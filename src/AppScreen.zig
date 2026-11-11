@@ -18,6 +18,7 @@ fn Screen(comptime Content: type) type {
         style: @import("vaxis").Style = .{},
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
+        host: ?vxfw.Widget = null,
         marker: ?vxfw.Widget = null,
         overlay: ?vxfw.Widget = null,
         userdata: *anyopaque,
@@ -74,7 +75,7 @@ fn Screen(comptime Content: type) type {
             // Nest columns to retain the existing height priority: input,
             // header, tail, marker, then the remaining content.
             const lower = try ctx.arena.create(Stack);
-            const lower_children = try ctx.arena.alloc(Stack.Child, 3);
+            const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
             lower_children[0] = .{ .widget = if (part == .compose) empty.widget() else self.content.widget(), .sizing = .fill };
             if (part == .whole) if (self.marker) |marker| {
@@ -85,6 +86,10 @@ fn Screen(comptime Content: type) type {
             };
             if (part == .whole) if (self.tail) |tail| {
                 lower_children[count] = .{ .widget = tail };
+                count += 1;
+            };
+            if (part != .list) if (self.host) |host| {
+                lower_children[count] = .{ .widget = host };
                 count += 1;
             };
             lower.* = .{ .children = lower_children[0..count] };

@@ -53,6 +53,7 @@ const session_view = @import("session_view.zig");
 const model_capability = @import("model_capability.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const preferences = @import("preferences.zig");
+const marks = @import("marks.zig");
 
 comptime {
     // The draft holds what a conversation's does.
@@ -92,11 +93,15 @@ pub const Hooks = struct {
     /// Runs between a start's capture and its send, as the CLI's other
     /// captures do.
     captured: *const fn (std.Io) anyerror!void,
+    /// The launch owner, without terminal output while App holds the screen.
+    start_host: *const fn (std.process.Init, []const u8) anyerror!void,
 };
 
 /// What one Host read found, kept whole so neither part outlives the read
 /// that took it.
 pub const HostRead = struct {
+    paused: bool = false,
+    stopped: bool = false,
     /// Null when no Host is ready.
     facts: ?view.Host = null,
     /// This TUI's memory, with the Host's and its tools' while one runs;
@@ -111,6 +116,7 @@ pub const HostRead = struct {
 pub const Operations = struct {
     /// One Host read: host-info's facts and the memory sampled with them.
     host: *const fn (*Self) HostRead,
+    start_host: *const fn (*Self) anyerror!void,
     /// Whether no Host owns the Store: it stopped, rather than failing to
     /// answer discovery.
     stopped: *const fn (*Self) bool,
@@ -142,7 +148,7 @@ pub const Operations = struct {
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .save_default = saveDefault, .command = runCommand, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .save_default = saveDefault, .command = runCommand, .open = openSession };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -251,6 +257,7 @@ pub const Reply = struct {
 const Job = union(enum) {
     /// host-info, read as each listing starts.
     host,
+    start_host,
     /// The traversal's next page.
     list,
     lines: view.Reads,
@@ -275,7 +282,7 @@ const Job = union(enum) {
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .commands, .models, .skills => .cancel_read,
-            .start, .stop, .archive, .save, .command => .settle_effect,
+            .start_host, .start, .stop, .archive, .save, .command => .settle_effect,
         };
     }
 
@@ -324,7 +331,7 @@ const Answer = union(enum) {
 /// One host read and list page, at most one first-line batch, one
 /// command-read batch, one model-list read, one skills read, one save, one
 /// command and the requests the core's ledger allows can wait at once.
-const max_jobs = 8 + view.max_requests;
+const max_jobs = 9 + view.max_requests;
 
 /// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
@@ -388,6 +395,8 @@ worker: ClientTask = .{},
 upgrade_job: UpgradeJob = .{},
 /// The serving Host's pid, read once per Host start.
 host_process: ?struct { started_at: u64, pid: i32 } = null,
+/// Only this owner changes Host availability or admits a manual start.
+host_state: HostState = .ready,
 upgrade_report: ?std.Io.Writer.Allocating = null,
 /// What the overview last said under the open conversation.
 conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
@@ -536,6 +545,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
+            if (input == .key_press and !self.root.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and self.hostState().canStart()) {
+                _ = try requestHostStart(self, ctx);
+                ctx.consumeEvent();
+                return;
+            }
             if (self.state.picker != null and !self.root.pasting and input == .key_press) {
                 const key = input.key_press;
                 const action: ?model_picker_view.Action = if (key.matchExact(vaxis.Key.left, .{})) .lower_effort else if (key.matchExact(vaxis.Key.right, .{})) .higher_effort else if (key.matchExact(vaxis.Key.tab, .{})) .next_sign_in else null;
@@ -607,7 +621,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
+    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -903,6 +917,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_input.facts = app_empty.widget();
         self.app_input.status = app_empty.widget();
     }
+    self.app_screen.host = hostNotice(self);
     var surface = try self.app_screen.drawPart(ctx, part);
     // The overview remains the compose ancestor in either layout, so a
     // resize never changes the composer's focus identity or key route.
@@ -997,7 +1012,7 @@ fn event(self: *Self, value: view.Event) !?Next {
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
-            self.queue(.host);
+            self.queueHost();
             self.queue(.list);
         },
         .read_first_lines => |reads| self.queue(.{ .lines = reads }),
@@ -1097,7 +1112,10 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     const next = self.take(at);
     self.job.deinit(self.init.gpa);
     self.job = next;
-    try self.worker.start(self.init.io, self, work);
+    self.worker.start(self.init.io, self, work) catch |err| {
+        if (next != .start_host) return err;
+        self.host_state = .retry;
+    };
 }
 
 /// The worker: runs one job and writes only that job's answer. Its
@@ -1112,7 +1130,11 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
 fn runJob(self: *Self, requests: client.Requests) !void {
     std.debug.assert(self.answer == .none);
     switch (self.job) {
-        .host => self.answer = .{ .host = self.ops.host(self) },
+        .host => self.answer = .{ .host = self.readHost() },
+        .start_host => {
+            try self.ops.start_host(self);
+            self.answer = .{ .host = self.readHost() };
+        },
         .list => {
             self.answer = .{ .page = undefined };
             if (try self.ops.list(self, requests, self.traversal.cursor, &self.answer.page)) |failure| return failure.err();
@@ -1206,7 +1228,17 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     const answer = &self.answer;
     defer answer.deinit(self.init.gpa);
     switch (self.job) {
+        .start_host => {
+            outcome catch {
+                self.host_state = .retry;
+                return null;
+            };
+            self.host_state = if (answer.host.stopped) .retry else if (answer.host.paused or answer.host.facts == null) .paused else .ready;
+            if (answer.host.memory) |memory| _ = try self.event(.{ .memory = memory });
+            return self.event(.{ .host = answer.host.facts });
+        },
         .host => {
+            if (self.host_state != .starting) self.host_state = if (answer.host.stopped) (if (self.host_state == .retry) .retry else .stopped) else if (answer.host.paused or answer.host.facts == null) .paused else .ready;
             if (answer.host.memory) |memory| _ = try self.event(.{ .memory = memory });
             return self.event(.{ .host = answer.host.facts });
         },
@@ -1541,18 +1573,105 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     };
     return outcome catch |err| {
         if (self.lent_failed) return err;
-        if (!client.hostUnreachable(err) or !self.ops.stopped(self)) return self.failed(err, left.session);
-        // Name this Store: a bare host start may pick another one.
-        var bytes: [4 * protocol.max_store_bytes + 96]u8 = undefined;
-        var notice = std.Io.Writer.fixed(&bytes);
-        write: {
-            notice.writeAll("\nrui: The Host stopped. Run rui host start --store ") catch break :write;
-            TerminalText.writeShellWord(&notice, self.options.store) catch break :write;
-            notice.writeAll(", then resume this Session.\n") catch break :write;
-        }
-        _ = stderr.write(notice.buffered());
-        return self.failed(error.HostStopped, left.session);
+        return self.failed(err, left.session);
     };
+}
+
+/// All Host ending words and their optional key live beside their one owner.
+const HostState = enum {
+    ready,
+    stopped,
+    paused,
+    starting,
+    retry,
+
+    fn canStart(self: HostState) bool {
+        return self == .stopped or self == .retry;
+    }
+
+    fn line(self: HostState) struct { mark: marks.Mark, words: []const u8, key: []const u8 = "" } {
+        return switch (self) {
+            .ready => .{ .mark = .stopped, .words = "" },
+            .stopped => .{ .mark = .stopped, .words = "Host stopped", .key = "r start" },
+            .paused => .{ .mark = .stopped, .words = "Host paused" },
+            .starting => .{ .mark = .active, .words = "Host starting" },
+            .retry => .{ .mark = .failed, .words = "Host stopped", .key = "r retry" },
+        };
+    }
+};
+
+fn hostState(self: *const Self) HostState {
+    return if (self.state.upgrading() or self.state.upgrade.after == .blocked) .paused else self.host_state;
+}
+
+fn hostHeld(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.hostState() != .ready;
+}
+
+fn hostLost(raw: *anyopaque) void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.host_state == .ready) self.host_state = .paused;
+    if (self.state.upgrading()) return;
+    if (self.worker.thread != null and self.job == .host) return;
+    self.queueHost();
+}
+
+fn queueHost(self: *Self) void {
+    for (self.jobs[0..self.job_count]) |job| if (job == .host) return;
+    self.queue(.host);
+}
+
+fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (!self.hostState().canStart()) return false;
+    self.host_state = .starting;
+    self.queue(.start_host);
+    try self.dispatch(if (self.root.session == null) .all else .lent);
+    ctx.redraw = true;
+    return true;
+}
+
+fn hostNotice(raw: *anyopaque) ?vxfw.Widget {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.hostState() == .ready) return null;
+    return .{ .userdata = self, .drawFn = drawHostNotice, .eventHandler = hostNoticeEvent };
+}
+
+fn hostNoticeEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+    if (input == .mouse and input.mouse.button == .left and input.mouse.type == .press) {
+        _ = try requestHostStart(raw, ctx);
+        ctx.consumeEvent();
+    }
+}
+
+fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const line = self.hostState().line();
+    const mark = marks.marks.get(line.mark);
+    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s}{s}{s}", .{ if (self.caps.unicode) mark.unicode else mark.ascii, line.words, if (line.key.len == 0) "" else " · ", line.key });
+    const label: vxfw.Text = .{ .text = text, .softwrap = false, .style = @import("widget_style.zig").of(self.caps, .{ .colour = switch (mark.tone) {
+        .ink => .ink,
+        .normal => .normal,
+        .quiet => .quiet,
+        .attention => .attention,
+        .failure => .failure,
+    } }) };
+    var surface = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width, .height = @min(1, ctx.max.height.?) }));
+    surface.widget = hostNotice(self).?;
+    return surface;
+}
+
+/// Runs only on the existing overview worker. Neither a failed read nor a
+/// tick starts a Host; only requestHostStart can enqueue that effect.
+fn readHost(self: *Self) HostRead {
+    var read = self.ops.host(self);
+    if (read.facts == null) read.stopped = self.ops.stopped(self);
+    return read;
+}
+
+fn startHost(self: *Self) !void {
+    try self.hooks.start_host(self.init, self.options.store);
 }
 
 fn hostStopped(self: *Self) bool {
@@ -1560,11 +1679,13 @@ fn hostStopped(self: *Self) bool {
 }
 
 fn hostFacts(self: *Self) HostRead {
-    const ready: ?@FieldType(protocol_reply.HostStatus, "ready") = switch (client.hostStatus(self.init.io, self.options.store)) {
+    const status = client.hostStatus(self.init.io, self.options.store);
+    const ready: ?@FieldType(protocol_reply.HostStatus, "ready") = switch (status) {
         .ready => |ready| ready,
         else => null,
     };
     return .{
+        .paused = if (ready) |host| host.paused else status == .owned_unavailable,
         .facts = if (ready) |host| .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied } else null,
         // The same read samples the counts line's memory.
         .memory = self.liveMemory(if (ready) |host| host.started_at else null),
@@ -1736,6 +1857,11 @@ const test_skills = [_]skill_suggestions.Entry{ .{ .name = "recap", .description
 const other_skills = [_]skill_suggestions.Entry{.{ .name = "release", .description = "Cut a release" }};
 
 const fake_operations: Operations = .{
+    .start_host = struct {
+        fn start(_: *Self) !void {
+            return error.TestUnexpectedResult;
+        }
+    }.start,
     .skills = struct {
         fn skills(_: *Self, _: client.Requests, gpa: std.mem.Allocator, workspace: []const u8, prefix: []const u8) !skill_suggestions.Page {
             Seen.now.skill_reads += 1;
@@ -3581,40 +3707,193 @@ test "a failed terminal restore still prints the departure guidance" {
     try std.testing.expectEqualStrings("rui: Not sure the new Session started. Check with: rui request recover lost-handle\n", try finishedGuidance(rig, &buffer));
 }
 
-test "a conversation ended by its Host stopping says how to start it again" {
-    const Down = struct {
-        var stopped: bool = false;
-        fn host(_: *Self) bool {
-            return stopped;
-        }
-    };
-    var ops = fake_operations;
-    ops.stopped = Down.host;
-    ops.open = openSession;
+/// Faults cross the same joined-worker boundary as a real lost connection.
+const HostRecovery = struct {
+    const Availability = enum { ready, paused, stopping, stopped };
+    var availability: Availability = .ready;
+    var starts: usize = 0;
+    var fail_start: bool = false;
+    var worker_id: ?std.Thread.Id = null;
+    var dir: std.Io.Dir = undefined;
+    var files: u8 = 0;
+
+    fn operations() Operations {
+        availability = .ready;
+        starts = 0;
+        fail_start = false;
+        worker_id = null;
+        files = 0;
+        var ops = fake_operations;
+        ops.host = host;
+        ops.stopped = stopped;
+        ops.start_host = start;
+        ops.open = openSession;
+        return ops;
+    }
+    fn host(_: *Self) HostRead {
+        return .{ .paused = availability == .paused, .facts = if (availability == .stopped or availability == .stopping) null else .{ .started_at = test_now_s, .slots = 4, .slots_in_use = 0 } };
+    }
+    fn stopped(_: *Self) bool {
+        return availability == .stopped;
+    }
+    fn start(overview: *Self) !void {
+        try std.testing.expectEqualStrings("/store", overview.options.store);
+        worker_id = std.Thread.getCurrentId();
+        starts += 1;
+        if (fail_start) return error.HostStartupFailed;
+        availability = .ready;
+    }
+    fn scratch(init: std.process.Init) !std.Io.File {
+        files += 1;
+        return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+    }
+    fn lost(_: *anyopaque, _: *ClientTask) !void {
+        return error.ConnectionRefused;
+    }
+    fn completed(frontend: *SessionFrontend) !bool {
+        return frontend.reader.completed();
+    }
+};
+
+test "Host recovery keeps the open widget drafts and scroll and starts only on an empty draft r" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const ops = HostRecovery.operations();
+    HostRecovery.dir = tmp.dir;
     var cancellation: client.Cancellation = .{};
-    var buffer: [1024]u8 = undefined;
-    // Not stopped covers a Host that runs or owns the Store but does not
-    // answer discovery: neither shows that it stopped.
-    for ([_]bool{ true, false }) |stopped| {
-        Down.stopped = stopped;
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = HostRecovery.scratch;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 });
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("list draft") == null);
+    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    const frontend = overview.app_session.?.frontend.?;
+    defer {
+        frontend.stop();
+        frontend.reader.join() catch {};
+        overview.disposeSession(overview.app_session.?);
+        overview.app_session = null;
+    }
+    const child = overview.root.session.?;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    frontend.reading.opening = false;
+    frontend.poll_at = std.math.maxInt(i96);
+    try app_events.send(&ctx, "chat draft", overview.root.widget(), child);
+    try rig.screen.browsing.append("earlier answer\nkept at this row\n");
+    try rig.screen.browsing.prepare();
+    rig.screen.view = .transcript;
+    rig.screen.browsing.top = .{ .offset = "earlier answer\n".len };
+    frontend.transcript.beginning = true;
+    const anchor = rig.screen.browsing.top;
+    try frontend.reader.start(std.testing.io, frontend, HostRecovery.lost);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), frontend, HostRecovery.completed);
+    HostRecovery.availability = .stopped;
+    try child.handleEvent(&ctx, .tick);
+    try rig.lend();
+    try std.testing.expect(!ctx.quit);
+    try std.testing.expectEqual(HostState.stopped, overview.hostState());
+    try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
+    for ([_]u16{ 140, 46 }) |width| {
+        var shown = try rig.shown(width, 26);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "■ Host stopped · r start") != null);
+    }
+    try std.testing.expect(overview.root.session.?.eql(child));
+    try std.testing.expectEqualStrings("list draft", overview.composerDraft().bytes);
+    try std.testing.expectEqualStrings("chat draft", frontend.input.composition().bytes);
+    try std.testing.expectEqual(anchor, rig.screen.browsing.top);
+    try app_events.send(&ctx, "r", overview.root.widget(), child);
+    try std.testing.expectEqualStrings("chat draftr", frontend.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
+    _ = frontend.input.replace(.{ .start = 0, .end = frontend.input.composition().bytes.len, .text = "" });
+    try app_events.send(&ctx, "r", overview.root.widget(), child);
+    try std.testing.expectEqual(HostState.starting, overview.hostState());
+    try std.testing.expect(!try requestHostStart(overview, &ctx)); // One attempt in flight.
+    var starting = try rig.shown(46, 26);
+    defer starting.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try starting.text(), "Host starting") != null);
+    try rig.lend();
+    try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+    try std.testing.expect(HostRecovery.worker_id.? != std.Thread.getCurrentId());
+    try std.testing.expect(hostNotice(overview) == null);
+    try std.testing.expect(overview.root.session.?.eql(child));
+    try std.testing.expectEqual(anchor, rig.screen.browsing.top);
+    try child.handleEvent(&ctx, .tick);
+    try std.testing.expect(frontend.reader.thread != null); // Normal reads resume.
+    try std.testing.expect(!ctx.quit);
+}
+
+test "Host recovery failed start waits for r retry and the line also accepts a click" {
+    const ops = HostRecovery.operations();
+    HostRecovery.availability = .stopped;
+    HostRecovery.fail_start = true;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    _ = try overview.event(.{ .tick = test_now_s * 1000 });
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(try rig.press("r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+    try std.testing.expectEqual(HostState.retry, overview.hostState());
+    _ = try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms });
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+    try std.testing.expectEqual(HostState.retry, overview.hostState());
+    var shown = try rig.shown(46, 26);
+    defer shown.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "× Host stopped · r retry") != null);
+    // r retries once, never a poll or a previous failed attempt.
+    try std.testing.expect(try rig.press("r") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 2), HostRecovery.starts);
+    HostRecovery.fail_start = false;
+    var row: u16 = 0;
+    while (row < shown.screen.height) : (row += 1) {
+        if (std.mem.indexOf(u8, try shown.line(row), "Host stopped") != null) break;
+    }
+    try std.testing.expect(row < shown.screen.height);
+    try std.testing.expect(try rig.click(4, row, 46, 26) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 3), HostRecovery.starts);
+    try std.testing.expect(hostNotice(overview) == null);
+}
+
+test "Host recovery paused shutting down and upgrading offer no start gesture" {
+    for ([_]HostRecovery.Availability{ .paused, .stopping }) |availability| {
+        const ops = HostRecovery.operations();
+        HostRecovery.availability = availability;
+        var cancellation: client.Cancellation = .{};
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
         defer rig.close();
-        rig.overview.hooks.scratch = struct {
-            fn scratch(_: std.process.Init) !std.Io.File {
-                return error.FileNotFound;
-            }
-        }.scratch;
-        try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        const overview = rig.overview;
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
         try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(@as(?Ending, .overview), try rig.press("\x1b[H\r"));
-        const resume_line = "\nResume: rui session resume --store $'/store' k7m2qx\n";
-        if (stopped) {
-            const written = try finishedWith(rig, {}, error.HostStopped, &buffer);
-            try std.testing.expectEqualStrings("\nrui: The Host stopped. Run rui host start --store $'/store', then resume this Session.\n" ++ resume_line, written);
-        } else {
-            const written = try finishedWith(rig, {}, error.FileNotFound, &buffer);
-            try std.testing.expectEqualStrings(resume_line, written);
-        }
+        try std.testing.expectEqual(HostState.paused, overview.hostState());
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try std.testing.expect(!try requestHostStart(overview, &ctx));
+        try std.testing.expect(try rig.press("r") == null);
+        try std.testing.expectEqualStrings("r", overview.composerDraft().bytes);
+        try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
+        var shown = try rig.shown(140, 26);
+        defer shown.deinit();
+        const text = try shown.text();
+        try std.testing.expect(std.mem.indexOf(u8, text, "■ Host paused") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "· r start") == null);
+        HostRecovery.availability = .ready;
+        overview.queue(.host);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(hostNotice(overview) == null);
+        overview.host_state = .stopped;
+        overview.state.upgrade.after = .blocked;
+        try std.testing.expectEqual(HostState.paused, overview.hostState());
+        try std.testing.expect(!try requestHostStart(overview, &ctx));
+        try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
     }
 }
 

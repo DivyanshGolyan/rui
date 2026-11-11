@@ -83,6 +83,7 @@ app_preview: Transcript = undefined,
 app_consent: ActionConsent = .{},
 app_card: PermissionCard = undefined,
 app_palette: Palette = undefined,
+app_host: ?HostAccess = null,
 app_hooks: AppHooks = undefined,
 app_caps: overview_view.Caps = .{},
 /// Stops when the caller is signalled; a running command stops with it.
@@ -343,7 +344,7 @@ fn serviceSkills(self: *Self) !void {
         }
         self.dirty = true;
     }
-    if (self.upgradeHeld()) return;
+    if (self.upgradeHeld() or self.hostHeld()) return;
     const draft = self.input.composition();
     const word = skill_completion.skillWordAt(draft.bytes, draft.cursor) orelse return;
     const ask = self.skills.ask(word.name(draft.bytes)) orelse return;
@@ -426,7 +427,18 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
 }
 
+/// The shell owns Host availability; the Session only reads it and forwards
+/// a transport loss or the person's explicit start gesture.
+pub const HostAccess = struct {
+    context: *anyopaque,
+    held: *const fn (*anyopaque) bool,
+    lost: *const fn (*anyopaque) void,
+    start: *const fn (*anyopaque, *vxfw.EventContext) anyerror!bool,
+    notice: *const fn (*anyopaque) ?vxfw.Widget,
+};
+
 pub const AppHooks = struct {
+    host: ?HostAccess = null,
     root: *Root,
     context: *anyopaque,
     leave: *const fn (*anyopaque, *vxfw.EventContext, Outcome) anyerror!void,
@@ -438,6 +450,7 @@ pub const AppHooks = struct {
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
+    self.app_host = hooks.host;
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = "shift+↓" };
@@ -578,6 +591,7 @@ fn appDragScroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) !void {
 
 fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy.Decision) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.hostHeld()) return;
     self.screen.releaseAction();
     self.app_input.permission = null;
     // Refused by an Upgrade's hold, the Action waits at the Host and its
@@ -589,6 +603,23 @@ fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy
     try ctx.requestFocus(self.app_input.composer.widget());
 }
 
+pub fn hostStartKey(key: vaxis.Key) bool {
+    return key.matchExact('r', .{});
+}
+
+fn hostHeld(self: *const Self) bool {
+    const host = self.app_host orelse return false;
+    return host.held(host.context);
+}
+
+fn hostFailure(self: *Self, err: anyerror) bool {
+    const host = self.app_host orelse return false;
+    if (!client.hostUnreachable(err)) return false;
+    host.lost(host.context);
+    self.dirty = true;
+    return true;
+}
+
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
@@ -598,7 +629,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             _ = try self.update();
             // An Upgrade's hold shows no choice: nothing decided could be
             // sent. The read after the hold finds the Action again.
-            const held = self.upgradeHeld();
+            const held = self.upgradeHeld() or self.hostHeld();
             if (held and self.reading.prepared_action != null) {
                 self.reading.prepared_action = null;
                 if (self.reader.thread == null) self.reading.phase = .activity;
@@ -631,6 +662,12 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
+            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_host) |host| {
+                if (try host.start(host.context, ctx)) {
+                    ctx.consumeEvent();
+                    return;
+                }
+            };
             self.shown_notice.dismiss();
             const question = event == .key_press and !pasting and typesQuestion(event.key_press);
             const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
@@ -645,7 +682,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 self.notice = null;
                 // One submission at a time: a decision or Message in flight,
                 // or an original still held, makes Enter say so and keep the draft.
-                const allowed = !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
+                const allowed = !self.hostHeld() and !self.reading.opening and self.reading.phase != .permission and !self.commandActive() and self.submission.intent == null;
                 if (!(event == .key_press and !pasting and Editor.isEnter(event.key_press) and (self.startChange() or self.takeShownRow()))) {
                     switch (self.input.appEvent(conversation_keys, event, pasting, allowed)) {
                         .message => |ticket| try self.beginMessage(.{ .message = ticket }),
@@ -789,6 +826,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .width = ctx.max.width.?,
     });
     self.app_preview.size = .{};
+    self.app_screen.host = if (self.app_host) |host| host.notice(host.context) else null;
     var surface = try self.app_screen.widget().draw(ctx);
     const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
     screen.height = visible.size.height;
@@ -1967,6 +2005,7 @@ fn update(self: *Self) !Updated {
     if (self.reading.pending_diagnostic) |pending| {
         if (pending.recoverable) try self.presentReadDiagnostic(self.screen);
     }
+    if (self.hostHeld()) return .waiting;
     try self.startQueuedCommand();
     // Scans continue during consent, so an Action decided elsewhere leaves.
     if (self.reader.thread == null and self.reading.prepared_action == null) {
@@ -2052,6 +2091,7 @@ fn recoverable(self: *const Self) ?*const [36]u8 {
 /// Ctrl-R, or /recover with the original's key: retries the original,
 /// except while an Action waits, which only its choice decides.
 fn recover(self: *Self, key: ?[]const u8) !void {
+    if (self.hostHeld()) return;
     if (self.waitingAction()) |action| {
         self.notice = session_notice.decision(action);
         return;
@@ -2254,6 +2294,7 @@ fn converse(self: *Self, input: overview_view.ConversationInput) !void {
         .other, .upgrade, .cancel_upgrade, .upgrade_failed => false,
         .stop, .archive, .unarchive => true,
     };
+    if (host_intent and self.hostHeld()) return;
     if (host_intent and self.upgradeHeld()) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
         return;
@@ -2558,6 +2599,21 @@ fn heldFailure(self: *const Self) ?@TypeOf(self.failure.?) {
 
 fn settleReader(self: *Self) !void {
     const end = self.joinReader();
+    const fenced = if (self.reading.pending_diagnostic) |pending|
+        pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
+    else
+        false;
+    const host_lost = if (end == .failed) self.hostFailure(end.failed.err) else false;
+    if (fenced and self.app_host != null) self.app_host.?.lost(self.app_host.?.context);
+    if (host_lost or (fenced and self.app_host != null)) {
+        // A joined failed read has published no staged output. Keep its
+        // cursor, opening state, documents, draft and scroll for the next scan.
+        self.reading.pending_diagnostic = null;
+        if (self.reading.phase == .recall) self.input.abandonStep();
+        self.inspection.command_running = false;
+        self.poll_at = 0;
+        return;
+    }
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     // A fatal failure leaves command output for exit to print.
     if (end.failure(reader_policy.settleMode(self.upgradePhase() == .quiescing, self.input.queuedCommand() != null))) |err| return err;
@@ -4813,6 +4869,75 @@ test "a card taller than the screen says how many lines it hides and Shift-Down 
         try stepKeys(held, "\x1b[1;2B");
         try held.settle();
     } else return error.TestUnexpectedResult;
+}
+
+test "Host recovery joins unavailable reads in every phase without losing the Session" {
+    const Fault = struct {
+        failure: anyerror,
+        lost: usize = 0,
+        fenced: bool = false,
+        fn run(raw: *anyopaque, task: *Task) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.fenced) {
+                var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+                try failure.diagnostic.type.set("busy");
+                try failure.diagnostic.code.set("dispatch_fenced");
+                return task.requests().failRead(failure);
+            }
+            return self.failure;
+        }
+        fn held(_: *anyopaque) bool {
+            return false;
+        }
+        fn lose(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.lost += 1;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return false;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
+    for (std.enums.values(ReadPhase)) |phase| {
+        for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse }) |failure| {
+            var fault: Fault = .{ .failure = failure };
+            self.app_host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+            self.reading.phase = phase;
+            self.reading.opening = true;
+            self.inspection.command_running = phase == .inspection;
+            try self.reader.start(std.testing.io, &fault, Fault.run);
+            try self.settleReader();
+            try std.testing.expectEqual(@as(usize, 1), fault.lost);
+            try std.testing.expect(self.reader.thread == null);
+            try std.testing.expect(self.reading.opening);
+            try std.testing.expect(self.reading.pending_diagnostic == null);
+            try std.testing.expect(self.leaving == null);
+            try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        }
+    }
+    var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
+    self.app_host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.reading.phase = .activity;
+    try self.reader.start(std.testing.io, &fenced, Fault.run);
+    try self.settleReader();
+    try std.testing.expectEqual(@as(usize, 1), fenced.lost);
+    try std.testing.expect(self.reading.pending_diagnostic == null);
+    // A canonical or unrelated failure still has its original fatal boundary.
+    for ([_]anyerror{ error.CanonicalStoreFailure, error.AccessDenied }) |failure| {
+        var fault: Fault = .{ .failure = failure };
+        self.app_host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.reading.phase = .activity;
+        try self.reader.start(std.testing.io, &fault, Fault.run);
+        try std.testing.expectError(failure, self.settleReader());
+        try std.testing.expectEqual(@as(usize, 0), fault.lost);
+    }
 }
 
 /// An App Session with a settled live view, for the chrome's tests.

@@ -853,6 +853,16 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
 /// Null capacity leaves a new Host on product_defaults.active_capacity.
 /// `readiness` is the caller's fresh local credential state, when it has one.
 fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses) !void {
+    return startHostWithFeedback(init, selected, quiet, capacity, readiness, .terminal);
+}
+
+/// App reuses the launch owner, but its worker leaves all feedback to the
+/// overview's Host state instead of writing beneath the active screen.
+fn startOverviewHost(init: std.process.Init, selected: []const u8) !void {
+    return startHostWithFeedback(init, selected, true, null, null, .screen);
+}
+
+fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, feedback: enum { terminal, screen }) !void {
     const io = init.io;
     const selection = platform.resolveClientSelection(selected);
     const resolved: ?platform.Paths = selection.paths(io) catch |err| switch (err) {
@@ -860,9 +870,9 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         else => return error.StoreAccessFailed,
     };
     switch (if (resolved) |*paths| client.hostStatusAt(io, paths, null) else @as(protocol_reply.HostStatus, .unavailable)) {
-        .ready => |ready| return reportStartedHost(io, &resolved.?, ready, quiet, capacity),
+        .ready => |ready| return if (feedback == .terminal) reportStartedHost(io, &resolved.?, ready, quiet, capacity) else {},
         .incompatible => {
-            stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
+            if (feedback == .terminal) stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
             return error.IncompatibleHost;
         },
         .access_failure => return error.StoreAccessFailed,
@@ -917,7 +927,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
             notice.print("\nrui: detached Host launch reported OS error {d}. Execution and readiness are unconfirmed.\nCheck this Store: rui host status --store ", .{launched}) catch break :notice;
             TerminalText.writeShellWord(&notice, paths.store.slice()) catch break :notice;
             notice.writeByte('\n') catch break :notice;
-            _ = @import("stderr.zig").write(notice.buffered());
+            if (feedback == .terminal) _ = @import("stderr.zig").write(notice.buffered());
         }
         return error.HostLaunchFailed;
     }
@@ -940,11 +950,11 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 try path_text.feed(&header, paths.store.slice());
                 try path_text.finish(&header);
                 try header.writeAll(":\n");
-                _ = @import("stderr.zig").write(header.buffered());
-                _ = @import("stderr.zig").write(startup);
-                if (startup_length == 0) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
+                if (feedback == .terminal) _ = @import("stderr.zig").write(header.buffered());
+                if (feedback == .terminal) _ = @import("stderr.zig").write(startup);
+                if (startup_length == 0 and feedback == .terminal) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
                 if (startup_length == startup_bytes.len) {
-                    stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
+                    if (feedback == .terminal) stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
                     return error.HostReadinessUnconfirmed;
                 }
                 if (std.mem.endsWith(u8, startup, "[store_identity_mismatch]\n")) return error.StoreIdentityMismatch;
@@ -961,9 +971,9 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 const notices = startup_bytes[0..startup_length];
                 // A competing launcher lost to this ready owner; its expected
                 // lease refusal is not a warning about the running Host.
-                if (startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
+                if (feedback == .terminal and startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
                     _ = @import("stderr.zig").write(notices);
-                return reportStartedHost(io, &paths, ready, quiet, capacity);
+                return if (feedback == .terminal) reportStartedHost(io, &paths, ready, quiet, capacity) else {};
             },
             .incompatible => return error.IncompatibleHost,
             .access_failure => return error.StoreAccessFailed,
@@ -972,8 +982,8 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 100 * std.time.ns_per_ms))), .awake);
     }
-    if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
-    stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
+    if (startup_length != 0 and feedback == .terminal) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
+    if (feedback == .terminal) stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
 }
 
@@ -1534,7 +1544,7 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate });
+    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .start_host = startOverviewHost });
 }
 
 fn captureGate(io: std.Io) !void {
