@@ -554,10 +554,16 @@ pub fn hostStatusUntil(io: std.Io, store_path: []const u8, deadline: ?i128) prot
         error.FileNotFound => .unavailable,
         else => .access_failure,
     };
-    if (paths.database.len == 0) return readHostInfo(io, &paths, deadline);
-    return switch (lockState(io, &paths)) {
+    return hostStatusAt(io, &paths, deadline);
+}
+
+/// Probe an already resolved location without reinterpreting its selector or
+/// the caller's environment. The reply carries identity, not routing policy.
+pub fn hostStatusAt(io: std.Io, paths: *const platform.Paths, deadline: ?i128) protocol_reply.HostStatus {
+    if (paths.kind == .mysql) return readHostInfo(io, paths, deadline);
+    return switch (lockState(io, paths)) {
         .free => .unavailable,
-        .held => readHostInfo(io, &paths, deadline),
+        .held => readHostInfo(io, paths, deadline),
         .failure => .access_failure,
     };
 }
@@ -818,8 +824,9 @@ pub const HostLockState = enum { free, held, failure };
 pub fn hostLockState(io: std.Io, store_path: []const u8) HostLockState {
     // MySQL owns its Store through GET_LOCK, not the runtime's socket lease.
     // No filesystem result, including a missing runtime, proves its ownership.
-    if (platform.mysqlRuntimeDirectory(store_path) != null) return .failure;
-    const paths = platform.resolveClientPaths(io, store_path) catch |err| return if (err == error.FileNotFound) .free else .failure;
+    const selected = platform.resolveClientSelection(store_path);
+    if (selected == .mysql) return .failure;
+    const paths = selected.paths(io) catch |err| return if (err == error.FileNotFound) .free else .failure;
     return lockState(io, &paths);
 }
 

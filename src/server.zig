@@ -1201,7 +1201,7 @@ fn serveOpened(
 fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool, result: anyerror!void) !void {
     // This is the sole decision and publication site, after intake, workers
     // and execution have drained. A fence wins over every serving outcome.
-    if (launched and storage.engine == .mysql and storage.isFenced()) {
+    if (launched and storage.kind() == .mysql and storage.isFenced()) {
         launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
         return error.StoreFenced;
     }
@@ -1242,22 +1242,25 @@ noinline fn openStoreForHost(
         // With MCP servers the tool set is saved below, once they are listed.
         .host_tool_set = if (!has_mcp) &tools.built_in_tool_set else null,
     };
-    if (mysql_url) |url| {
-        // Only this call borrows the login. Neither metadata nor filesystem
-        // paths ever see the URL, and admission failure wipes it too.
-        defer url.wipe();
-        try storage.openMysql(io, url.options(), url.database.slice(), store_options);
-        lease.paths.store.set(storage.mysqlStoreId()) catch unreachable;
-        storage.selector.set(storage.mysqlStoreId()) catch unreachable;
-    } else storage.openWithOptions(io, lease.paths.database.slice(), lease.paths.store.slice(), store_options) catch |err| {
-        if (err == error.WrongStoreVersion) {
-            try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
-            if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
-        } else if (err == error.StoreIdentityMismatch) {
-            try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+    // The login is borrowed only by admission and wiped on every exit.
+    defer if (mysql_url) |url| url.wipe();
+    const target: store_module.Target = if (mysql_url) |url|
+        .{ .mysql = url.options() }
+    else
+        .{ .sqlite = lease.paths.database.slice() };
+    const selector = if (mysql_url) |url| url.database.slice() else lease.paths.store.slice();
+    storage.openTarget(io, target, selector, store_options) catch |err| {
+        if (mysql_url == null) {
+            if (err == error.WrongStoreVersion) {
+                try reportWrongStoreVersion(lease.paths.store.slice(), found_schema_version);
+                if (diagnostics) |writer| writer.record("failed", "unsupported_store_version");
+            } else if (err == error.StoreIdentityMismatch) {
+                try reportStoreIdentityMismatch(identity_mismatch.saved_selector.slice(), lease.paths.store.slice());
+            }
         }
         return err;
     };
+    lease.paths.store.set(storage.storeId()) catch unreachable;
 }
 
 noinline fn reportStoreIdentityMismatch(saved_selector: []const u8, actual_selector: []const u8) !void {
@@ -1602,7 +1605,7 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
 fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header, request_number: u64, accepted_at_ns: u64, request: *wire_request.Request, client_environment: ?*SessionEnvironments.Offer) !void {
     // The first MySQL readiness probe learns the opaque id over the private
     // socket. All subsequent work must name that exact id, never the URL.
-    const discovering = request.* == .host_info and request.store().len == 0 and host.store.engine == .mysql;
+    const discovering = request.* == .host_info and request.store().len == 0 and host.store.kind() == .mysql;
     if (!discovering and !std.mem.eql(u8, request.store(), host.lease.paths.store.slice())) {
         return respondStatic(fd, 409, .invocation_error, "wrong_store_identity");
     }
@@ -1633,7 +1636,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
                 .custody_occupied = host.custody.held(),
                 .paused = host.turns_paused.load(.acquire),
                 .routes = host.providers.routes(),
-                .doublewrite = host.store.mysqlDoublewrite(),
+                .doublewrite = host.store.admissionDiagnostic().doublewrite,
             }});
         },
         .host_pause => |pause| {

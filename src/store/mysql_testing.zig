@@ -140,7 +140,7 @@ pub fn open(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: test
     };
     const name = std.mem.sliceTo(&name_buffer, 0);
     const config = (try dialect.rootConfig()).?;
-    try storage.openMysql(io, .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
+    try storage.openTarget(io, .{ .mysql = .{ .address = .{ .unix_socket = config.socket }, .user = "rui_conformance", .password = "rui_conformance", .database = name } }, options.identity orelse path, .{ .served = options.served, .host_tool_set = options.host_tool_set });
     storage.engine.mysql.state.testing_database = name_buffer;
 }
 
@@ -699,6 +699,40 @@ fn liveWrite(storage: *Store, comptime S: type, args: S.Args) !u64 {
     mysql.endStatement();
     try mysql.finishPass();
     return changed;
+}
+
+test "Store target MySQL owns admitted identity routes and neutral diagnostics" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    try std.testing.expectEqual(.mysql, storage.kind());
+    const id = storage.engine.mysql.state.store_id;
+    try std.testing.expectEqualStrings(&id, storage.storeId());
+    try std.testing.expect(@import("../store_id.zig").valid(storage.storeId()));
+    const diagnostic = storage.diagnostic();
+    try std.testing.expect(diagnostic == .mysql);
+    try std.testing.expectEqualStrings(diagnostic.mysql.doublewrite.slice(), storage.admissionDiagnostic().doublewrite.?);
+    try std.testing.expect(storage.hostTools().set_id != 0);
+    // The engine must borrow routes from final Store storage. The login and
+    // selector buffers in the fixture's open function have already expired.
+    try std.testing.expect(storage.engine.mysql.state.served == &storage.served);
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+}
+
+test "Store target MySQL tail failure releases the connection and ownership lock" {
+    if (!try available()) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const empty_tool_set: @import("../tool_record.zig").HostToolSet = .{ .records = &.{}, .digests = &.{} };
+    var refused: Store = undefined;
+    try std.testing.expectError(error.InvalidHostToolSet, open(&refused, &tmp, std.testing.io, .{ .host_tool_set = &empty_tool_set }));
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    try std.testing.expect(storage.hostTools().set_id != 0);
+    try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
 }
 
 test "store.mysql live CLIENT_FOUND_ROWS counts an unchanged matched UPDATE" {
