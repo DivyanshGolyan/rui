@@ -1,6 +1,6 @@
-//! Composer and the two independent rows beneath it, shared by both screens.
-//! Screens supply terminal-safe facts and status text; notices never take the
-//! facts row. The floating palette belongs to the content above this area.
+//! Shared input stack. The composer's lower rule and identity/keys line form
+//! the chat footer; the bottom state slot stays below it, blank while idle.
+//! The floating palette belongs to the content above this area.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -225,6 +225,34 @@ test "InputArea approval has one document title above a choice between composer 
         _ = consent.route(.escape);
         _ = try input.widget().draw(ctx);
         try std.testing.expectEqual(choice, card.choice_row.?);
+    }
+}
+
+test "InputArea chat keeps a two-row footer above the unchanged bottom state slot" {
+    var bytes: [16]u8 = undefined;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    const footer: @import("widgets/Footer.zig") = .{ .left = "Chat · model", .right = "ctrl+x stop" };
+    var notice: vxfw.Text = .{ .text = "" };
+    var input: Self = .{ .composer = .{ .editor = &editor }, .facts = footer.widget(), .status = notice.widget() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
+
+        const idle = try input.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 5), idle.size.height);
+        try std.testing.expectEqual(@as(usize, 3), idle.children.len);
+        try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
+        try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
+
+        notice.text = "Copied 12 lines";
+        const noticed = try input.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 5), noticed.size.height);
+        try std.testing.expectEqual(@as(i17, 4), noticed.children[2].origin.row);
+        try std.testing.expectEqual(@as(i17, 0), noticed.children[0].origin.row);
+        try std.testing.expectEqualDeep(idle.children[1].surface.buffer, noticed.children[1].surface.buffer);
+        notice.text = "";
     }
 }
 

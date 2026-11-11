@@ -19,9 +19,8 @@ method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
 style: vaxis.Style = .{},
 colours: viewport.Colours = .{},
-/// The key that scrolls this view. When set and the text runs past the
-/// view, the last row says how many rows lie below and names the key.
-more: ?[]const u8 = null,
+/// Report the rows below this viewport without prescribing input.
+more: bool = false,
 /// What the screen does for this widget's gestures; without it the mouse
 /// does nothing here.
 handler: ?Handler = null,
@@ -72,10 +71,18 @@ const Drawn = struct {
     /// The first row drawn, its line as an absolute offset.
     line: u64 = 0,
     row: u16 = 0,
+    continuation: ?viewport.Position = null,
 };
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+}
+
+/// The first omitted row of this frame, valid only for the same document.
+/// Open gestures use this position, not a second saved preview or fold.
+pub fn continuation(self: *const Self) ?viewport.Position {
+    if (self.drawn.document != self.document or self.drawn.replacements != self.document.replacements) return null;
+    return self.drawn.continuation;
 }
 
 /// Whether a press or drag is under way.
@@ -142,9 +149,15 @@ fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void
             ctx.consumeAndRedraw();
             if (selection.dragging) return copy(ctx, handler, try selecting.copy(ctx.alloc, self.document, .of(selection.anchor, selection.head)));
             if (!std.meta.eql(at, selection.press)) return;
+            // The state row is not the last text row, even when selection's
+            // clamped anchor happens to fall on a link in that text.
+            if (at.row == self.drawn.height) if (self.continuation()) |position| {
+                if (handler.on_click) |clicked| try clicked(handler.userdata, ctx, position);
+                return;
+            };
             if (selecting.opens(self.document, selection.anchor)) |id| return if (handler.on_open) |open| open(handler.userdata, ctx, id);
             const clicked = handler.on_click orelse return;
-            if (at.row >= 0) if (self.rowPosition(self.laidFirst(), @intCast(at.row))) |position| try clicked(handler.userdata, ctx, position);
+            if (at.row >= 0 and at.row < self.drawn.height) if (self.rowPosition(self.laidFirst(), @intCast(at.row))) |position| try clicked(handler.userdata, ctx, position);
         },
         .motion => {},
     }
@@ -223,16 +236,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .height = screen.height,
         .screen = &screen,
     };
-    const below = if (self.more == null or self.size.height < 2) 0 else self.document.measure(shape, self.first, std.math.maxInt(u16)).rows;
+    const below = if (!self.more or self.size.height < 2) 0 else self.document.measure(shape, self.first, std.math.maxInt(u16)).rows;
     var text = window;
     if (below > self.size.height) text.height -= 1;
     const drawn = self.document.draw(text, self.first, true, self.colour, self.style, self.colours);
     self.next = drawn.next;
     if (below > self.size.height) {
-        var hint_style = self.style;
-        hint_style.fg = self.colours.quiet;
-        const hint = try std.fmt.allocPrint(ctx.arena, "{d} more lines · {s}", .{ below - drawn.rows, self.more.? });
-        _ = window.child(.{ .y_off = text.height, .height = 1 }).print(&.{.{ .text = hint, .style = hint_style }}, .{ .wrap = .none });
+        var quiet = self.style;
+        quiet.fg = self.colours.quiet;
+        const remaining = try std.fmt.allocPrint(ctx.arena, "… {d} more lines", .{below - drawn.rows});
+        _ = window.child(.{ .y_off = text.height, .height = 1 }).print(&.{.{ .text = remaining, .style = quiet }}, .{ .wrap = .none });
     }
     // Replaced content (another document, or this one cleared) ends a press
     // or drag over the old text without copying.
@@ -244,6 +257,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .height = text.height,
         .line = self.document.origin + @min(self.first.offset, self.document.text().len),
         .row = self.first.row,
+        .continuation = if (below > self.size.height) drawn.next else null,
     };
     if (self.selection) |*selection| if (selection.dragging and surface.buffer.len != 0) {
         const width = surface.size.width;
@@ -313,7 +327,7 @@ test "DocumentView user text keeps theme contrast without terminal dim" {
     };
 }
 
-test "DocumentView forwards foreground roles and keeps its hint row quiet" {
+test "DocumentView forwards foreground roles and keeps its overflow state quiet" {
     const document = try std.testing.allocator.create(viewport.Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
@@ -326,7 +340,7 @@ test "DocumentView forwards foreground roles and keeps its hint row quiet" {
         .failure = .{ .rgb = .{ 170, 187, 204 } },
     };
     const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
-    var transcript: Self = .{ .document = document, .style = plain, .colours = colours, .more = "shift+↓" };
+    var transcript: Self = .{ .document = document, .style = plain, .colours = colours, .more = true };
     for ([_]bool{ true, false }) |colour| {
         transcript.colour = colour;
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
@@ -336,7 +350,7 @@ test "DocumentView forwards foreground roles and keeps its hint row quiet" {
             try std.testing.expectEqual(if (colour) foreground else plain.fg, surface.readCell(@intCast(column), 0).style.fg);
         }
         try std.testing.expectEqual(if (colour) colours.quiet else plain.fg, surface.readCell(0, 1).style.fg);
-        try std.testing.expectEqualStrings("2", surface.readCell(0, 2).char.grapheme);
+        try std.testing.expectEqualStrings("…", surface.readCell(0, 2).char.grapheme);
         try std.testing.expectEqual(colours.quiet, surface.readCell(0, 2).style.fg);
         for (surface.buffer) |cell| try std.testing.expectEqual(plain.bg, cell.style.bg);
     }
@@ -543,6 +557,23 @@ test "a press and release on one cell is a click, and only a peer's name opens" 
     try std.testing.expectEqualStrings("", h.copies(&copied));
 }
 
+test "DocumentView continuation click never follows the link in the last text row" {
+    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    const h = try Harness.init("first\n" ++ peer ++ "\nthird\nfourth", .{ .width = 24, .height = 3 });
+    defer h.deinit();
+    h.document.top = .{};
+    h.transcript.more = true;
+    _ = try h.frame();
+    const next = h.transcript.continuation().?;
+    try h.send(.press, 0, 2);
+    try h.send(.release, 0, 2);
+    try std.testing.expectEqualStrings("", h.opened.items);
+    try std.testing.expectEqualSlices(viewport.Position, &.{next}, h.clicks.items);
+    h.document.clear();
+    try h.document.append("replacement");
+    try std.testing.expectEqual(null, h.transcript.continuation());
+}
+
 test "a drag held at an edge scrolls one row a tick and selects the rows it brings in" {
     var text: [10 * 7]u8 = undefined;
     for (0..10) |index| _ = std.fmt.bufPrint(text[index * 7 ..][0..7], "line {d}\n", .{index}) catch unreachable;
@@ -575,6 +606,56 @@ test "a drag held at an edge scrolls one row a tick and selects the rows it brin
     try h.send(.release, 3, 5);
     try std.testing.expectEqual(@as(i32, -1), h.scrolls);
     try std.testing.expectEqualStrings("line 3\nline 4\nline 5", h.copies(&copied));
+}
+
+test "DocumentView active edge drag survives zero one and two row resizes with queued ticks" {
+    var text: [32 * 7]u8 = undefined;
+    for (0..32) |index| _ = try std.fmt.bufPrint(text[index * 7 ..][0..7], "line{d:0>2}\n", .{index});
+    for ([_]u16{ 10, 46 }) |width| for ([_]bool{ false, true }) |up| {
+        const h = try Harness.init(&text, .{ .width = width, .height = 3 });
+        defer h.deinit();
+        h.document.top = .{ .offset = 8 * 7 };
+        h.transcript.more = true;
+        _ = try h.frame();
+        try h.drag(.{ 0, 0 }, .{ 0, if (up) -1 else 4 });
+        try std.testing.expect(h.transcript.selection.?.dragging);
+        try std.testing.expect(h.transcript.selection.?.ticking);
+        const anchor = h.transcript.selection.?.anchor;
+
+        // Keep the same live drag while collapsing and restoring the view.
+        // A previously queued tick is delivered after every resized frame;
+        // its redraw must still have text cells for either selection edge.
+        for ([_]u16{ 0, 1, 2, 0, 2, 1 }) |height| {
+            h.size.height = height;
+            _ = try h.frame();
+            h.clearCommands();
+            const before = h.scrolls;
+            try h.transcript.widget().handleEvent(&h.ctx, .tick);
+            const surface = try h.frame();
+            try std.testing.expectEqual(before + @as(i32, if (up) -1 else 1), h.scrolls);
+            try std.testing.expectEqual(height, surface.size.height);
+            try std.testing.expectEqual(@as(u16, if (height == 2) 1 else height), h.transcript.drawn.height);
+            try std.testing.expect(h.transcript.selection.?.dragging);
+            try std.testing.expectEqualDeep(anchor, h.transcript.selection.?.anchor);
+            if (height < 2) {
+                try std.testing.expectEqual(null, h.transcript.continuation());
+                if (height == 1) try std.testing.expect(!std.mem.eql(u8, "…", surface.readCell(0, 0).char.grapheme));
+            } else {
+                try std.testing.expect(h.transcript.continuation() != null);
+                try std.testing.expectEqualStrings("…", surface.readCell(0, 1).char.grapheme);
+            }
+            var ticks: usize = 0;
+            for (h.ctx.cmds.items) |command| ticks += @intFromBool(command == .tick);
+            try std.testing.expectEqual(@as(usize, 1), ticks);
+        }
+        try h.send(.release, 0, 0);
+        try std.testing.expect(!h.transcript.dragging());
+        const after_release = h.scrolls;
+        h.clearCommands();
+        try h.transcript.widget().handleEvent(&h.ctx, .tick);
+        try std.testing.expectEqual(after_release, h.scrolls);
+        try std.testing.expectEqual(@as(usize, 0), h.ctx.cmds.items.len);
+    };
 }
 
 test "a drag on an edge row keeps the pointer's column until the view scrolls" {
