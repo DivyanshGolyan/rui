@@ -18,7 +18,7 @@ const tool_proposal = @import("../../tool_proposal.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const historical_domain = @This();
-const configuration_domain = @import("configuration.zig");
+const operation_effort = @import("operation_effort.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const skills_domain = @import("skills.zig");
@@ -72,6 +72,9 @@ pub const HistoricalSettings = struct {
     /// Effective effort frozen at admission; null when the binding has no
     /// inferred default and no override.
     reasoning_effort: ?model_capability.ReasoningEffort = null,
+    /// Whether this original request emitted its own effort boundary. A
+    /// refused retry instead restores its frozen prior value through replay.
+    effort_update: bool = false,
     /// The effort the Session's first Operation for this model froze.
     starting_effort: ?model_capability.ReasoningEffort = null,
     /// The codec the Session pinned at creation.
@@ -767,7 +770,7 @@ const historical_settings = rsql.Read(.{
     .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,o.tool_set_id AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
-        configuration_domain.operationReasoningEffortSql("o", "r") ++ " AS reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
+        operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
@@ -791,6 +794,7 @@ const historical_settings = rsql.Read(.{
         compaction_trigger: ?u64,
         output_reservation: ?u64,
         reasoning_effort: ?model_capability.ReasoningEffort,
+        effort_update: bool,
         codec: Bounded(40),
         plain_codec: bool,
         purpose: u8,
@@ -934,6 +938,7 @@ pub const SettingsRead = struct {
         out.compaction_trigger = row.compaction_trigger;
         out.output_reservation = row.output_reservation orelse return error.CorruptStore;
         out.reasoning_effort = row.reasoning_effort;
+        out.effort_update = row.effort_update;
         out.starting_effort = row.starting_effort;
         out.provider = row.provider;
         // Requests are built by the codec the Session pinned, which takes no
@@ -1055,6 +1060,22 @@ pub fn newestBaseSql(comptime session: []const u8, comptime boundary: []const u8
         " ORDER BY selected.admission_position DESC LIMIT 1)";
 }
 const selected_base_sql = newestBaseSql("current.session_ref", "current.admission_position");
+
+/// The encoder carry immediately before this request's own boundary. Capture
+/// it only at admission: replay uses the same raw base, Recipe projection,
+/// covered anchor/floor, every-outcome model boundaries and frozen first top.
+/// On encodable histories the last retained boundary is the carry. Row
+/// presence, not coalesce, preserves NULL. A concrete-to-NULL boundary still
+/// declines in the codec; the projection does not normalize invalid history.
+pub fn effortBeforeSql(comptime session: []const u8, comptime boundary: []const u8, comptime model: []const u8, comptime own_floor: []const u8, comptime first_effort: []const u8) []const u8 {
+    const floor = replay_recipe.Recipe.floorSql(model, "effort_base_model.model", "effort_base.history_floor", own_floor);
+    const anchor = replay_recipe.Recipe.anchorSql(model, "effort_base_model.model", "(SELECT min(anchor.session_position) FROM model_output_item anchor WHERE anchor.operation_id=effort_base.operation_id AND anchor.session_ref=" ++ session ++ " AND anchor.item_kind=4)");
+    return "(SELECT CASE WHEN retained.operation_id IS NOT NULL THEN " ++ operation_effort.effectiveSql("retained") ++ " WHEN first_effort.operation_id IS NOT NULL THEN first_effort.reasoning_effort ELSE " ++ first_effort ++ " END FROM session effort_seed " ++
+        "LEFT JOIN model_operation effort_base ON effort_base.operation_id=" ++ newestBaseSql(session, boundary) ++ " AND effort_base.session_ref=" ++ session ++ " " ++
+        "LEFT JOIN session_revision effort_base_model ON effort_base_model.session_ref=effort_base.session_ref AND effort_base_model.revision=effort_base.settings_revision " ++
+        "LEFT JOIN model_operation retained ON retained.operation_id=(SELECT earlier.operation_id FROM model_operation earlier @index(model_operation_admission) JOIN session_revision earlier_model ON earlier_model.session_ref=earlier.session_ref AND earlier_model.revision=earlier.settings_revision WHERE earlier.session_ref=" ++ session ++ " AND earlier.admission_position<" ++ boundary ++ " AND earlier_model.model=" ++ model ++ " AND earlier.admission_position>" ++ floor ++ " AND earlier.admission_position>=" ++ anchor ++ " ORDER BY earlier.admission_position DESC LIMIT 1) AND retained.session_ref=" ++ session ++ " " ++
+        "LEFT JOIN model_operation first_effort ON first_effort.operation_id=(SELECT first.operation_id FROM model_operation first @index(model_operation_admission) JOIN session_revision first_model ON first_model.session_ref=first.session_ref AND first_model.revision=first.settings_revision WHERE first.session_ref=" ++ session ++ " AND first_model.model=" ++ model ++ " AND first.admission_position<" ++ boundary ++ " ORDER BY first.admission_position LIMIT 1) AND first_effort.session_ref=" ++ session ++ " WHERE effort_seed.session_ref=" ++ session ++ ")";
+}
 
 /// The base's compaction items, whose provider bag is the opaque
 /// continuation: a base has exactly one.
@@ -1304,7 +1325,7 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ configuration_domain.operationReasoningEffortSql("earlier", "revision") ++ ",earlier.tool_set_id," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ operation_effort.effectiveSql("earlier") ++ ",earlier.tool_set_id," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++

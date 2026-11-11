@@ -164,13 +164,11 @@ pub const Encoder = struct {
             // unchanged effort writes nothing. Effort is null for a whole
             // Session or for none of it, so a boundary never returns to it.
             .operation => |effort| if (self.carry.version == .two and !std.meta.eql(effort, self.carry.effort)) {
-                const changed = effort orelse return error.Declined;
-                self.separateInput(out);
-                out.literal(switch (changed) {
-                    inline else => |value| "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}}",
-                });
-                self.carry.effort = changed;
+                self.changeEffort(effort orelse return error.Declined, out);
             },
+            // The original current boundary is an admission fact. Replay and
+            // refused retries above may restore an already admitted value.
+            .effort_update => |effort| if (self.carry.version == .two) self.changeEffort(effort, out),
             .declare_open => {
                 if (self.carry.version != .two) return error.Declined;
                 self.separateInput(out);
@@ -233,6 +231,14 @@ pub const Encoder = struct {
     }
 
     /// An input item after another takes a comma.
+    fn changeEffort(self: *Encoder, effort: codec_abi.Effort, out: *Pieces) void {
+        self.separateInput(out);
+        out.literal(switch (effort) {
+            inline else => |value| "{\"type\":\"configuration_update\",\"reasoning\":{\"effort\":\"" ++ @tagName(value) ++ "\"}}",
+        });
+        self.carry.effort = effort;
+    }
+
     fn separateInput(self: *Encoder, out: *Pieces) void {
         if (self.carry.input_comma) out.literal(",");
         self.carry.input_comma = true;
@@ -1980,6 +1986,10 @@ test "every item at its longest fits max_pieces and names only handles it has" {
     for ([_]?codec_abi.Effort{null} ++ std.enums.values(codec_abi.Effort)) |effort| {
         cases[count] = .{ .item = .{ .operation = effort }, .handles = &.{0} };
         count += 1;
+        if (effort) |value| {
+            cases[count] = .{ .item = .{ .effort_update = value }, .handles = &.{0} };
+            count += 1;
+        }
     }
     for (std.enums.values(codec_abi.Author)) |author| {
         cases[count] = .{ .item = .{ .message = author }, .handles = &.{ 0b01, 0b11 } };

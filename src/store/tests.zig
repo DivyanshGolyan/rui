@@ -37,6 +37,7 @@ const Store = store_core.Store;
 const action_domain = @import("domain/action.zig");
 const command_domain = @import("domain/command.zig");
 const configuration_domain = @import("domain/configuration.zig");
+const operation_effort = @import("domain/operation_effort.zig");
 const content_domain = @import("domain/content.zig");
 const historical_domain = @import("domain/historical.zig");
 const model_admission_domain = @import("domain/model_admission.zig");
@@ -12517,6 +12518,81 @@ test "configuration validates effective effort across retained requested and tar
     }
 }
 
+test "effort refusal requires an emitted Operation update across configure cycles" {
+    try store_testing.forEachEngine(struct {
+        const Scenario = enum { first, unchanged, label, cycle_back, genuine, skipped_choice };
+
+        fn run(case: *store_testing.Case) !void {
+            for ([_]?protocol.ReasoningEffort{ null, .low }) |initial| for ([_]bool{ false, true }) |legacy_codec| for (std.enums.values(Scenario)) |scenario| {
+                if (initial == null and scenario == .cycle_back) continue;
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("wire-effort-create", "", workspace, "unlisted-effort");
+                create.configuration.reasoning_effort.state = if (initial == null) .explicit_null else .value;
+                if (initial) |value| try create.configuration.reasoning_effort.value.set(@tagName(value));
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                if (legacy_codec) try store_testing.exec(&storage, "UPDATE session SET codec='openai-responses/1' WHERE session_ref=?1", .{session.slice()});
+                if (scenario != .first) try answerTestTurn(&storage, &tmp, session.slice(), "wire-effort-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
+                var change: wire_request.ConfigureCommand = .{};
+                change.session = session;
+                var selected = initial;
+                if (scenario != .unchanged and scenario != .label) {
+                    change.configuration.reasoning_effort.state = .value;
+                    try change.key.set("wire-effort-high");
+                    try change.configuration.reasoning_effort.value.set("high");
+                    _ = (try storage.configure(&change, .{})).accepted;
+                    selected = .high;
+                }
+                if (scenario == .cycle_back or scenario == .skipped_choice) {
+                    try change.key.set("wire-effort-final");
+                    selected = if (scenario == .cycle_back) .low else .xhigh;
+                    try change.configuration.reasoning_effort.value.set(@tagName(selected.?));
+                    _ = (try storage.configure(&change, .{})).accepted;
+                }
+                if (scenario == .label) {
+                    try change.key.set("wire-effort-label");
+                    change.configuration.label.state = .value;
+                    try change.configuration.label.value.set("not an effort update");
+                    _ = (try storage.configure(&change, .{})).accepted;
+                }
+                try submitTestMessage(&storage, &tmp, "wire-effort-next", "wire-effort-message", session.slice(), "observe wire effort");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const emitted = !legacy_codec and (scenario == .genuine or scenario == .skipped_choice);
+                try std.testing.expectEqual(@intFromBool(emitted), try store_testing.queryU64(&storage, "SELECT effort_update FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+                try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+                try std.testing.expectEqual(@intFromBool(emitted), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND field='reasoning_effort_refused'", .{session.slice()}));
+                // A skipped high Configure is not an admitted fallback. A
+                // refused xhigh returns to the Operation's low/null, not high.
+                const expected = if (emitted) initial else selected;
+                try std.testing.expectEqual(expected, (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+                try std.testing.expectEqual(@intFromBool(!emitted), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='provider_http_400'", .{binding.operation_id}));
+                if (emitted) {
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE refused_operation_id=?1 AND revision=(SELECT effort_source_revision FROM model_operation WHERE operation_id=?1)", .{binding.operation_id}));
+                    var retry = (try storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
+                    const retried = try retry.permit.consume();
+                    var view: HistoricalView = undefined;
+                    storage.openHistoricalView(retried, &view);
+                    defer view.close();
+                    var settings: HistoricalSettings = undefined;
+                    try view.settings(&settings);
+                    try std.testing.expectEqual(initial, settings.reasoning_effort);
+                    try std.testing.expect(!settings.effort_update);
+                    // The refused source is excluded on a replacement Attempt,
+                    // not interpreted again as a fresh configuration choice.
+                    try storage.settleModelAttemptFailure(retried, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+                    try std.testing.expect(try storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE refused_operation_id=?1", .{binding.operation_id}));
+                } else try std.testing.expect(try storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
+            };
+        }
+    }.run);
+}
+
 test "effort provenance excludes refused Operations across unrelated revisions" {
     try store_testing.forEachEngine(struct {
         fn expectEffort(storage: *Store, binding: AttemptBinding, effort: ?protocol.ReasoningEffort) !void {
@@ -12586,7 +12662,6 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 // The P2 counterexample must fail here, not during setup.
                 try std.testing.expectEqual(effort, observed.reasoning_effort);
                 try std.testing.expectEqual(override, observed.reasoning_effort_override);
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT " ++ configuration_domain.reasoningEffortRevisionSql("s") ++ " FROM session s WHERE s.session_ref=?1", .{session.slice()}));
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='reasoning_effort_refused'", .{ session.slice(), revision }));
                 var retry = (try storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
                 const retried = try retry.permit.consume();
@@ -12601,7 +12676,7 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 try change.key.set("provenance-new-choice");
                 const chosen = (try storage.configure(&change, .{})).accepted;
                 try std.testing.expectEqual(@as(?protocol.ReasoningEffort, rejected), (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
-                try std.testing.expectEqual(chosen.revision, try store_testing.queryU64(&storage, "SELECT " ++ configuration_domain.reasoningEffortRevisionSql("s") ++ " FROM session s WHERE s.session_ref=?1", .{session.slice()}));
+                try std.testing.expectEqual(chosen.revision, try store_testing.queryU64(&storage, "SELECT " ++ configuration_domain.effortChoiceRevisionSql("s") ++ " FROM session s WHERE s.session_ref=?1", .{session.slice()}));
                 try expectEffort(&storage, next, effort);
             };
         }
@@ -15491,6 +15566,153 @@ test "configure parent refuses every widening field, missing or ended parents an
                 }
             }
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1", .{parent.slice()}));
+        }
+    }.run);
+}
+
+/// Calls the admission owner's SQL, rather than duplicating it in a fixture.
+const EffortCarryRead = struct {
+    const query = rsql.Read(.{
+        .sql = "SELECT " ++ historical_domain.effortBeforeSql("?1", "?2", "?3", "?4", "?5") ++ " AS effort",
+        .Args = struct { session: []const u8, boundary: u64, model: []const u8, floor: ?u64, first: ?protocol.ReasoningEffort },
+        .Row = struct { effort: ?protocol.ReasoningEffort },
+        .cardinality = .one,
+    });
+
+    const eligible = rsql.Read(.{
+        .sql = "SELECT " ++ operation_effort.refusalEligibleSql("o") ++ " AS eligible FROM model_operation o WHERE o.operation_id=?1",
+        .Args = struct { operation: u64 },
+        .Row = struct { eligible: bool },
+        .cardinality = .one,
+    });
+
+    fn refusalEligible(storage: *Store, operation: u64) !bool {
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        var result: eligible.Result = undefined;
+        a.read(eligible, .{ .operation = operation }, &result);
+        try a.run();
+        return result.eligible;
+    }
+
+    fn read(storage: *Store, args: query.Args) !?protocol.ReasoningEffort {
+        const entry = try store_core.enter(storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.read, error{}) = .open(&entry);
+        defer a.deinit();
+        var result: query.Result = undefined;
+        a.read(query, args, &result);
+        try a.run();
+        return result.effort;
+    }
+};
+
+test "admitted effort carry agrees with replay recipe across the owner domain" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Recipe = @import("../replay_recipe.zig").Recipe;
+            const Entry = struct { position: u64, model: []const u8, effort: ?protocol.ReasoningEffort };
+            for ([_]?protocol.ReasoningEffort{ null, .low }) |top| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("carry-create", "", workspace, "unlisted-A");
+                if (top) |value| {
+                    create.configuration.reasoning_effort.state = .value;
+                    try create.configuration.reasoning_effort.value.set(@tagName(value));
+                } else create.configuration.reasoning_effort.state = .explicit_null;
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                try answerTestTurn(&storage, &tmp, session.slice(), "carry-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
+                var change: wire_request.ConfigureCommand = .{};
+                change.session = session;
+                try change.key.set("carry-B");
+                change.configuration.model.state = .value;
+                try change.configuration.model.value.set("unlisted-B");
+                try std.testing.expect(try storage.configure(&change, .{}) == .accepted);
+                // Closed fixture includes NULL boundaries. The codec declines
+                // a concrete-to-NULL transition; compare only encodable folds.
+                try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=2 WHERE session_ref=?1", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor) SELECT 90,turn_id,session_ref,1,input_cutoff,10,1,0,'high',1,'failed',1,tool_set_id,10 FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor) SELECT 91,turn_id,session_ref,2,input_cutoff,20,1,0,'xhigh',1,'failed',1,tool_set_id,20 FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id) SELECT 92,turn_id,session_ref,1,input_cutoff,22,0,'none',1,'failed',1,tool_set_id FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id) SELECT 93,turn_id,session_ref,1,input_cutoff,25,0,NULL,1,'failed',1,tool_set_id FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) SELECT 90,0,session_ref,11,4,1,item_id_digest,0,0,extras_content_id,0 FROM model_output_item WHERE session_ref=?1 AND item_ordinal=0 LIMIT 1", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) SELECT 91,0,session_ref,21,4,1,item_id_digest,0,0,extras_content_id,0 FROM model_output_item WHERE operation_id=90 AND session_ref=?1", .{session.slice()});
+                const entries = [_]Entry{ .{ .position = 2, .model = "unlisted-A", .effort = top }, .{ .position = 10, .model = "unlisted-A", .effort = .high }, .{ .position = 20, .model = "unlisted-B", .effort = .xhigh }, .{ .position = 22, .model = "unlisted-A", .effort = .none }, .{ .position = 25, .model = "unlisted-A", .effort = null } };
+                for (0..3) |profile| {
+                    try store_testing.exec(&storage, "UPDATE model_operation SET resolution_code=CASE WHEN (?1>=1 AND operation_id=90) OR (?1=2 AND operation_id=91) THEN 'compacted' ELSE 'failed' END WHERE operation_id IN (90,91)", .{profile});
+                    for ([_][]const u8{ "unlisted-A", "unlisted-B" }) |model| for ([_]u64{ 2, 9, 10, 11, 20, 21, 22, 23, 25, 26, 30 }) |boundary| for ([_]?u64{ null, 0, 10, 11, 20, 22, 25, 40 }) |own_floor| {
+                        const candidate: ?@import("../replay_recipe.zig").Base = if (profile == 2 and boundary > 20) .{ .position = 20, .floor = 20, .model = "unlisted-B" } else if (profile >= 1 and boundary > 10) .{ .position = 10, .floor = 10, .model = "unlisted-A" } else null;
+                        const recipe = Recipe.select(model, candidate, own_floor orelse 0);
+                        const anchor: u64 = if (recipe.frontier == 0) 0 else recipe.frontier + 1;
+                        var expected: ?protocol.ReasoningEffort = .medium;
+                        for (entries) |item| {
+                            if (item.position < boundary and std.mem.eql(u8, item.model, model)) {
+                                expected = item.effort;
+                                break;
+                            }
+                        }
+                        var declined = false;
+                        for (entries) |item| if (item.position < boundary and item.position > recipe.floor and item.position >= anchor and std.mem.eql(u8, item.model, model)) {
+                            if (item.effort == null and expected != null) {
+                                declined = true;
+                                break;
+                            }
+                            expected = item.effort;
+                        };
+                        // Concrete->NULL has no successfully encoded carry;
+                        // responses' boundary test separately pins Declined.
+                        if (declined) continue;
+                        try std.testing.expectEqual(expected, try EffortCarryRead.read(&storage, .{ .session = session.slice(), .boundary = boundary, .model = model, .floor = own_floor, .first = .medium }));
+                    };
+                }
+            }
+        }
+    }.run);
+}
+
+test "effort refusal eligibility excludes a source refused by any Operation" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            var create = try completeConfiguration("eligible-create", "", workspace, "unlisted-effort-model");
+            create.configuration.reasoning_effort.state = .value;
+            try create.configuration.reasoning_effort.value.set("low");
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            try answerTestTurn(&storage, &tmp, session.slice(), "eligible-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
+            var change: wire_request.ConfigureCommand = .{};
+            change.session = session;
+            try change.key.set("eligible-high");
+            change.configuration.reasoning_effort.state = .value;
+            try change.configuration.reasoning_effort.value.set("high");
+            _ = (try storage.configure(&change, .{})).accepted;
+            try submitTestMessage(&storage, &tmp, "eligible-input", "eligible-message", session.slice(), "change");
+            const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            // A second snapshot sharing the source isolates the source's
+            // immutable refusal fact from the exact refusing Operation.
+            try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,999,0,reasoning_effort,1,'failed',1,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override FROM model_operation WHERE operation_id=?1", .{binding.operation_id});
+            try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, binding.operation_id));
+            try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, 999));
+            try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});
+            try std.testing.expect(!try EffortCarryRead.refusalEligible(&storage, binding.operation_id));
+            try std.testing.expect(!try EffortCarryRead.refusalEligible(&storage, 999));
+            try change.key.set("eligible-new-choice");
+            try change.configuration.reasoning_effort.value.set("xhigh");
+            const revision = (try storage.configure(&change, .{})).accepted.revision;
+            try store_testing.exec(&storage, "UPDATE model_operation SET settings_revision=?1,effort_source_revision=?1,reasoning_effort='xhigh' WHERE operation_id=999", .{revision});
+            try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, 999));
         }
     }.run);
 }

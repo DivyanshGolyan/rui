@@ -21,6 +21,7 @@ const rsql = @import("../rsql.zig");
 const store_schema = @import("../schema.zig");
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
+const operation_effort = @import("operation_effort.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const historical_domain = @import("historical.zig");
@@ -343,25 +344,18 @@ const schedule_retry = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-/// Only a changed effort that actually has an earlier Operation for this
-/// model can have emitted a configuration update. Creation/top-level effort
-/// failures and already-refused sources remain ordinary provider failures.
+/// Admission, not revision history, owns whether this request emitted a
+/// refusable choice. A replay restoration or an unchanged effort is ordinary.
 const refused_effort_source = rsql.Read(.{
-    .sql = "SELECT source.revision FROM model_operation o " ++
-        "JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
-        "JOIN session_revision source ON source.session_ref=r.session_ref AND source.revision=" ++ configuration_domain.reasoningEffortRevisionSql("r") ++ " " ++
-        "WHERE o.operation_id=?1 AND source.revision>1 " ++
-        "AND EXISTS(SELECT 1 FROM session_change changed WHERE changed.session_ref=source.session_ref AND changed.revision=source.revision AND changed.field='reasoning_effort') " ++
-        "AND EXISTS(SELECT 1 FROM model_operation earlier JOIN session_revision earlier_revision ON earlier_revision.session_ref=earlier.session_ref AND earlier_revision.revision=earlier.settings_revision " ++
-        "WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position AND earlier.settings_revision<source.revision AND earlier_revision.model=r.model)",
+    .sql = "SELECT o.effort_source_revision AS revision FROM model_operation o WHERE o.operation_id=?1 AND " ++ operation_effort.refusalEligibleSql("o"),
     .Args = struct { operation: u64 },
     .Row = struct { revision: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_effort_refusal = rsql.Write(.{
-    .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text) VALUES(@session(?1),?2,0,?3,'reasoning_effort_refused',@now,?4)",
-    .Args = struct { session: rsql.SessionHead, position: u64, revision: u64, provider_text: []const u8 },
+    .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES(@session(?1),?2,0,?3,'reasoning_effort_refused',@now,?4,?5)",
+    .Args = struct { session: rsql.SessionHead, position: u64, revision: u64, provider_text: []const u8, operation: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
@@ -371,9 +365,9 @@ const invalidate_effort_prefix = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, report: []const u8) !void {
+fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, operation: u64, report: []const u8) !void {
     const position = try (try a.positions(session)).take(1);
-    a.write(insert_effort_refusal, .{ .session = session, .position = position, .revision = revision, .provider_text = report });
+    a.write(insert_effort_refusal, .{ .session = session, .position = position, .revision = revision, .provider_text = report, .operation = operation });
     a.write(invalidate_effort_prefix, .{ .session = session });
 }
 
@@ -390,7 +384,7 @@ fn settleEffortRefusal(a: anytype, io: std.Io, binding: AttemptBinding, failure:
     const row = try currentAttempt(&facts, binding);
     const revision = (source orelse return .unmatched).revision.get();
     if (binding.attempt_ordinal >= retry_policy.maximum_attempts) return .{ .exhausted = revision };
-    try queueEffortRefusal(a, row.session, revision, failure.report());
+    try queueEffortRefusal(a, row.session, revision, binding.operation_id, failure.report());
     a.write(schedule_retry, .{
         .operation_id = binding.operation_id,
         .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
@@ -564,7 +558,7 @@ pub fn settleModelAttemptFailure(
             },
         },
     }
-    if (exhausted_refusal) |revision| try queueEffortRefusal(a, session, revision, failure.report());
+    if (exhausted_refusal) |revision| try queueEffortRefusal(a, session, revision, binding.operation_id, failure.report());
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
 }
