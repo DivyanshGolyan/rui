@@ -1661,15 +1661,16 @@ def renderer_cases():
             with terminal(session) as tty:
                 tty.send("propose an Action decided elsewhere\r", CHOICE)
                 action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
-                tty.send("/", predicate=lambda: tty.capture.draft("/", 3))
+                tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
                 generation = tty.capture.generation
                 run(home, "action", decision, "--store", store, "--session", session, "--action", action)
-                shown = tty.wait(predicate=lambda: marker in tty.capture.completed and tty.capture.draft("/", 3), after=generation)
+                shown = tty.wait(predicate=lambda: marker in tty.capture.completed and tty.capture.draft("x", 3), after=generation)
                 for pending in ("Allow once", "? Decided elsewhere"):
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
                 requests = len(endpoint.requests)
-                tty.send("status\r", " Status · ")
+                tty.send("\x7f", predicate=lambda: tty.capture.draft("", 2))
+                tty.send("/status\r", " Status · ")
                 assert len(endpoint.requests) == requests, endpoint.requests
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
