@@ -50,6 +50,7 @@ Retained earlier builds are not an unconditional rollback after a Store migratio
 The target build's schema determines compatibility, not version punctuation.
 At Host startup, Rui backs up and migrates supported SQLite formats.
 MySQL schema changes are operator-owned.
+For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 If target compatibility facts are unavailable, compatibility is unknown until startup validates it.
 See [Store format and upgrades](../ARCHITECTURE.md#store-format-and-upgrades) for the contract.
 
