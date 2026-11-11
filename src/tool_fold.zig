@@ -195,10 +195,11 @@ test "tool display bounds stored raw escaped and line prefixes without parsing" 
     const output = try std.testing.allocator.create(Output);
     defer std.testing.allocator.destroy(output);
     const lines: [32 * 5]u8 = @bitCast(@as([32][5]u8, @splat("line\n".*)));
+    const envelope = "Bash succeeded. Exit code: 0.\nstdout tail:\n" ++ lines;
     const long = @as([max_bytes + 1]u8, @splat('x')) ++ "\nsecond\n";
     const escaped = @as([3000]u8, @splat(0x1b)) ++ "\nsecond\n";
     var rendered: [32768]u8 = undefined;
-    for ([_][]const u8{ &lines, long, escaped }, 0..) |bytes, case_index| {
+    for ([_][]const u8{ &lines, envelope, long, escaped }, 0..) |bytes, case_index| {
         for ([_]usize{ 1, 257, 8192 }) |chunk| {
             output.* = .{};
             var at: usize = 0;
@@ -212,6 +213,10 @@ test "tool display bounds stored raw escaped and line prefixes without parsing" 
             if (case_index == 0) {
                 try std.testing.expectEqual(@as(usize, max_lines), std.mem.count(u8, writer.buffered(), output_marker ++ "    line\n"));
                 try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), more_marker ++ "    … 12 more lines\n"));
+            } else if (case_index == 1) {
+                try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), output_marker ++ "    Bash succeeded. Exit code: 0.\n" ++ output_marker ++ "    stdout tail:\n"));
+                try std.testing.expectEqual(@as(usize, max_lines - 2), std.mem.count(u8, writer.buffered(), output_marker ++ "    line\n"));
+                try std.testing.expect(std.mem.endsWith(u8, writer.buffered(), more_marker ++ "    … 14 more lines\n"));
             } else try std.testing.expectEqualStrings(more_marker ++ "    … 2 more lines\n", writer.buffered());
         }
     }

@@ -345,14 +345,14 @@
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    output line 18",
-        "    … 16 more lines",
+        "    … 14 more lines",
         "ctrl+o close"
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then sixteen remaining lines; close key shares the facts footer"
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines; close key shares the facts footer"
     },
     {
       "name": "tool-open-nocolor",

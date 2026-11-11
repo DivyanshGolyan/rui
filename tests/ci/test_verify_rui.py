@@ -233,8 +233,8 @@ class FramesTest(unittest.TestCase):
             self.assertEqual(states[name]["sizes"], [(46, 30), (140, 40)])
         keys = [key for step in states["tool-open-two"]["steps"] for key in step.get("keys", [])]
         self.assertEqual(keys.count("C-o"), 2)
-        self.assertTrue(any(text.startswith("    … ") and text.endswith(" more lines")
-                            for text in states["tool-open-long"]["expect"]))
+        self.assertIn("    output line 18", states["tool-open-long"]["expect"])
+        self.assertIn("    … 14 more lines", states["tool-open-long"]["expect"])
         for name in ("help", "slash"):
             self.assertIn({"gone": "/details"}, states[name]["steps"])
         self.assertIn("ctrl+o                 open", states["help"]["expect"])
