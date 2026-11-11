@@ -497,15 +497,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             return self.toolOutput(self.nextLine(offset) orelse return false);
         }
 
-        pub fn hasOpenTools(self: *const Self) bool {
-            var offset: usize = 0;
-            while (offset < self.text().len) {
-                if (self.toolIsOpen(offset)) return true;
-                offset = self.nextLine(offset) orelse break;
-            }
-            return false;
-        }
-
         /// A display edit relocates the frontend's absolute live anchors too.
         pub const Edit = struct {
             at: u64,

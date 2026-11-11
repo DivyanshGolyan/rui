@@ -217,7 +217,6 @@ class FramesTest(unittest.TestCase):
                 state = states[name]
                 keys = [key for step in state["steps"] for key in step.get("keys", [])]
                 self.assertIn("C-o", keys)
-                self.assertIn("ctrl+o close", state["expect"])
                 self.assertTrue(any(text.startswith(("✓ ", "× ")) for text in state["expect"]))
                 self.assertIn({"gone": "▸"}, state["steps"])
                 status = "    Bash succeeded. Exit code: 0." if name == "tool-open-long" else "    Bash failed. Exit code: 1."
@@ -262,7 +261,7 @@ class FramesTest(unittest.TestCase):
         for text in ("✓ List project files", "    README.md", "    src",
                      "× Fail with exit 127 · exit 127", "× Fail with an excerpt · exit 1",
                      "    Bash succeeded. Exit code: 0.", "    stdout tail:", "    Bash failed. Exit code: 1.", "    stderr tail:",
-                     "    usage: example", "    unknown option --help", "ctrl+o close"):
+                     "    usage: example", "    unknown option --help"):
             self.assertIn(text, state["expect"])
 
     def test_stop_frame_owns_work_and_waits_for_the_stable_ending(self):

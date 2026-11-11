@@ -188,7 +188,7 @@
           ]
         },
         {
-          "wait": "ctrl+o close"
+          "wait": "    stderr tail:"
         },
         {
           "gone": "Opening tool output…"
@@ -212,14 +212,13 @@
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
-        "    unknown option --help",
-        "ctrl+o close"
+        "    unknown option --help"
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour, close key shares the facts footer"
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour"
     },
     {
       "name": "tool-open-two",
@@ -299,8 +298,7 @@
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
-        "    unknown option --help",
-        "ctrl+o close"
+        "    unknown option --help"
       ],
       "sizes": [
         "46x30",
@@ -345,14 +343,13 @@
         "    Bash succeeded. Exit code: 0.",
         "    stdout tail:",
         "    output line 18",
-        "    … 14 more lines",
-        "ctrl+o close"
+        "    … 14 more lines"
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines; close key shares the facts footer"
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines"
     },
     {
       "name": "tool-open-nocolor",
@@ -370,7 +367,7 @@
           ]
         },
         {
-          "wait": "ctrl+o close"
+          "wait": "    stderr tail:"
         },
         {
           "gone": "Opening tool output…"
@@ -394,14 +391,13 @@
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
-        "    unknown option --help",
-        "ctrl+o close"
+        "    unknown option --help"
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour, close key shares the facts footer"
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour"
     },
     {
       "name": "chat-draft-kept",

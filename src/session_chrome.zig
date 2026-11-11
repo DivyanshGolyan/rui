@@ -216,8 +216,6 @@ pub const Bar = struct {
     stop: bool = false,
     /// The column `stop_key` starts at, when it shows.
     stop_column: u16 = 0,
-    right_key: []const u8 = stop_key,
-    close_tool: bool = false,
 };
 
 /// The facts the status bar is decided over.
@@ -237,7 +235,6 @@ pub const Facts = struct {
     overview: ?[]const u8 = null,
     /// `stoppable` for the Session's work.
     stoppable: bool = false,
-    tool_open: bool = false,
     width: u16,
     method: Method = .unicode,
 };
@@ -269,14 +266,10 @@ pub fn bar(facts: Facts) Bar {
         result.left = left;
         result.tone = if (std.mem.startsWith(u8, left, "!")) .attention else .quiet;
     }
-    if (!facts.stoppable and !facts.tool_open) return result;
-    // Stop is never displaced: closing a tool row can wait, stopping work cannot.
-    result.close_tool = facts.tool_open and !facts.stoppable;
-    result.right_key = if (result.close_tool) "ctrl+o close" else stop_key;
-    const stop_cells = session_line.cells(result.right_key, facts.method);
+    if (!facts.stoppable) return result;
+    const stop_cells = session_line.cells(stop_key, facts.method);
     const left_cells = session_line.cells(result.left, facts.method);
-    // Close lives on the facts line, not beside this status/notice text.
-    const used = if (result.close_tool or left_cells == 0) 0 else left_cells + gap;
+    const used = if (left_cells == 0) 0 else left_cells + gap;
     // One cell of margin at the right edge, as the mocks set it.
     if (used + stop_cells + 1 > facts.width) return result;
     result.stop = true;

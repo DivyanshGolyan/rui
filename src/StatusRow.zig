@@ -25,17 +25,14 @@ pub fn widget(self: *Self) vxfw.Widget {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const max = ctx.max.size();
-    // An open tool's right-slot key is on the facts line. Do not reserve
-    // another row for it when there is no independent notice/status.
-    const empty = self.bar.close_tool and self.bar.left.len == 0;
-    const size: vxfw.Size = .{ .width = max.width, .height = if (empty) 0 else @min(1, max.height) };
+    const size: vxfw.Size = .{ .width = max.width, .height = @min(1, max.height) };
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.quiet });
     if (size.width == 0 or size.height == 0) return surface;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
     var used: usize = 0;
     const tone = if (self.bar.tone == .attention) self.attention else self.quiet;
-    const left_end: u16 = if (self.bar.stop and !self.bar.close_tool) self.bar.stop_column -| 2 else size.width;
+    const left_end: u16 = if (self.bar.stop) self.bar.stop_column -| 2 else size.width;
     const keyed = self.key.label.len != 0 and std.mem.endsWith(u8, self.bar.left, self.key.label);
     const words = if (keyed) self.bar.left[0 .. self.bar.left.len - self.key.label.len] else self.bar.left;
     const column = Chip.print(surface, self.method, 0, 0, words, tone, left_end);
@@ -47,8 +44,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         children[used] = .{ .origin = .{ .row = 0, .col = column }, .surface = try self.key.widget().draw(ctx.withConstraints(.{}, .{ .width = left_end - column, .height = 1 })) };
         used += 1;
     }
-    if (self.bar.stop and !self.bar.close_tool and self.bar.stop_column < size.width) {
-        self.stop.label = self.bar.right_key;
+    if (self.bar.stop and self.bar.stop_column < size.width) {
+        self.stop.label = chrome.stop_key;
         self.stop.style = self.quiet;
         self.stop.hover = self.quiet;
         self.stop.hover.ul_style = .single;
