@@ -133,8 +133,8 @@ class FramesTest(unittest.TestCase):
 
     def test_sizes(self):
         parse = self.helper["parse_sizes"]
-        self.assertEqual(parse("140x40,46x30"), ["140x40", "46x30"])
-        self.assertEqual(parse(["1x1"]), ["1x1"])
+        self.assertEqual(parse("140x40,46x30"), [(140, 40), (46, 30)])
+        self.assertEqual(parse(["1x1"]), [(1, 1)])
         for value in (None, [], "", "0x30", "46x0", "-1x3", "12X3", "12x", "2x3,", "2x3,2x3", [42], " 2x3"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse(value)
@@ -144,9 +144,17 @@ class FramesTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "scenario.json"
             path.write_text(json.dumps(data))
-            self.assertEqual(self.helper["load_scenario"](path), data)
+            loaded = self.helper["load_scenario"](path)
+            self.assertEqual(loaded["sizes"], [(140, 40), (46, 30)])
+            self.assertEqual(loaded["states"][0]["sizes"], [(140, 40), (46, 30)])
+            self.assertEqual(loaded["states"][0]["expect"], [])
+            self.assertEqual(loaded["states"][1]["expect"], ["Keys"])
+            snapshot = self.helper["scenario_snapshot"](loaded)
+            path.write_text(json.dumps(snapshot))
+            self.assertEqual(self.helper["load_scenario"](path), loaded)
+            self.assertEqual(data, self.scenario())  # Loading leaves caller data untouched.
         default = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
-        self.assertEqual(default["sizes"], ["140x40", "46x30"])
+        self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
     def test_cumulative_cast_and_counted_labels(self):
@@ -168,6 +176,9 @@ class FramesTest(unittest.TestCase):
             lambda d: d["states"][1].update(open="missing"),
             lambda d: d["states"][1].update(open=[]),
             lambda d: d["states"][1].update(theme=[]),
+            lambda d: d["states"][1].update(expect=None),
+            lambda d: d["states"][1].update(expect=["valid", 42]),
+            lambda d: d["states"][1].update(expect=""),
             lambda d: d["states"][1].update(name="../escape"),
             lambda d: d["states"][1].update(name="empty"),
             lambda d: d["states"][1].update(steps=[{"unknown": "oops"}]),
@@ -298,33 +309,110 @@ class FramesTest(unittest.TestCase):
                 command(args)
             self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
 
-    def test_frame_window_gets_its_size_before_rui_exec(self):
+    def run_frames_scenario(self, scenario, sizes=None, capture_ok=True):
+        """Run the real loader/orchestrator with an inert OS and capture adapter."""
         command = self.helper["cmd_frames"]
         calls = []
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            source = root / "scenario.json"
+            source.write_text(json.dumps(scenario))
             run = types.SimpleNamespace(root=root, home=root / "home", store=root / "store",
                                         evidence=root / "evidence", project=root, rui=Path("/pinned/rui"),
                                         sock=root / "tmux.sock", meta={"sha": "a" * 40},
                                         env=lambda **extra: extra, own=lambda *_args, **_kw: None)
             run.tmux = lambda *argv, **_kw: (calls.append(argv) or types.SimpleNamespace(returncode=0, stdout="999\n", stderr=""))
-            scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": []}]}
-            args = types.SimpleNamespace(sha="a" * 40, scenario="unused", only=None, sizes=None,
+            args = types.SimpleNamespace(sha="a" * 40, scenario=str(source), only=None, sizes=sizes,
                                          out=str(root / "out"), no_png=True, keep=False)
-            replacements = {"load_scenario": lambda _path: scenario, "Run": lambda _path: run,
-                            "cmd_new": lambda _args: print(root), "cmd_cleanup": lambda _args: None,
-                            "frame_wait": lambda *_args, **_kw: None, "frame_steps": lambda *_args, **_kw: None,
-                            "frame_capture": lambda *_args: {"name": "empty", "size": "100x30", "files": {},
-                                                             "ok": True, "status": "ok", "note": "", "reason": None}}
+
+            def capture(_run, _target, _out, state, size, reason):
+                calls.append(("capture", size))
+                return {"name": state["name"], "size": self.helper["size_name"](size), "files": {},
+                        "ok": capture_ok, "status": "ok" if capture_ok else "failed", "note": "",
+                        "reason": reason if capture_ok else "state left before capture: Working"}
+
+            replacements = {"Run": lambda _path: run, "cmd_new": lambda _args: print(root),
+                            "cmd_cleanup": lambda _args: None, "frame_wait": lambda *_args, **_kw: None,
+                            "frame_steps": lambda *_args, **_kw: calls.append(("steps",)), "frame_capture": capture}
             with patch.dict(command.__globals__, replacements), patch("shutil.which", return_value="/bin/tmux"), \
-                    patch("time.sleep"), contextlib.redirect_stdout(io.StringIO()):
+                    patch("time.sleep", side_effect=lambda seconds: calls.append(("sleep", seconds))), \
+                    contextlib.redirect_stdout(io.StringIO()):
                 command(args)
-            initial_size = [i for i, c in enumerate(calls) if c == ("set-option", "-g", "default-size", "100x30")]
-            self.assertEqual(len(initial_size), 1)
-            create = next(i for i, c in enumerate(calls) if c[0] == "new-window")
-            self.assertLess(initial_size[0], create)
-            colour = next(i for i, c in enumerate(calls) if "window-style" in c)
-            self.assertLess(colour, create)
+            records = json.loads((root / "out/frames.json").read_text())
+        return calls, records
+
+    def test_frame_window_gets_its_size_before_rui_exec(self):
+        scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": []}]}
+        calls, _records = self.run_frames_scenario(scenario)
+        initial_size = [i for i, c in enumerate(calls) if c == ("set-option", "-g", "default-size", "100x30")]
+        self.assertEqual(len(initial_size), 1)
+        create = next(i for i, c in enumerate(calls) if c[0] == "new-window")
+        self.assertLess(initial_size[0], create)
+        colour = next(i for i, c in enumerate(calls) if "window-style" in c)
+        self.assertLess(colour, create)
+
+    def test_comma_sizes_at_both_levels_execute_two_sizes_and_cli_overrides_both(self):
+        scenario = {"sizes": "100x30,46x30", "states": [
+            {"name": "default", "open": "overview", "steps": []},
+            {"name": "override", "open": "overview", "steps": [], "sizes": "100x30,46x30"},
+        ]}
+        for override, expected in ((None, [(100, 30), (46, 30)]), ("90x20,50x15", [(90, 20), (50, 15)])):
+            with self.subTest(override=override):
+                calls, records = self.run_frames_scenario(scenario, override)
+                self.assertEqual([c[1] for c in calls if c[0] == "capture"], expected * 2)
+                self.assertEqual([r["size"] for r in records], [self.helper["size_name"](size) for size in expected] * 2)
+                first = next(i for i, call in enumerate(calls) if call[0] == "capture")
+                self.assertEqual(calls[first - 1], ("steps",))  # No first-size resize or sleep after the wait.
+                second = next(i for i, call in enumerate(calls) if i > first and call[0] == "capture")
+                self.assertEqual(calls[second - 1], ("sleep", 0.8))
+
+    def test_failed_capture_makes_the_command_fail(self):
+        scenario = {"sizes": ["100x30"], "states": [{"name": "working", "open": "overview", "steps": []}]}
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
+            self.run_frames_scenario(scenario, capture_ok=False)
+        self.assertEqual(result.exception.code, 1)
+
+    def test_capture_expectations_over_sizes_and_state_transitions(self):
+        capture = self.helper["frame_capture"]
+        cases = [
+            ("stable", {"steps": [{"wait": "earlier"}, {"wait": "Ready"}]},
+             ["Ready", "Ready"], [None, None]),
+            ("transient", {"steps": [{"wait": "Working"}]},
+             ["Working", "Finished"], [None, "state left before capture: Working"]),
+            ("empty-expect", {"steps": [{"wait": "Working"}], "expect": []},
+             ["Finished", "Finished"], [None, None]),
+            ("explicit-list", {"steps": [{"wait": "irrelevant"}], "expect": ["Working", "Docs"]},
+             ["Working Docs", "Working"], [None, "state left before capture: Docs"]),
+            ("explicit-text", {"steps": [{"wait": "irrelevant"}], "expect": "Working"},
+             ["Working", "Working"], [None, None]),
+        ]
+        for name, policy, screens, reasons in cases:
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temp:
+                out = Path(temp)
+                state = {"name": name, **policy}
+                run = types.SimpleNamespace(meta={"sha": "a" * 40})
+                records = []
+                for size, screen, reason in zip(((100, 30), (46, 30)), screens, reasons):
+                    ansi = "\x1b[31m" + screen + "\x1b[0m  \n"
+
+                    def tmux(*argv, **_kwargs):
+                        self.assertIn(argv[0], ("capture-pane", "display-message"))
+                        if argv[0] == "capture-pane":
+                            self.assertIn("-e", argv)  # The text and HTML share this one snapshot.
+                        return types.SimpleNamespace(returncode=0, stderr="", stdout=ansi if argv[0] == "capture-pane" else "0 0 0\n")
+
+                    run.tmux = tmux
+                    record = capture(run, "pane", out, state, size, None)
+                    records.append(record)
+                    self.assertEqual(record["reason"], reason)
+                    self.assertEqual(record["ok"], reason is None)
+                    self.assertEqual(record["status"], "ok" if reason is None else "failed")
+                    self.assertEqual((out / record["files"]["txt"]).read_text(), screen + "\n")
+                    self.assertEqual((out / record["files"]["ansi"]).read_text(), ansi)
+                    self.assertIn(screen, (out / record["files"]["html"]).read_text())
+                self.helper["frames_index"](out, records, False)
+                self.assertEqual([r["ok"] for r in json.loads((out / "frames.json").read_text())],
+                                 [reason is None for reason in reasons])
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]

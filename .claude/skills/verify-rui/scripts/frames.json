@@ -8,7 +8,8 @@
       "name": "start-empty",
       "note": "01-overview-empty",
       "open": "overview",
-      "steps": []
+      "steps": [],
+      "expect": "Type a task"
     },
     {
       "name": "start",
@@ -89,6 +90,10 @@
             "Explain the Host in a long answer."
           ]
         }
+      ],
+      "expect": [
+        "Needs you",
+        "■"
       ]
     },
     {
@@ -211,6 +216,10 @@
         {
           "wait": "ctrl+x stop"
         }
+      ],
+      "expect": [
+        "Waiting",
+        "ctrl+x stop"
       ]
     },
     {
@@ -255,11 +264,16 @@
         {
           "wait": "ctrl+x stop"
         }
+      ],
+      "expect": [
+        "• Build the docs",
+        "Run the slow tests",
+        "ctrl+x stop"
       ]
     },
     {
       "name": "stopping",
-      "note": "14c-stop-asked",
+      "note": "14c-stop-asked: transient; capture immediately at one size before it settles",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -273,6 +287,9 @@
         {
           "wait": "Stopping"
         }
+      ],
+      "sizes": [
+        "140x40"
       ]
     },
     {
@@ -542,7 +559,8 @@
             "Plan the billing reconciliation migration."
           ]
         }
-      ]
+      ],
+      "expect": "Migrate"
     },
     {
       "name": "many-sessions",
@@ -629,14 +647,16 @@
       "note": "70-light-overview",
       "open": "overview",
       "steps": [],
-      "theme": "day"
+      "theme": "day",
+      "expect": "Type a task"
     },
     {
       "name": "day-chat",
       "note": "71-light-conversation",
       "open": "Fix retry deadline",
       "steps": [],
-      "theme": "day"
+      "theme": "day",
+      "expect": "Fix retry deadline"
     },
     {
       "name": "no-color",
@@ -645,7 +665,8 @@
       "steps": [],
       "env": {
         "NO_COLOR": "1"
-      }
+      },
+      "expect": "Fix retry deadline"
     },
     {
       "name": "host-stopped",
@@ -694,7 +715,8 @@
         {
           "gone": "Host stopped"
         }
-      ]
+      ],
+      "expect": "Batch job"
     },
     {
       "name": "exit",

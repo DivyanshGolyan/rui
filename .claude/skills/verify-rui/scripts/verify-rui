@@ -1779,6 +1779,9 @@ ANSI_BASE = ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "
              "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff"]
 
 
+ANSI_ESCAPE = re.compile(r"\x1b\[([0-9;:]*)m|\x1b\]8;[^\x1b\x07]*(?:\x1b\\|\x07)|\x1b\([B0]|\x0e|\x0f")
+
+
 def ansi_color(n):
     if not 0 <= n <= 255:
         return None
@@ -1796,7 +1799,6 @@ def ansi_render(text, bg, fg):
     default = dict(fg=None, bg=None, bold=False, dim=False, ital=False, ul=False, rev=False, strike=False)
     style = default.copy()
     out = []
-    pattern = r"\x1b\[([0-9;:]*)m|\x1b\]8;[^\x1b\x07]*(?:\x1b\\|\x07)|\x1b\([B0]|\x0e|\x0f"
 
     def span(chunk):
         f, b = style["fg"] or fg, style["bg"] or bg
@@ -1814,7 +1816,7 @@ def ansi_render(text, bg, fg):
         return f'<span style="{";".join(css)}">{html.escape(chunk)}</span>'
 
     pos = 0
-    for match in re.finditer(pattern, text):
+    for match in ANSI_ESCAPE.finditer(text):
         if match.start() > pos:
             out.append(span(text[pos:match.start()]))
         pos = match.end()
@@ -1875,6 +1877,7 @@ pre{{margin:0;font:14px/1.35 'JetBrains Mono','DejaVu Sans Mono',monospace;color
 
 
 def parse_sizes(value):
+    """Normalize scenario or CLI sizes to (columns, rows), before execution."""
     values = value.split(",") if isinstance(value, str) else value
     if not isinstance(values, list) or not values:
         raise ValueError("sizes must be a nonempty list or comma-separated WxH values")
@@ -1882,10 +1885,26 @@ def parse_sizes(value):
     for size in values:
         if not isinstance(size, str) or not re.fullmatch(r"[1-9][0-9]*x[1-9][0-9]*", size):
             raise ValueError(f"invalid size {size!r}; expected positive WxH")
-        if size in result:
+        dimensions = tuple(map(int, size.split("x")))
+        if dimensions in result:
             raise ValueError(f"duplicate size {size}")
-        result.append(size)
+        result.append(dimensions)
     return result
+
+
+def size_name(size):
+    cols, rows = size
+    return f"{cols}x{rows}"
+
+
+def frame_expectations(state):
+    """One expectation policy for validation and the capture owner."""
+    value = state.get("expect", next((step["wait"] for step in reversed(state["steps"]) if "wait" in step), []))
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(text, str) and text and "\0" not in text for text in value):
+        raise ValueError(f"{state['name']}: expect must be text or a list of nonempty text markers")
+    return value
 
 
 def cast_entries(entries):
@@ -1894,7 +1913,7 @@ def cast_entries(entries):
             yield {**entry, "label": entry["label"].replace("{n}", str(n))}
 
 
-def validate_scenario(data):
+def validate_scenario(data, sizes=None):
     """Validate before allocating a run or sending any side effects."""
     def require(ok, message):
         if not ok:
@@ -1904,7 +1923,9 @@ def validate_scenario(data):
         return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
     require(isinstance(data, dict), "scenario must be an object")
-    parse_sizes(data.get("sizes"))
+    default_sizes = parse_sizes(data.get("sizes"))
+    override = parse_sizes(sizes) if sizes is not None else None
+    normalized_states = []
     states = data.get("states")
     require(isinstance(states, list) and bool(states), "states must be a nonempty list")
     names, labels = set(), set()
@@ -1919,8 +1940,7 @@ def validate_scenario(data):
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
                                              and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
         require("note" not in state or isinstance(state["note"], str) and "\n" not in state["note"], f"{name}: note must be one line")
-        if "sizes" in state:
-            parse_sizes(state["sizes"])
+        state_sizes = parse_sizes(state["sizes"]) if "sizes" in state else default_sizes
         cast = state.get("cast", [])
         require(isinstance(cast, list), f"{name}: cast must be a list")
         for entry in cast:
@@ -1960,11 +1980,18 @@ def validate_scenario(data):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
-    return data
+        normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state)})
+    return {**data, "sizes": override or default_sizes, "states": normalized_states}
 
 
-def load_scenario(path):
-    return validate_scenario(json.loads(pathlib.Path(path).read_text()))
+def load_scenario(path, sizes=None):
+    return validate_scenario(json.loads(pathlib.Path(path).read_text()), sizes)
+
+
+def scenario_snapshot(scenario):
+    """Keep the evidence copy reusable as a scenario input, not internal tuples."""
+    return {**scenario, "sizes": [size_name(size) for size in scenario["sizes"]],
+            "states": [{**state, "sizes": [size_name(size) for size in state["sizes"]]} for state in scenario["states"]]}
 
 
 class FrameFailure(Exception):
@@ -2095,11 +2122,17 @@ def frame_steps(run, target, steps, exiting=False):
 
 
 def frame_capture(run, target, out, state, size, reason):
-    cols, rows = map(int, size.split("x"))
-    stem = f"{state['name']}@{size}"
+    cols, rows = size
+    name = size_name(size)
+    stem = f"{state['name']}@{name}"
     files = {ext: f"{stem}.{ext}" for ext in ("txt", "ansi", "html")}
-    plain = frame_pane(run, target)
     ansi = frame_command(run.tmux("capture-pane", "-e", "-N", "-p", "-t", target, check=False), "capture ANSI").stdout
+    # Derive text and HTML from this same snapshot: a second capture could
+    # already show the next state while the first still satisfied its marker.
+    plain = "\n".join(line.rstrip(" ") for line in ANSI_ESCAPE.sub("", ansi).split("\n"))
+    missing = next((text for text in frame_expectations(state) if text not in plain), None)
+    if missing is not None and reason is None:
+        reason = f"state left before capture: {missing}"
     info = run.tmux("display-message", "-p", "-t", target,
                     "#{cursor_x} #{cursor_y} #{cursor_flag}").stdout.split()
     cx, cy, visible = map(int, info)
@@ -2108,7 +2141,7 @@ def frame_capture(run, target, out, state, size, reason):
     (out / files["ansi"]).write_text(ansi)
     (out / files["html"]).write_text(ansi_page(ansi_render(ansi.removesuffix("\n"), bg, fg), bg, fg, cols, rows,
                                               (cx, cy) if visible else (-5, -5)))
-    return {"name": state["name"], "size": size, "files": files, "status": "failed" if reason else "ok",
+    return {"name": state["name"], "size": name, "files": files, "status": "failed" if reason else "ok",
             "ok": not bool(reason), "reason": reason, "sha": run.meta["sha"], "note": state.get("note", "")}
 
 
@@ -2130,8 +2163,7 @@ def frames_index(out, frames, png):
 
 def cmd_frames(args):
     try:
-        scenario = load_scenario(args.scenario)
-        sizes = parse_sizes(args.sizes) if args.sizes else None
+        scenario = load_scenario(args.scenario, args.sizes)
         selected = set(args.only.split(",")) if args.only else {s["name"] for s in scenario["states"]}
         unknown = selected - {s["name"] for s in scenario["states"]}
         if unknown:
@@ -2175,7 +2207,7 @@ def cmd_frames(args):
     failed = False
     try:
         out.mkdir(parents=True, exist_ok=True)
-        (out / "scenario.json").write_text(json.dumps(scenario, indent=2) + "\n")
+        (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
         # A keeper window preserves the private server and its options between states.
         run.tmux("-f", "/dev/null", "new-session", "-d", "-s", "frames", "-n", "keeper", "sleep 86400")
         run.own("tmux-server", int(run.tmux("display-message", "-p", "#{pid}").stdout), socket=str(run.sock))
@@ -2184,8 +2216,8 @@ def cmd_frames(args):
         run.tmux("set-option", "-g", "status", "off")
         last = max(i for i, state in enumerate(scenario["states"]) if state["name"] in selected)
         for state in scenario["states"][:last + 1]:
-            state_sizes = sizes or state.get("sizes", scenario["sizes"])
-            cols, rows = map(int, state_sizes[0].split("x"))
+            state_sizes = state["sizes"]
+            cols, rows = state_sizes[0]
             target = f"=frames:={state['name']}"
             reason = None
             opened = False
@@ -2225,19 +2257,25 @@ def cmd_frames(args):
                         pass  # The capture error below retains the primary state failure.
             try:
                 if state["name"] in selected:
-                    for size in state_sizes:
-                        if failure_capture and size == state_sizes[0]:
+                    for index, size in enumerate(state_sizes):
+                        if failure_capture and index == 0:
                             records.append(failure_capture)
                             continue
                         try:
-                            width, height = size.split("x")
-                            frame_command(run.tmux("resize-window", "-t", target, "-x", width, "-y", height, check=False), "resize window")
-                            time.sleep(0.8)
+                            if index > 0:
+                                width, height = size
+                                frame_command(run.tmux("resize-window", "-t", target, "-x", width, "-y", height, check=False), "resize window")
+                                time.sleep(0.8)
+                            # The first viewport is already sized. Capture directly
+                            # after its steps/wait, while a transient is still visible.
                             record = frame_capture(run, target, out, state, size, reason)
                         except (Exception, SystemExit) as error:
                             failed = True
-                            record = {"name": state["name"], "size": size, "files": {}, "status": "failed", "ok": False,
+                            record = {"name": state["name"], "size": size_name(size), "files": {}, "status": "failed", "ok": False,
                                       "reason": reason or str(error), "sha": args.sha, "note": state.get("note", "")}
+                        failed = failed or not record["ok"]
+                        if not record["ok"] and reason is None:
+                            print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
                         records.append(record)
                     frames_index(out, records, False)
             finally:
