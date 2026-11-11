@@ -11,6 +11,7 @@
 //! The rows are a client view over `session list`; the Host keeps no
 //! overview state.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const session_archive = @import("session_archive.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
@@ -577,7 +578,7 @@ pub const StartEffort = struct {
     /// launch reads no saved defaults.
     pub fn applied(self: StartEffort, saved: ?ReasoningEffort) ?ReasoningEffort {
         if (!self.readsSaved()) return null;
-        return model_capability.startEffort(saved, self.model.?);
+        return model_capability.startEffort(model_catalog.shipped, saved, self.model.?);
     }
 };
 
@@ -2747,7 +2748,7 @@ fn configure(state: *State, arguments: []const u8) bool {
             state.say(.attention, "! Not a model ID; session configure -h", .{});
             return false;
         }
-        break :blk if (model_capability.supportsModel(model)) null else model;
+        break :blk if (model_capability.supportsModel(model_catalog.shipped, model)) null else model;
     } else null;
     var next: StartSettings = .{};
     inline for (start_options, 0..) |name, option| {
@@ -2757,7 +2758,7 @@ fn configure(state: *State, arguments: []const u8) bool {
         };
     }
     state.settings = next;
-    if (unlisted) |model| state.say(.quiet, "Rui does not list {s}; it uses default limits", .{model});
+    if (unlisted) |model| state.say(.quiet, "This client's catalog does not list {s}; client defaults use estimated limits", .{model});
     return true;
 }
 
