@@ -216,9 +216,10 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(state["steps"], [
             {"send": {"to": state["open"], "text": "long bash", "wait": False}},
             {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
-            {"gone": "Stopping", "timeout": 60}, {"wait": "■ Stopped", "timeout": 60},
+            {"wait": "■ Stopped", "timeout": 60},
         ])
         self.assertEqual(state["expect"], ["■ Stopped"])
+        self.assertEqual(state["absent"], ["Stopping"])
         stopped = states["stopped"]
         self.assertEqual(stopped["open"], "Profile the Host under load")
         seeded = next(entry for state in scenario["states"] for entry in state.get("cast", [])
@@ -287,6 +288,19 @@ class FramesTest(unittest.TestCase):
             mutate(data)
             with self.subTest(mutation=i), self.assertRaises(ValueError):
                 self.helper["validate_scenario"](data)
+
+    def test_absent_requires_a_list_of_nonempty_text_markers(self):
+        for value in (None, "Stopping", "", 1, {}, [""], ["Stopping", 42], ["bad\0marker"]):
+            with self.subTest(absent=value):
+                data = self.scenario()
+                data["states"][1]["absent"] = value
+                with self.assertRaisesRegex(ValueError, "chat: absent"):
+                    self.helper["validate_scenario"](data)
+        for value in ([], ["Stopping"], ["Stopping", "Loading"]):
+            with self.subTest(absent=value):
+                data = self.scenario()
+                data["states"][1]["absent"] = value
+                self.assertEqual(self.helper["validate_scenario"](data)["states"][1]["absent"], value)
 
     def test_answer_choices_preserve_echo_and_realistic_prose(self):
         answer = self.helper["fixture_answer"]
@@ -548,6 +562,11 @@ class FramesTest(unittest.TestCase):
     def test_capture_expectations_over_sizes_and_state_transitions(self):
         capture = self.helper["frame_capture"]
         cases = [
+            ("stop-clean", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
+             ["■ Stopped", "■ Stopped"], [None, None]),
+            ("stop-stale", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
+             ["■ Stopped  Stopping…", "■ Stopped  Stopping…"],
+             ["unexpected on screen: Stopping", "unexpected on screen: Stopping"]),
             ("stable", {"steps": [{"wait": "earlier"}, {"wait": "Ready"}]},
              ["Ready", "Ready"], [None, None]),
             ("transient", {"steps": [{"wait": "Working"}]},
@@ -586,6 +605,29 @@ class FramesTest(unittest.TestCase):
                 self.helper["frames_index"](out, records, False)
                 self.assertEqual([r["ok"] for r in json.loads((out / "frames.json").read_text())],
                                  [reason is None for reason in reasons])
+
+    def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
+        state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
+                     if state["name"] == "stop")
+        stale = "■ Stopped  Stopping…\n"
+        run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
+                                    rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
+        run.tmux = lambda *argv, **_kw: types.SimpleNamespace(
+            returncode=0, stderr="", stdout=stale if argv[0] == "capture-pane" else "0 0 0\n")
+        steps = self.helper["frame_steps"]
+        panes = unittest.mock.Mock(side_effect=["⠹ Sleep eight seconds", "⠹ Sleep eight seconds", stale])
+        with patch.dict(steps.__globals__, {"frame_pane": panes, "frame_dead": lambda *_args: False,
+                                            "frame_request": lambda *_args: None}), patch("time.sleep"):
+            steps(run, "pane", state["steps"])
+        self.assertEqual(panes.call_count, 3)  # Running, still running, then the ending with stale text.
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            for size in state["sizes"]:
+                with self.subTest(size=size):
+                    record = self.helper["frame_capture"](run, "pane", out, state, size, None)
+                    self.assertFalse(record["ok"])
+                    self.assertEqual(record["reason"], "unexpected on screen: Stopping")
+                    self.assertEqual((out / record["files"]["txt"]).read_text(), stale)
 
     def test_stop_waits_for_a_running_bash_not_an_approval(self):
         running = self.helper["frame_bash_running"]

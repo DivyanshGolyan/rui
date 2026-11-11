@@ -408,15 +408,14 @@
           ]
         },
         {
-          "gone": "Stopping",
-          "timeout": 60
-        },
-        {
           "wait": "■ Stopped",
           "timeout": 60
         }
       ],
-      "expect": "■ Stopped"
+      "expect": "■ Stopped",
+      "absent": [
+        "Stopping"
+      ]
     },
     {
       "name": "stopped",
