@@ -29,6 +29,7 @@ const feed_reads = @import("feed_reads.zig");
 const feed_window = @import("feed_window.zig");
 const Key = feed_window.Key;
 const FeedPolicy = feed_reads.Policy(Key);
+pub const LatestEnding = feed_reads.Ending(Key);
 
 /// Independent raw rendering in inspection. The shell prepares the text and
 /// pairs summary markers with the retained targets in emission order.
@@ -228,6 +229,8 @@ pub const Job = struct {
     scan_provisional: ?Key = null,
     target: Target = undefined,
     recall: ?Input.Step = null,
+    /// Frozen live fact for scans; fills neither read nor publish it.
+    latest_ending: ?LatestEnding = null,
     queued_line: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -275,6 +278,7 @@ pub const Job = struct {
         queued: protocol.Queued = .{},
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
+        latest_ending: ?LatestEnding = null,
         cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
         // Output custody began; a later failure is not a silent preparation one.
@@ -293,6 +297,7 @@ pub const Job = struct {
         // The step passed over a sent Message the draft cannot hold.
         recall_passed: bool = false,
     } = .{},
+
 };
 
 /// One step over the Messages the person sent, from the one the draft
@@ -490,6 +495,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         .failure => |failure| return requests.failRead(failure),
     };
     if (plan.kinds == .all) {
+        job.result.latest_ending = if (job.opening) null else job.latest_ending;
+        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session);
+        if (job.opening and job.result.latest_ending == null and page.facts.more) {
+            try latestEnding(requests, job, page.facts.end);
+        }
         job.result.work = page.facts.work;
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
@@ -543,6 +553,35 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     if (job.result.at_end) job.result.high = if (page.facts.end == 0) null else .{ .position = page.facts.end, .ordinal = std.math.maxInt(u64) };
     if (plan.kinds == .all) {
         job.result.cursor = if (plan.direction == .backward) .{ .position = page.facts.end } else page.continuation() orelse .{ .position = page.facts.end };
+    }
+}
+
+/// Forward scans can replay older provisional rows; only a newer own ending
+/// advances this fact. Child endings never grant retry authority for a parent.
+fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8) void {
+    const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
+    if (latest.*) |old| if (key.order(old.key) != .gt) return;
+    const marks = @import("marks.zig");
+    const cause: marks.Cause = switch (item.value) {
+        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending == .done) .{ .words = "Finished" } else marks.cause(ended.code.slice()),
+        .stop => |stop| if (stop.turn == null) marks.cause("cancelled") else return,
+        else => return,
+    };
+    latest.* = .{ .key = key, .cause = cause };
+}
+
+/// Opening's row page need not contain an ending. Find it with a separate,
+/// snapshot-bound cursor, never by filling/rendering historical window rows.
+fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
+    var cursor: protocol_reply.ActivityCursor = .{ .end = end, .direction = .backward, .kinds = .initMany(&.{ .turn_ended, .stop }) };
+    while (true) {
+        const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session);
+        if (job.result.latest_ending != null) return;
+        cursor = page.continuation() orelse return;
     }
 }
 
@@ -1243,8 +1282,13 @@ const FakeHost = struct {
 
     /// Runs `job` as a read against this Host; output is then in `shown`.
     fn read(self: *FakeHost, job: *Job) !void {
+        try self.readWith(job, scan);
+    }
+
+    fn readWith(self: *FakeHost, job: *Job, run_read: Task.Run) !void {
         const Read = struct {
             job: *Job,
+            run_read: Task.Run,
             fn run(action: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
                 const io = std.testing.io;
                 const inspection = try dir.createFile(io, "inspection", .{ .read = true });
@@ -1254,12 +1298,13 @@ const FakeHost = struct {
                 action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
                 var task: Task = .{ .io = io };
                 const started = std.Io.Clock.awake.now(io).nanoseconds;
-                try scan(action.job, &task);
+                try task.start(io, action.job, action.run_read);
+                try task.join();
                 host.last_read_ns = std.Io.Clock.awake.now(io).nanoseconds - started;
                 host.shown = host.output[0..try inspection.readPositionalAll(io, &host.output, 0)];
             }
         };
-        var action: Read = .{ .job = job };
+        var action: Read = .{ .job = job, .run_read = run_read };
         try self.withHost(&action);
     }
 };
@@ -1724,7 +1769,8 @@ test "session_reads long Session opening and visible fill measure their own boun
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 32), host.contents);
     try std.testing.expectEqual(@as(usize, 16), job.result.row_count);
-    try std.testing.expectEqual(@as(usize, 2), host.pages);
+    // One metadata-only ending lookup on opening, plus two visible pages.
+    try std.testing.expectEqual(@as(usize, 3), host.pages);
     std.debug.print("feed long Session: first paint {d} us / 16 content reads; fill {d} us / 16 content reads\n", .{ @divTrunc(paint_ns, 1000), @divTrunc(host.last_read_ns, 1000) });
 }
 
@@ -1785,4 +1831,57 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
             try std.testing.expectEqual(View.Collapsed{ .source = .activity, .position = position, .ordinal = 0, .row = false, .content = .{ .length = text.len, .digest = protocol.contentDigest(text) } }, target);
         }
     }
+}
+
+fn testEnding(code: []const u8, kind: protocol.TurnEnding, session: []const u8) protocol.ActivityItem.Value {
+    var ended: protocol.ActivityItem.TurnEnded = .{ .session = .{}, .turn = 1, .operation = 1, .ending = kind, .code = .{}, .content = if (kind == .done) FakeHost.content() else null };
+    ended.session.set(session) catch unreachable;
+    ended.code.set(code) catch unreachable;
+    return .{ .turn_ended = ended };
+}
+
+test "session_reads latest ending follows scan cursor, survives empty scans, ignores child endings and fills" {
+    const tail = [_]FakeHost.Tail{
+        .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+        .{ .value = testEnding("provider_http_500", .failed, "9f8e7d") },
+        .{ .value = testEnding("provider_quota", .failed, "k7m2qx") },
+        .{ .value = testEnding("completed", .done, "k7m2qx") },
+        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } } },
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1 };
+    var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u64, 1), job.result.latest_ending.?.key.position);
+    try std.testing.expectEqualStrings("ctrl+r retries", job.result.latest_ending.?.cause.key.?);
+    for ([_]u64{ 1, 2, 3, 4, 5 }) |end| {
+        job.latest_ending = job.result.latest_ending;
+        job.cursor = job.result.cursor;
+        job.opening = false;
+        job.result = .{};
+        host.end = end;
+        job.line_read = .{ .revision = 1, .end = end };
+        try host.read(&job);
+        try std.testing.expectEqual(if (end <= 2) @as(u64, 1) else end, job.result.latest_ending.?.key.position);
+        try std.testing.expectEqual(end <= 2, job.result.latest_ending.?.cause.key != null);
+        try std.testing.expect(std.mem.indexOf(u8, host.shown, "ctrl+r") == null);
+    }
+    job.latest_ending = job.result.latest_ending;
+    job.feed_page = .{ .direction = .backward, .kinds = .visible, .from = null, .started_from = null };
+    job.result = .{};
+    try host.read(&job);
+    try std.testing.expect(job.result.latest_ending == null);
+}
+
+test "session_reads opening finds own newest ending outside resident rows and across child ending pages" {
+    var tail: [40]FakeHost.Tail = undefined;
+    tail[0] = .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") };
+    for (tail[1..]) |*item| item.* = .{ .value = testEnding("completed", .done, "9f8e7d") };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len };
+    var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = tail.len } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u64, 1), job.result.latest_ending.?.key.position);
+    try std.testing.expect(job.result.latest_ending.?.cause.key != null);
+    try std.testing.expectEqual(@as(usize, 4), host.pages);
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
+    try std.testing.expectEqual(@as(usize, 0), job.result.row_count);
 }

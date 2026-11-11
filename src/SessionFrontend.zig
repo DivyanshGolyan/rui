@@ -170,6 +170,7 @@ admission: struct {
 // Live facts have their own scan cursor, independent of the resident window.
 live: struct {
     view: View.Live = .{},
+    latest_ending: ?reads.LatestEnding = null,
     work: protocol.SessionWork = .{},
     cursor: protocol_reply.ActivityCursor = .{},
     provisional: ?feed_window.Key = null,
@@ -258,6 +259,7 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
     self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     job.scan_provisional = self.live.provisional;
+    job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.statusShown();
@@ -757,6 +759,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.activity.method = self.app_caps.width;
     chrome.activity.styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
     self.app_content.tail = chrome.activity.widget();
+    self.app_content.latest_ending = self.live.latest_ending;
     chrome.status.method = self.app_caps.width;
     chrome.status.quiet = quiet;
     chrome.status.attention = attention;
@@ -2138,7 +2141,7 @@ fn feedState(self: *Self) FeedPolicy.State {
         .now_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds,
         .scan_due_ns = self.poll_at,
         .opening = self.reading.opening,
-        .need = screen.anchor.need(screen.feed.layoutEntries(screen.textLayout()), screen.height, screen.feed.edges()),
+        .need = screen.anchor.need(screen.feed.layoutEntriesWith(screen.textLayout(), self.app_content.presentation()), screen.height, screen.feed.edges()),
         .at_end = screen.feed.at_end,
         .low = screen.feed.low,
         .high = screen.feed.high,
@@ -2431,12 +2434,12 @@ fn showStaged(self: *Self) !void {
             window.at_end = result.at_end;
             window.forward_partial = false;
         }
-        self.screen.anchor.prepend(window.layoutEntries(self.screen.textLayout()), self.screen.height, window.edges());
+        self.screen.anchor.prepend(window.layoutEntriesWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.edges());
     } else {
         window.high = if (complete) result.high else if (window.count != 0) window.entries[window.count - 1].key else window.high;
         window.at_end = complete and result.at_end;
         window.forward_partial = !window.at_end;
-        self.screen.anchor.append(window.layoutEntries(self.screen.textLayout()), self.screen.height, window.edges());
+        self.screen.anchor.append(window.layoutEntriesWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.edges());
     }
     self.reading.output_started = self.reading.output_started or result.row_count != 0;
     self.dirty = true;
@@ -2450,7 +2453,7 @@ fn insertFeed(self: *Self, entry: feed_window.Entry, backward: bool) bool {
     while (true) {
         const inserted = if (backward) window.prepend(&.{entry}) else window.append(&.{entry});
         if (inserted) |_| return true else |_| {
-            const trim = self.screen.anchor.trim(window.heights(self.screen.textLayout()), self.screen.height, window.count -| 1);
+            const trim = self.screen.anchor.trim(window.heightsWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.count -| 1);
             if (trim.drop_front == 0 and trim.drop_back == 0) return false;
             window.trim(trim.drop_front, trim.drop_back);
         }
@@ -2630,6 +2633,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (result.line) |*line| self.line = line.*;
             if (result.hint) |*hint| self.hint = hint.*;
             self.live.view = result.live;
+            self.live.latest_ending = result.latest_ending;
             self.live.cursor = result.cursor;
             self.live.provisional = result.scan_provisional;
             if (read == .opening) self.reading.opening = false;
@@ -5165,4 +5169,25 @@ test "SessionFrontend feed resize inside a long answer preserves the same logica
     held.size = .{ .width = 46, .height = 30 };
     try std.testing.expect(std.mem.indexOf(u8, firstRows(try held.shown(), 1), "logical 12") != null);
     try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
+}
+
+test "SessionFrontend feed latest ending is live state, not window fill state" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.reading.phase = .activity;
+    const ending: reads.LatestEnding = .{ .key = .{ .position = 10 }, .cause = @import("marks.zig").cause("provider_http_500") };
+    const newer: reads.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("provider_quota") };
+    for ([_]feed_reads.Read{ .opening, .scan, .fill_above, .fill_below }) |read| {
+        self.live.latest_ending = ending;
+        self.reading.feed_read = read;
+        self.job.result = .{ .latest_ending = newer };
+        try self.applyReader(.{ .cancelled = .{ .phase = .activity, .rendering = false } });
+        try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+        try self.applyReader(.complete);
+        try std.testing.expectEqualDeep(if (read == .opening or read == .scan) newer else ending, self.live.latest_ending.?);
+        // The next reader freezes the live scan fact even with no resident rows.
+        const job = self.freeze(.activity);
+        try std.testing.expectEqualDeep(self.live.latest_ending, job.latest_ending);
+    }
 }

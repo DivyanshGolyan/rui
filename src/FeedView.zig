@@ -15,6 +15,8 @@ const Self = @This();
 window: *Window,
 anchor: *Feed,
 tail: ?vxfw.Widget = null,
+latest_ending: ?resident.LatestEnding = null,
+retry_actionable: bool = false,
 style: vaxis.Style = .{},
 colours: viewport.Colours = .{},
 method: vaxis.gwidth.Method = .unicode,
@@ -58,16 +60,20 @@ pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw, .eventHandler = event };
 }
 
+pub fn presentation(self: *const Self) resident.Presentation {
+    return .{ .latest_ending = self.latest_ending, .retry_actionable = self.retry_actionable };
+}
+
 fn layout(self: *const Self) viewport.Layout {
     return .{ .width = @max(1, self.size.width), .method = self.method };
 }
 
 pub fn need(self: *Self) Feed.Need {
-    return self.anchor.need(self.window.layoutEntries(self.layout()), self.size.height, self.window.edges());
+    return self.anchor.need(self.window.layoutEntriesWith(self.layout(), self.presentation()), self.size.height, self.window.edges());
 }
 
 pub fn scroll(self: *Self, rows: i32) void {
-    self.anchor.scroll(self.window.layoutEntries(self.layout()), self.size.height, rows, self.window.edges());
+    self.anchor.scroll(self.window.layoutEntriesWith(self.layout(), self.presentation()), self.size.height, rows, self.window.edges());
 }
 
 pub fn dragging(self: *const Self) bool {
@@ -128,11 +134,11 @@ fn laidVisible(self: *const Self) Feed.Visible {
         line += 1;
     }
     const gap = if (self.window.document.lineEnd(offset) + 1 == entry.offset + entry.length) self.window.gapAfter(index) else 0;
-    return .{ .first = index, .line = line, .row = @min(self.drawn.row, self.window.document.lineRows(self.layout(), offset) + gap -| 1), .pad = self.drawn.pad };
+    return .{ .first = index, .line = line, .row = @min(self.drawn.row, self.window.lineRows(entry, self.layout(), offset, self.presentation()) + gap -| 1), .pad = self.drawn.pad };
 }
 
 fn rowPosition(self: *const Self, row: u16) ?viewport.Position {
-    return self.window.positionAt(self.laidVisible(), row, self.layout());
+    return self.window.positionAtWith(self.laidVisible(), row, self.layout(), self.presentation());
 }
 
 fn paintRow(self: *const Self, cells: []vaxis.Cell, position: viewport.Position) void {
@@ -251,11 +257,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // frame must not remove the tail and change its own scroll geometry.
     const tail = if (self.tail) |child| try child.draw(ctx.withConstraints(.{}, ctx.max)) else null;
     self.window.tail_rows = if (tail) |child| child.size.height else 0;
-    const entries = self.window.layoutEntries(self.layout());
+    const entries = self.window.layoutEntriesWith(self.layout(), self.presentation());
     const visible = self.anchor.visible(entries, self.size.height);
     var screen: vaxis.Screen = .{ .width = self.size.width, .height = self.size.height, .width_method = self.method, .buf = surface.buffer };
     const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = screen.height, .screen = &screen };
-    self.window.draw(visible, win, self.colour, self.style, self.colours);
+    try self.window.drawWith(visible, win, self.colour, self.style, self.colours, self.presentation(), ctx.arena);
     var first: ?resident.Point = null;
     if (visible.first < self.window.count) {
         const entry = self.window.entries[visible.first];
@@ -429,4 +435,62 @@ test "FeedView multiple collapsed targets and lowest visible peer use keyed byte
     try window.append(&.{.{ .key = .{ .position = 30 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = first, .target = a }} }});
     _ = try testFrame(&view, arena.allocator(), 30, 4);
     try std.testing.expectEqualStrings("k7m2qx", &(try view.openable(arena.allocator())).?.session);
+}
+
+test "FeedView retry tail is frame-local, latest-key-only and gated by cause and actionability at every width" {
+    const window = try testWindow();
+    defer std.testing.allocator.destroy(window);
+    const words = "× Provider unreachable\n";
+    try window.append(&.{
+        .{ .key = .{ .position = 10 }, .text = .{ .bytes = words } },
+        .{ .key = .{ .position = 20 }, .text = .{ .bytes = words } },
+        .{ .key = .{ .position = 20, .ordinal = 1 }, .text = .{ .bytes = words } },
+    });
+    var anchor: Feed = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const original = try std.testing.allocator.dupe(u8, window.document.text());
+    defer std.testing.allocator.free(original);
+    const marks = @import("marks.zig");
+    // All cause policies are covered by marks' independent exhaustive domain;
+    // cross keyed/unkeyed, every entry identity (including ordinal) and bool.
+    for ([_]?resident.LatestEnding{
+        null,
+        .{ .key = .{ .position = 10 }, .cause = marks.cause("provider_http_500") },
+        .{ .key = .{ .position = 20 }, .cause = marks.cause("provider_http_500") },
+        .{ .key = .{ .position = 20, .ordinal = 1 }, .cause = marks.cause("provider_http_500") },
+        .{ .key = .{ .position = 30 }, .cause = marks.cause("provider_http_500") },
+        .{ .key = .{ .position = 20 }, .cause = marks.cause("provider_quota") },
+    }) |latest| for ([_]bool{ false, true }) |actionable| {
+        view.latest_ending = latest;
+        view.retry_actionable = actionable;
+        for (1..141) |width| {
+            const surface = try testFrame(&view, arena.allocator(), @intCast(width), 180);
+            // Compare each stored entry against an independently prepared line.
+            // The explicit expectation doesn't call the production decorator.
+            for (window.entries[0..window.count], 0..) |entry, index| {
+                const expected_hint = actionable and latest != null and latest.?.cause.key != null and std.meta.eql(entry.key, latest.?.key);
+                var expected: viewport.Sized(128, true) = .{};
+                try expected.append(if (expected_hint) "× Provider unreachable · ctrl+r retries\n" else words);
+                try expected.prepare();
+                const rows = expected.lineRows(.{ .width = @intCast(width), .method = .unicode }, 0);
+                try std.testing.expectEqual(@as(u32, rows) + window.gapAfter(index), window.dimensions[index].lines[0]);
+                var top: u32 = anchor.visible(window.dimensions[0..window.count], 180).pad;
+                for (window.dimensions[0..index]) |before| for (before.lines) |height| {
+                    top += height;
+                };
+                const cells = try arena.allocator().alloc(vaxis.Cell, rows * width);
+                @memset(cells, .{});
+                var screen: vaxis.Screen = .{ .width = @intCast(width), .height = rows, .width_method = .unicode, .buf = cells };
+                const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = rows, .screen = &screen };
+                _ = expected.printLine(win, 0, 0, true, false, .{}, .{});
+                const drawn = surface.buffer[top * width ..][0 .. rows * width];
+                for (cells, drawn) |want, got| try std.testing.expectEqualStrings(want.char.grapheme, got.char.grapheme);
+            }
+            try std.testing.expectEqualStrings(original, window.document.text());
+            // Bound test scratch independently of the exhaustive width domain.
+            _ = arena.reset(.retain_capacity);
+        }
+    };
 }

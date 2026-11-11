@@ -13,6 +13,19 @@ const feed = @import("widgets/Feed.zig");
 pub const scanDue = reading.scanDue;
 pub const scan_interval_ns = reading.scan_interval_ns;
 
+/// A scan-owned live fact, independent of resident rows. Cause strings borrow
+/// the shared marks table (never a page or renderer buffer).
+pub fn Ending(comptime Key: type) type {
+    return struct {
+        key: Key,
+        cause: @import("marks.zig").Cause,
+
+        pub fn matches(self: @This(), key: Key) bool {
+            return std.meta.eql(self.key, key);
+        }
+    };
+}
+
 pub const Read = enum {
     opening,
     scan,
@@ -365,4 +378,13 @@ test "feed_reads continues a paginated provisional replay without restarting or 
         try std.testing.expect(next.continuing);
         try std.testing.expect(P.forwardAttaches(next.started_from, next.replace_from, state.high, state.window_provisional));
     }
+}
+
+test "feed_reads ending identity includes position and ordinal" {
+    const Key = struct { position: u64, ordinal: u64 = 0 };
+    const E = Ending(Key);
+    const ending: E = .{ .key = .{ .position = 9, .ordinal = 2 }, .cause = @import("marks.zig").cause("provider_http_500") };
+    for ([_]u64{ 8, 9, 10 }) |position| for ([_]u64{ 1, 2, 3 }) |ordinal| {
+        try std.testing.expectEqual(position == 9 and ordinal == 2, ending.matches(.{ .position = position, .ordinal = ordinal }));
+    };
 }
