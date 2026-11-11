@@ -124,6 +124,7 @@ pub const Code = enum {
     reply_unconfirmed,
     wait_timed_out,
     request_absent,
+    request_wire_incompatible,
 };
 
 /// Transitional inventory. An entry is an unclassified internal failure,
@@ -239,6 +240,7 @@ pub const pending = .{
 fn mapped(err: anyerror) ?Code {
     return switch (err) {
         error.OutOfMemory => .memory_exhausted,
+        error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
         error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -281,6 +283,7 @@ fn mapped(err: anyerror) ?Code {
         error.InvalidHome => .home_unavailable,
         error.InvalidSession => .invalid_session_reference,
         error.InvalidModel => .model_id_malformed,
+        error.InvalidOutputSchema => .invalid_output_schema,
         error.InteractiveTerminalRequired => .terminal_required,
         error.EmptyMessageInput => .message_empty,
         error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
@@ -507,6 +510,7 @@ pub fn facts(code: Code) Facts {
         .store_identity_mismatch => .{ .act = .operate, .input = null, .accepted = .none, .says = "This SQLite Store belongs to a different canonical folder.", .next = "Stop Hosts and preserve the complete Store; restore its saved original canonical folder, or back up this Store and choose a fresh --store." },
         .store_locked => .{ .act = .operate, .input = null, .accepted = .none, .says = "Another Host owns this Store.", .next = "Use that Host, or pause it with rui host pause before starting again." },
         .wait_timed_out => .{ .act = .wait, .input = null, .accepted = .none, .says = "The wait ended while the request was still pending.", .next = "Run rui request wait with the same HANDLE again; never resubmit with a new key." },
+        .request_wire_incompatible => .{ .act = .recover, .input = .identity, .accepted = .none, .says = "The saved request uses a different Rui wire version; it was not sent.", .next = "Keep the original record and key. Recover it with the compatible Rui build; do not resubmit it with a new key." },
         .request_absent => .{ .act = .recover, .input = null, .accepted = .none, .says = "The Store has no such request; admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
         .reply_unconfirmed => .{ .act = .recover, .input = null, .accepted = .none, .says = "Admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
         .memory_exhausted => .{ .act = .operate, .input = null, .accepted = .none, .says = "Memory was exhausted while reading the arguments.", .next = "Free memory and try the same invocation again." },
@@ -803,4 +807,13 @@ test "Session settings caller spellings retain every existing diagnostic" {
         .{ Input.label, "--label" },
     }) |case| try std.testing.expectEqualStrings(case[1], case[0].spelling().?);
     try std.testing.expect(Input.instructions.spelling() == null);
+}
+
+test "saved request wire mismatch has an explicit recovery diagnostic" {
+    try std.testing.expectEqual(Code.request_wire_incompatible, of(error.SavedRequestWireVersionMismatch));
+    var buffer: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try writeLine(&out, .request_wire_incompatible, .{ .resource = "request", .operation = "recover" });
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "different Rui wire version; it was not sent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "do not resubmit it with a new key") != null);
 }

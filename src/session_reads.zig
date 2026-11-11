@@ -220,6 +220,7 @@ pub const Job = struct {
     session: []const u8 = "",
     files: Files = undefined,
     colour: bool = false,
+    width_method: Viewport.Method = .wcwidth,
     command: Command = undefined,
     requests: Requests = undefined,
     status: Status = undefined,
@@ -523,7 +524,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     // A stop searches only from the oldest Message that waited at the last
     // read: queued input joins the work at its next input boundary, so that
     // is at most one model step back, never the history.
-    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home);
+    job.drawn = try View.render(requests, job.store, job.session, &page, if (job.result.line) |line| line.provider else job.provider, &output, job.colour, &job.result.compact_tools, .{ .drawn = job.drawn, .from = searchFrom(job.queued) }, job.home, .{ .viewport = job.width_method });
     job.result.output_length = output.offset;
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
@@ -569,7 +570,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home);
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home, .{ .viewport = job.width_method });
     if (!latest) job.result.history_cursor = prepared.page.continuation();
 }
 
@@ -1524,11 +1525,11 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                 page.* = .{ .facts = .{ .end = 2, .count = if (split) 1 else 2, .direction = if (historical) .backward else .forward } };
                 page.facts.items[0] = if (historical and !split) ended else stop;
                 if (!split) page.facts.items[1] = if (historical) stop else ended;
-                _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, colour, &compact, .{ .drawn = .{}, .from = null }, "");
+                _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, colour, &compact, .{ .drawn = .{}, .from = null }, "", .{ .viewport = .wcwidth });
                 if (split) {
                     try std.testing.expectEqualStrings("", out.buffered());
                     page.facts.items[0] = ended;
-                    _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, colour, &compact, .{ .drawn = .{}, .from = null }, "");
+                    _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, colour, &compact, .{ .drawn = .{}, .from = null }, "", .{ .viewport = .wcwidth });
                 }
                 try std.testing.expectEqualStrings(if (colour) "\n\x1b[39m■\x1b[39m Stopped\n" else "\n■ Stopped\n", out.buffered());
                 try std.testing.expect(!compact);
@@ -1543,6 +1544,6 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
     var compact = false;
-    _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, true, &compact, .{ .drawn = .{}, .from = null }, "");
+    _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, true, &compact, .{ .drawn = .{}, .from = null }, "", .{ .viewport = .wcwidth });
     try std.testing.expectEqualStrings("\n\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }

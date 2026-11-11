@@ -264,6 +264,22 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_facts_domain.save(&access, entries, etag)));
     }
 
+    /// The selected generation for one operation. Saved entries/IDs belong to
+    /// the caller's arena; without a source this borrows the shipped snapshot.
+    /// Store failures propagate through the normal read/fencing boundary.
+    pub fn readModelCatalog(self: *Store, arena: std.mem.Allocator) ![]const model_catalog.Entry {
+        return self.queue().run(readModelCatalogHeld, .{ self, arena });
+    }
+
+    fn readModelCatalogHeld(self: *Store, arena: std.mem.Allocator) ![]const model_catalog.Entry {
+        const entry = try enter(self, .none);
+        defer entry.release();
+        var access: Access(.read, error{OutOfMemory}) = .open(&entry);
+        defer access.deinit();
+        const facts = model_facts_domain.readSelected(&access, arena);
+        return entry.finish(error{OutOfMemory}, facts);
+    }
+
     pub fn readModelCatalogSource(self: *Store) !?model_facts_domain.Source {
         return self.queue().run(readModelCatalogSourceHeld, .{self});
     }

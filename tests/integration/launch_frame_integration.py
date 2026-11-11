@@ -215,7 +215,7 @@ def main(network, ci):
     host = launch(frame(dict(good, presets={"review": preset})))
     wait_for_host(sock, store, host)
     create = {"version": WIRE, "kind": "configure", "store": str(store), "key": "preset:create",
-              "session": "", "preset": "review", "configuration": {"label": {"state": "null"}}}
+              "session": "", "preset": "review", "configuration": {"label": None}}
     created = post(sock, "configure", create)
     assert created["answer"]["status"] == "accepted", created
     session = created["answer"]["session"]
@@ -235,7 +235,7 @@ def main(network, ci):
     for presets, field in [
         ({"Bad": preset}, "name"),
         ({"a" * 64: dict(preset, **{"\x01" * 64: None})}, "\x01"),
-        ({"review": {"model": "m"}}, "effort"),
+        ({"review": {name: value for name, value in preset.items() if name != "effort"}}, "effort"),
         ({"review": dict(preset, tools=["bash"])}, "workspace"),
     ]:
         refused = refusal(launch(frame(dict(good, presets=presets))))

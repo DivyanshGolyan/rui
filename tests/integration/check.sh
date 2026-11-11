@@ -24,7 +24,8 @@ if [ "${3:-}" = parallel ]; then
     activity_client=$7
     preference_policy_actor=$8
     terminal_notice=$9
-    shift 9 # Remaining arguments are additional native unit roots, in run order.
+    mysql_launch_admin=${10}
+    shift 10 # Remaining arguments are additional native unit roots, in run order.
 else
     host_status_actor=$3
     session_list_client=$4
@@ -32,6 +33,7 @@ else
     preference_policy_actor=$6
     part=${7:-all}
     terminal_notice=${8}
+    mysql_launch_admin=${9}
     case "$part" in
         all|execution|callers) ;;
         *) printf 'Unknown full-check part: %s\n' "$part" >&2; exit 2 ;;
@@ -69,7 +71,7 @@ cases() {
     run_case callers conversation-page python3 "$directory/conversation_page_integration.py" "$release_safe"
     run_case callers activity python3 "$directory/activity_integration.py" "$release_safe" "$activity_client"
     run_case execution descriptor-capacity python3 "$directory/descriptor_capacity_integration.py" "$release_safe"
-    run_case callers host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor"
+    run_case callers host-status python3 "$directory/host_status_integration.py" "$release_safe" "$host_status_actor" "$mysql_launch_admin"
     run_case isolated host-launch python3 "$directory/host_launch_integration.py" "$release_safe"
     run_case callers host-stop python3 "$directory/host_stop_integration.py" "$release_safe" "$host_status_actor"
     run_case callers launch-frame python3 "$directory/launch_frame_integration.py" "$release_safe" --require-mcp-sdk

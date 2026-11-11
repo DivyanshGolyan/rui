@@ -44,6 +44,8 @@ class Endpoint(socketserver.ThreadingTCPServer):
         self.models = None
         self.catalog = None
         self.catalog_etag = '"catalog-v1"'
+        self.catalog_release = None
+        self.catalog_responses = []
         # Set: a model list GET waits unanswered until the event is set.
         self.models_release = None
         # Set: each connection allows this many concurrent streams.
@@ -152,11 +154,17 @@ class StreamHandler(socketserver.BaseRequestHandler):
         def answer_models(stream_id):
             headers = get_headers.pop(stream_id)
             is_catalog = headers[b":path"] == b"/api.json"
-            models = self.server.catalog if is_catalog else self.server.models
-            etag = self.server.catalog_etag if is_catalog else None
+            with self.server.lock:
+                models = self.server.catalog if is_catalog else self.server.models
+                etag = self.server.catalog_etag if is_catalog else None
             unchanged = etag is not None and headers.get(b"if-none-match") == etag.encode()
             payload = b"" if unchanged else models if models is not None else b"{}"
             status = "304" if unchanged else "200" if models is not None else "404"
+            if is_catalog:
+                # Record the selected reply before sending it, independently
+                # of teardown or the Host consuming the body.
+                with self.server.lock:
+                    self.server.catalog_responses.append({"headers": headers, "status": status, "etag": etag})
             fields = [(":status", status), ("content-type", "application/json")]
             if etag is not None:
                 fields.append(("etag", etag))
@@ -165,6 +173,11 @@ class StreamHandler(socketserver.BaseRequestHandler):
             conn.send_headers(stream_id, fields, end_stream=not payload)
             if payload:
                 outgoing_bodies[stream_id] = payload
+        def listing_release(stream_id):
+            if get_headers[stream_id][b":path"] == b"/api.json" and self.server.catalog_release is not None:
+                return self.server.catalog_release
+            return self.server.models_release
+
         with self.server.lock:
             self.server.connections.append(self.client_address)
         while True:
@@ -178,10 +191,12 @@ class StreamHandler(socketserver.BaseRequestHandler):
                 return
             if data == b"":
                 return
-            if held_models and self.server.models_release.is_set():
-                for stream_id in held_models:
+            for stream_id in held_models[:]:
+                release = listing_release(stream_id)
+                if release is None or release.is_set():
+                    held_models.remove(stream_id)
                     answer_models(stream_id)
-                held_models.clear()
+            if not held_models and not held_bodies and not isolation_bodies and not flow_bodies:
                 sock.settimeout(45)
             if held_bodies and self.server.release.is_set():
                 outgoing_bodies.update(held_bodies)
@@ -214,7 +229,7 @@ class StreamHandler(socketserver.BaseRequestHandler):
                     if dict(event.headers)[b":method"] == b"GET":
                         # A listing: it has no body and is not a model request.
                         get_headers[event.stream_id] = dict(event.headers)
-                        release = self.server.models_release
+                        release = listing_release(event.stream_id)
                         if release is not None and not release.is_set():
                             held_models.append(event.stream_id)
                             sock.settimeout(0.05)  # Poll for release.

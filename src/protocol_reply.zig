@@ -2,6 +2,7 @@
 //! decoders that accept or reject its bytes. Requests are in protocol.zig;
 //! client.zig owns transport and request capture.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const protocol = @import("protocol.zig");
 const session_list = @import("session_list.zig");
 const activity_reply = @import("activity_reply.zig");
@@ -389,7 +390,7 @@ pub fn validHostUnavailable(body: []const u8) bool {
 /// reads. The Host writes the reply's head and tail as they are.
 pub fn modelListProviders(body: []const u8) error{InvalidModelList}![]const u8 {
     const reply = protocol.model_list_reply;
-    if (body.len > reply.max_bytes or !std.mem.startsWith(u8, body, reply.head) or !std.mem.endsWith(u8, body, reply.tail) or body.len < reply.head.len + reply.tail.len)
+    if (!std.mem.startsWith(u8, body, reply.head) or !std.mem.endsWith(u8, body, reply.tail) or body.len < reply.head.len + reply.tail.len)
         return error.InvalidModelList;
     return body[reply.head.len .. body.len - reply.tail.len];
 }
@@ -398,7 +399,7 @@ test "a model list reply reads as what the Host writes" {
     var bytes: [protocol.model_list_reply.max_bytes]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     try out.writeAll(protocol.model_list_reply.head);
-    try model_list.writeProviders(&out, &.{
+    try model_list.writeProviders(&out, model_catalog.shipped, &.{
         .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-luna\nunlisted-model\n" } } },
     });
