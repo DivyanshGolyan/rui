@@ -2939,16 +2939,9 @@ fn settleReader(self: *Self) !void {
         pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
     else
         false;
-    const lost = fenced or (end == .failed and self.reader.result.failure_origin == .host_transport);
-    if (lost and self.hostFailure()) {
-        // A joined failed read has published no staged output. Keep its
-        // cursor, opening state, documents, draft and scroll for the next scan.
-        self.reading.pending_diagnostic = null;
-        if (self.reading.phase == .recall) self.input.abandonStep();
-        self.inspection.command_running = false;
-        self.poll_at = 0;
-        return;
-    }
+    const lost = (fenced or (end == .failed and self.reader.result.failure_origin == .host_transport)) and self.hostFailure();
+    // Each phase settles the request it owns first, whatever the read's end:
+    // a request left outstanding would refuse every later one.
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
     if (phase == .tool) {
@@ -2958,10 +2951,18 @@ fn settleReader(self: *Self) !void {
                     try self.finishTool(request, .failed);
                     return err;
                 }) .shown else .failed
-            else if (end == .failed) .failed else .cancelled;
+            else if (end == .failed and !lost) .failed else .cancelled;
             try self.finishTool(request, outcome);
         }
     } else if (end != .complete and phase == .message) self.expansion.reading = null;
+    if (lost) {
+        // A joined failed read has published no staged output. Keep its
+        // cursor, opening state, documents, draft and scroll for the next scan.
+        self.reading.pending_diagnostic = null;
+        self.inspection.command_running = false;
+        self.poll_at = 0;
+        return;
+    }
     // A fatal failure leaves command output for exit to print.
     if (end.failure(reader_policy.settleMode(self.upgradePhase() == .quiescing, self.input.queuedCommand() != null))) |err| return err;
     const inspection = self.readInspection();
@@ -5765,6 +5766,41 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
             try std.testing.expect(self.reading.pending_diagnostic == null);
             try std.testing.expect(self.leaving == null);
             try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        }
+    }
+    {
+        // A tool output read in flight when the Host goes settles its
+        // request: the same row opens again once the Host is back.
+        const Sink = struct {
+            document: *viewport.Document,
+            pub fn feed(sink: *@This(), bytes: []const u8) !void {
+                try sink.document.append(bytes);
+            }
+            pub fn tool(sink: *@This(), reference: tool_fold.Reference) !void {
+                try tool_fold.marker(reference, sink);
+            }
+        };
+        const reference: tool_fold.Reference = .{ .position = 41, .ordinal = 1, .content = .{ .length = 4, .digest = protocol.contentDigest("src\n") } };
+        var sink: Sink = .{ .document = &fixture.screen.live };
+        var compact = true;
+        var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+        try description.set("List project files");
+        try View.toolResultRow(.{ .description = description, .code = .succeeded, .publication_position = null }, .{ .exit = null }, reference, &sink, self.colour, &compact);
+        var fault: Fault = .{ .failure = error.ConnectionRefused, .origin = .host_transport };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.reading.opening = false;
+        for (0..2) |round| {
+            _ = try fixture.draw();
+            const handler = self.app_content.handler.?;
+            try handler.on_click.?(handler.userdata, &fixture.ctx, .{ .offset = fixture.screen.live.findTool(reference).? });
+            try std.testing.expectEqual(ToolFolds.State.requested, self.tools.state(reference));
+            try std.testing.expect(self.tools.start(self.pageAsked()) != null);
+            self.reading.phase = .tool;
+            try self.reader.start(std.testing.io, &fault, Fault.run);
+            try self.settleReader();
+            try std.testing.expectEqual(round + 1, fault.lost);
+            try std.testing.expect(self.tools.in_flight == null);
+            try std.testing.expect(!fixture.screen.live.toolIsOpen(fixture.screen.live.findTool(reference).?));
         }
     }
     var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
