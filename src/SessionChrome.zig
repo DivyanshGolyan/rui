@@ -16,6 +16,7 @@ const FactsRow = @import("FactsRow.zig");
 const Shortcuts = @import("Shortcuts.zig");
 const Chip = @import("Chip.zig");
 const Self = @This();
+const empty_marker: vxfw.Text = .{ .text = "" };
 
 /// The screen's actions a click runs.
 pub const Actions = struct {
@@ -34,7 +35,7 @@ pub const Actions = struct {
 
 /// What the screen read for this frame.
 pub const View = struct {
-    /// Scrolled back from the latest: no activity tail, the marker shows.
+    /// Anchor held away from the end: the reserved marker row shows its chip.
     browsing: bool = false,
     /// Transcript entries that arrived below while browsing.
     new_entries: u64 = 0,
@@ -96,9 +97,10 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     self.facts.text = view.facts;
     screen.input.facts = self.facts.widget();
     screen.input.status = self.status.widget();
-    screen.tail = if (view.browsing) null else self.activity.widget();
+    // The activity block is the Feed's unkeyed last entry, never a shell row.
+    screen.tail = null;
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
-    screen.marker = if (view.browsing) self.marker.widget() else null;
+    screen.marker = if (view.browsing) self.marker.widget() else empty_marker.widget();
     screen.overlay = if (view.shortcuts) self.shortcuts.widget() else view.overlay;
 }
 
@@ -139,7 +141,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     defer std.testing.allocator.destroy(document);
     document.* = .{};
     try document.append("› Port the overview\nI'll start.\n");
-    var transcript: @import("Transcript.zig") = .{ .document = document };
+    var transcript: @import("DocumentView.zig") = .{ .document = document };
     var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     self.activity.work = .{ .mark = "⠹", .tone = .normal, .words = "Waiting", .clock = .{ .elapsed = 12 } };
     self.activity.live.count = 0;
@@ -151,15 +153,12 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     const view: View = .{ .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries", .stoppable = true, .facts = "Fix flaky store test · gpt-6.1-sol · high · 62% left", .width = 80 };
 
     self.place(&screen, view);
-    try std.testing.expect(screen.tail != null and screen.marker == null);
+    try std.testing.expect(screen.tail == null and screen.marker != null);
     const live = try screen.widget().draw(draw);
-    // Tail: `+5 more running · /status` then the work line, right above the input at 19.
-    try std.testing.expectEqual(@as(i17, 17), live.children[0].surface.children[0].surface.children[0].surface.children[1].origin.row);
-    try clickAt(live, arena.allocator(), &ctx, 17, 4);
     try clickAt(live, arena.allocator(), &ctx, 22, 1);
     try clickAt(live, arena.allocator(), &ctx, 23, 20);
     try clickAt(live, arena.allocator(), &ctx, 23, 70);
-    try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.status_page));
+    try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.status_page));
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.back));
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.key));
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.stop));
@@ -184,7 +183,7 @@ test "the status row shows the notice under what needs the person, and the ? sho
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    var transcript: @import("Transcript.zig") = .{ .document = document };
+    var transcript: @import("DocumentView.zig") = .{ .document = document };
     var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     const palette: vxfw.Text = .{ .text = "/model" };
 

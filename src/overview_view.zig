@@ -2142,7 +2142,7 @@ fn counts(state: *const State) Counts {
         .active => result.working += 1,
         .queued => result.queued += 1,
         .failed => result.failed += 1,
-        .waiting, .finished, .stopped => {},
+        .waiting, .finished, .stopped, .newer => {},
     };
     return result;
 }

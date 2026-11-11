@@ -6,32 +6,21 @@ const Viewport = @import("ConversationViewport.zig");
 const Document = Viewport.Document;
 const Position = Viewport.Position;
 const slash_commands = @import("slash_commands.zig");
-const View = @import("session_view.zig");
 const ConsentPolicy = @import("session_consent.zig");
-const session_id = @import("session_id.zig");
+const feed_window = @import("feed_window.zig");
 const Self = @This();
 
-/// What the conversation area shows. The transcript is a frozen copy of live
-/// text that can grow older canonical pages at its top; inspection, Action and
-/// Message documents come from files. Only an Action view can collect consent
-/// reads.
-pub const ViewKind = enum { live, transcript, inspection, action, message };
+/// The feed and three independent file-backed panel views.
+pub const ViewKind = enum { feed, inspection, action, message };
 
 vx: vaxis.Vaxis = undefined,
 memory: Memory = .{},
-// Live text and its transcript copy keep a right margin for user Messages'
-// times; pages loaded from files use the full width.
-live: Document = .{ .sidenotes = true },
+feed: feed_window.Window = .{},
+anchor: feed_window.Feed = .{},
+// File-backed panels never borrow the feed's text or anchor.
 browsing: Document = .{},
 staging: Document = .{},
-view: ViewKind = .live,
-// Newer transcript rows left the copy so older pages fit; returning to them
-// means returning to live.
-newer_trimmed: bool = false,
-// Rows asked for above the transcript's top while an older page loads; the
-// page applies them, so holding PgUp or the wheel keeps moving.
-overscroll: usize = 0,
-browsing_height: u16 = 0,
+view: ViewKind = .feed,
 preview_complete: bool = true,
 // The first Action row no delivered frame has shown in this layout.
 action_seen: Position = .{},
@@ -41,19 +30,14 @@ action_view: ?struct { io: std.Io, file: std.Io.File } = null,
 // The exact adopted Action awaiting its decision, with its highlighted option
 // and input row. Only this owner changes it.
 consent: ?ConsentPolicy.Pending = null,
-// The view a Message page returns to. A transcript keeps its rows and
-// position in `browsing` meanwhile: the page is shown from `staging`.
-message_return: ViewKind = .live,
+// A Message panel leaves the feed window and anchor untouched.
+message_return: ViewKind = .feed,
 // The rows of the shown document the latest frame drew.
 drawn: struct { first: Position = .{}, rows: u16 = 0 } = .{},
 // The command list the latest frame built for the draft: the one value the
 // list's keys act on (`slash_commands.Shown`).
 commands: ?slash_commands.Shown = null,
 height: u16 = 1,
-// Rows a scrolled-back view gives up below the transcript, where the `↓`
-// marker sits; the latest view shows text there. Scrolling down returns to
-// the latest once the view reaches where the latest one starts.
-marker_rows: u16 = 0,
 colour: bool,
 
 pub fn init(self: *Self, io: std.Io, environ: *std.process.Environ.Map, colour: bool) !void {
@@ -69,28 +53,7 @@ pub fn deinit(self: *Self) void {
     std.debug.assert(self.memory.used == 0);
 }
 
-pub fn append(self: *Self, bytes: []const u8) !void {
-    try self.live.append(bytes);
-}
-
-/// Absolute live offsets: bytes before `origin` left the retained view.
-/// Preparing escapes oversized and invisible clusters, which changes the
-/// length of text not yet prepared, so the end is taken after preparing.
-/// Escaped text never changes again, and the next item begins a new
-/// cluster, so the offset names the same text until it leaves the view.
-/// Both ends are taken after preparing: escaping can also grow text and
-/// move the origin past offsets recorded earlier.
-pub fn liveEnd(self: *Self) !u64 {
-    try self.live.prepare();
-    return self.live.origin + self.live.length;
-}
-
-pub fn liveStart(self: *Self) !u64 {
-    try self.live.prepare();
-    return self.live.origin;
-}
-
-fn textLayout(self: *const Self) Viewport.Layout {
+pub fn textLayout(self: *const Self) Viewport.Layout {
     return .{ .width = @max(1, self.vx.screen.width), .method = self.vx.caps.unicode };
 }
 
@@ -99,7 +62,7 @@ pub fn setWidth(self: *Self, method: vaxis.gwidth.Method) void {
     self.invalidateLayout();
     self.vx.caps.unicode = method;
     self.vx.screen.width_method = method;
-    inline for (.{ &self.live, &self.browsing, &self.staging }) |document| {
+    inline for (.{ &self.browsing, &self.staging }) |document| {
         document.width_method = method;
         document.dirty = true;
     }
@@ -149,43 +112,19 @@ pub fn liveApproval(self: *const Self, command_blocked: bool) ConsentPolicy.Appr
     return ConsentPolicy.project(self.consent, self.shownAction(), command_blocked).approval;
 }
 
-/// Starts browsing a copy of live text from absolute offset `front`, a
-/// position from which older canonical pages continue without a gap.
-pub fn beginTranscript(self: *Self, front: u64) !void {
-    std.debug.assert(self.view == .live);
-    self.browsing = self.live;
-    self.browsing.discardFront(front);
-    try self.browsing.prepare();
-    // Moves apply to the transcript's own height, which its heading and the
-    // absent calls make differ from the live view's: start at its end so the
-    // same rows down as up return to live output.
-    self.height = self.browsing_height;
-    self.browsing.top = null;
-    self.newer_trimmed = false;
-    self.overscroll = 0;
-    self.view = .transcript;
-}
-
-/// Pages or lines through the shown document. Returns true when a downward
-/// move passed the transcript's end: the caller returns to the latest view,
-/// which is the pending Action if there is one.
+/// Panels scroll their document; the feed always scrolls its keyed anchor.
 pub fn browse(self: *Self, down: bool, page: bool) bool {
-    std.debug.assert(self.view != .live);
-    const document = self.viewed();
-    const latest_rows = self.height + self.marker_rows;
-    const end = document.atBottom(self.textLayout(), latest_rows);
-    const moves: usize = if (page) self.height else 1;
-    if (self.view == .transcript) self.overscroll = if (down) 0 else if (document.atTop(self.textLayout(), self.height)) @min(self.overscroll + moves, 4 * @as(usize, self.height)) else 0;
-    document.browse(self.textLayout(), down, moves, self.height, null);
-    if (self.view != .transcript or !down) return false;
-    // Untrimmed transcript ends where live output continues.
-    return (end and self.newer_trimmed) or (!self.newer_trimmed and document.atBottom(self.textLayout(), latest_rows));
+    std.debug.assert(self.view != .feed);
+    self.viewed().browse(self.textLayout(), down, if (page) self.height else 1, self.height, null);
+    return false;
 }
 
-/// A drag held at the top or bottom row moves the view one row through
-/// the text it already holds: it never reads older pages or changes view.
+pub fn scrollFeed(self: *Self, rows: i32) void {
+    self.anchor.scroll(self.feed.layoutEntries(self.textLayout()), self.height, rows, self.feed.edges());
+}
+
 pub fn dragScroll(self: *Self, up: bool) void {
-    self.viewed().browse(self.textLayout(), !up, 1, self.height, null);
+    if (self.view == .feed) self.scrollFeed(if (up) -1 else 1) else _ = self.browse(!up, false);
 }
 
 /// Scrolls the inspection page so line `line` begins in view, as little as
@@ -209,96 +148,9 @@ fn lineStart(document: *const Document, line: usize) ?usize {
     return offset;
 }
 
-/// The transcript shows its first retained row, so older text is wanted.
-pub fn transcriptAtTop(self: *const Self) bool {
-    return self.view == .transcript and self.browsing.atTop(self.textLayout(), self.height);
-}
-
-/// Prepends one older canonical page, rendered to `file`, above the
-/// transcript without moving the rows in view.
-pub fn prependFile(self: *Self, io: std.Io, file: std.Io.File) !Prepended {
-    std.debug.assert(self.view == .transcript);
-    try self.load(&self.staging, io, file, false);
-    if (self.staging.origin != 0) {
-        // A page larger than the view cannot join its older neighbour without
-        // a gap. Keep its newest whole lines and say so at the gap.
-        const text = "Rui: Earlier rows of this saved page exceed the view.\n";
-        const retained = self.staging.bytes[0..self.staging.length];
-        const cut = std.mem.indexOfScalarPos(u8, retained, text.len, '\n') orelse retained.len - 1;
-        self.staging.discardFront(self.staging.origin + cut + 1);
-        var marker: Viewport.Sized(128, true) = .{ .width_method = self.staging.width_method };
-        try marker.append(View.Style.quiet.code(self.colour));
-        try marker.append(text);
-        try marker.append(View.Style.normal.code(self.colour));
-        _ = try self.staging.prepend(&marker, self.textLayout(), 1);
-    }
-    const before = self.browsing.collapsed(0, self.browsing.text().len).count;
-    const older = self.staging.collapsed(0, self.staging.text().len).count;
-    if (try self.browsing.prepend(&self.staging, self.textLayout(), self.height)) self.newer_trimmed = true;
-    const first = self.browsing.first(self.textLayout(), self.height);
-    self.browsing.top = self.browsing.up(self.textLayout(), first, self.overscroll);
-    self.overscroll = 0;
-    return .{ .older = older, .trimmed = before + older - self.browsing.collapsed(0, self.browsing.text().len).count };
-}
-
-/// Collapsed blocks an older page kept, its newest, and those newer rows
-/// lost from the transcript's end.
-pub const Prepended = struct { older: usize, trimmed: usize };
-
-/// Collapsed blocks in the transcript.
-pub fn transcriptCollapsed(self: *const Self) usize {
-    return self.browsing.collapsed(0, self.browsing.text().len).count;
-}
-
-/// Shows that the transcript reached the start of the saved conversation.
-/// Returns the collapsed blocks newer rows lost from the transcript's end.
-pub fn markBeginning(self: *Self) !usize {
-    return self.boundary("Start of conversation\n");
-}
-
-/// Shows that live rows above this point left the view and older saved
-/// pages cannot join here without a gap. Returns as markBeginning does.
-pub fn markGap(self: *Self) !usize {
-    return self.boundary("Earlier rows left this view.\n");
-}
-
-fn boundary(self: *Self, text: []const u8) !usize {
-    std.debug.assert(self.view == .transcript);
-    var marker: Viewport.Sized(128, true) = .{ .width_method = self.browsing.width_method };
-    try marker.append(View.Style.quiet.code(self.colour));
-    try marker.append(text);
-    try marker.append(View.Style.normal.code(self.colour));
-    const before = self.transcriptCollapsed();
-    if (try self.browsing.prepend(&marker, self.textLayout(), self.height)) self.newer_trimmed = true;
-    return before - self.transcriptCollapsed();
-}
-
-/// What Ctrl-O opens: the lowest item the latest frame drew in the live
-/// view or transcript, a collapsed user block, counted by how many collapsed
-/// blocks follow it in that document, or a peer's name, by its Session's ID.
-/// Call right after drawing: later text moves what the frame drew.
-pub const Openable = union(enum) { message: usize, session: [session_id.bytes]u8 };
-
-pub fn openableInView(self: *Self, gpa: std.mem.Allocator) !?Openable {
-    if (self.view != .live and self.view != .transcript) return null;
-    const document = self.viewed();
-    const text = document.text().len;
-    const next = document.measure(self.textLayout(), self.drawn.first, self.drawn.rows).next;
-    // A line cut at the bottom shows its first rows, which hold the mark.
-    const end = if (next.offset >= text) text else if (next.row != 0) document.lineEnd(next.offset) else next.offset;
-    const start = @min(self.drawn.first.offset, text);
-    const mark = document.collapsed(start, end).last;
-    if (try document.lastShownSession(gpa, self.textLayout(), start, end)) |name| if (mark == null or name > mark.?) {
-        const id = document.sessionAt(name).?;
-        if (id.len == session_id.bytes) return .{ .session = id[0..session_id.bytes].* };
-    };
-    const last = mark orelse return null;
-    return .{ .message = document.collapsed(last + 1, text).count };
-}
-
-/// Shows one Message's full text over the live view or the transcript.
+/// Shows one Message's full text over the feed.
 pub fn showMessage(self: *Self, io: std.Io, file: std.Io.File) !void {
-    std.debug.assert(self.view == .live or self.view == .transcript);
+    std.debug.assert(self.view == .feed);
     try self.load(&self.staging, io, file, true);
     self.staging.top = .{};
     self.message_return = self.view;
@@ -314,11 +166,11 @@ pub fn leaveMessage(self: *Self) !void {
     self.view = self.message_return;
 }
 
-fn viewed(self: *Self) *Document {
+pub fn viewed(self: *Self) *Document {
     return switch (self.view) {
-        .live => &self.live,
+        .feed => unreachable,
         .message => &self.staging,
-        .transcript, .inspection, .action => &self.browsing,
+        .inspection, .action => &self.browsing,
     };
 }
 
@@ -327,11 +179,10 @@ pub fn latest(self: *Self) !void {
         const seen = self.action_seen;
         try self.showFile(action.io, action.file, true);
         self.action_seen = seen;
-    } else self.view = .live;
+    } else self.view = .feed;
 }
 
-/// Inspection and Action files show their prefix; an older page keeps its
-/// newest text, which adjoins the transcript.
+/// Panel files show their bounded prefix.
 fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix: bool) !void {
     const length = (try file.stat(io)).size;
     const end = if (prefix) @min(Viewport.capacity, length) else length;
@@ -386,13 +237,13 @@ pub fn refreshFile(self: *Self, io: std.Io, file: std.Io.File) !void {
 fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
     self.invalidateLayout();
     self.action_view = .{ .io = io, .file = file };
-    if (self.view == .live) try self.showFile(io, file, true);
+    if (self.view == .feed) try self.showFile(io, file, true);
 }
 
 /// The decision was consumed: leave its page for the latest view.
 pub fn releaseAction(self: *Self) void {
     self.action_view = null;
-    self.view = .live;
+    self.view = .feed;
 }
 
 /// The Action stopped pending elsewhere: end consent, leave its page and keep
@@ -400,7 +251,7 @@ pub fn releaseAction(self: *Self) void {
 pub fn withdrawAction(self: *Self) void {
     self.consent = null;
     self.action_view = null;
-    if (self.view == .action) self.view = .live;
+    if (self.view == .action) self.view = .feed;
     self.invalidateLayout();
 }
 
@@ -442,34 +293,33 @@ const Memory = struct {
     }
 };
 
-/// Appends text that fits the view unescaped and whose zero-width spaces,
-/// escaped, take 160 bytes more than the view holds. Shared by tests whose
-/// point is that escaping can evict older live text.
-pub fn appendEscapeGrowth(screen: *Self) !void {
-    const spaces = 64; // 3 bytes each, 8 escaped: 320 more.
-    const filler = try std.testing.allocator.alloc(u8, Viewport.capacity - "GROWS-FIRST\n".len - "\nGROWS-END\n".len - 3 * spaces - 160);
-    defer std.testing.allocator.free(filler);
-    for (filler, 0..) |*byte, index| byte.* = if (index % 64 == 63) '\n' else 'a';
-    try screen.append(filler);
-    for (0..spaces) |_| try screen.append("\u{200b}");
-}
-
-test "a transcript's front is taken after escaping, which can grow live text past the view" {
+test "SessionScreen feed scrolling includes tail and latest only changes the view" {
     var environ = try std.testing.environ.createMap(std.testing.allocator);
     defer environ.deinit();
     const screen = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(screen);
     try screen.init(std.testing.io, &environ, false);
     defer screen.deinit();
-    // Fits unescaped; escaping its zero-width spaces grows it past the view.
-    try screen.append("GROWS-FIRST\n");
-    try appendEscapeGrowth(screen);
-    try screen.append("\nGROWS-END\n");
-    try std.testing.expectEqual(@as(u64, 0), screen.live.origin);
-    const front = try screen.liveStart();
-    try std.testing.expect(front > 0);
-    try screen.beginTranscript(front);
-    try std.testing.expectEqual(front, screen.browsing.origin);
-    try std.testing.expectEqualStrings(screen.live.text(), screen.browsing.text());
-    try std.testing.expectEqual(front + screen.live.length, try screen.liveEnd());
+    screen.vx.screen.width = 16;
+    screen.height = 3;
+    screen.feed.at_start = true;
+    screen.feed.at_end = true;
+    try screen.feed.append(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = "0\n1\n2\n3\n" } }});
+    screen.feed.tail_rows = 2;
+    screen.scrollFeed(-1);
+    try std.testing.expectEqual(@as(u32, 2), screen.anchor.anchor.at.line);
+    const held = screen.anchor.anchor;
+    screen.feed.at_end = false;
+    screen.view = .inspection;
+    try screen.latest();
+    try std.testing.expectEqual(ViewKind.feed, screen.view);
+    try std.testing.expectEqualDeep(held, screen.anchor.anchor);
+    try std.testing.expect(!screen.anchor.following());
+    // Panels do not borrow the feed document or its reading position.
+    try screen.browsing.append("one\ntwo\nthree\nfour\n");
+    screen.view = .inspection;
+    screen.browsing.top = .{};
+    _ = screen.browse(true, false);
+    try std.testing.expectEqualDeep(held, screen.anchor.anchor);
+    try std.testing.expectEqual(@as(usize, 4), screen.browsing.top.?.offset);
 }

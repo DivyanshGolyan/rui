@@ -4,6 +4,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const unicode = @import("terminal_unicode");
 const viewport = @import("ConversationViewport.zig");
+const View = @import("session_view.zig");
 
 pub const Key = struct {
     position: u64,
@@ -14,6 +15,10 @@ pub const Key = struct {
         return if (primary == .eq) std.math.order(a.ordinal, b.ordinal) else primary;
     }
 };
+/// Stable byte position within a retained row, independent of page seams.
+pub const Point = struct { key: Key, offset: usize };
+pub const MessageTarget = struct { offset: usize, target: View.Collapsed };
+pub const tail_key: Key = .{ .position = std.math.maxInt(u64), .ordinal = std.math.maxInt(u64) };
 pub const Feed = @import("widgets/Feed.zig").Feed(Key);
 
 /// Borrowed, prepared Document representation, not SGR input. Empty styles
@@ -34,30 +39,35 @@ pub const Entry = struct {
     text: Text,
     tight: bool = false,
     provisional: bool = false,
+    message: ?View.Collapsed = null,
+    messages: []const MessageTarget = &.{},
 };
 
 pub const row_capacity = 32 * 1024;
 pub const entry_capacity = 512;
 // Account for styles AND worst-case one u32 per byte of newline-only text,
 // plus the entry and layout tables, within the old styled Document's footprint.
-// 79 KiB of text is below the existing 256-KiB ceiling. At 80 columns with
-// typical ~80-byte lines this holds >900 rows, and 512 one-line entries hold
+// 65 KiB of text leaves room for bounded keyed Message metadata within the
+// existing styled Document footprint. At 80 columns this holds >800 typical
+// text rows, and 512 one-line entries hold
 // >three 140x40 screens even when every neighbour is tight. These independent
 // caps prevent a large row or many tiny entries from causing load/evict ping-pong.
 // No finite byte budget promises three screens at arbitrary terminal sizes.
-pub const byte_capacity = 79 * 1024;
+pub const byte_capacity = 65 * 1024;
 // Remember the latest 64 opened keys, including evicted entries; oldest-opened
 // is forgotten when full. Lookup does not mutate order. Closing releases a slot.
 pub const open_capacity = 64;
 
 pub const Window = struct {
     const Document = viewport.Sized(byte_capacity, true);
-    const Stored = struct {
+    const Target = struct { point: Point, target: View.Collapsed };
+    pub const Stored = struct {
         key: Key,
         offset: usize,
         length: usize,
         tight: bool,
         provisional: bool,
+        message: ?View.Collapsed,
     };
 
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
@@ -69,11 +79,17 @@ pub const Window = struct {
     // empty pages can advance them without adding any rendered text.
     at_start: bool = false,
     at_end: bool = false,
+    forward_partial: bool = false,
     low: ?Key = null,
     high: ?Key = null,
     // Borrowed layout output; rebuilt, never cached. Every stored entry has a
     // terminating newline, so there cannot be more logical lines than bytes.
-    dimensions: [entry_capacity]Feed.Entry = undefined,
+    dimensions: [entry_capacity + 1]Feed.Entry = undefined,
+    // Last measured activity Widget, never a stored/keyed conversation row.
+    tail_rows: u32 = 0,
+    tail_lines: [1]u32 = undefined,
+    targets: [entry_capacity]Target = undefined,
+    target_count: usize = 0,
     line_rows: [byte_capacity]u32 = undefined,
 
     pub const Error = error{WindowFull};
@@ -121,7 +137,7 @@ pub const Window = struct {
     pub fn replace(self: *Window, key: Key, new_text: Text) Error!void {
         const index = self.indexOf(key) orelse unreachable;
         const old = self.entries[index];
-        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional }});
+        try self.splice(index, 1, &.{.{ .key = key, .text = new_text, .tight = old.tight, .provisional = old.provisional, .message = old.message }});
     }
 
     /// Forward reads restart at the first provisional row. The replacement may
@@ -156,8 +172,15 @@ pub const Window = struct {
         }
         if (drop_back != 0) {
             self.at_end = false;
+            self.forward_partial = false;
             self.high = if (self.count != 0) self.entries[self.count - 1].key else null;
         }
+        var kept: usize = 0;
+        for (self.targets[0..self.target_count]) |target| if (self.indexOf(target.point.key) != null) {
+            self.targets[kept] = target;
+            kept += 1;
+        };
+        self.target_count = kept;
         // Open keys deliberately survive both sides, including an empty window.
     }
 
@@ -182,10 +205,83 @@ pub const Window = struct {
                 used += 1;
                 offset = self.document.lineEnd(offset) + 1;
             }
-            self.line_rows[used - 1] += self.gapAfter(i);
+            if (used > start) self.line_rows[used - 1] += self.gapAfter(i);
             self.dimensions[i] = .{ .key = entry.key, .lines = self.line_rows[start..used] };
         }
         return self.dimensions[0..self.count];
+    }
+
+    /// Includes the unkeyed Widget tail only for layout/scroll/read policy.
+    /// The synthetic key is never persisted, targeted or counted as a row.
+    pub fn layoutEntries(self: *Window, layout: viewport.Layout) []const Feed.Entry {
+        _ = self.heights(layout);
+        if (self.tail_rows == 0) return self.dimensions[0..self.count];
+        self.tail_lines[0] = self.tail_rows;
+        self.dimensions[self.count] = .{ .key = tail_key, .lines = &self.tail_lines };
+        return self.dimensions[0 .. self.count + 1];
+    }
+
+    pub fn pointAt(self: *const Window, offset: usize) ?Point {
+        for (self.entries[0..self.count]) |entry| {
+            if (offset >= entry.offset and offset < entry.offset + entry.length)
+                return .{ .key = entry.key, .offset = offset - entry.offset };
+        }
+        if (self.count > 0 and offset == self.document.length) {
+            const last = self.entries[self.count - 1];
+            return .{ .key = last.key, .offset = last.length };
+        }
+        return null;
+    }
+
+    /// Edits may shorten a row; a surviving keyed endpoint clamps to its end.
+    pub fn offsetOf(self: *const Window, point: Point) ?usize {
+        const entry = self.entries[self.indexOf(point.key) orelse return null];
+        return entry.offset + @min(point.offset, entry.length);
+    }
+
+    pub fn messageAt(self: *const Window, point: Point) ?View.Collapsed {
+        const offset = self.offsetOf(point) orelse return null;
+        const entry = self.entries[self.indexOf(point.key).?];
+        // Only summary rows are Message targets. A click elsewhere in the
+        // entry must not open its last Message (stops can contain many).
+        const end = self.document.lineEnd(offset);
+        var line = offset;
+        while (line > entry.offset and self.document.bytes[line - 1] != '\n') : (line -= 1) {}
+        const mark = self.document.collapsed(line, end).last orelse return null;
+        for (self.targets[0..self.target_count]) |target| {
+            if (target.point.key.order(point.key) == .eq and entry.offset + target.point.offset == mark)
+                return target.target;
+        }
+        // The singular compatibility field belongs only to the last summary.
+        if (entry.message) |message| {
+            if (self.document.collapsed(entry.offset, entry.offset + entry.length).last == mark) return message;
+        }
+        return null;
+    }
+
+    /// Logical text row beneath the pointer, excluding adjacency gaps/tail.
+    pub fn positionAt(self: *const Window, visible: Feed.Visible, row: u32, layout: viewport.Layout) ?viewport.Position {
+        if (row < visible.pad or visible.first >= self.count) return null;
+        var wanted = row - visible.pad;
+        for (self.entries[visible.first..self.count], visible.first..) |entry, i| {
+            var offset = entry.offset;
+            var line: u32 = 0;
+            while (offset < entry.offset + entry.length) : (line += 1) {
+                const next = self.document.lineEnd(offset) + 1;
+                if (i != visible.first or line >= visible.line) {
+                    const skip = if (i == visible.first and line == visible.line) visible.row else 0;
+                    const rows = self.document.lineRows(layout, offset) - skip;
+                    if (wanted < rows) return .{ .offset = offset, .row = @intCast(wanted + skip) };
+                    wanted -= rows;
+                    if (next == entry.offset + entry.length and self.gapAfter(i) != 0) {
+                        if (wanted == 0) return null;
+                        wanted -= 1;
+                    }
+                }
+                offset = next;
+            }
+        }
+        return null;
     }
 
     /// Feed.Visible must have been obtained at this window's current width and
@@ -213,11 +309,14 @@ pub const Window = struct {
         }
     }
 
-    fn gapAfter(self: *const Window, index: usize) u1 {
-        return @intFromBool(index + 1 < self.count and !(self.entries[index].tight and self.entries[index + 1].tight));
+    pub fn gapAfter(self: *const Window, index: usize) u1 {
+        if (self.entries[index].length == 0) return 0;
+        var next = index + 1;
+        while (next < self.count and self.entries[next].length == 0) : (next += 1) {}
+        return @intFromBool(next < self.count and !(self.entries[index].tight and self.entries[next].tight));
     }
 
-    fn indexOf(self: *const Window, key: Key) ?usize {
+    pub fn indexOf(self: *const Window, key: Key) ?usize {
         for (self.entries[0..self.count], 0..) |entry, i| if (entry.key.order(key) == .eq) return i;
         return null;
     }
@@ -259,6 +358,11 @@ pub const Window = struct {
         return result;
     }
 
+    fn entryPlan(entry: Entry) Plan {
+        if (entry.provisional and entry.text.bytes.len == 0) return .{ .head = 0, .length = 0 };
+        return plan(entry.text);
+    }
+
     fn splice(self: *Window, first: usize, remove: usize, incoming: []const Entry) Error!void {
         const count = self.count - remove + incoming.len;
         if (count > entry_capacity) return error.WindowFull;
@@ -267,7 +371,7 @@ pub const Window = struct {
         var added: usize = 0;
         for (incoming, 0..) |entry, i| {
             if (i != 0) std.debug.assert(incoming[i - 1].key.order(entry.key) == .lt);
-            added += plan(entry.text).length;
+            added += entryPlan(entry).length;
         }
         if (incoming.len != 0) {
             if (first != 0) std.debug.assert(self.entries[first - 1].key.order(incoming[0].key) == .lt);
@@ -275,6 +379,14 @@ pub const Window = struct {
         }
         const length = self.document.length - (old_end - old_start) + added;
         if (length > byte_capacity) return error.WindowFull;
+        var kept_targets: usize = 0;
+        for (self.targets[0..self.target_count]) |target| {
+            const index = self.indexOf(target.point.key) orelse continue;
+            if (index >= first and index < first + remove) continue;
+            self.targets[kept_targets] = target;
+            kept_targets += 1;
+        }
+        self.target_count = kept_targets;
         const new_end = old_start + added;
         const tail = self.document.length - old_end;
         if (new_end > old_end) {
@@ -293,7 +405,7 @@ pub const Window = struct {
         for (self.entries[first + incoming.len .. count]) |*entry| entry.offset = new_end + (entry.offset - old_end);
         var offset = old_start;
         for (incoming, 0..) |entry, i| {
-            const p = plan(entry.text);
+            const p = entryPlan(entry);
             @memcpy(self.document.bytes[offset..][0..p.head], entry.text.bytes[0..p.head]);
             if (entry.text.styles.len != 0) @memcpy(self.document.styles[offset..][0..p.head], entry.text.styles[0..p.head]) else @memset(self.document.styles[offset..][0..p.head], 0);
             if (p.marker_length != 0) {
@@ -304,13 +416,28 @@ pub const Window = struct {
                 self.document.styles[offset + p.head] = 0;
             }
             // End link runs at the seam, but preserve a code newline's band.
-            const last = offset + p.length - 1;
-            self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
-            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional };
+            if (p.length > 0) {
+                const last = offset + p.length - 1;
+                self.document.styles[last] = viewport.seamStyle(self.document.styles[last]);
+            }
+            // The singular shorthand is valid only for one complete summary.
+            // A capped/multi-summary row must use explicit paired targets.
+            const message = if (entry.messages.len == 0 and p.marker_length == 0) entry.message else null;
+            self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional, .message = message };
+            for (entry.messages) |target| {
+                // Oversized rows are capped; do not retain targets in omitted
+                // text. Capacity refusal loses a target, never mispairs one.
+                if (target.offset >= p.head or self.target_count == self.targets.len) continue;
+                self.targets[self.target_count] = .{ .point = .{ .key = entry.key, .offset = target.offset }, .target = target.target };
+                self.target_count += 1;
+            }
             offset += p.length;
         }
         self.document.length = length;
         self.count = count;
+        for (self.entries[first .. first + incoming.len]) |*entry| {
+            if (entry.message != null and self.document.collapsed(entry.offset, entry.offset + entry.length).count != 1) entry.message = null;
+        }
     }
 };
 
@@ -708,4 +835,26 @@ test "feed_window styled newline drawing parity for every splice" {
             }
         }
     }
+}
+
+test "feed_window invisible provisional keys own replay without adding rows or adjacency gaps" {
+    const window = try testing.allocator.create(Window);
+    defer testing.allocator.destroy(window);
+    window.* = .{};
+    try window.append(&.{
+        .{ .key = .{ .position = 10 }, .text = .{ .bytes = "a\n" }, .tight = true },
+        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "" }, .provisional = true },
+        .{ .key = .{ .position = 30 }, .text = .{ .bytes = "" }, .provisional = true },
+        .{ .key = .{ .position = 40 }, .text = .{ .bytes = "b\n" }, .tight = true, .provisional = true },
+    });
+    try testing.expectEqualDeep(@as(?Key, .{ .position = 20 }), window.firstProvisional());
+    try testing.expectEqual(@as(u64, 2), totalRows(window.heights(test_layout)));
+    try testing.expectEqual(@as(usize, 0), window.heights(test_layout)[1].lines.len);
+    window.forward_partial = true;
+    try window.replaceFrom(.{ .position = 20 }, &.{testEntry(20, "z")});
+    try testing.expect(window.firstProvisional() == null);
+    try testing.expectEqual(@as(u64, 3), totalRows(window.heights(test_layout)));
+    window.trim(0, 1);
+    try testing.expect(!window.forward_partial);
+    try testing.expectEqual(@as(usize, 1), window.count);
 }

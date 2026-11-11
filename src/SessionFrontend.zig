@@ -5,7 +5,8 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
-const Transcript = @import("Transcript.zig");
+const DocumentView = @import("DocumentView.zig");
+const FeedView = @import("FeedView.zig");
 const Root = @import("Root.zig");
 const ActionConsent = @import("ActionConsent.zig");
 const PermissionCard = @import("PermissionCard.zig");
@@ -32,6 +33,9 @@ const View = @import("session_view.zig");
 const departure = @import("session_departure.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const reader_policy = @import("session_reading.zig");
+const feed_reads = @import("feed_reads.zig");
+const feed_window = @import("feed_window.zig");
+const FeedPolicy = feed_reads.Policy(feed_window.Key);
 const session_notice = @import("session_notice.zig");
 const session_id = @import("session_id.zig");
 const session_keys = @import("session_keys.zig");
@@ -74,12 +78,13 @@ command: Command,
 requests: Requests = undefined,
 status: Status = undefined,
 screen: *Screen = undefined,
-// `begin` points it at the live Document. Shared paths such as `idleReader`
-// ask whether it drags, so until then it holds no press or drag.
-app_content: Transcript = .{ .document = undefined },
+// One keyed widget for the feed; panels keep their own documents.
+app_content: FeedView = .{ .window = undefined, .anchor = undefined },
+app_document: DocumentView = .{ .document = undefined },
+app_body: AppScreen.Content = undefined,
 app_input: InputArea = undefined,
 app_screen: AppScreen.Session = undefined,
-app_preview: Transcript = undefined,
+app_preview: DocumentView = undefined,
 app_consent: ActionConsent = .{},
 app_card: PermissionCard = undefined,
 app_palette: Palette = undefined,
@@ -121,6 +126,7 @@ reading: struct {
     phase: ReadPhase = .activity,
     opening: bool = true,
     output_started: bool = false,
+    feed_read: feed_reads.Read = .opening,
     // An Action the reader found, adopted once input is idle.
     prepared_action: ?u64 = null,
     prepared_summary: View.ActionSummary = .{},
@@ -161,55 +167,18 @@ admission: struct {
     sent: u64 = 0,
     details_sent: u64 = 0,
 } = .{},
-// Live output and the page that last extended it.
+// Live facts have their own scan cursor, independent of the resident window.
 live: struct {
     view: View.Live = .{},
-    // The work the latest applied page carried.
     work: protocol.SessionWork = .{},
     cursor: protocol_reply.ActivityCursor = .{},
-    // UI commits layout alongside delivered Activity; workers borrow a snapshot.
-    compact_tools: bool = false,
-    // The Messages of collapsed blocks in live output.
-    blocks: View.Blocks = .{},
-    // Where each read's live output began, so a transcript whose live copy lost
-    // its front still continues from a canonical position without a gap.
-    marks: reads.Marks = .{},
-    // Messages shown live so far, which decide where a later read may mark.
-    messages: reads.Messages = .{},
-    // The Messages live output shows since its newest mark.
-    echoes: reads.Record = .{},
-    // How many entries live output has shown, as its reads counted them.
-    entries: u64 = 0,
-    // Where a transcript's search for the Messages a seam lists may stop
-    // (see reads.listed): at most the lowest position of one seen or not yet
-    // searched for; a stale value only costs reads.
-    lowest: ?u64 = null,
-    // The Messages a person or script sent that wait behind the work, as
-    // the Host reported them at the cursor; the first line the queued row
-    // last read, with its Message; and the newest live output showed while
-    // it waited (see View.Taking).
+    provisional: ?feed_window.Key = null,
     queued: protocol.Queued = .{},
     queued_line: ?queued_line.Shown = null,
-    drawn: queued_line.Drawn = .{},
 } = .{},
-// The transcript above live output.
-transcript: struct {
-    // Each transcript gets a new identity, so a page loaded for one is never
-    // joined to another.
-    id: u64 = 0,
-    // Continues the transcript above its oldest shown row; null at the start.
-    older: ?protocol_reply.ConversationCursor = null,
-    // What the transcript shows above its copy before older pages (see
-    // reads.Plan); its echoes are listed newest first, so `count` falls.
-    plan: reads.Plan = .{ .start = 0 },
-    // Older pages reach the conversation's start, so the transcript says so.
-    beginning: bool = false,
-    // A failed older load waits for the next scroll rather than retrying at once.
-    older_failed: bool = false,
-    history_requested: ?History = null,
-    // The Messages of collapsed blocks in the transcript.
-    blocks: View.Blocks = .{},
-} = .{},
+// New rows observed while the anchor is held, not replayed provisional rows.
+new_below: usize = 0,
+details_requested: bool = false,
 // One collapsed Message shown in full.
 expansion: struct {
     // Ctrl-O waits for the frame it names a block in; the read then waits for
@@ -240,9 +209,6 @@ failure: ?struct { key: [36]u8, state: Submission.State, bar: session_notice.Fai
 failure_buffer: [failure_capacity]u8 = undefined,
 /// The `?` shortcuts are open.
 shortcuts_open: bool = false,
-/// How many entries live output had shown when the view was scrolled back,
-/// so the marker counts the ones that arrived since.
-browsed_from: ?u64 = null,
 chrome: SessionChrome = undefined,
 /// The Session line's facts from the latest read that took them, the
 /// unlabelled Session's name, and the line as last written.
@@ -263,7 +229,7 @@ const failure_capacity = @max(
 /// The longest built notice: a short result with a failure mark on each
 /// line, or the model's facts.
 const notice_capacity = @max(
-    slash_commands_shared.result_notice_bytes,
+    @max(2048, slash_commands_shared.result_notice_bytes),
     protocol.max_model_bytes + " · ".len + unknown_sign_in.len + model_tail.len,
 );
 
@@ -275,9 +241,11 @@ test "a read freezes its viewport width method for live and historical answers" 
     try screen.init(std.testing.io, &environment, false);
     defer screen.deinit();
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
+    self.init.io = std.testing.io;
+    self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &self.input, .environment = .empty };
     for (std.enums.values(@import("ConversationViewport.zig").Method)) |method| {
         screen.setWidth(method);
-        for ([_]ReadPhase{ .activity, .history }) |phase| {
+        for ([_]ReadPhase{ .activity, .details }) |phase| {
             const job = self.freeze(phase);
             try std.testing.expectEqual(method, job.width_method);
         }
@@ -287,8 +255,9 @@ test "a read freezes its viewport width method for live and historical answers" 
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
+    job.scan_provisional = self.live.provisional;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.statusShown();
@@ -298,7 +267,10 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
         job.status_taken = &self.inspection.sessions[taken];
         job.status_actions = self.files.actions[taken];
     }
-    job.result.compact_tools = self.live.compact_tools;
+    if (phase == .activity or phase == .permission) {
+        self.reading.feed_read = if (self.reading.opening and phase == .activity) .opening else .scan;
+        job.feed_page = FeedPolicy.request(self.reading.feed_read, self.feedState());
+    }
     return job;
 }
 
@@ -314,6 +286,8 @@ test "reader freezes borrowed HOME independently of process initialization" {
     for ([_][]const u8{ "", "/home/a b" }) |home| {
         for (std.enums.values(ReadPhase)) |phase| {
             self.* = .{ .init = undefined, .home = home, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
+            self.init.io = std.testing.io;
+            self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &self.input, .environment = .empty };
             const job = self.freeze(phase);
             self.home = "/changed-after-freeze";
             try std.testing.expectEqualStrings(home, job.home);
@@ -444,9 +418,11 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick } };
+    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
-    self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
+    self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
+    self.app_body = .{ .shown = self.app_content.widget() };
+    self.app_screen = .{ .content = &self.app_body, .input = &self.app_input, .userdata = self, .on_event = appEvent };
 }
 
 pub const AppHooks = struct {
@@ -580,23 +556,23 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
 
 /// A click on a `┄ N more lines` row opens that Message, as Ctrl-O opens
 /// the lowest one in view; a click anywhere else does nothing.
-fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: viewport.Position) !void {
+fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: feed_window.Point) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null or self.pagePlace() == .elsewhere) return;
-    const index = self.app_content.document.summaryAt(at.offset) orelse return;
+    const target = self.app_content.messageAt(at) orelse return;
     self.shown_notice.dismiss();
     if (self.upgradeHeld()) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
     } else {
         self.dropMessageRequest();
-        self.openCollapsed(index);
+        self.openCollapsed(target);
     }
     try self.afterInput(ctx);
 }
 
 fn appDragScroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    self.screen.dragScroll(up);
+    try self.scroll(!up, 1);
 }
 
 fn appDecision(raw: *anyopaque, ctx: *vxfw.EventContext, decision: ConsentPolicy.Decision) !void {
@@ -709,7 +685,6 @@ fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
     }
     ctx.redraw = ctx.redraw or self.dirty;
     if (self.leaving == null) try self.serviceSkills();
-    try self.screen.live.prepare();
     try self.screen.browsing.prepare();
     try self.screen.staging.prepare();
     self.app_input.composer.editor = &self.input.editors[self.input.active];
@@ -758,14 +733,11 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_content.style = normal;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
-    self.app_content.document = switch (screen.view) {
-        .live => &screen.live,
-        .message => &screen.staging,
-        .transcript, .inspection, .action => &screen.browsing,
-    };
-    // Live output follows the latest rows; only a drag held at its top
-    // edge moves it, until the drag ends.
-    if (screen.view == .live and !self.app_content.dragging()) screen.live.top = null;
+    self.app_document.style = normal;
+    self.app_document.colours = colours;
+    self.app_document.method = self.app_caps.width;
+    self.app_document.document = if (screen.view == .message) &screen.staging else &screen.browsing;
+    self.app_body.shown = if (screen.view == .feed) self.app_content.widget() else self.app_document.widget();
     screen.commands = self.nextCommands(screen.commands);
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
@@ -775,16 +747,16 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const now_ms = self.nowMs();
     const work = self.live.work.state.asOf(now_ms);
     const said = self.lender.line(self.lender.context, work);
-    const browsing = screen.view != .live;
-    if (!browsing) self.browsed_from = null else if (self.browsed_from == null) self.browsed_from = self.live.entries;
+    const browsing = screen.view == .feed and !screen.anchor.following();
+    if (screen.anchor.following()) self.new_below = 0;
     const chrome = &self.chrome;
     chrome.activity.live = self.live.view;
     chrome.activity.work = if (self.app_consent.request != null) null else work_line.of(try ctx.arena.create([work_line.max_words_bytes]u8), &self.live.work.state, self.live.work.operation, now_ms);
-    // Browsing draws no tail, so no waiting row.
-    const queued = if (browsing) null else self.queuedRow();
+    const queued = self.queuedRow();
     chrome.activity.queued = if (queued) |row| row.waiting else null;
     chrome.activity.method = self.app_caps.width;
     chrome.activity.styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
+    self.app_content.tail = chrome.activity.widget();
     chrome.status.method = self.app_caps.width;
     chrome.status.quiet = quiet;
     chrome.status.attention = attention;
@@ -799,7 +771,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
     chrome.place(&self.app_screen, .{
         .browsing = browsing,
-        .new_entries = if (self.browsed_from) |from| self.live.entries - from else 0,
+        .new_entries = self.new_below,
         .needs = send.needs,
         .needs_key = if (send.needs) |needs| session_chrome.needsKey(needs) else "",
         // A conversation reading itself again says so until Host requests go on.
@@ -814,12 +786,10 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     });
     self.app_preview.size = .{};
     var surface = try self.app_screen.widget().draw(ctx);
-    const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
-    screen.height = visible.size.height;
-    screen.browsing_height = screen.height;
-    screen.marker_rows = @intFromBool(self.app_screen.marker != null);
-    screen.vx.screen.width = visible.size.width;
-    screen.drawn = .{ .first = visible.first, .rows = screen.height };
+    const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
+    screen.height = size.height;
+    screen.vx.screen.width = size.width;
+    if (screen.view != .feed) screen.drawn = .{ .first = if (self.app_consent.request != null) self.app_preview.first else self.app_document.first, .rows = screen.height };
     surface.widget = self.widget();
     self.dirty = false;
     return surface;
@@ -860,12 +830,14 @@ test "App Session retains the draft across a permission card arriving during pas
     var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
+    self.screen.feed.at_end = true;
+    self.screen.feed.at_start = true;
     self.poll_at = std.math.maxInt(i96);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
-    try screen.append("\x1b[2mtheme witness\x1b[0m");
+    try seedFeed(screen, "\x1b[2mtheme witness\x1b[0m");
     for ([_]struct { caps: overview_view.Caps, ground: vaxis.Color, band: vaxis.Color }{
         .{ .caps = .{}, .ground = .{ .rgb = .{ 0x12, 0x19, 0x33 } }, .band = .{ .rgb = .{ 0x1a, 0x22, 0x46 } } },
         .{ .caps = .{ .background = .{ 255, 255, 255 } }, .ground = .{ .rgb = .{ 0xf3, 0xee, 0xe2 } }, .band = .{ .rgb = .{ 0xe6, 0xdd, 0xc8 } } },
@@ -879,7 +851,7 @@ test "App Session retains the draft across a permission card arriving during pas
         var rendered: vaxis.Screen = try .init(arena.allocator(), .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &rendered };
         surface.render(window, self.app_input.composer.widget());
-        const user = rendered.readCell(0, 0).?;
+        const user = rendered.readCell(0, @intCast(self.app_content.drawn.pad)).?;
         try std.testing.expectEqualStrings("t", user.char.grapheme);
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
         try std.testing.expect(!user.style.dim);
@@ -962,6 +934,8 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
         const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         self.reading.opening = false;
+        self.screen.feed.at_end = true;
+        self.screen.feed.at_start = true;
         self.poll_at = std.math.maxInt(i96);
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
@@ -987,109 +961,6 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
         _ = self.submission.join();
         self.submission.close();
     }
-}
-
-test "App Session drag copies the live rows it crosses once, says so and clears" {
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    const screen = try std.testing.allocator.create(Screen);
-    defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
-    defer page.close(std.testing.io);
-    var init: std.process.Init = undefined;
-    init.io = std.testing.io;
-    init.gpa = std.testing.allocator;
-    init.environ_map = &environ;
-    var interrupted: client.Cancellation = .{};
-    const self = try std.testing.allocator.create(Self);
-    defer std.testing.allocator.destroy(self);
-    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
-    const Hooks = struct {
-        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {
-            return error.UnexpectedLeave;
-        }
-        fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
-            return error.UnexpectedCopy;
-        }
-        fn open(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {
-            return error.UnexpectedOpen;
-        }
-    };
-    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
-    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
-    self.reading.opening = false;
-    self.poll_at = std.math.maxInt(i96);
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
-    defer ctx.cmds.deinit(std.testing.allocator);
-    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
-    for (0..40) |index| {
-        var line: [16]u8 = undefined;
-        try screen.live.append(try std.fmt.bufPrint(&line, "row {d}\n", .{index}));
-    }
-    _ = try widget_.draw(draw_context);
-    const shown = self.app_content.size.height;
-    try std.testing.expect(shown > 3 and shown < 40);
-    const content = self.app_content.widget();
-    const Clip = struct {
-        fn take(context: *vxfw.EventContext, buffer: []u8) []const u8 {
-            var length: usize = 0;
-            for (context.cmds.items) |command| if (command == .copy_to_clipboard) {
-                @memcpy(buffer[length..][0..command.copy_to_clipboard.len], command.copy_to_clipboard);
-                length += command.copy_to_clipboard.len;
-                std.testing.allocator.free(command.copy_to_clipboard);
-            };
-            context.cmds.clearRetainingCapacity();
-            return buffer[0..length];
-        }
-    };
-    var copied: [256]u8 = undefined;
-    const press = struct {
-        fn at(kind: vaxis.Mouse.Type, col: i16, row: u16) vxfw.Event {
-            return .{ .mouse = .{ .col = col, .row = @intCast(row), .button = .left, .mods = .{}, .type = kind } };
-        }
-    }.at;
-    // Rows drawn end "row 37", "row 38", "row 39"; the last row is an edge.
-    try content.handleEvent(&ctx, press(.press, 0, shown - 3));
-    try content.handleEvent(&ctx, press(.drag, 4, shown - 2));
-    _ = try widget_.draw(draw_context);
-    try std.testing.expect(self.app_content.dragging());
-    try content.handleEvent(&ctx, press(.release, 4, shown - 2));
-    try std.testing.expectEqualStrings("row 37\nrow 3", Clip.take(&ctx, &copied));
-    try std.testing.expectEqualStrings("Copied 2 lines", self.shown_notice.current(self.nowMs()).?);
-    try std.testing.expect(!self.app_content.dragging());
-    // Held at the top edge, the live view scrolls through rows it already
-    // holds; released, it follows the latest rows again.
-    try content.handleEvent(&ctx, press(.press, 2, 1));
-    try content.handleEvent(&ctx, press(.drag, 0, 0));
-    for (ctx.cmds.items) |command| std.debug.assert(command != .copy_to_clipboard);
-    ctx.cmds.clearRetainingCapacity();
-    const before = self.app_content.first;
-    for (0..2) |_| {
-        try content.handleEvent(&ctx, .tick);
-        _ = try widget_.draw(draw_context);
-    }
-    ctx.cmds.clearRetainingCapacity();
-    try std.testing.expectEqual(Screen.ViewKind.live, screen.view);
-    try std.testing.expect(self.app_content.first.order(before) == .lt);
-    try content.handleEvent(&ctx, press(.release, 0, 0));
-    const first_row = 40 - @as(usize, shown) - 2;
-    var expected: [64]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "row {d}\nrow {d}\nrow {d}\nrow", .{ first_row, first_row + 1, first_row + 2 }), Clip.take(&ctx, &copied));
-    _ = try widget_.draw(draw_context);
-    try std.testing.expect(self.app_content.first.order(screen.live.bottom(.{ .width = 80, .method = self.app_caps.width }, shown)) == .eq);
-    // A transcript at its top reads an older page in, but not under a
-    // press or drag: that waits for the release.
-    screen.view = .transcript;
-    defer screen.view = .live;
-    try std.testing.expect(self.idleReader().at_top);
-    try content.handleEvent(&ctx, press(.press, 0, 0));
-    try std.testing.expect(!self.idleReader().at_top);
 }
 
 test "App Session link click leaves for the peer only where Esc would leave" {
@@ -1131,24 +1002,26 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
+    self.screen.feed.at_end = true;
+    self.screen.feed.at_start = true;
     self.poll_at = std.math.maxInt(i96);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
     defer ctx.cmds.deinit(std.testing.allocator);
     const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
-    try screen.live.append("\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "m3n4p5" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m\x1b[0m\n");
+    try seedFeed(screen, "\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "m3n4p5" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m\x1b[0m\n");
     _ = try widget_.draw(draw_context);
     const content = self.app_content.widget();
     const click = struct {
-        fn on(context: *vxfw.EventContext, target: vxfw.Widget, col: i16) !void {
-            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try target.handleEvent(context, .{ .mouse = .{ .col = col, .row = 0, .button = .left, .mods = .{}, .type = kind } });
+        fn on(context: *vxfw.EventContext, target: vxfw.Widget, row: i16, col: i16) !void {
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try target.handleEvent(context, .{ .mouse = .{ .col = col, .row = row, .button = .left, .mods = .{}, .type = kind } });
         }
     }.on;
     // "Plan" is at columns 24 to 27. With a draft, the click is refused as
     // Esc is, and the Session and its draft stay as they were.
     _ = self.input.append("keep me");
-    try click(&ctx, content, 25);
+    try click(&ctx, content, @intCast(self.app_content.drawn.pad), 25);
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", self.notice.?);
     try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
     try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
@@ -1156,109 +1029,12 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     // Beside the name nothing opens.
     self.input.init();
     self.notice = null;
-    try click(&ctx, content, 10);
+    try click(&ctx, content, @intCast(self.app_content.drawn.pad), 10);
     try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
     // On the name, with nothing to lose, the Session leaves for the peer.
-    try click(&ctx, content, 25);
+    try click(&ctx, content, @intCast(self.app_content.drawn.pad), 25);
     try std.testing.expectEqualStrings("m3n4p5", &Hooks.opened.?);
     try std.testing.expectEqual(Outcome.returned, Hooks.left.?);
-}
-
-test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower Message" {
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    const screen = try std.testing.allocator.create(Screen);
-    defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const page = try tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
-    defer page.close(std.testing.io);
-    var init: std.process.Init = undefined;
-    init.io = std.testing.io;
-    init.gpa = std.testing.allocator;
-    init.environ_map = &environ;
-    var interrupted: client.Cancellation = .{};
-    const self = try std.testing.allocator.create(Self);
-    defer std.testing.allocator.destroy(self);
-    self.begin(init, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .status = page, .actions = .{ page, page } }, undefined, undefined, undefined, screen, &interrupted, quiet_overview);
-    const Hooks = struct {
-        var opened: ?[session_id.bytes]u8 = null;
-        var leaves: usize = 0;
-        fn leave(_: *anyopaque, _: *vxfw.EventContext, _: Outcome) !void {
-            leaves += 1;
-        }
-        fn copy(_: *anyopaque, _: std.Io.File, _: u64, _: u64) !void {
-            return error.UnexpectedCopy;
-        }
-        fn open(_: *anyopaque, _: *vxfw.EventContext, id: *const [session_id.bytes]u8) !void {
-            opened = id.*;
-        }
-    };
-    Hooks.opened = null;
-    Hooks.leaves = 0;
-    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
-    const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
-    self.reading.opening = false;
-    self.poll_at = std.math.maxInt(i96);
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
-    defer ctx.cmds.deinit(std.testing.allocator);
-    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
-    const peer = "\x1b[2;8m← Received message from " ++ TerminalText.link_open ++ TerminalText.session_link ++ "m3n4p5" ++ TerminalText.link_end ++ "\x1b[4mPlan" ++ TerminalText.link_close ++ "\x1b[0m\x1b[2;8m\x1b[0m\n";
-    const ctrl_o: vxfw.Event = .{ .key_press = .{ .codepoint = 'o', .mods = .{ .ctrl = true } } };
-    // A collapsed Message above, its block kept, and a peer row below it.
-    try screen.live.append("\n› " ++ View.Mark.body ++ "preview\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n");
-    self.live.blocks.append(.{ .source = .conversation, .position = 0, .ordinal = 1, .content = undefined, .row = false });
-    try screen.live.append(peer);
-    // While an Action waits, Ctrl-O opens no peer: the Action's card
-    // holds the keys, and the Session stays.
-    try page.writeStreamingAll(std.testing.io, "$ echo safe\n");
-    self.reading.prepared_action = 9;
-    self.live.work.first_action = 9;
-    try widget_.handleEvent(&ctx, .tick);
-    _ = try widget_.draw(draw_context);
-    try std.testing.expectEqual(@as(?u64, 9), self.app_consent.drawn);
-    try widget_.handleEvent(&ctx, ctrl_o);
-    try widget_.handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings("! Ctrl-O opens a message or Session name from the conversation.", self.shown_notice.current(self.nowMs()).?);
-    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
-    try std.testing.expectEqual(@as(?Outcome, null), self.leaving);
-    self.live.work.first_action = null;
-    try widget_.handleEvent(&ctx, .tick);
-    // A Message drawn lower than the name is what Ctrl-O opens.
-    try screen.live.append("\n› " ++ View.Mark.body ++ "later\n" ++ View.Mark.summary ++ "┄ 4 more lines" ++ View.Mark.reset ++ "\n");
-    self.live.blocks.append(.{ .source = .conversation, .position = 0, .ordinal = 2, .content = undefined, .row = false });
-    _ = try widget_.draw(draw_context);
-    try widget_.handleEvent(&ctx, ctrl_o);
-    try widget_.handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings("Opening message…", self.shown_notice.current(self.nowMs()).?);
-    try std.testing.expectEqual(@as(u64, 2), self.expansion.queued.ready.target.ordinal);
-    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
-    // With the peer row lowest again, Ctrl-O follows the peer, unless the
-    // row is too narrow to show any of its name: then the Message above is
-    // the lowest thing drawn that Ctrl-O can open.
-    self.dropMessageRequest();
-    try screen.live.append(peer);
-    var narrow = draw_context;
-    narrow.max.width = 20;
-    _ = try widget_.draw(narrow);
-    try widget_.handleEvent(&ctx, ctrl_o);
-    try widget_.handleEvent(&ctx, .tick);
-    try std.testing.expectEqual(@as(?[session_id.bytes]u8, null), Hooks.opened);
-    try std.testing.expectEqualStrings("Opening message…", self.shown_notice.current(self.nowMs()).?);
-    try std.testing.expectEqual(@as(u64, 2), self.expansion.queued.ready.target.ordinal);
-    self.dropMessageRequest();
-    _ = try widget_.draw(draw_context);
-    try widget_.handleEvent(&ctx, ctrl_o);
-    try widget_.handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings("m3n4p5", &Hooks.opened.?);
-    try std.testing.expectEqual(Outcome.returned, self.leaving.?);
-    // The Session leaves once: the screen opens the peer on that leave, so
-    // a second one would leave the peer too.
-    try std.testing.expectEqual(@as(usize, 1), Hooks.leaves);
 }
 
 /// A Session's input starts empty, and no frame of it has drawn a list yet:
@@ -1431,14 +1207,12 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
     }
 }
 
-const History = enum { older, latest };
-
 /// What each slash command does here.
 const Slash = union(enum) {
     exit,
     archive,
     unarchive,
-    history: History,
+    details,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
     /// The Session's model and sign-in, which never change.
@@ -1462,8 +1236,7 @@ fn parse(text: []const u8) Slash {
         .exit => .exit,
         .archive => .archive,
         .unarchive => .unarchive,
-        .history => .{ .history = .older },
-        .details => .{ .history = .latest },
+        .details => .details,
         .status => .{ .inspection = .status },
         .requests => .{ .inspection = .requests },
         .help => .{ .inspection = .help },
@@ -1477,13 +1250,6 @@ fn parse(text: []const u8) Slash {
         .model => .model,
         .upgrade => .upgrade,
     };
-}
-
-/// The page asked for last is the one shown: a /status not yet rendered
-/// yields to a later /history or /details.
-fn requestHistory(self: *Self, history: History) void {
-    self.transcript.history_requested = history;
-    self.inspection.status_requested = false;
 }
 
 /// Runs one slash command the draft admitted; it never decides. Local
@@ -1505,7 +1271,10 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
         .exit => self.leaving = .detached,
-        .history => |history| self.requestHistory(history),
+        .details => {
+            self.details_requested = true;
+            self.inspection.status_requested = false;
+        },
         .inspection => self.input.queueCommand(text),
         .discard => {
             self.submission.discardRejected() catch {
@@ -1994,24 +1763,11 @@ fn update(self: *Self) !Updated {
     try self.startQueuedCommand();
     // Scans continue during consent, so an Action decided elsewhere leaves.
     if (self.reader.thread == null and self.reading.prepared_action == null) {
-        if (self.transcript.history_requested != null and !self.reading.opening) {
-            const requested = self.transcript.history_requested.?;
-            self.transcript.history_requested = null;
-            if (requested == .latest) {
-                try self.screen.latest();
-                self.admission.details_sent = self.admission.sent;
-                try self.launch(self.freeze(.details), reads.history);
-            } else {
-                // /history scrolls the transcript to its top; older pages
-                // then load there as for any scroll.
-                const screen = self.screen;
-                if (screen.view != .transcript) {
-                    try screen.latest();
-                    if (screen.view == .live) try self.beginTranscript();
-                }
-                if (screen.view == .transcript) screen.browsing.top = .{} else self.notice = "/history opens once the Action is decided.";
-                self.dirty = true;
-            }
+        if (self.details_requested and !self.reading.opening) {
+            self.details_requested = false;
+            try self.screen.latest();
+            self.admission.details_sent = self.admission.sent;
+            try self.launch(self.freeze(.details), reads.details);
         }
         if (self.reader.thread == null and self.expansion.queued == .ready) {
             const request = self.expansion.queued.ready;
@@ -2026,13 +1782,15 @@ fn update(self: *Self) !Updated {
             job.recall = recall;
             try self.launch(job, reads.recall);
         };
-        if (self.reader.thread == null) if (reader_policy.background(self.idleReader())) |read| switch (read) {
-            .history => {
-                self.notice = "Loading earlier messages…";
-                try self.launch(self.freeze(.history), reads.history);
-            },
-            .activity => try self.launch(self.freeze(.activity), reads.scan),
-            .permission => try self.launch(self.freeze(.permission), reads.permission),
+        if (self.reader.thread == null) if (FeedPolicy.nextRead(self.feedState())) |read| {
+            if (read == .permission) {
+                try self.launch(self.freeze(.permission), reads.permission);
+            } else {
+                const job = self.freeze(.activity);
+                self.reading.feed_read = read;
+                job.feed_page = FeedPolicy.request(read, self.feedState());
+                try self.launch(job, reads.scan);
+            }
         };
     }
     return .active;
@@ -2181,13 +1939,13 @@ fn withdrawDecided(self: *Self) void {
 fn beginMessage(self: *Self, intent: Submission.Intent) !void {
     if (!try self.beginSubmission(intent)) return;
     // A sent Message continues the conversation: show it and its reply
-    // rather than the frozen transcript or page the reader was browsing,
+    // rather than a page the reader was browsing,
     // or a page asked for before it.
     self.admission.sent += 1;
     self.inspection.status_requested = false;
-    self.transcript.history_requested = null;
+    self.details_requested = false;
     self.dropMessageRequest();
-    try self.screen.latest();
+    try self.jumpToEnd();
 }
 
 /// A queued or running command holds the choice until it completes.
@@ -2248,7 +2006,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
                     .stay => |why| self.notice = why,
                 }
             }
-            if (action != .latest and screen.view == .message) try screen.leaveMessage() else try screen.latest();
+            if (action != .latest and screen.view == .message) try screen.leaveMessage() else try self.jumpToEnd();
         },
         .expand => if (screen.view == .message) try screen.leaveMessage() else {
             // A newer Ctrl-O replaces any page asked for before it, even
@@ -2293,12 +2051,12 @@ fn shownWork(self: *const Self) protocol.session_work.Kind {
 
 fn scroll(self: *Self, down: bool, rows: usize) !void {
     const screen = self.screen;
-    if (screen.view == .live) {
-        if (down) return; // Live output already shows the latest rows.
-        try self.beginTranscript();
-    }
-    self.transcript.older_failed = false; // A new scroll may retry a failed load.
-    for (0..rows) |_| if (screen.browse(down, false)) return screen.latest();
+    if (screen.view == .feed) {
+        const amount: i32 = @intCast(@min(rows, std.math.maxInt(i32)));
+        self.app_content.scroll(if (down) amount else -amount);
+        if (screen.anchor.following()) self.new_below = 0;
+    } else for (0..rows) |_| _ = screen.browse(down, false);
+    self.dirty = true;
 }
 
 /// Lands a read recall step on the draft it began from.
@@ -2321,7 +2079,7 @@ fn showRecalled(self: *Self) !void {
 /// Esc leaves it once no submission or draft would be lost.
 fn settledView(self: *const Self) bool {
     const screen = self.screen;
-    return screen.view == .live and screen.action_view == null and self.live.work.first_action == null and
+    return screen.view == .feed and screen.anchor.following() and screen.action_view == null and self.live.work.first_action == null and
         self.reading.prepared_action == null and !self.commandActive();
 }
 
@@ -2330,8 +2088,7 @@ const MessageRequest = struct { target: View.Collapsed, asked: reader_policy.Ask
 /// Where a Message page would be asked from now.
 fn pagePlace(self: *const Self) reader_policy.Place {
     return switch (self.screen.view) {
-        .live => .live,
-        .transcript => .{ .transcript = self.transcript.id },
+        .feed => .feed,
         .inspection, .action, .message => .elsewhere,
     };
 }
@@ -2352,82 +2109,59 @@ fn dropMessageRequest(self: *Self) void {
 fn expand(self: *Self) !?[session_id.bytes]u8 {
     self.expansion.queued = .none;
     self.dirty = true;
-    const screen = self.screen;
     if (self.pagePlace() == .elsewhere) {
         self.notice = "! Ctrl-O opens a message or Session name from the conversation.";
         return null;
     }
-    const index = switch (try screen.openableInView(self.init.gpa) orelse {
+    const target = switch (try self.app_content.openable(self.init.gpa) orelse {
         self.notice = "Nothing to open in view; scroll to one, then Ctrl-O.";
         return null;
     }) {
-        .message => |index| index,
+        .message => |target| target,
         .session => |id| return id,
     };
-    self.openCollapsed(index);
+    self.openCollapsed(target);
     return null;
 }
 
-/// Asks for the collapsed Message `index` from the shown document's end.
-fn openCollapsed(self: *Self, index: usize) void {
-    const screen = self.screen;
+/// The target belongs to a keyed row/offset, never a count from the end.
+fn openCollapsed(self: *Self, target: View.Collapsed) void {
     self.dirty = true;
-    const blocks = if (screen.view == .live) &self.live.blocks else &self.transcript.blocks;
-    const target = blocks.fromEnd(index) orelse {
-        self.notice = "! That message's full text is no longer held here; /history shows it again.";
-        return;
-    };
     self.expansion.queued = .{ .ready = .{ .target = target, .asked = self.pageAsked() } };
     self.notice = "Opening message…";
 }
 
-/// Freezes live output for scrolling. The copy starts at a recorded read
-/// boundary, so older canonical pages continue it without a gap. With none
-/// retained, the gap's shown Messages and those at its seam are listed above
-/// the copy, and older pages continue before the newest boundary that left.
-fn beginTranscript(self: *Self) !void {
+/// Inputs to the single read policy, derived from the current anchor/window.
+fn feedState(self: *Self) FeedPolicy.State {
     const screen = self.screen;
-    self.transcript.id += 1;
-    const front = try screen.liveStart();
-    self.transcript.plan = reads.plan(&self.live.marks, &self.live.echoes, front, self.live.lowest);
-    try screen.beginTranscript(self.transcript.plan.start);
-    self.transcript.blocks = self.live.blocks.newest(screen.transcriptCollapsed());
-    self.transcript.older = self.transcript.plan.older;
-    // Without any boundary, where the conversation starts is unknown.
-    self.transcript.beginning = self.transcript.older == null and !(self.transcript.plan.gap and self.live.marks.count == 0);
-    try self.showOlderLabels();
-}
-
-/// Shows the gap's label once its Messages are listed, and the
-/// conversation's start once nothing older remains.
-fn showOlderLabels(self: *Self) !void {
-    const screen = self.screen;
-    const plan = &self.transcript.plan;
-    if (plan.gap and plan.echo_count == 0 and plan.dropped == null) {
-        // A label can push newer rows, and their blocks, off the end.
-        self.transcript.blocks.dropNewest(try screen.markGap());
-        plan.gap = false;
-    }
-    if (self.transcript.beginning and self.transcript.plan.next() == null and self.transcript.older == null) {
-        self.transcript.blocks.dropNewest(try screen.markBeginning());
-        self.transcript.beginning = false;
-    }
-}
-
-/// What the idle reader may start from, read now.
-fn idleReader(self: *const Self) reader_policy.Idle {
     return .{
         .now_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds,
         .scan_due_ns = self.poll_at,
         .opening = self.reading.opening,
-        .older_remain = self.transcript.plan.next() != null or self.transcript.older != null,
-        .older_failed = self.transcript.older_failed,
-        // An older page waits until a press or drag over the text ends.
-        .at_top = self.screen.transcriptAtTop() and !self.app_content.dragging(),
-        .choice_open = self.screen.consent != null or self.app_consent.request != null,
+        .need = screen.anchor.need(screen.feed.layoutEntries(screen.textLayout()), screen.height, screen.feed.edges()),
+        .at_end = screen.feed.at_end,
+        .low = screen.feed.low,
+        .high = screen.feed.high,
+        .scan_cursor = if (self.live.cursor.position != 0) .{ .position = self.live.cursor.position, .ordinal = self.live.cursor.ordinal orelse std.math.maxInt(u64) } else null,
+        .window_provisional = screen.feed.firstProvisional(),
+        .scan_provisional = self.live.provisional,
+        .scan_continuing = self.live.cursor.end != null,
+        .window_continuing = screen.feed.forward_partial,
+        .choice_open = screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,
     };
+}
+
+/// An evicted high edge needs a fresh opening; leave the old frame in place.
+fn jumpToEnd(self: *Self) !void {
+    try self.screen.latest();
+    switch (feed_reads.jumpToEnd(self.screen.feed.at_end)) {
+        .follow => self.screen.anchor.follow(),
+        .opening_keep_frame => self.reading.opening = true,
+    }
+    self.new_below = 0;
+    self.dirty = true;
 }
 
 /// The waiting Action, as the screen shows it now.
@@ -2588,7 +2322,6 @@ fn settleReader(self: *Self) !void {
     const phase = self.reading.phase;
     const inspection = self.readInspection();
     if (end == .complete) switch (reader_policy.shows(phase, inspection)) {
-        .older => try self.showOlder(),
         .message => {
             const request = self.expansion.reading.?;
             self.expansion.reading = null;
@@ -2623,121 +2356,121 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     };
 }
 
-/// Prepends a completed older page to the transcript it was read for.
-fn showOlder(self: *Self) !void {
-    // What a seam's search found holds whatever the view now shows.
-    if (self.job.result.searched) |floor| if (self.live.lowest) |known| {
-        self.live.lowest = @max(known, floor);
-    };
-    // The user may have left the transcript while this page loaded.
-    const screen = self.screen;
-    if (screen.view == .transcript and self.job.transcript == self.transcript.id) {
-        const prepended = try screen.prependFile(self.init.io, self.files.inspection);
-        // The page's newest blocks are those its kept rows show.
-        const collapsed = &self.job.result.collapsed;
-        var older: [reads.Collected.capacity]?View.Collapsed = @splat(null);
-        const kept = @min(prepended.older, older.len);
-        for (0..kept) |index| {
-            const from_end = kept - index;
-            older[index] = if (from_end <= collapsed.count) collapsed.at(collapsed.count - from_end) else null;
-        }
-        self.transcript.blocks.prepend(older[0..kept]);
-        self.transcript.blocks.dropNewest(prepended.trimmed);
-        if (self.job.target == .listing) self.transcript.plan.listed(self.job.target.listing, self.job.result.listing) else {
-            self.transcript.older = self.job.result.history_cursor;
-            self.transcript.beginning = self.transcript.older == null;
-        }
-        try self.showOlderLabels();
-    }
-}
-
 /// What the queued row shows, if it shows (see `queued_line.unshown`): the
 /// newest waiting Message, by the line read from it, and how many wait
 /// that live output has not shown.
 pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.Waiting } {
     const queued = self.live.queued;
-    const count = queued_line.unshown(queued.count, queued.oldest_position, self.live.drawn);
+    const count = queued.count - @intFromBool(queued.count != 0 and !self.live.work.state.holdsQueue());
     if (count == 0) return null;
     const shown = if (self.live.queued_line) |*shown| shown else return null;
     if (shown.admission != queued.newest_admission) return null;
     return .{ .newest = queued.newest_admission, .waiting = .{ .line = shown.line.slice(), .count = count } };
 }
 
-/// Appends a joined read's staged live output; none of it showed before.
-/// Its boundaries and echoes take the live offsets where writing reaches
-/// them: live output keeps text, not the styling the scratch file also
-/// counts, and escapes clusters it cannot show, so each is the settled end
-/// once writing reaches it. A page's own start precedes its separator.
+/// Applies one page through the policy's single attachment decision. The
+/// resident window owns rows; neither the scan nor a fill owns another copy.
 fn showStaged(self: *Self) !void {
+    const page = self.job.feed_page orelse return;
+    const read = self.reading.feed_read;
+    const window = &self.screen.feed;
+    const provisional = window.firstProvisional();
+    const edge = if (read == .fill_above) window.low else window.high;
+    if (!FeedPolicy.applies(read, page.started_from, page.replace_from, edge, provisional)) return;
     const result = &self.job.result;
-    self.live.messages = result.messages;
-    self.live.entries += result.entries;
-    if (result.lowest) |lowest| self.live.lowest = if (self.live.lowest) |known| @min(known, lowest) else lowest;
-    var staged: Staged = .{ .frontend = self, .length = result.output_length, .start = try self.screen.liveEnd() };
-    // Every cut in output order; at one offset an echo ends before a
-    // boundary prunes it, and a boundary prunes before an echo begins.
-    const Cut = struct { output: u64, kind: enum { echo_end, boundary, echo_start }, index: usize };
-    var cuts: [@typeInfo(@FieldType(reads.Boundaries, "items")).array.len + 2 * @typeInfo(@FieldType(reads.Echoes, "items")).array.len]Cut = undefined;
-    var count: usize = 0;
-    for (result.boundaries.slice(), 0..) |mark, index| {
-        cuts[count] = .{ .output = mark.output, .kind = .boundary, .index = index };
-        count += 1;
+    if (read == .scan) {
+        const scan = FeedPolicy.applyScan(window.high, page.started_from, page.replace_from, provisional, result.new_rows);
+        if (!self.screen.anchor.following()) self.new_below += result.new_rows;
+        if (scan.rows == .count_only) return;
     }
-    for (result.echoes.slice(), 0..) |echo, index| {
-        cuts[count] = .{ .output = echo.output, .kind = .echo_start, .index = index };
-        cuts[count + 1] = .{ .output = echo.end, .kind = .echo_end, .index = index };
-        count += 2;
+    if (read == .opening) {
+        // Only now abandon the old frame of a jump whose high was evicted.
+        window.trim(window.count, 0);
+        self.screen.anchor.follow();
+        self.new_below = 0;
+    } else if (page.replace_from != null and !page.continuing and read != .fill_above) {
+        try window.replaceFrom(page.replace_from.?, &.{});
     }
-    std.sort.insertion(Cut, cuts[0..count], {}, struct {
-        fn less(_: void, left: Cut, right: Cut) bool {
-            return left.output < right.output or (left.output == right.output and @backingInt(left.kind) < @backingInt(right.kind));
+    const document = try self.init.gpa.create(viewport.Document);
+    defer self.init.gpa.destroy(document);
+    const backward = page.direction == .backward;
+    var complete = true;
+    for (0..result.row_count) |step| {
+        const row = &result.rows[if (backward) result.row_count - step - 1 else step];
+        document.* = .{ .sidenotes = true, .quotes = true, .width_method = self.screen.vx.caps.unicode };
+        var buffer: [4096]u8 = undefined;
+        var copied: u64 = 0;
+        while (copied < row.length) {
+            const wanted: usize = @intCast(@min(buffer.len, row.length - copied));
+            const got = try self.files.inspection.readPositionalAll(self.init.io, buffer[0..wanted], row.offset + copied);
+            if (got != wanted) return error.TruncatedDisplayScratch;
+            try document.append(buffer[0..got]);
+            copied += got;
         }
-    }.less);
-    var echoes = result.echoes;
-    for (cuts[0..count]) |cut| {
-        const offset = try staged.to(cut.output);
-        switch (cut.kind) {
-            .boundary => {
-                const mark = result.boundaries.items[cut.index];
-                self.live.marks.record(.{ .offset = offset, .cursor = mark.cursor, .admitted = mark.admitted });
-                self.live.echoes.prune(offset);
-            },
-            .echo_start => echoes.items[cut.index].output = offset,
-            .echo_end => {
-                var echo = echoes.items[cut.index];
-                echo.end = offset;
-                if (echo.message.state != .applied) self.live.lowest = if (self.live.lowest) |known| @min(known, echo.position) else echo.position;
-                self.live.echoes.add(echo, self.reading.opening);
-            },
+        try document.prepare();
+        var targets: [16]feed_window.MessageTarget = undefined;
+        var target_count: usize = 0;
+        var at: usize = 0;
+        while (at < document.length and target_count < row.collapsed_count) : (at += 1) {
+            if (document.collapsed(at, @min(at + "┄".len, document.length)).last == at) {
+                targets[target_count] = .{ .offset = at, .target = row.collapsed_targets[target_count] };
+                target_count += 1;
+            }
+        }
+        const entry: feed_window.Entry = .{ .key = row.key, .text = feed_window.Text.fromDocument(document), .tight = row.tight, .provisional = row.provisional, .messages = targets[0..target_count] };
+        if (!self.insertFeed(entry, backward)) {
+            complete = false;
+            break;
         }
     }
-    _ = try staged.to(staged.length);
-    for (0..result.collapsed.count) |index| self.live.blocks.append(result.collapsed.at(index));
-    if (staged.length != 0) self.reading.output_started = true;
+    if (backward) {
+        window.low = if (complete) result.low else if (window.count != 0) window.entries[0].key else window.low;
+        window.at_start = complete and result.at_start;
+        if (read == .opening) {
+            window.high = result.high;
+            window.at_end = result.at_end;
+            window.forward_partial = false;
+        }
+        self.screen.anchor.prepend(window.layoutEntries(self.screen.textLayout()), self.screen.height, window.edges());
+    } else {
+        window.high = if (complete) result.high else if (window.count != 0) window.entries[window.count - 1].key else window.high;
+        window.at_end = complete and result.at_end;
+        window.forward_partial = !window.at_end;
+        self.screen.anchor.append(window.layoutEntries(self.screen.textLayout()), self.screen.height, window.edges());
+    }
+    self.reading.output_started = self.reading.output_started or result.row_count != 0;
+    self.dirty = true;
 }
 
-/// Writes staged output to live output up to an output offset.
-const Staged = struct {
-    frontend: *Self,
-    length: u64,
-    start: u64,
-    written: u64 = 0,
-    buffer: [4096]u8 = undefined,
-
-    fn to(self: *Staged, output: u64) !u64 {
-        const frontend = self.frontend;
-        while (self.written < output) {
-            const count = try frontend.files.inspection.readPositionalAll(frontend.init.io, self.buffer[0..@intCast(@min(self.buffer.len, output - self.written))], self.written);
-            if (count == 0) return error.TruncatedDisplayScratch;
-            // A notice can end the group while a read is still silent. Restore
-            // its separator before the first compact heading.
-            if (self.written == 0 and !frontend.reading.opening and !frontend.live.compact_tools and self.buffer[0] != '\n') try frontend.screen.append("\n");
-            try frontend.screen.append(self.buffer[0..count]);
-            self.written += count;
+/// Evict only outside the visible rows and their three-screen margins. A
+/// page larger than the bound stops at its last inserted key; need() resumes
+/// there later instead of discarding an anchor or silently skipping history.
+fn insertFeed(self: *Self, entry: feed_window.Entry, backward: bool) bool {
+    const window = &self.screen.feed;
+    while (true) {
+        const inserted = if (backward) window.prepend(&.{entry}) else window.append(&.{entry});
+        if (inserted) |_| return true else |_| {
+            const trim = self.screen.anchor.trim(window.heights(self.screen.textLayout()), self.screen.height, window.count -| 1);
+            if (trim.drop_front == 0 and trim.drop_back == 0) return false;
+            window.trim(trim.drop_front, trim.drop_back);
         }
-        return if (output == 0) self.start else try frontend.screen.liveEnd();
     }
-};
+}
+
+/// Test fixtures seed the real resident owner, not a second live document.
+fn seedFeed(screen: *Screen, bytes: []const u8) !void {
+    const document = try std.testing.allocator.create(viewport.Document);
+    defer std.testing.allocator.destroy(document);
+    document.* = .{ .sidenotes = true, .width_method = screen.vx.caps.unicode };
+    try document.append(bytes);
+    try document.prepare();
+    const key: feed_window.Key = .{ .position = if (screen.feed.high) |high| high.position + 1 else 1 };
+    try screen.feed.append(&.{.{ .key = key, .text = feed_window.Text.fromDocument(document) }});
+    screen.feed.high = key;
+    if (screen.feed.low == null) screen.feed.low = key;
+    screen.feed.at_start = true;
+    screen.feed.at_end = true;
+}
 
 fn joinReader(self: *Self) ReadEnd {
     if (self.reader.thread == null) return .absent;
@@ -2784,7 +2517,6 @@ test "read diagnostic shows the Host's type and code as escaped line text" {
 
 fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     const pending = self.reading.pending_diagnostic.?;
-    self.live.compact_tools = false;
     var bytes: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     const summary = switch (pending.phase) {
@@ -2796,13 +2528,18 @@ fn presentReadDiagnostic(self: *Self, sink: anytype) !void {
     try out.writeAll(summary);
     try out.writeAll(" ");
     try self.writePendingDiagnostic(&out);
-    try sink.append("\n");
-    try sink.append(View.Style.failure.code(self.colour));
-    try sink.append(out.buffered());
-    try sink.append(View.Style.normal.code(self.colour));
-    try sink.append("\n");
-    // The transcript keeps the details; the notice stays one terse row.
-    self.notice = summary;
+    if (comptime @TypeOf(sink) == *Screen) {
+        // Read diagnostics are UI notices, not counterfeit Activity rows.
+        @memcpy(self.notice_buffer[0..out.buffered().len], out.buffered());
+        self.notice = self.notice_buffer[0..out.buffered().len];
+    } else {
+        try sink.append("\n");
+        try sink.append(View.Style.failure.code(self.colour));
+        try sink.append(out.buffered());
+        try sink.append(View.Style.normal.code(self.colour));
+        try sink.append("\n");
+        self.notice = summary;
+    }
     self.reading.pending_diagnostic = null;
     self.dirty = true;
 }
@@ -2830,7 +2567,7 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
             self.length += bytes.len;
         }
     };
-    for ([_]ReadPhase{ .history, .details }) |phase| {
+    for ([_]ReadPhase{.details}) |phase| {
         for (1..6) |fail_at| {
             var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false, .reading = .{ .phase = phase } };
             self.init.io = std.testing.io;
@@ -2867,7 +2604,6 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
 
 fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end.preparationFailure()) {
-        if (self.reading.phase == .history) self.transcript.older_failed = true;
         if (self.reading.pending_diagnostic == null)
             self.notice = switch (reader_policy.unavailable(self.reading.phase, self.readInspection())) {
                 .say => |text| text,
@@ -2878,39 +2614,34 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
     }
     if (end != .complete) return;
     var observed: ?struct { work: protocol.session_work.Work, opening: bool } = null;
-    if (self.reading.output_started)
-        self.live.compact_tools = if (self.reading.phase == .activity or self.reading.phase == .permission) self.job.result.compact_tools else false;
-    if (self.reading.phase == .history or self.reading.phase == .message) {
-        self.notice = null; // Clears "Loading earlier messages…" or "Opening message…".
-    } else if (self.reading.phase == .recall) {
-        // showRecalled selected the notice.
-    } else if (self.reading.phase == .details or self.reading.phase == .inspection) {
-        // showInspection selected the notice.
-    } else {
-        // History, footer, status and /status change together, in one frame.
-        const result = &self.job.result;
-        observed = .{ .work = result.work.work, .opening = self.reading.opening };
-        self.live.work = .fromCore(result.work.work);
-        // A taken Message leaves the queued row in the frame that shows it.
-        self.live.queued = result.queued;
-        if (result.queued_line) |shown| self.live.queued_line = shown;
-        self.live.drawn = self.job.drawn;
-        if (self.job.open_status or self.job.watch_status) try self.applyStatus();
-        if (result.line) |*line| self.line = line.*;
-        if (result.hint) |*hint| self.hint = hint.*;
-        self.live.view = result.live;
-        self.live.cursor = result.cursor;
-        self.reading.opening = false;
-        self.upgrade_stale = false;
-        if (self.reading.phase == .permission) {
-            self.reading.prepared_action = result.action;
-            self.reading.prepared_summary = result.summary;
+    const phase = self.reading.phase;
+    if (phase == .message) {
+        self.notice = null;
+    } else if (phase == .activity or phase == .permission) {
+        const read = self.reading.feed_read;
+        // Filtered fills never overwrite current work or move the scan cursor.
+        if (read == .opening or read == .scan or phase == .permission) {
+            const result = &self.job.result;
+            observed = .{ .work = result.work.work, .opening = read == .opening };
+            self.live.work = .fromCore(result.work.work);
+            self.live.queued = result.queued;
+            if (result.queued_line) |shown| self.live.queued_line = shown;
+            if (self.job.open_status or self.job.watch_status) try self.applyStatus();
+            if (result.line) |*line| self.line = line.*;
+            if (result.hint) |*hint| self.hint = hint.*;
+            self.live.view = result.live;
+            self.live.cursor = result.cursor;
+            self.live.provisional = result.scan_provisional;
+            if (read == .opening) self.reading.opening = false;
+            self.upgrade_stale = false;
+            self.poll_at = feed_reads.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
+        }
+        if (phase == .permission) {
+            self.reading.prepared_action = self.job.result.action;
+            self.reading.prepared_summary = self.job.result.summary;
             if (self.reading.prepared_action == null) self.reading.phase = .activity;
         }
     }
-    // A /status asked for during this read is the next read's, at once.
-    self.poll_at = reader_policy.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
-    // News goes out first in the next frame, once the read is applied.
     if (observed) |read| try self.lender.observed(self.lender.context, read.work, read.opening);
     self.dirty = true;
 }
@@ -2941,40 +2672,9 @@ test "archive badges follow only completed server snapshots and stay distinct fr
     }
 }
 
-test "frontend commits spacing only for completed visible reads" {
-    const progress: ReadEnd.Progress = .{ .phase = .activity, .rendering = false };
-    const Case = struct { end: ReadEnd = .complete, output: bool, prior: bool, next: bool, expected: bool };
-    for ([_]Case{
-        // A notice may clear UI grouping after a worker snapshots it.
-        .{ .output = false, .prior = false, .next = true, .expected = false },
-        .{ .output = false, .prior = true, .next = false, .expected = true },
-        .{ .output = true, .prior = false, .next = true, .expected = true },
-        .{ .output = true, .prior = true, .next = false, .expected = false },
-        .{ .end = .{ .cancelled = progress }, .output = true, .prior = false, .next = true, .expected = false },
-        .{ .end = .{ .failed = .{ .err = error.Cancelled, .progress = progress } }, .output = true, .prior = true, .next = false, .expected = true },
-    }) |case| {
-        var self: Self = .{
-            .init = undefined,
-            .store = "unused",
-            .session = "unused",
-            .directory = "unused",
-            .files = undefined,
-            .command = undefined,
-            .colour = false,
-            .reading = .{ .opening = false, .output_started = case.output },
-            .live = .{ .cursor = .{ .position = 7 }, .compact_tools = case.prior },
-        };
-        self.job.result = .{ .cursor = .{ .position = 12 }, .compact_tools = case.next };
-        self.init.io = std.testing.io;
-        try self.applyReader(case.end);
-        try std.testing.expectEqual(case.expected, self.live.compact_tools);
-        try std.testing.expectEqual(@as(u64, if (case.end == .complete) 12 else 7), self.live.cursor.position);
-    }
-}
-
 test "the queued row shows what waits until it is taken, whatever the work is doing" {
     const some: protocol.Queued = .{ .count = 2, .oldest_position = 30, .newest_admission = 9, .newest_position = 34 };
-    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, drawn: queued_line.Drawn = .{}, line: ?u64 = 9, count: u64 = 2, shown: bool };
+    const Case = struct { queued: protocol.Queued, state: protocol.WorkState, line: ?u64 = 9, count: u64 = 2, shown: bool };
     var line: queued_line.Line = .{ .len = 0 };
     try line.set("check the cache");
     for ([_]Case{
@@ -2982,14 +2682,14 @@ test "the queued row shows what waits until it is taken, whatever the work is do
         .{ .queued = some, .state = .{ .approval = .{ .since = 1 } }, .shown = true },
         // A Message held back and then left pending, which live output
         // shows only once taken: the row shows it meanwhile.
-        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .shown = true },
-        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .shown = true },
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .count = 1, .shown = true },
+        .{ .queued = some, .state = .{ .idle = .{ .since = 1 } }, .count = 1, .shown = true },
         // Sent while the Session stayed pending: the first showed at its
         // Admission and still waits, so the row counts only the second.
-        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 7, .position = 30 }, .count = 1, .shown = true },
+        .{ .queued = some, .state = .{ .pending = .{ .since = 1 } }, .count = 1, .shown = true },
         // Nothing waits, or the one waiting showed while it waited.
         .{ .queued = .{}, .state = .{ .working = .{ .since = 1 } }, .shown = false },
-        .{ .queued = .{ .count = 1, .oldest_position = 34, .newest_admission = 9, .newest_position = 34 }, .state = .{ .pending = .{ .since = 1 } }, .drawn = .{ .admission = 9, .position = 34 }, .shown = false },
+        .{ .queued = .{ .count = 1, .oldest_position = 34, .newest_admission = 9, .newest_position = 34 }, .state = .{ .pending = .{ .since = 1 } }, .shown = false },
         // The line held is another Message's, or none was read.
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = 8, .shown = false },
         .{ .queued = some, .state = .{ .working = .{ .since = 1 } }, .line = null, .shown = false },
@@ -3002,7 +2702,7 @@ test "the queued row shows what waits until it is taken, whatever the work is do
             .files = undefined,
             .command = undefined,
             .colour = false,
-            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .drawn = case.drawn, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
+            .live = .{ .queued = case.queued, .work = .{ .state = case.state }, .queued_line = if (case.line) |admission| .{ .admission = admission, .line = line } else null },
         };
         const row = self.queuedRow() orelse {
             try std.testing.expect(!case.shown);
@@ -3169,24 +2869,6 @@ fn startChange(self: *Self) bool {
     return true;
 }
 
-test "a transcript begun before grown live output is drawn shows the gap, not a lost join" {
-    var environ = try std.testing.environ.createMap(std.testing.allocator);
-    defer environ.deinit();
-    const screen = try std.testing.allocator.create(Screen);
-    defer std.testing.allocator.destroy(screen);
-    try screen.init(std.testing.io, &environ, false);
-    defer screen.deinit();
-    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false, .reading = .{ .opening = false } };
-    try screen.append("GROWS-FIRST\n");
-    self.live.marks.record(.{ .offset = 12, .cursor = .{ .end = 3 }, .admitted = 4 });
-    // Unescaped, the rows after the mark fit; escaped, they evict it.
-    try Screen.appendEscapeGrowth(screen);
-    try screen.append("\nGROWS-END\n");
-    try self.beginTranscript();
-    try std.testing.expect(std.mem.indexOf(u8, screen.browsing.text(), "Earlier rows left this view.") != null);
-    try std.testing.expectEqual(@as(?u64, 3), if (self.transcript.older) |cursor| cursor.end else null);
-}
-
 /// A frontend attached to App as `rui` attaches it: Root before it, a
 /// permission card that holds focus while it shows, and hooks that record
 /// leaving and an Upgrade instead of acting on them.
@@ -3221,6 +2903,8 @@ const HeldFrontend = struct {
         lender.upgrade = shownUpgrade;
         held.self.begin(init, "unused", "unused", held.directory[0..directory], undefined, undefined, undefined, undefined, screen, &held.interrupted, lender);
         held.self.reading.opening = false;
+        screen.feed.at_end = true;
+        screen.feed.at_start = true;
         // No read is due: a test hands the frontend what a read would.
         held.self.poll_at = std.math.maxInt(i96);
         held.self.submission.environment = .empty;
@@ -3372,34 +3056,7 @@ fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     try held.keys(bytes);
 }
 
-test "a history page read for an earlier transcript never joins the current one" {
-    const Worker = struct {
-        fn read(_: *anyopaque, _: *Task) !void {}
-    };
-    const held = try HeldFrontend.create();
-    defer held.destroy();
-    const self = &held.self;
-    self.files.inspection = try held.tmp.dir.createFile(std.testing.io, "older", .{ .read = true });
-    defer self.files.inspection.close(std.testing.io);
-    try self.files.inspection.writePositionalAll(std.testing.io, "STALE PAGE ROW\n", 0);
-    try held.settle();
-    try held.keys("\x1b[5~");
-    self.job.transcript = self.transcript.id;
-    self.reading.phase = .history;
-    try self.reader.start(std.testing.io, self, Worker.read);
-    defer {
-        self.reader.cancel();
-        self.reader.join() catch {};
-    }
-    try held.keys("\x07\x1b[5~");
-    try std.testing.expect(self.job.transcript != self.transcript.id);
-    while (!self.reader.completed()) std.Thread.yield() catch {};
-    try held.settle();
-    try held.keys("\x1b[5~");
-    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "STALE PAGE ROW") == null);
-}
-
-test "sending a Message drops an older-page read still waiting to start" {
+test "sending a Message drops a details read still waiting to start" {
     const Worker = struct {
         var release: std.atomic.Value(bool) = .init(false);
         fn read(_: *anyopaque, _: *Task) !void {
@@ -3416,15 +3073,15 @@ test "sending a Message drops an older-page read still waiting to start" {
         self.reader.cancel();
         self.reader.join() catch {};
     }
-    try held.keys("/history\r");
-    try std.testing.expect(self.transcript.history_requested != null);
+    try held.keys("/details\r");
+    try std.testing.expect(self.details_requested);
     try held.keys("hello\r");
-    try std.testing.expect(self.transcript.history_requested == null);
+    try std.testing.expect(!self.details_requested);
     Worker.release.store(true, .release);
     while (!self.reader.completed()) std.Thread.yield() catch {};
     try self.settleReader();
     try held.settle();
-    try std.testing.expect(self.transcript.history_requested == null);
+    try std.testing.expect(!self.details_requested);
     try std.testing.expect(self.reader.thread == null);
 }
 
@@ -3461,11 +3118,11 @@ test "sending a Message drops a /status read still waiting to start" {
 test "sending a Message from a browsed page returns the screen to the latest conversation" {
     const held = try HeldFrontend.create();
     defer held.destroy();
-    try held.screen.append("OLDER ROW\n");
-    for (0..60) |_| try held.screen.append("conversation row\n");
-    try held.screen.append("LATEST ROW\n");
+    try seedFeed(held.screen, "OLDER ROW\n");
+    for (0..60) |_| try seedFeed(held.screen, "conversation row\n");
+    try seedFeed(held.screen, "LATEST ROW\n");
     try held.settle();
-    for (0..6) |_| try held.keys("\x1b[5~");
+    for (0..16) |_| try held.keys("\x1b[5~");
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "OLDER ROW") != null);
     try held.keys("hello\r");
     const shown = try held.shown();
@@ -3983,7 +3640,7 @@ test "a details page read before a Message was sent never covers it" {
         while (!self.reader.completed()) std.Thread.yield() catch {};
         try self.settleReader();
         // The sent Message keeps the latest view; an unrelated page still opens.
-        try std.testing.expectEqual(if (send) Screen.ViewKind.live else .inspection, held.screen.view);
+        try std.testing.expectEqual(if (send) Screen.ViewKind.feed else .inspection, held.screen.view);
     }
 }
 
@@ -4885,13 +4542,15 @@ const ChromeFixture = struct {
         fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
         fixture.widget = fixture.self.attach(.{ .root = &fixture.root, .context = fixture.self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         fixture.self.reading.opening = false;
+        fixture.screen.feed.at_end = true;
+        fixture.screen.feed.at_start = true;
         fixture.self.poll_at = std.math.maxInt(i96);
         fixture.arena = .init(std.testing.allocator);
         fixture.ctx = .{ .io = std.testing.io, .alloc = fixture.arena.allocator(), .cmds = .empty };
         var history: [100 * 20]u8 = undefined;
         var writer = std.Io.Writer.fixed(&history);
         for (0..100) |number| try writer.print("History line {d:0>3}\n", .{number});
-        try fixture.screen.live.append(writer.buffered());
+        try seedFeed(fixture.screen, writer.buffered());
     }
 
     fn deinit(fixture: *ChromeFixture) void {
@@ -4971,8 +4630,9 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expectEqualStrings("+2 more running · /status", shown[first + 3]);
     // No shown call carries the clock, so the work line follows, once.
     try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 13s"));
-    // The tail sits right above the input's top rule.
-    try std.testing.expect(std.mem.startsWith(u8, shown[first + 5], "─"));
+    // The chip always reserves a row between the tail and the input rule.
+    try std.testing.expectEqualStrings("", shown[first + 5]);
+    try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "─"));
     var waiting: usize = 0;
     for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Waiting"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
@@ -4997,7 +4657,8 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     // The waiting row is the tail's last, under the work line.
     try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Waiting"));
-    try std.testing.expect(std.mem.startsWith(u8, three[row + 1], "─"));
+    try std.testing.expectEqualStrings("", three[row + 1]);
+    try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "─"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
     // One waiting: no count. A first line read for an older Message shows nothing.
     self.live.queued.count = 1;
@@ -5239,100 +4900,6 @@ test "App Session's chrome clicks that run a command say so while another waits 
     try std.testing.expectEqual(Submission.State.not_started, self.submission.view().?.state);
 }
 
-test "App Session shows work under way at the transcript's tail, and the ↓ marker in its place while scrolled back" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 } };
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.tail != null);
-    try std.testing.expect(self.app_screen.marker == null);
-    try std.testing.expectEqualStrings("Waiting", self.chrome.activity.work.?.words);
-    try std.testing.expect(self.chrome.status.bar.stop);
-
-    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.tail == null);
-    try std.testing.expect(self.app_screen.marker.?.eql(self.chrome.marker.widget()));
-    try std.testing.expectEqualStrings("↓", self.chrome.marker.label);
-    // The marker counts entries live output showed since, never how far
-    // the Activity's positions moved: a read of items that show nothing
-    // adds none.
-    self.live.cursor.position += 40;
-    self.job.result = .{};
-    try self.showStaged();
-    _ = try fixture.draw();
-    try std.testing.expectEqualStrings("↓", self.chrome.marker.label);
-    self.live.cursor.position += 1;
-    self.job.result = .{ .entries = 2 };
-    try self.showStaged();
-    _ = try fixture.draw();
-    try std.testing.expectEqualStrings("↓ 2 new", self.chrome.marker.label);
-
-    try fixture.press(.{ .codepoint = vaxis.Key.escape });
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.marker == null);
-    try std.testing.expect(self.app_screen.tail != null);
-}
-
-test "App Session's ↓ marker takes a row of its own while scrolled back, so no Message's time hides under it" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    // Messages whose time ends at the last column, each telling its row.
-    var timed: [40 * 48]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&timed);
-    for (0..40) |number| try writer.print("\x1b[94m›\x1b[39m \x1b[8m14:{d:0>2}\x1b[0mRow {d:0>2}\n", .{ number, number });
-    try fixture.screen.live.append(writer.buffered());
-    const live = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, live[18], "› Row 39") and std.mem.endsWith(u8, live[18], "14:39"));
-    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
-    const shown = try fixture.rows();
-    // The marker alone at the right of the row above the input's rule.
-    try std.testing.expectEqualStrings("↓", std.mem.trim(u8, shown[18], " "));
-    try std.testing.expect(std.mem.startsWith(u8, shown[19], "─"));
-    // Every Message the transcript drew keeps its whole time.
-    var drawn: usize = 0;
-    for (shown[0..18]) |row| if (std.mem.startsWith(u8, row, "› Row ")) {
-        try std.testing.expectEqualStrings(row["› Row ".len..][0..2], row[row.len - 2 ..]);
-        drawn += 1;
-    };
-    try std.testing.expectEqual(@as(usize, 18), drawn);
-}
-
-test "App Session's Shift-↓ returns to the latest once it reaches where the latest view starts, the marker's row included" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    const latest = try fixture.rows();
-    try fixture.press(.{ .codepoint = vaxis.Key.up, .mods = .{ .shift = true } });
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.marker != null);
-    try fixture.press(.{ .codepoint = vaxis.Key.down, .mods = .{ .shift = true } });
-    const returned = try fixture.rows();
-    try std.testing.expect(self.app_screen.marker == null);
-    try std.testing.expectEqualDeep(latest, returned);
-}
-
-test "App Session's End no longer returns to the latest; Esc and the marker do" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    try fixture.press(.{ .codepoint = vaxis.Key.page_up });
-    _ = try fixture.draw();
-    const anchor = self.app_content.first;
-    try fixture.press(.{ .codepoint = vaxis.Key.end });
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.marker != null);
-    try std.testing.expectEqual(anchor, self.app_content.first);
-    try self.chrome.marker.on_click(self.chrome.marker.userdata, &fixture.ctx);
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.marker == null);
-}
-
 test "App Session notice goes after five seconds or at the next key" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
@@ -5385,25 +4952,6 @@ test "App Session ? on an empty draft shows the shortcuts; the next key closes t
     try std.testing.expectEqualStrings("?", self.input.composition().bytes);
 }
 
-test "App Session opens the collapsed Message whose ┄ row was clicked, as Ctrl-O does" {
-    var fixture: ChromeFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const self = fixture.self;
-    try fixture.screen.live.append("› first\n  \x1b[2;8m┄ 2 more lines\x1b[0m\n› second\n  \x1b[2;8m┄ 3 more lines\x1b[0m\nTail line\n");
-    const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
-    for ([_]u64{ 40, 50 }) |position| self.live.blocks.append(.{ .source = .activity, .position = position, .ordinal = 0, .content = content, .row = false });
-    _ = try fixture.draw();
-    const text = fixture.screen.live.text();
-    const handler = self.app_content.handler.?;
-    // Any other row opens nothing.
-    try handler.on_click.?(handler.userdata, &fixture.ctx, .{ .offset = std.mem.indexOf(u8, text, "Tail line").? });
-    try std.testing.expect(self.expansion.queued == .none);
-    const older = std.mem.lastIndexOfScalar(u8, text[0..std.mem.indexOf(u8, text, "┄ 2").?], '\n').? + 1;
-    try handler.on_click.?(handler.userdata, &fixture.ctx, .{ .offset = older });
-    try std.testing.expectEqual(@as(u64, 40), self.expansion.queued.ready.target.position);
-}
-
 test "App Session drag-copy notices follow the notice rule" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
@@ -5429,9 +4977,9 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
     for ("kept") |byte| try fixture.press(.{ .codepoint = byte, .text = &.{byte} });
     _ = try fixture.root.widget().draw(draw);
     const view_before = fixture.screen.view;
-    try std.testing.expect(view_before != .live);
-    const top = fixture.self.app_content.document.top;
-    try std.testing.expect(top != null);
+    try std.testing.expectEqual(Screen.ViewKind.feed, view_before);
+    const top = fixture.screen.anchor.anchor;
+    try std.testing.expect(top == .at);
     const focused = fixture.self.app_input.composer.widget();
     const commands = fixture.ctx.cmds.items.len;
     try std.testing.expect(fixture.ctx.cmds.items[commands - 1].request_focus.eql(focused));
@@ -5441,7 +4989,7 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept", fixture.self.input.composition().bytes);
         try std.testing.expectEqual(view_before, fixture.screen.view);
-        try std.testing.expectEqualDeep(top, fixture.self.app_content.document.top);
+        try std.testing.expectEqualDeep(top, fixture.screen.anchor.anchor);
         try std.testing.expectEqual(commands, fixture.ctx.cmds.items.len);
         var screen: vaxis.Screen = try .init(fixture.arena.allocator(), .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
@@ -5450,4 +4998,171 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
         const col = screen.cursor.col - @as(u16, if (width >= 100) 41 else 0);
         if (caret_col) |expected| try std.testing.expectEqual(expected, col) else caret_col = col;
     }
+}
+
+/// Feed-domain fixture: pages use the same staged-file handoff as the reader.
+const FeedFixture = struct {
+    held: *HeldFrontend,
+    file: std.Io.File,
+    const Row = struct { key: u64, text: []const u8, provisional: bool = false, target: ?View.Collapsed = null };
+
+    fn create() !FeedFixture {
+        const held = try HeldFrontend.create();
+        errdefer held.destroy();
+        const file = try held.tmp.dir.createFile(std.testing.io, "feed-page", .{ .read = true });
+        held.self.files = .{ .scratch = file, .inspection = file, .action = file, .status = file, .actions = .{ file, file } };
+        return .{ .held = held, .file = file };
+    }
+    fn destroy(self: FeedFixture) void {
+        self.held.destroy();
+        self.file.close(std.testing.io);
+    }
+    fn page(self: FeedFixture, read: feed_reads.Read, rows: []const Row, start: bool, end: bool) !void {
+        const frontend = &self.held.self;
+        frontend.reading.feed_read = read;
+        frontend.job = .{ .feed_page = FeedPolicy.request(read, frontend.feedState()) };
+        frontend.job.result.row_count = rows.len;
+        frontend.job.result.at_start = start;
+        frontend.job.result.at_end = end;
+        frontend.job.result.low = if (rows.len == 0) null else .{ .position = rows[0].key };
+        frontend.job.result.high = if (rows.len == 0) frontend.screen.feed.high else .{ .position = rows[rows.len - 1].key };
+        var offset: u64 = 0;
+        for (rows, 0..) |row, i| {
+            try self.file.writePositionalAll(std.testing.io, row.text, offset);
+            frontend.job.result.rows[i] = .{ .key = .{ .position = row.key }, .offset = offset, .length = row.text.len, .tight = false, .provisional = row.provisional };
+            if (row.target) |target| {
+                frontend.job.result.rows[i].collapsed_targets[0] = target;
+                frontend.job.result.rows[i].collapsed_count = 1;
+            }
+            if (frontend.job.feed_page.?.started_from == null or row.key > frontend.job.feed_page.?.started_from.?.position) frontend.job.result.new_rows += 1;
+            offset += row.text.len;
+        }
+        try frontend.showStaged();
+        frontend.reading.opening = false;
+        frontend.live.cursor = .{ .position = if (frontend.screen.feed.high) |high| high.position else 0, .ordinal = if (frontend.screen.feed.high) |high| high.ordinal else null };
+        frontend.live.provisional = frontend.screen.feed.firstProvisional();
+    }
+    fn longPage(self: FeedFixture, read: feed_reads.Read, first: u64) !void {
+        var rows: [16]Row = undefined;
+        var words: [16][160]u8 = undefined;
+        for (&rows, 0..) |*row, i| {
+            var out = std.Io.Writer.fixed(&words[i]);
+            for (0..8) |line| try out.print("entry {d} line {d}\n", .{ first + i, line });
+            row.* = .{ .key = first + i, .text = out.buffered() };
+        }
+        try self.page(read, &rows, false, read != .fill_above);
+    }
+};
+
+fn firstRows(text: []const u8, count: usize) []const u8 {
+    var end: usize = 0;
+    for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
+    return text[0..end];
+}
+
+test "SessionFrontend feed opens full bottom aligned and page round trip is an identical frame" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    try fixture.longPage(.opening, 100);
+    const held = fixture.held;
+    const initial = try held.shown();
+    errdefer std.debug.print("initial feed frame:\n{s}\nfinal feed frame:\n{s}\n", .{ initial, held.shown() catch "unavailable" });
+    try std.testing.expectEqual(@as(u32, 0), held.screen.anchor.visible(held.screen.feed.layoutEntries(held.screen.textLayout()), held.screen.height).pad);
+    try std.testing.expect(std.mem.indexOf(u8, firstRows(initial, 2), "entry ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, initial, "entry 115 line 7") != null);
+    for (0..3) |_| try held.keys("\x1b[5~");
+    try std.testing.expect(!held.screen.anchor.following());
+    for (0..3) |_| try held.keys("\x1b[6~");
+    try std.testing.expect(held.screen.anchor.following());
+    try std.testing.expectEqualStrings(initial, try held.shown());
+}
+
+test "SessionFrontend feed banks held PgUp across a fill and live arrivals keep the held rows still" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    try fixture.longPage(.opening, 100);
+    _ = try held.draw();
+    try held.self.scroll(false, 1000);
+    try std.testing.expect(held.screen.anchor.banked_rows < 0);
+    const before_key = held.screen.anchor.anchor.at.key;
+    try fixture.longPage(.fill_above, 84);
+    try std.testing.expect(held.screen.anchor.anchor == .at);
+    try std.testing.expect(held.screen.anchor.anchor.at.key.order(before_key) == .lt);
+    const held_anchor = held.screen.anchor.anchor;
+    const held_frame = try held.shown();
+    try fixture.longPage(.fill_above, 68);
+    try std.testing.expectEqualDeep(held_anchor, held.screen.anchor.anchor);
+    try std.testing.expectEqualStrings(held_frame, try held.shown());
+    const before = try held.shown();
+    const anchor = held.screen.anchor.anchor;
+    try fixture.page(.scan, &.{ .{ .key = 116, .text = "new settled row\n" }, .{ .key = 117, .text = "another settled row\n" } }, false, true);
+    try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
+    try std.testing.expectEqual(@as(usize, 2), held.self.new_below);
+    const after = try held.shown();
+    try std.testing.expectEqualStrings(firstRows(before, held.screen.height), firstRows(after, held.screen.height));
+    try std.testing.expect(std.mem.indexOf(u8, after, "↓ 2 new") != null);
+}
+
+test "SessionFrontend feed jump after high eviction keeps old rows until the opening lands" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    try fixture.longPage(.opening, 100);
+    _ = try held.draw();
+    try held.self.scroll(false, 80);
+    held.screen.feed.trim(0, 4);
+    const old = try held.shown();
+    const anchor = held.screen.anchor.anchor;
+    try held.self.jumpToEnd();
+    try std.testing.expect(held.self.reading.opening);
+    try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
+    try std.testing.expectEqual(feed_reads.Read.opening, FeedPolicy.nextRead(held.self.feedState()).?);
+    try std.testing.expectEqualStrings(firstRows(old, held.screen.height), firstRows(try held.shown(), held.screen.height));
+    try fixture.longPage(.opening, 300);
+    try std.testing.expect(held.screen.anchor.following());
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "entry 315 line 7") != null);
+}
+
+test "SessionFrontend feed reload restores keyed Ctrl-O target and replaces a provisional suffix once" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const target: View.Collapsed = .{ .source = .activity, .position = 40, .ordinal = 0, .content = .{ .length = 2000, .digest = @splat(7) }, .row = false };
+    const summary = "› preview\n  " ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n";
+    try fixture.page(.opening, &.{ .{ .key = 40, .text = summary, .target = target }, .{ .key = 50, .text = "settled\n" } }, true, true);
+    _ = try held.draw();
+    _ = try held.self.expand();
+    try std.testing.expectEqualDeep(target, held.self.expansion.queued.ready.target);
+    held.screen.feed.setOpen(.{ .position = 40 }, true);
+    held.screen.feed.trim(1, 0);
+    held.screen.anchor.anchor = .{ .at = .{ .key = .{ .position = 50 } } };
+    try fixture.page(.fill_above, &.{.{ .key = 40, .text = summary, .target = target }}, true, false);
+    held.screen.anchor.follow();
+    _ = try held.draw();
+    _ = try held.self.expand();
+    try std.testing.expectEqualDeep(target, held.self.expansion.queued.ready.target);
+    try std.testing.expect(held.screen.feed.isOpen(.{ .position = 40 }));
+    try fixture.page(.scan, &.{ .{ .key = 60, .text = "› provisional\n", .provisional = true }, .{ .key = 61, .text = "between\n" } }, false, true);
+    try fixture.page(.scan, &.{ .{ .key = 61, .text = "between\n" }, .{ .key = 62, .text = "› applied\n" } }, false, true);
+    try std.testing.expect(held.screen.feed.firstProvisional() == null);
+    try std.testing.expectEqual(@as(usize, 4), held.screen.feed.count);
+    try std.testing.expect(std.mem.indexOf(u8, held.screen.feed.document.text(), "provisional") == null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, held.screen.feed.document.text(), "› applied"));
+}
+
+test "SessionFrontend feed resize inside a long answer preserves the same logical line on top" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    var words: [8000]u8 = undefined;
+    var out = std.Io.Writer.fixed(&words);
+    for (0..50) |line| try out.print("logical {d:0>2} answer words that wrap on a narrow terminal but keep their identity\n", .{line});
+    try fixture.page(.opening, &.{.{ .key = 10, .text = out.buffered() }}, true, true);
+    held.screen.anchor.anchor = .{ .at = .{ .key = .{ .position = 10 }, .line = 12 } };
+    try std.testing.expect(std.mem.indexOf(u8, firstRows(try held.shown(), 1), "logical 12") != null);
+    const anchor = held.screen.anchor.anchor;
+    held.size = .{ .width = 46, .height = 30 };
+    try std.testing.expect(std.mem.indexOf(u8, firstRows(try held.shown(), 1), "logical 12") != null);
+    try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
 }

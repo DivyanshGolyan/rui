@@ -15,7 +15,8 @@ test {
     _ = @import("Palette.zig");
     _ = @import("skill_palette_tests.zig");
     _ = @import("Composer.zig");
-    _ = @import("Transcript.zig");
+    _ = @import("DocumentView.zig");
+    _ = @import("FeedView.zig");
     _ = @import("Root.zig");
     _ = @import("Chip.zig");
     _ = @import("StatusRow.zig");
