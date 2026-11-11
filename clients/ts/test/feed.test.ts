@@ -91,8 +91,9 @@ function narrowed(entry: FeedEntry): void {
 			break;
 		}
 		case "session_changed": {
-			const field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label" = entry.field;
-			void field;
+			const field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "reasoning_effort_refused" | "label" = entry.field;
+			const providerText: string | null = entry.providerText;
+			void [field, providerText];
 			break;
 		}
 		case "compacted": {
@@ -478,3 +479,21 @@ for (const follow of [false, true]) {
 		}
 	});
 }
+
+
+test("a refused effort change retains its revision and inline provider text", async () => {
+    const row = { position: "4", ordinal: "0", at: "9", value: { session_changed: { revision: "2", field: "reasoning_effort_refused", provider_text: "unsupported_value: high is not supported" } } };
+    const link: Link = { exchange: async (path) => {
+        assert.equal(path, "/v1/activity-page");
+        return Buffer.from(JSON.stringify({ delta: "full", since: null, items: [row], more: false, end: "4" }));
+    } };
+    const entries = [];
+    for await (const entry of listActivity(link, "ses123")) entries.push(entry);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.kind, "session_changed");
+    if (entries[0]?.kind === "session_changed") {
+        assert.equal(entries[0].field, "reasoning_effort_refused");
+        assert.equal(entries[0].revision, "2");
+        assert.equal(entries[0].providerText, "unsupported_value: high is not supported");
+    }
+});

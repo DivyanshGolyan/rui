@@ -455,7 +455,7 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
 /// transaction. The selected recipe was read under the same Entry lock; its
 /// uncovered bytes ride this read's batch, not a dependent round of their own.
 const admission_facts = rsql.Read(.{
-    .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
+    .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++

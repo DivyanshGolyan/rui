@@ -12266,6 +12266,97 @@ test "configuration validates effective effort across retained requested and tar
     }
 }
 
+test "effort provenance excludes refused Operations across unrelated revisions" {
+    try store_testing.forEachEngine(struct {
+        fn expectEffort(storage: *Store, binding: AttemptBinding, effort: ?protocol.ReasoningEffort) !void {
+            var view: HistoricalView = undefined;
+            storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var settings: HistoricalSettings = undefined;
+            try view.settings(&settings);
+            try std.testing.expectEqual(effort, settings.reasoning_effort);
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            const Before = enum { none, before_admission, after_admission };
+            const After = enum { none, label, no_op };
+            const efforts = [_]?protocol.ReasoningEffort{ null, .none, .low, .medium, .high, .xhigh, .max };
+            for (efforts) |effort| for ([_]bool{ false, true }) |legacy| for (std.enums.values(Before)) |before| for (std.enums.values(After)) |after| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("provenance-create", "", workspace, "unlisted-effort-model");
+                if (effort) |value| {
+                    create.configuration.reasoning_effort.state = .value;
+                    try create.configuration.reasoning_effort.value.set(@tagName(value));
+                } else create.configuration.reasoning_effort.state = .explicit_null;
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                try answerTestTurn(&storage, &tmp, session.slice(), "provenance-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
+                // A migrated null spec retains the earlier frozen effort.
+                if (legacy) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
+                const override = if (legacy) null else effort;
+                const rejected: protocol.ReasoningEffort = if (effort == .high) .max else .high;
+                var change: wire_request.ConfigureCommand = .{};
+                change.session = session;
+                try change.key.set("provenance-rejected-choice");
+                change.configuration.reasoning_effort.state = .value;
+                try change.configuration.reasoning_effort.value.set(@tagName(rejected));
+                const revision = (try storage.configure(&change, .{})).accepted.revision;
+                var unrelated: wire_request.ConfigureCommand = .{};
+                unrelated.session = session;
+                if (before != .none) {
+                    try unrelated.key.set("provenance-before");
+                    unrelated.configuration.label.state = .value;
+                    try unrelated.configuration.label.value.set("before refusal");
+                    if (before == .before_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
+                }
+                try submitTestMessage(&storage, &tmp, "provenance-input", "provenance-message", session.slice(), "change effort");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (before == .after_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
+                try expectEffort(&storage, binding, rejected);
+                try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: effort update" } }, .effort_change_refused, .{});
+                const refused = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(effort, refused.reasoning_effort);
+                try std.testing.expectEqual(override, refused.reasoning_effort_override);
+                if (after != .none) {
+                    try unrelated.key.set("provenance-after");
+                    unrelated.configuration = .{};
+                    if (after == .label) {
+                        unrelated.configuration.label.state = .value;
+                        try unrelated.configuration.label.value.set("after refusal");
+                    }
+                    try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
+                }
+                const observed = try storage.inspectSessionForTesting(session.slice());
+                // The P2 counterexample must fail here, not during setup.
+                try std.testing.expectEqual(effort, observed.reasoning_effort);
+                try std.testing.expectEqual(override, observed.reasoning_effort_override);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT " ++ configuration_domain.reasoningEffortRevisionSql("s") ++ " FROM session s WHERE s.session_ref=?1", .{session.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='reasoning_effort_refused'", .{ session.slice(), revision }));
+                var retry = (try storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
+                const retried = try retry.permit.consume();
+                try expectEffort(&storage, retried, effort);
+                try settleItemsForTesting(&storage, &tmp, retried, &.{"{\"type\":\"message\",\"id\":\"provenance-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
+                try submitTestMessage(&storage, &tmp, "provenance-next", "provenance-next-message", session.slice(), "next Operation");
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try expectEffort(&storage, next, effort);
+                try std.testing.expectEqual(effort, (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+                // Re-selecting the refused value is a new choice, not a
+                // permanent blacklist of that effort word.
+                try change.key.set("provenance-new-choice");
+                const chosen = (try storage.configure(&change, .{})).accepted;
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, rejected), (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+                try std.testing.expectEqual(chosen.revision, try store_testing.queryU64(&storage, "SELECT " ++ configuration_domain.reasoningEffortRevisionSql("s") ++ " FROM session s WHERE s.session_ref=?1", .{session.slice()}));
+                try expectEffort(&storage, next, effort);
+            };
+        }
+    }.run);
+}
+
 test "effective effort carries legacy history without inferring a fresh default" {
     var current: CurrentConfiguration = .{ .provider = .codex };
     try current.model.set("unlisted-model");
@@ -14660,6 +14751,176 @@ test "MCP read-only ordering uses frozen offers and admits read waves between wr
                     start = end;
                 }
                 try std.testing.expect((try storage.nextAction(.mcp)) == null);
+            }
+        }
+    }.run);
+}
+
+// One boundary test for every caller of the Session-message writer. A stop
+// does not close a Session: new input to it must still be admitted (D41).
+test "session message writer covers peer message_agent start_agent and ending with wake and refusal" {
+    // Ownership is part of this regression: correct rows alone did not catch
+    // four private copies of this transition. Pair the structural invariant
+    // with the durable behavior of every caller below.
+    const owner = @embedFile("domain/command.zig");
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, owner, "a.write(admit_sent_message,"));
+    try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, owner, "try admitFromSession("));
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Source = enum { peer, message_agent, start_agent, ending };
+            inline for (std.enums.values(Source)) |source| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var path: [protocol.max_workspace_bytes]u8 = undefined;
+                var create = try completeConfiguration("writer-source", "", try canonicalCwd(std.testing.io, &path), "model-a");
+                create.configuration.tools = try .of(&.{ "bash", "message_agent", "start_agent" });
+                create.configuration.permission_mode.state = .value;
+                try create.configuration.permission_mode.value.set("bypass");
+                const sender = (try storage.configure(&create, .{})).accepted.session;
+                var receiver = try configureTestSession(&storage, "writer-target");
+                // Existing stopped receivers accept fresh input on both send paths.
+                if (source == .peer or source == .message_agent) {
+                    var stop = try completeSessionStop("writer-target-stop", receiver.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                }
+                if (source == .ending) try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ receiver.slice(), sender.slice() });
+                try submitTestMessage(&storage, &tmp, "writer-task", "writer-task", sender.slice(), "send");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const text = "writer's saved content";
+                var key_buffer: [128]u8 = undefined;
+                var key: []const u8 = undefined;
+                var action: action_domain.CoreActionInput = undefined;
+                var peer: ActionExecutionInput = undefined;
+                if (source == .peer) {
+                    try settleTwoActionsForTesting(&storage, &tmp, model, "writer-peer-calls");
+                    const binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
+                    try storage.readActionExecutionInput(.bash, binding, &peer);
+                    key = "writer-peer-send";
+                } else if (source == .ending) {
+                    try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"writer's saved content\"}]}"}, text);
+                    key = try std.fmt.bufPrint(&key_buffer, "rui.core/ending/{d}", .{model.turn_id});
+                } else {
+                    const name = @tagName(source);
+                    var arguments_buffer: [128]u8 = undefined;
+                    const arguments = if (source == .message_agent) try std.fmt.bufPrint(&arguments_buffer, "{{\"id\":\"{s}\",\"text\":\"hello\"}}", .{receiver.slice()}) else "{}";
+                    var encoded_buffer: [192]u8 = undefined;
+                    const encoded = if (source == .message_agent) try std.fmt.bufPrint(&encoded_buffer, "{{\\\"id\\\":\\\"{s}\\\",\\\"text\\\":\\\"hello\\\"}}", .{receiver.slice()}) else "{}";
+                    const calls = [_]TestingCall{
+                        .{ .item_id = "send", .name = name, .encoded_call_id = "send", .decoded_call_id = "send", .encoded_arguments = encoded, .decoded_arguments = arguments },
+                        .{ .item_id = "missing", .name = name, .encoded_call_id = "missing", .decoded_call_id = "missing", .encoded_arguments = encoded, .decoded_arguments = arguments },
+                    };
+                    try settleCallsForTesting(&storage, &tmp, model, "writer-core-calls", &calls);
+                    action = (try storage.nextCoreWork()).?.action;
+                    key = try std.fmt.bufPrint(&key_buffer, "rui.core/{s}/{d}", .{ name, action.binding.action_id });
+                }
+                const sender_position = try store_testing.queryU64(&storage, "SELECT next_position FROM session WHERE session_ref=?1", .{sender.slice()});
+                var wake: std.Io.Event = .unset;
+                storage.commitWake().store(&wake, .release);
+                defer storage.commitWake().store(null, .release);
+                var commits: TestingCommits = .{};
+                switch (source) {
+                    .peer => {
+                        const file = try tmp.dir.createFile(std.testing.io, "peer-content", .{ .read = true });
+                        try file.writeStreamingAll(std.testing.io, text);
+                        try file.sync(std.testing.io);
+                        var command = try completeMessage(key, receiver.slice(), file, text);
+                        defer command.removeTemporaryContent(std.testing.io) catch unreachable;
+                        command.sender = .{ .store = storage.selector, .session = sender };
+                        command.sender_handle = peer.sender_handle;
+                        try std.testing.expect(storage.submitMessageWithModel(&command, commits.callback(), .{}) == .accepted);
+                    },
+                    .message_agent => try std.testing.expectEqual(command_domain.AgentDelivery.delivered, try storage.deliverAgentMessage(action.binding, receiver.slice(), text, .{})),
+                    .start_agent => {
+                        var spec = try testingAgentSpec(&.{"message_agent"}, "bypass");
+                        try std.testing.expectEqual(command_domain.AgentStart.started, try storage.startAgent(action.binding, sender.slice(), text, true, &spec, commits.callback(), .{}));
+                        const sent = try store_core.activityPageForTesting(&storage, .{ .session = sender, .kinds = .initOne(.sent) });
+                        receiver = sent.items[0].value.sent.target.session;
+                    },
+                    .ending => try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{})),
+                }
+                try std.testing.expect(wake.isSet());
+                if (source == .peer or source == .start_agent) {
+                    try std.testing.expectEqual(@as(usize, 1), commits.count);
+                    try std.testing.expect(commits.calls[0].from_peer);
+                    try std.testing.expectEqualStrings(receiver.slice(), commits.calls[0].session.slice());
+                }
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission m JOIN content c ON c.content_id=m.content_id WHERE m.command_key=?1 AND m.session_ref=?2 AND m.sender_session_ref=?3 AND m.sender_position=?4 AND c.digest=?5", .{ key, receiver.slice(), sender.slice(), sender_position, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
+                const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE command_key=?1", .{key});
+                try expectContent(&storage, try testingContentReference(&storage, content_id), text);
+                // Positions belong to the receiving Session, not the sender.
+                try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT next_position-1 FROM session WHERE session_ref=?1", .{receiver.slice()}), try store_testing.queryU64(&storage, "SELECT admission_position FROM message_admission WHERE command_key=?1", .{key}));
+                if (source == .peer) {
+                    const file = try tmp.dir.createFile(std.testing.io, "missing-content", .{ .read = true });
+                    try file.writeStreamingAll(std.testing.io, text);
+                    try file.sync(std.testing.io);
+                    var missing = try completeMessage("writer-missing", "zzzzzz", file, text);
+                    defer missing.removeTemporaryContent(std.testing.io) catch unreachable;
+                    missing.sender = .{ .store = storage.selector, .session = sender };
+                    missing.sender_handle = peer.sender_handle;
+                    try std.testing.expectEqual(protocol.MessageRejection.unknown_session, storage.submitMessageWithModel(&missing, null, .{}).rejected.code);
+                } else if (source == .message_agent) {
+                    const missing = (try storage.nextCoreWork()).?.action;
+                    try std.testing.expectEqual(command_domain.AgentDelivery.failed, try storage.deliverAgentMessage(missing.binding, "zzzzzz", text, .{}));
+                }
+            }
+        }
+    }.run);
+}
+
+test "child ending Message includes bounded provider report done answer and quiet parent stop" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Ending = enum { failed, provider_refused, done, stopped, quiet };
+            inline for (std.enums.values(Ending)) |ending| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const parent = try configureTestSession(&storage, "report-parent");
+                const child = try configureTestSession(&storage, "report-child");
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+                try submitTestMessage(&storage, &tmp, "report-task", "report-task", child.slice(), "answer");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const report: [protocol.max_report_bytes]u8 = @splat('r');
+                if (ending == .done) {
+                    try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
+                } else if (ending == .stopped) {
+                    var stop = try completeSessionStop("report-child-stop", child.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                } else if (ending == .quiet) {
+                    var stop = try completeSessionStop("report-parent-stop", parent.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                    const owed = (try storage.nextCoreWork()).?.stop;
+                    var child_stop: protocol.SessionStopCommand = .{ .key = owed.key, .session = child };
+                    try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
+                } else {
+                    try storage.settleModelAttemptFailure(model, .{ .correlated = .{ .code = if (ending == .failed) "malformed_provider_output" else "provider_http_400", .request_id = .{}, .report = &report } }, .ordinary, .{});
+                }
+                try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{}));
+                try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));
+                const count = try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()});
+                try std.testing.expectEqual(@as(u64, if (ending == .quiet) 0 else 1), count);
+                if (ending != .quiet) {
+                    const content_id = try store_testing.queryU64(&storage, "SELECT content_id FROM message_admission WHERE session_ref=?1", .{parent.slice()});
+                    if (ending == .done) {
+                        try expectContent(&storage, try testingContentReference(&storage, content_id), "saved answer");
+                        try std.testing.expectEqual(content_id, try store_testing.queryU64(&storage, "SELECT outcome_content_id FROM turn WHERE turn_id=?1", .{model.turn_id}));
+                    } else {
+                        var expected: [96 + protocol.max_report_bytes]u8 = undefined;
+                        const text = try std.fmt.bufPrint(&expected, "[Rui: this agent's Turn ended without an answer: {s}.]{s}{s}", .{ @tagName(ending), if (ending == .stopped) "" else "\n", if (ending == .stopped) "" else &report });
+                        var reader: ContentReader = undefined;
+                        reader.open(try storage.openContent(try testingContentReference(&storage, content_id)));
+                        defer reader.close();
+                        var actual: [96 + protocol.max_report_bytes]u8 = undefined;
+                        const length = try reader.read(0, &actual);
+                        try std.testing.expectEqualStrings(text, actual[0..length]);
+                        try std.testing.expectEqual(@as(usize, 0), try reader.read(length, &actual));
+                    }
+                }
             }
         }
     }.run);

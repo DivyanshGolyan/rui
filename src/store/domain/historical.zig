@@ -18,6 +18,7 @@ const tool_proposal = @import("../../tool_proposal.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const historical_domain = @This();
+const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const skills_domain = @import("skills.zig");
@@ -759,7 +760,7 @@ const historical_settings = rsql.Read(.{
     .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id," ++ tool_set.offeredSetSql("r") ++ " AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
-        "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
+        configuration_domain.operationReasoningEffortSql("o", "r") ++ " AS reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
@@ -1234,7 +1235,7 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort," ++ tool_set.offeredSetSql("revision") ++ "," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ configuration_domain.operationReasoningEffortSql("earlier", "revision") ++ "," ++ tool_set.offeredSetSql("revision") ++ "," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where(tool_set.offeredSetSql("revision"), "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++

@@ -259,12 +259,74 @@ pub fn effectiveReasoningEffort(current: anytype) ?model_capability.ReasoningEff
     return current.reasoning_effort orelse current.previous_reasoning_effort;
 }
 
-/// Both configuration reads and admission use the same durable legacy fact.
-/// The admission index bounds the lookup, including all-null Session histories.
+/// One provenance model for both a revision's effective choice and an
+/// Operation's choice when it was admitted. Refusals are immutable facts
+/// positioned after the Operation they reject, not ranges of revisions.
+const EffortProvenanceSql = struct {
+    session_ref: []const u8,
+    revision: []const u8,
+    known_before: ?[]const u8 = null,
+
+    fn atRevision(comptime revision: []const u8) EffortProvenanceSql {
+        return .{ .session_ref = revision ++ ".session_ref", .revision = revision ++ ".revision" };
+    }
+
+    fn atAdmission(comptime operation: []const u8) EffortProvenanceSql {
+        return .{ .session_ref = operation ++ ".session_ref", .revision = operation ++ ".settings_revision", .known_before = operation ++ ".admission_position" };
+    }
+
+    fn hasRefusal(comptime self: EffortProvenanceSql) []const u8 {
+        return "EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ self.session_ref ++ " AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ self.revision ++ ")";
+    }
+
+    /// Old snapshots predate change rows. Their differences remain evidence
+    /// until a refusal can make a later snapshot merely copy effective state.
+    /// Thereafter the immutable effort/model change rows own new choices.
+    fn source(comptime self: EffortProvenanceSql, comptime column: []const u8) []const u8 {
+        return "(SELECT effort_revision." ++ column ++ " FROM session_revision effort_revision LEFT JOIN session_revision before_effort ON before_effort.session_ref=effort_revision.session_ref AND before_effort.revision=effort_revision.revision-1 WHERE effort_revision.session_ref=" ++ self.session_ref ++ " AND effort_revision.revision<=" ++ self.revision ++ " " ++
+            "AND CASE WHEN effort_revision.revision=1 OR effort_revision.model<>before_effort.model THEN 1 WHEN EXISTS(SELECT 1 FROM session_change effort_change WHERE effort_change.session_ref=effort_revision.session_ref AND effort_change.revision=effort_revision.revision AND effort_change.field IN ('reasoning_effort','model')) THEN 1 WHEN EXISTS(SELECT 1 FROM session_change prior_refusal WHERE prior_refusal.session_ref=effort_revision.session_ref AND prior_refusal.field='reasoning_effort_refused' AND prior_refusal.revision<effort_revision.revision) THEN 0 ELSE NOT @same(effort_revision.reasoning_effort,before_effort.reasoning_effort) END " ++
+            "AND NOT EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=effort_revision.session_ref AND refused.revision=effort_revision.revision AND refused.field='reasoning_effort_refused'" ++
+            (if (self.known_before) |position| " AND refused.position<" ++ position else "") ++ ") " ++
+            "ORDER BY effort_revision.revision DESC LIMIT 1)";
+    }
+
+    fn override(comptime self: EffortProvenanceSql, comptime revision: []const u8) []const u8 {
+        return "CASE WHEN " ++ self.hasRefusal() ++ " THEN " ++ self.source("reasoning_effort") ++ " ELSE " ++ revision ++ ".reasoning_effort END";
+    }
+
+    fn previous(comptime self: EffortProvenanceSql, comptime revision: []const u8) []const u8 {
+        const admitted = atAdmission("legacy");
+        // CASE keeps the source subquery out of the ordinary no-refusal path;
+        // an indexed equality alone lets SQLite evaluate it before finding no rows.
+        return "CASE WHEN " ++ revision ++ ".reasoning_effort IS NULL OR " ++ self.hasRefusal() ++ " THEN (SELECT legacy.reasoning_effort FROM model_operation legacy @index(model_operation_admission) WHERE legacy.session_ref=" ++ self.session_ref ++ " AND legacy.settings_revision<=" ++ self.revision ++ " " ++
+            "AND CASE WHEN " ++ self.hasRefusal() ++ " THEN NOT EXISTS(SELECT 1 FROM session_change invalidated WHERE invalidated.session_ref=legacy.session_ref AND invalidated.field='reasoning_effort_refused' AND invalidated.revision=" ++ admitted.source("revision") ++ ") ELSE 1 END " ++
+            "ORDER BY legacy.admission_position DESC LIMIT 1) END";
+    }
+
+    fn effective(comptime self: EffortProvenanceSql, comptime revision: []const u8) []const u8 {
+        return "coalesce(" ++ self.override(revision) ++ "," ++ self.previous(revision) ++ ")";
+    }
+};
+
+pub fn reasoningEffortRevisionSql(comptime session: []const u8) []const u8 {
+    return EffortProvenanceSql.atRevision(session).source("revision");
+}
+
+pub fn reasoningEffortOverrideSql(comptime session: []const u8) []const u8 {
+    return EffortProvenanceSql.atRevision(session).override(session);
+}
+
+/// A null spec carries a valid earlier frozen effort, never a fresh default.
+/// Each candidate is checked against its own source at admission, so unrelated
+/// later revisions cannot rehabilitate an Operation whose source was refused.
 pub fn previousReasoningEffortSql(comptime session: []const u8) []const u8 {
-    return "CASE WHEN " ++ session ++ ".reasoning_effort IS NULL THEN " ++
-        "(SELECT o.reasoning_effort FROM model_operation o @index(model_operation_admission) WHERE o.session_ref=" ++
-        session ++ ".session_ref ORDER BY o.admission_position DESC LIMIT 1) END";
+    return EffortProvenanceSql.atRevision(session).previous(session);
+}
+
+/// Frozen legacy efforts remain authoritative unless their source was refused.
+pub fn operationReasoningEffortSql(comptime operation: []const u8, comptime revision: []const u8) []const u8 {
+    const provenance = EffortProvenanceSql.atRevision(revision);
+    return "CASE WHEN " ++ provenance.hasRefusal() ++ " THEN " ++ provenance.effective(revision) ++ " ELSE " ++ operation ++ ".reasoning_effort END";
 }
 
 /// `next` holds the current configuration's values, or the defaults when
@@ -565,7 +627,7 @@ pub const ConfigurationReads = struct {
 const saved_session = rsql.Read(.{
     .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
-        "reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
+        reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = CurrentConfiguration,
     .cardinality = .optional,

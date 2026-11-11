@@ -161,7 +161,7 @@ pub const ActivityPage = struct {
         const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
-        const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField };
+        const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
@@ -253,7 +253,11 @@ pub const ActivityPage = struct {
                     if (!protocol.validSessionId(request.session.slice())) return error.InvalidActivityPage;
                     fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .session = request.session.value, .call_ordinal = try id(request.call_ordinal, true) } };
                 },
-                .session_changed => |change| fact.value = .{ .session_changed = .{ .revision = try id(change.revision, false), .field = change.field } },
+                .session_changed => |change| {
+                    const revision = try id(change.revision, false);
+                    if (revision <= 1 or (change.field == .reasoning_effort_refused) != (change.provider_text != null)) return error.InvalidActivityPage;
+                    fact.value = .{ .session_changed = .{ .revision = revision, .field = change.field, .provider_text = if (change.provider_text) |text| text.value else null } };
+                },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
                 .model_call => |call| {
                     if (call.model.slice().len == 0 or call.status.slice().len == 0 or (call.served_model != null and call.served_model.?.slice().len == 0)) return error.InvalidActivityPage;
@@ -3589,6 +3593,31 @@ test "a hosted call travels as its presentation alone, in the conversation and t
     try activity_reply.writePage(&writer, &facts);
     const activity = try ActivityPage.parse(writer.buffered(), .{});
     try std.testing.expectEqualDeep(presentation, activity.facts.items[0].value.hosted_call);
+}
+
+test "session change activity carries refusal text only for a refused later revision" {
+    for (std.enums.values(protocol.SessionField)) |field| {
+        for ([_]u64{ 1, 2 }) |revision| {
+            for ([_]bool{ false, true }) |has_text| {
+                var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 2 } };
+                try facts.work.workspace.set("/w");
+                facts.items[0] = .{ .position = 1, .at = 1, .value = .{ .session_changed = .{ .revision = revision, .field = field } } };
+                if (has_text) {
+                    facts.items[0].value.session_changed.provider_text = .{};
+                    try facts.items[0].value.session_changed.provider_text.?.set("unsupported_value: high \"effort\" is not supported");
+                }
+                var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&buffer);
+                try activity_reply.writePage(&writer, &facts);
+                if (revision > 1 and (field == .reasoning_effort_refused) == has_text) {
+                    const page = try ActivityPage.parse(writer.buffered(), .{});
+                    try std.testing.expectEqualDeep(facts.items[0].value.session_changed, page.facts.items[0].value.session_changed);
+                } else {
+                    try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
+                }
+            }
+        }
+    }
 }
 
 test "approval activity accepts own and forwarded ordinals and validates child session" {

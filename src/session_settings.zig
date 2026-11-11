@@ -40,12 +40,14 @@ pub const entries = [_]Entry{
 
 /// Workspace is not revisioned. Provider remains in the persisted tag domain
 /// even though changing it is refused; removing it would change Store format.
+/// A refusal is an appended revision fact, not a configurable setting: it
+/// belongs only to this tag domain, never to `entries` or its adapters.
 pub const revision_fields = blk: {
     var names: []const []const u8 = &.{};
     for (entries) |entry| if (!std.mem.eql(u8, entry.field, "workspace")) {
         names = names ++ .{entry.field};
     };
-    break :blk names;
+    break :blk names ++ .{"reasoning_effort_refused"};
 };
 
 pub const SessionField = blk: {
@@ -60,9 +62,12 @@ test "Session settings revision tags retain persisted names ordinals and backing
     const expected = @typeInfo(Before).@"enum";
     const actual = @typeInfo(SessionField).@"enum";
     try std.testing.expect(expected.tag_type == actual.tag_type);
-    try std.testing.expectEqual(expected.field_names.len, actual.field_names.len);
-    inline for (expected.field_names, actual.field_names, expected.field_values, actual.field_values) |old, new, old_value, new_value| {
+    try std.testing.expectEqual(expected.field_names.len + 1, actual.field_names.len);
+    inline for (expected.field_names, actual.field_names[0..expected.field_names.len], expected.field_values, actual.field_values[0..expected.field_names.len]) |old, new, old_value, new_value| {
         try std.testing.expectEqualStrings(old, new);
         try std.testing.expectEqual(old_value, new_value);
     }
+    try std.testing.expectEqualStrings("reasoning_effort_refused", actual.field_names[expected.field_names.len]);
+    try std.testing.expectEqual(expected.field_names.len, @backingInt(SessionField.reasoning_effort_refused));
+    inline for (entries) |entry| try std.testing.expect(!std.mem.eql(u8, entry.field, "reasoning_effort_refused"));
 }

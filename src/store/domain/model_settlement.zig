@@ -56,6 +56,7 @@ pub const ModelTimings = struct {
 
 pub const ModelFailureClass = union(enum) {
     ordinary,
+    effort_change_refused,
     context_overflow,
     retryable: retry_policy.Input,
     /// A model 401 whose one forced credential refresh completed under this
@@ -350,6 +351,66 @@ const schedule_retry = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
+/// Only a changed effort that actually has an earlier Operation for this
+/// model can have emitted a configuration update. Creation/top-level effort
+/// failures and already-refused sources remain ordinary provider failures.
+const refused_effort_source = rsql.Read(.{
+    .sql = "SELECT source.revision FROM model_operation o " ++
+        "JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
+        "JOIN session_revision source ON source.session_ref=r.session_ref AND source.revision=" ++ configuration_domain.reasoningEffortRevisionSql("r") ++ " " ++
+        "WHERE o.operation_id=?1 AND source.revision>1 " ++
+        "AND EXISTS(SELECT 1 FROM session_change changed WHERE changed.session_ref=source.session_ref AND changed.revision=source.revision AND changed.field='reasoning_effort') " ++
+        "AND EXISTS(SELECT 1 FROM model_operation earlier JOIN session_revision earlier_revision ON earlier_revision.session_ref=earlier.session_ref AND earlier_revision.revision=earlier.settings_revision " ++
+        "WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position AND earlier.settings_revision<source.revision AND earlier_revision.model=r.model)",
+    .Args = struct { operation: u64 },
+    .Row = struct { revision: rsql.Positive },
+    .cardinality = .optional,
+});
+
+const insert_effort_refusal = rsql.Write(.{
+    .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text) VALUES(@session(?1),?2,0,?3,'reasoning_effort_refused',@now,?4)",
+    .Args = struct { session: rsql.SessionHead, position: u64, revision: u64, provider_text: []const u8 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
+});
+
+const invalidate_effort_prefix = rsql.Write(.{
+    .sql = "UPDATE session SET prefix_seal=NULL WHERE session_ref=@session(?1)",
+    .Args = struct { session: rsql.SessionHead },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
+});
+
+fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, report: []const u8) !void {
+    const position = try (try a.positions(session)).take(1);
+    a.write(insert_effort_refusal, .{ .session = session, .position = position, .revision = revision, .provider_text = report });
+    a.write(invalidate_effort_prefix, .{ .session = session });
+}
+
+const EffortRefusal = union(enum) { unmatched, retried, exhausted: u64 };
+
+/// The refusal and retry share a commit. Even an exhausted allowance must
+/// retain the refusal: later Operations must not reuse the rejected effort.
+fn settleEffortRefusal(a: anytype, io: std.Io, binding: AttemptBinding, failure: ModelFailure, faults: Faults) !EffortRefusal {
+    var facts: attempt_facts.Result = undefined;
+    var source: refused_effort_source.Result = undefined;
+    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &facts);
+    a.read(refused_effort_source, .{ .operation = binding.operation_id }, &source);
+    try runOperationRead(a);
+    const row = try currentAttempt(&facts, binding);
+    const revision = (source orelse return .unmatched).revision.get();
+    if (binding.attempt_ordinal >= retry_policy.maximum_attempts) return .{ .exhausted = revision };
+    try queueEffortRefusal(a, row.session, revision, failure.report());
+    a.write(schedule_retry, .{
+        .operation_id = binding.operation_id,
+        .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
+        .code = failure.code(),
+        .attempt_ordinal = binding.attempt_ordinal,
+        .session = row.session,
+    });
+    if (faults.before_commit) return error.InjectedCommitFailure;
+    try a.commit();
+    return .retried;
+}
+
 /// The content a failure settles with: its diagnostic and its report.
 const FailureContent = struct {
     diagnostic: ?content_domain.Import,
@@ -401,10 +462,21 @@ pub fn settleModelAttemptFailure(
     io: std.Io,
     binding: AttemptBinding,
     failure: ModelFailure,
-    disposition: ModelFailureClass,
+    requested_disposition: ModelFailureClass,
     timings: ModelTimings,
     faults: Faults,
 ) !void {
+    var exhausted_refusal: ?u64 = null;
+    const disposition: ModelFailureClass = if (requested_disposition == .effort_change_refused) refusal: {
+        switch (try settleEffortRefusal(a, io, binding, failure, faults)) {
+            .retried => return,
+            .unmatched => break :refusal .ordinary,
+            .exhausted => |revision| {
+                exhausted_refusal = revision;
+                break :refusal .{ .retryable = .{ .waits_ms = retry_policy.default_waits_ms } };
+            },
+        }
+    } else requested_disposition;
     const code = failure.code();
     var retry_random: u64 = 0;
     if (disposition == .retryable) io.random(std.mem.asBytes(&retry_random));
@@ -413,6 +485,7 @@ pub fn settleModelAttemptFailure(
     const resolves = switch (disposition) {
         .ordinary, .context_overflow => true,
         .refreshed => false,
+        .effort_change_refused => unreachable,
         .retryable => binding.attempt_ordinal == retry_policy.maximum_attempts,
     };
     var facts: attempt_facts.Result = undefined;
@@ -425,6 +498,7 @@ pub fn settleModelAttemptFailure(
     const row = try currentAttempt(&facts, binding);
     const session = row.session;
     switch (disposition) {
+        .effort_change_refused => unreachable,
         .ordinary, .context_overflow => {
             // An overflowing call compacts; an overflowing compaction makes
             // room with a deeper floor while one drops more (D217).
@@ -503,6 +577,7 @@ pub fn settleModelAttemptFailure(
             },
         },
     }
+    if (exhausted_refusal) |revision| try queueEffortRefusal(a, session, revision, failure.report());
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
 }

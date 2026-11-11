@@ -65,9 +65,10 @@ pub const Item = struct {
     /// for approval when it was made: `action` is the id a
     /// `permission_decision` names. The row follows its call at ordinal 1.
     pub const ApprovalRequested = struct { session: Bounded(session_id.bytes), action: u64, operation: u64, call_ordinal: u64 };
-    /// One setting a revision changed, at the position the revision was
-    /// accepted; a revision's changes share it, one ordinal each.
-    pub const SessionChanged = struct { revision: u64, field: session_field.SessionField };
+    /// A setting a revision changed, or its later effort refusal. Ordinary
+    /// rows share the revision's position; a refusal has its settlement
+    /// position and the provider's bounded report, without a new revision.
+    pub const SessionChanged = struct { revision: u64, field: session_field.SessionField, provider_text: ?Bounded(outcome_code.max_report_bytes) = null };
     /// A compaction that succeeded, at its admission: `dropped` is how many
     /// conversation entries it left out to make room, zero for none (D217).
     pub const Compacted = struct { operation: u64, dropped: u64 };

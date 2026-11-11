@@ -988,6 +988,13 @@ A rebuilt history preserves effort boundaries only from Operations requesting th
 Their tool declarations remain in place for the visible calls.
 The history view yields an Operation element at each earlier Operation's admission position, with the effort it froze, and the request being prepared gets its own Operation item after `history_end`, where a later request's span will place it.
 At an Operation whose effort differs from the one in force, the codec writes `{"type":"configuration_update","reasoning":{"effort":…}}` and its carry takes the new effort; an unchanged effort writes nothing.
+If an unambiguous provider error refuses that update (D77, D137), settlement appends a `session_changed` refusal row with the provider's bounded report and schedules the same Operation for retry without the refused update.
+The refusal names the effort revision, not a new compensating revision: effective effort is the last effort source not named by a refusal, including across later revisions that changed another setting.
+Legacy fallback Operations are checked against their own effort source as of admission, not the current revision's source.
+A later snapshot copying the effective value after refusal is not a new choice; label-only and no-op revisions cannot restore rejected provenance.
+The configuration domain owns that derivation for admission, replay, Session reports and status; frozen Operations and revisions remain unchanged.
+Refusal settlement invalidates the history prefix seal, so a memo from before the refusal cannot reintroduce the rejected item.
+Initial top-level effort errors, ambiguous errors, and failures without an eligible update remain ordinary provider failures; retries use the existing Attempt allowance.
 A compaction base covers the Operation elements before its anchor with the output it covers, so effort there is the top's again.
 Every Operation is placed, whatever its outcome, because its own request carried its boundary; effort may start unspecified and then acquire a supported value, but admission refuses a boundary back to unspecified effort.
 
@@ -2587,7 +2594,8 @@ Session binding and normal provider rejection remain unchanged.
 
 The Host does not check the saved future-Session model default at startup: any pin with valid syntax starts Sessions, and one outside the catalog runs with default limits.
 A missing or null catalog window uses the product's unlisted context estimate, while compactAt admission enforces only non-null known windows.
-A catalog entry accepts exactly its listed efforts, including `none` where listed; an unlisted model accepts every effort in Rui's grammar, passing it through so a provider refusal remains the error.
+A catalog entry accepts exactly its listed efforts, including `none` where listed; an unlisted model accepts every effort in Rui's grammar and passes it through.
+A provider refusal of an effort update follows [effort inside the history](#effort-inside-the-history); it is not a configuration rejection or a request error.
 Missing or unreadable future defaults do not prevent a Host from serving existing saved work.
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
@@ -3244,8 +3252,11 @@ An `approval_requested` row (D115) follows each call whose Action was saved unde
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
 Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
 A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
-A `session_changed` row (D138, D218) is one setting a later revision changed, carrying `revision` and `field` (a configuration member's name: `provider`, `model`, `instructions`, `tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`).
-The revision's commit writes them to `session_change` at a position taken when it is accepted, never edited; the revision keeps the current values, and a creation and a revision that changes nothing have none.
+A `session_changed` row (D138, D218) carries `revision`, `field` and required nullable `provider_text` (explicit `null` for ordinary changes).
+An ordinary row names a setting the revision changed (`provider`, `model`, `instructions`, `tools`, `loaded_tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`) and has null provider text.
+The revision's commit writes those rows at one position, never edited; creation and an unchanged revision have none.
+A refused effort update is also an immutable row, with `field:"reasoning_effort_refused"`, the revision whose effort was refused, and the provider report in `provider_text`, using the same bounded, control-normalized report as other provider failures.
+Settlement writes it once at its own position even though it changes no setting, and never edits the revision or its original change rows.
 A `compacted` row (D217) is a compaction that succeeded, at its compaction item's position (taken at settlement, so no earlier page gains it), carrying `operation` and `dropped`: how many conversation entries its floor left out beyond the one before it, zero for a compaction that made no room.
 A `model_call` row (D179, D219) is one resolved model Operation, including failures and compactions, at its admission position with ordinal zero, dated by resolution.
 It derives `model` from the Operation's immutable settings revision; `served_model` from stored model evidence (body first, then OpenAI header, then alternate header), never from the requested model; `input_tokens` from uncached plus cache-read plus cache-write tokens; `cached_tokens` from cache-read tokens; `output_tokens` from output usage; `status` from the resolution code; and `attempts` from the final attempt ordinal.
@@ -4026,7 +4037,7 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 
 #### Tool excerpts and full output
 
-Tool output has no per-call total capture cap.
+Bash output has no per-call total capture cap.
 Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
@@ -4036,6 +4047,13 @@ Canonical permission, Edit intent and outcome evidence are not disposable spillo
 A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
 When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
 An untruncated stream is complete in the result and names no file.
+
+MCP answers are bounded by the existing 4 MiB per-call answer buffer.
+Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
+When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
+Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
+The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.
 
 #### Exhaustion and cleanup
 

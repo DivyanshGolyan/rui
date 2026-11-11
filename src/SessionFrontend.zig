@@ -3585,18 +3585,24 @@ test "Up, Down and Enter take a row only from a list the latest frame drew" {
 }
 
 test "a key on a draft changed since the latest frame acts on that draft's list when the frame drew one" {
+    {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try held.settle();
+        // The frame drew the list for `/h`; `e` changes the draft before any
+        // frame lists it, and Enter takes /help from `/he`'s list.
+        try stepKeys(held, "/h");
+        try held.settle();
+        try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
+        try stepKeys(held, "e\r");
+        try std.testing.expect(!std.mem.startsWith(u8, try barShows(held), "! Unknown command"));
+        try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    }
+    // /help owns an asynchronous reader. A separate fixture keeps its late
+    // unavailable-endpoint notice out of these list-only assertions.
     const held = try HeldFrontend.create();
     defer held.destroy();
-    const self = &held.self;
-    try held.settle();
-    // The frame drew the list for `/h`; `e` changes the draft before any
-    // frame lists it, and Enter takes /help from `/he`'s list.
-    try stepKeys(held, "/h");
-    try held.settle();
-    try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
-    try stepKeys(held, "e\r");
-    try std.testing.expect(!std.mem.startsWith(u8, try barShows(held), "! Unknown command"));
-    try std.testing.expectEqualStrings("", self.input.composition().bytes);
     // Down on `/c`, typed after the frame drew `/`'s list, moves the
     // highlight to `/c`'s second row, which the next frame keeps.
     try stepKeys(held, "/");
@@ -3608,7 +3614,7 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
     // Esc on `/co`, typed after the frame drew `/c`'s list, closes the list.
     try stepKeys(held, "o\x07");
-    try std.testing.expect((try barShows(held)).len == 0);
+    try std.testing.expectEqualStrings("", try barShows(held));
     try held.settle();
     try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
 }
