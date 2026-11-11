@@ -720,7 +720,15 @@ class ReleaseFlowTest(unittest.TestCase):
 
     def test_promotion_step_lists_name_each_check_once_with_a_fresh_output(self):
         upgrade = self.step_list(job(UPGRADE.read_text(), 'upgrade'))
-        self.assertEqual([name for name, _ in upgrade], ['startup', 'current-upgrade', 'previous-upgrade'])
+        self.assertEqual([name for name, _ in upgrade], ['current-upgrade', 'previous-upgrade'])
+        # The shipped-build Host launch repeat runs first, and only outside PRs.
+        body = job(UPGRADE.read_text(), 'upgrade')
+        self.assertIn("HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}", body)
+        startup = steps.parse(shlex.split(body.split("startup=(", 2)[2].split(")\n", 1)[0])[0])
+        self.assertEqual(startup[0], 'startup')
+        self.assertIn('zig build host-launch-integration', startup[1])
+        upgrade.append(startup)
+        self.assertLess(body.index('${startup[@]+"${startup[@]}"}'), body.index("'current-upgrade="))
         contracts = self.step_list(job(RENDERER.read_text(), 'contracts'))
         self.assertEqual([name for name, _ in contracts],
                          ['selftest', 'pty', 'ghostty', 'controls', 'recovery'])
