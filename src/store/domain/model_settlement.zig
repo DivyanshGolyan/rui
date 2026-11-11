@@ -6,7 +6,7 @@ const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
-const tool_catalog = @import("../../call_classification.zig");
+const tool_defs = @import("../../call_classification.zig");
 const tool_record = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const mcp_arguments = @import("../../mcp/arguments.zig");
@@ -1186,7 +1186,7 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
 }
 
 /// Collects the next calls from `start`, as `collectItems` does items:
-/// each call's name, call_id and arguments, and, when the catalog rejects
+/// each call's name, call_id and arguments, and, when the tool set rejects
 /// it, its rejection text. Unknown names collect both possible results before
 /// the history read, so deciding withdrawn versus unknown adds no round.
 /// Noinline keeps call inspection scratch off the subsequent SQL call chain.
@@ -1223,10 +1223,10 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
                     const provisional = facts.tool == null and !facts.removed;
                     if (provisional) {
                         batch.history_needed = true;
-                        const fits = batch.add(.ofBytes(tool_catalog.removed_tool_result, false));
+                        const fits = batch.add(.ofBytes(tool_defs.removed_tool_result, false));
                         std.debug.assert(fits);
                     }
-                    if (tool_catalog.classifyCall(&facts)) |code| {
+                    if (tool_defs.classifyCall(&facts)) |code| {
                         var buffer: [192]u8 = undefined;
                         if (rejectionText(io, output, code, &facts, name_record, &buffer)) |text| {
                             const fits = batch.add(.ofBytes(text, false));
@@ -1249,9 +1249,9 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
 }
 
 /// A rejected call's result text, from its name in the source.
-fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal.Rejection, facts: *const tool_catalog.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
+fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal.Rejection, facts: *const tool_defs.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
     var rejected_name: output_format.NameReader = .{ .io = io, .file = output.source, .position = name.start, .end = try name.end() };
-    return tool_catalog.rejectionResult(code, facts, &rejected_name, name.decoded_length, name.content_digest, buffer);
+    return tool_defs.rejectionResult(code, facts, &rejected_name, name.decoded_length, name.content_digest, buffer);
 }
 
 /// Main's checks on the candidate output, before any import: compaction
@@ -1699,7 +1699,7 @@ fn Settlement(comptime A: type) type {
             const arguments_content_id = try s.importDecoded(batch, record);
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
             const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
-            const rejection_code = tool_catalog.classifyCall(&call_facts);
+            const rejection_code = tool_defs.classifyCall(&call_facts);
             const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
                 var buffer: [192]u8 = undefined;
                 const text = try rejectionText(s.io, s.output, code, &call_facts, name, &buffer);
@@ -1717,7 +1717,7 @@ fn Settlement(comptime A: type) type {
 
         /// All content sinks have closed before saving the certificate and
         /// line. Keep their bounded row-binding scratch off those sink paths.
-        noinline fn recordCall(s: *Self, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_catalog.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+        noinline fn recordCall(s: *Self, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
             const record = fields[2];
             const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
             // The call's certificate: (little-endian length, SHA-256) for its
@@ -1772,9 +1772,9 @@ const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_len
 /// A hosted call's description from its action and pattern records.
 /// noinline: its excerpt windows live in this frame only.
 noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
-    var target: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
-    var found: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
-    return tool_catalog.describe(.{ .web_search = .{
+    var target: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
+    var found: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
+    return tool_defs.describe(.{ .web_search = .{
         .action = @fromBackingInt(@backingInt(call.action)),
         .target = try excerpt(io, source, call, &target),
         .pattern = if (pattern) |field| try excerpt(io, source, field, &found) else "",
@@ -1888,7 +1888,7 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
 
 /// Noinline: description rendering does not retain its bounded scratch on
 /// the import frame while that frame opens SQLite content sinks.
-noinline fn callDescription(facts: *const tool_catalog.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
+noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
         var fallback: tool_record.Description = .{ .len = 0 };
         try fallback.set(tool.name);
@@ -1916,15 +1916,15 @@ noinline fn callDescription(facts: *const tool_catalog.CallFacts, io: std.Io, fi
     return facts.description();
 }
 
-/// One function call's catalog facts: its name and, for bash, its
+/// One function call's tool-set facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
-noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_catalog.CallFacts {
+noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_defs.CallFacts {
     var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
     var encoded: output_format.JsonStringSource = .{
         .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },
     };
-    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded, offered);
+    return tool_defs.inspectCall(&call_name, name.decoded_length, &encoded, offered);
 }
 
 /// noinline: its read buffer serves the rare schema check, not every

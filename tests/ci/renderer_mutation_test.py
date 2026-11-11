@@ -200,7 +200,7 @@ class MutationGateTests(unittest.TestCase):
                 seen.extend(mutation.name for mutation in selected)
         self.assertCountEqual(seen, [mutation.name for mutation in gate.MUTATIONS])
         with patch.object(sys, "argv", [gate.__file__, "--output", "unused", "--target", "test",
-                                        "--mutation", "stale-details"]), patch.object(gate, "run") as run:
+                                        "--mutation", "stale-message"]), patch.object(gate, "run") as run:
             with self.assertRaises(SystemExit) as error:
                 gate.main()
             self.assertEqual(error.exception.code, 2)

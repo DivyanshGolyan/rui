@@ -11,8 +11,22 @@ sys.path.insert(0, str(ROOT / "tests/integration"))
 import host_process
 import live_engines
 import live_engine_step
+import mysql_server
 
 ENGINE_NAME = re.compile(r"\bRUI_TEST_(?:MYSQL|PG)_[A-Z_]+|\bRUI_TEST_REQUIRE_ENGINES\b")
+
+
+class ProxyConfigTest(unittest.TestCase):
+    def test_the_proxy_fronts_the_supplied_socket_whatever_its_name(self):
+        for basename in ("mysqld.sock", "other.sock"):
+            config = mysql_server.proxy_config(f"/run/db/{basename}", "px", "pw")
+            self.assertIn(f'address="/var/run/mysqld/{basename}"', config)
+            self.assertIn('interfaces="/var/run/mysqld/px.sock"', config)
+            self.assertEqual(mysql_server.proxy_socket_path(f"/run/db/{basename}", "px"), "/run/db/px.sock")
+
+    def test_a_password_is_one_quoted_configuration_string(self):
+        for password, rendered in (("0123abcd", '"0123abcd"'), ('a"b', '"a\\"b"'), ("a\\b", '"a\\\\b"')):
+            self.assertIn(f"password={rendered},", mysql_server.proxy_config("/run/db/mysqld.sock", "px", password))
 
 
 class LauncherTest(unittest.TestCase):

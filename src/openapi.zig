@@ -1426,9 +1426,9 @@ test "replies the Host renders conform to their schemas" {
     const reply = @import("command_reply.zig");
     const host_reply = @import("host_reply.zig");
     var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
-    var catalog = @import("tools.zig").built_in;
-    catalog.configured_servers = &.{"notes"};
-    configured.rejected.message = catalog.missingTool("lookup");
+    var host_tool_set = @import("tools.zig").built_in_tool_set;
+    host_tool_set.configured_servers = &.{"notes"};
+    configured.rejected.message = host_tool_set.missingTool("lookup");
     try host_reply.renderConfigureReply(.{ .writer = &out.writer }, "", configured);
     try Case.check(schemas, "ConfigureReply", out.written(), a);
     out.clearRetainingCapacity();

@@ -1,4 +1,6 @@
 test {
+    _ = @import("widgets/Panel.zig");
+    _ = @import("app_settings.zig");
     _ = @import("widgets/Split.zig");
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");
@@ -46,6 +48,7 @@ test {
     _ = @import("model_adapter.zig");
     _ = @import("model_capability.zig");
     _ = @import("model_catalog.zig");
+    _ = @import("model_catalog_main.zig");
     _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
@@ -117,6 +120,7 @@ test {
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
     _ = @import("SessionSubmission.zig");
+    _ = @import("ToolFolds.zig");
     _ = @import("SessionFrontend.zig");
     _ = @import("Overview.zig");
     _ = @import("session_reads.zig");

@@ -157,6 +157,17 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
+    def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "settings")
+        self.assertEqual(state["open"], "overview")
+        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(state["steps"], [
+            {"keys": ["End", "Enter"]},
+            {"wait": "Rui"}, {"wait": "Notifications"},
+        ])
+        self.assertEqual(state["expect"], ["Rui", "Notifications", "Sign-in", "Version"])
+
     def test_markdown_frames_show_the_compact_answer_at_both_sizes_and_colours(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
@@ -180,12 +191,14 @@ class FramesTest(unittest.TestCase):
             self.assertEqual(states[name]["open"], "Fix retry deadline")
             self.assertTrue(states[name]["expect"])
 
-    def test_narrow_markdown_frame_pins_the_code_continuation_indent(self):
+    def test_markdown_frame_pins_narrow_code_indent_before_the_split_layout(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "markdown-wrapped")
         self.assertEqual(state["open"], "Markdown retry")
-        self.assertEqual(state["sizes"], [(46, 30)])
-        self.assertIn("return null; //\n    expired", state["expect"])
+        self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
+        self.assertIn({"wait": "return null; //\n    expired"}, state["steps"])
+        for text in ("return null; //", "expired", "Late request  waits 30 s  fails at once", "retry policy notes"):
+            self.assertIn(text, state["expect"])
 
     def test_busy_frame_waits_for_work_text_not_a_rotating_spinner(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -203,6 +216,64 @@ class FramesTest(unittest.TestCase):
                 self.assertEqual(states[name]["expect"], [words])
         self.assertEqual(states["tools-running"]["expect"],
                          ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+
+    def test_default_frames_cover_inline_tool_folds(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        self.assertEqual(self.helper["KEYS"]["C-o"], b"\x0f")
+        self.assertEqual(self.helper["KEYS"]["S-Up"], b"\x1b[1;2A")
+        for name in ("tool-open", "tool-open-two", "tool-open-long", "tool-open-nocolor"):
+            with self.subTest(state=name):
+                self.assertIn(name, states)
+                state = states[name]
+                keys = [key for step in state["steps"] for key in step.get("keys", [])]
+                self.assertIn("C-o", keys)
+                self.assertTrue(any(text.startswith(("✓ ", "× ")) for text in state["expect"]))
+                self.assertIn({"gone": "▸"}, state["steps"])
+                status = "    Bash succeeded. Exit code: 0." if name == "tool-open-long" else "    Bash failed. Exit code: 1."
+                label = "    stdout tail:" if name == "tool-open-long" else "    stderr tail:"
+                self.assertIn(status, state["expect"])
+                self.assertIn(label, state["expect"])
+                self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout tail:", "stderr tail:")) for step in state["steps"]))
+                self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
+                # Do not capture the asynchronous opening notice as the finished fold.
+                self.assertIn({"gone": "Opening tool output…"}, state["steps"])
+        self.assertEqual(states["tool-open-nocolor"]["env"], {"NO_COLOR": "1"})
+        for name in ("tool-open", "tool-open-two", "tool-open-long", "tool-open-nocolor"):
+            self.assertEqual(states[name]["sizes"], [(46, 30), (140, 40)])
+        keys = [key for step in states["tool-open-two"]["steps"] for key in step.get("keys", [])]
+        self.assertEqual(keys.count("C-o"), 2)
+        self.assertIn("    output line 18", states["tool-open-long"]["expect"])
+        self.assertIn("    … 14 more lines", states["tool-open-long"]["expect"])
+        for name in ("help", "slash"):
+            self.assertIn({"gone": "/details"}, states[name]["steps"])
+        self.assertIn("ctrl+o                 open", states["help"]["expect"])
+        self.assertIn("× Fail with exit 127 · exit 127", states["chat"]["expect"])
+
+    def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "tool-open-two")
+        self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
+        # Reach a known narrow tail, then move rows rather than four half-pages:
+        # the wider terminal now gives only 99 columns to the chat beside the list.
+        self.assertEqual(state["steps"][:11], [
+            {"wait": "The project has a README"},
+            {"keys": ["C-o"]},
+            {"gone": "Opening tool output…"},
+            {"keys": ["PgDn"]},
+            {"wait": "    unknown option --help"},
+            {"keys": ["Up"] * 12},
+            {"wait": "✓ List project files"},
+            {"gone": "× Fail with exit 127"},
+            {"keys": ["C-o"]},
+            {"gone": "Opening tool output…"},
+            {"keys": ["PgDn"] * 3},
+        ])
+        for text in ("✓ List project files", "    README.md", "    src",
+                     "× Fail with exit 127 · exit 127", "× Fail with an excerpt · exit 1",
+                     "    Bash succeeded. Exit code: 0.", "    stdout tail:", "    Bash failed. Exit code: 1.", "    stderr tail:",
+                     "    usage: example", "    unknown option --help"):
+            self.assertIn(text, state["expect"])
 
     def test_stop_frame_owns_work_and_waits_for_the_stable_ending(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -320,6 +391,8 @@ class FramesTest(unittest.TestCase):
         summary = self.helper["fixture_summary"]
         self.assertEqual(summary("hello", 4, 3), 'Fixture tool summary 4: 3 tool results for "hello".')
         self.assertIn("Two of the three commands failed", summary("hello", 4, 3, "realistic"))
+        self.assertEqual(summary("Show long tool output.", 4, 1, "realistic"),
+                         "Printed thirty-two numbered lines.")
 
     def test_ansi_sgr_and_html_escaping(self):
         render = self.helper["ansi_render"]

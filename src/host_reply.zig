@@ -62,7 +62,7 @@ pub fn renderMessageReply(
 
 // Rare diagnostic scratch stays off the engine and the ordinary reply frame.
 noinline fn renderToolRejection(response: protocol.JsonOut, session: []const u8, value: anytype, comptime shape: anytype) !void {
-    var buffer: [@import("tool_record.zig").Catalog.max_refusal_message_bytes]u8 = undefined;
+    var buffer: [@import("tool_record.zig").HostToolSet.max_refusal_message_bytes]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     const message: ?[]const u8 = if (value.message) |detail| message: {
         try detail.write(&writer);
@@ -326,7 +326,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     // The semantic diagnostic only contains valid names. Exercise the
     // string hole's arbitrary-escaping bound separately from the other arms.
-    const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").Catalog.max_refusal_message_bytes }) - "null".len;
+    const message_expansion = protocol.Hole.maxBytes(.{ .optional_string = @import("tool_record.zig").HostToolSet.max_refusal_message_bytes }) - "null".len;
     try std.testing.expectEqual(protocol.configuration_reply.max_bytes, @max(
         try Worst.reply(renderConfigureReply, @as([]const u8, &escaped_session), .{
             command_reply.ConfigureReply{ .accepted = .{ .replayed = false, .revision = max, .created = false, .session = session, .skills = .unchanged } },

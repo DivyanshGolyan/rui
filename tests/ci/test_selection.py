@@ -871,7 +871,7 @@ class SelectionTest(unittest.TestCase):
                 actual = 'skipped'
                 if admitted:
                     result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
-                                            env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
+                                            env={**os.environ, 'DRAFT_RUN': 'false', 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,

@@ -93,13 +93,16 @@ def pinned_settings():
         assert rows[-1].rstrip().endswith("enter start"), frame
         screen.keys(b"\x1b[F")
         screen.wait(lambda f: f.split("\n")[-1].rstrip().endswith("enter open"), "Settings selected")
-        # The stub is a no-op; clicking it must not open a Session or move it.
+        # Clicking the row opens app settings; Esc returns with the row pinned.
         screen.click(4, settings + 1)
+        screen.contains("Notifications")
+        screen.keys(b"\x1b")
+        screen.contains("› Type a task")
         screen.keys("draft")
         frame = screen.contains("› draft")
         assert frame.split("\n")[settings].lstrip().startswith("Settings"), frame
         assert frame.split("\n")[-1].rstrip().endswith("enter start"), frame
-    print("overview drawing: Settings stays above the composer and one Footer keeps the keys", flush=True)
+    print("overview drawing: Settings stays above the composer, opens app settings, and one Footer keeps the keys", flush=True)
 
 
 def requests(w):

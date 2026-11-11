@@ -286,6 +286,8 @@ See the [retry policy notes](https://example.com/docs/retry-policy) for the reas
     return "The deadline check now runs before the backoff sleep, and the test suite passes (214 tests). I did not touch `fetch.zig`."
 
 def fixture_summary(text, n, tool_count, answers="echo"):
+    if answers == "realistic" and "long tool output" in text:
+        return "Printed thirty-two numbered lines."
     if answers == "realistic":
         return "The project has a README and an empty `src` folder. Two of the three commands failed: `exit 127` (command not found) and the usage check, which printed `unknown option --help`."
     return f"Fixture tool summary {n}: {tool_count} tool results for {json.dumps(text)}."
@@ -306,6 +308,7 @@ def fixture_main(args):
       * after a function_call_output: echo tool summary, or believable prose in realistic mode
       * text containing "tool demonstration": three Bash calls (ls, exit 127, stderr+exit 1)
       * text containing "consent check": one 32-line Bash command (needs approval in ask mode)
+      * text containing "long tool output": one Bash call that prints 32 numbered lines
       * text containing "long bash": one Bash command that sleeps 8 s
       * text containing "show environment": one Bash call that prints CLIENT_MARK, HOST_SECRET, `command -v brew` and PATH
       * text containing "start a child": one Bash call that starts Session "child" with "show environment"
@@ -393,6 +396,10 @@ def fixture_main(args):
                     bash(f"c{n}a", "ls", "List project files"),
                     bash(f"c{n}b", "exit 127", "Fail with exit 127"),
                     bash(f"c{n}c", "printf 'usage: example\\nunknown option --help\\n' >&2; exit 1", "Fail with an excerpt")])
+            elif user_text and "long tool output" in user_text:
+                kind = "long-tool-output"
+                command = "printf 'output line %02d\\n' " + " ".join(str(n) for n in range(1, 33))
+                payload = fixture.sse_tool_calls(f"r{n}", [bash(f"c{n}", command, "Print thirty-two lines")])
             elif user_text and "parallel bash" in user_text:
                 kind = "parallel-bash"
                 payload = fixture.sse_tool_calls(f"r{n}", [
@@ -999,9 +1006,9 @@ def term_record(run, name):
     return json.loads(path.read_text())
 
 
-KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
+KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
-        "Tab": b"\t", "S-PgUp": b"\x1b[5;2~",
+        "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-PgUp": b"\x1b[5;2~",
         # Unsolicited mouse reports: Rui never enables mouse tracking (it uses ?1007
         # alternate scroll), so a physical wheel arrives as Up/Down, not as these.
         "SGRWheelUp": b"\x1b[<64;10;10M", "SGRWheelDown": b"\x1b[<65;10;10M"}

@@ -367,6 +367,11 @@ pub const Event = union(enum) {
     models: ModelsRead,
     /// A save of the default ended.
     saved: SaveAnswer,
+    /// A write of the saved defaults that was no pick ended: the default a
+    /// fresh launch would now take from them, null when they decide none.
+    defaults_saved: ?Default,
+    /// The app settings page asked for the Upgrade /upgrade starts.
+    start_upgrade,
     /// A read the open conversation applied.
     observed: Observed,
     /// The command `step` asked the shell to run ended.
@@ -789,9 +794,6 @@ pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 
 /// The model picker /model opens.
 pub const Picker = struct {
-    /// The highlighted model's ID, which a new list keeps highlighted while
-    /// it holds the model; empty until a list holds any.
-    highlight: Bounded(model_capability.max_model_bytes) = .{ .len = 0 },
     choice: ?model_picker_view.Choice = null,
     edits: ?u32 = null,
     query_effort: ?ReasoningEffort = null,
@@ -1199,17 +1201,6 @@ pub const State = struct {
         if (!pending and !same) return null;
         const failed = if (last) |ended| same and ended.outcome == .failed else false;
         return .{ .value = binding.effort, .only_when_explicit = !pending and !failed };
-    }
-
-    /// The menu as the picker shows it, the next Session's model first.
-    fn shownMenu(self: *const State) model_picker.Shown {
-        return self.menu.shown(self.nextBinding().model);
-    }
-
-    /// The open picker's highlighted entry of `menu`.
-    fn highlighted(self: *const State) ?usize {
-        const picker = self.picker orelse return null;
-        return self.menu.find(picker.highlight.slice());
     }
 
     fn closePicker(self: *State) void {
@@ -1818,6 +1809,13 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             }
             startSave(state, &effects);
         },
+        // A pick still on its way to the file was asked after the edit that
+        // wrote this snapshot, as `admitsDefaultsEdit` keeps it: the pick
+        // stands, and its own save writes over the snapshot.
+        .defaults_saved => |saved| if (state.save.running == null and state.save.wanted == null) {
+            if (saved) |binding| state.default = binding;
+        },
+        .start_upgrade => startUpgrade(state),
     }
     // Opening a Session shows the person its outcome.
     for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
@@ -1832,24 +1830,13 @@ fn readModels(state: *State, read: ModelsRead) void {
             var owned = menu;
             // The answer came after the picker closed.
             const picker = if (state.picker) |*open| open else return owned.deinit(state.gpa);
-            var retained: ?model_picker_view.Choice = null;
-            if (picker.choice) |choice| {
-                const id = state.menu.entries[choice.index].id;
-                picker.highlight.set(id) catch unreachable;
-                if (owned.find(id)) |index| {
-                    const row = model_picker.Query.parse("").row(owned.entries[index], pickerDefaults(state)).?;
-                    retained = model_picker_view.retain(.{ .index = index, .row = row }, choice);
-                }
-            }
-            picker.choice = retained;
+            // Keep the owned ID and controls until the next frame reconciles
+            // them with this menu AND the current draft. A previously typed ID
+            // must yield to listed matches, not become an extra row.
             picker.edits = null;
             state.menu.deinit(state.gpa);
             state.menu = owned;
             state.menu_read = .read;
-            // The highlight stays on its model while the list holds it.
-            if (state.highlighted() == null) {
-                if (owned.entries.len != 0) picker.highlight.set(state.shownMenu().entry(0).id) catch unreachable;
-            }
         },
         .unanswered => if (state.picker != null) {
             state.menu_read = .unanswered;
@@ -1942,6 +1929,14 @@ fn askModels(state: *State, effects: *Effects) void {
     if (state.asking_models) return;
     state.asking_models = true;
     effects.add(.list_models);
+}
+
+/// Whether the shell may queue a write of the saved defaults that is no
+/// pick. The shell writes in the order it queued, and a pick waiting here
+/// for the running save is not queued yet: an edit queued now would be
+/// written before that older pick and lost to it.
+pub fn admitsDefaultsEdit(state: *const State) bool {
+    return !state.left and !state.upgrade.held() and state.save.wanted == null;
 }
 
 /// Hands the waiting pick to the shell to save once no save runs. A
@@ -2352,7 +2347,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 .overflow => state.say(.attention, "! Too long to send.", .{}),
                 .paste_overflow => state.say(.attention, "! Paste too long; draft unchanged.", .{}),
                 .edit_rejected => state.say(.attention, "! Can't add that character alone.", .{}),
-                .unbound => state.say(.attention, "! That key does nothing here.", .{}),
+                .unbound => {},
             }
         },
     }
@@ -2696,17 +2691,15 @@ pub fn syncPicker(state: *State, draft: Draft) void {
     const shown = &state.picker.?;
     if (shown.edits != null and shown.edits.? == draft.edits and shown.choice != null) return;
     const previous = shown.choice;
-    const wanted = if (shown.choice) |choice| choice.index else if (shown.highlight.len != 0) state.menu.find(shown.highlight.slice()) else if (state.nextBinding().model) |id| state.menu.find(id) else null;
+    const wanted = if (shown.choice) |choice| choice.index(&state.menu) else if (state.nextBinding().model) |id| state.menu.find(id) else null;
     const words = pickerWords(draft.bytes);
     const query = model_picker.Query.parse(words);
     shown.choice = model_picker_view.select(&state.menu, words, pickerDefaults(state), wanted);
     if (previous) |old| if (shown.choice) |current| {
-        if (old.index == current.index) {
-            var kept = model_picker_view.retain(current, old);
-            if (query.effort != null and query.effort != shown.query_effort) kept.row.effort = current.row.effort;
-            if (query.provider != null and query.provider != shown.query_provider) kept.row.provider = current.row.provider;
-            shown.choice = kept;
-        }
+        var kept = model_picker_view.retain(current, old);
+        if (query.effort != null and query.effort != shown.query_effort) kept.row.effort = current.row.effort;
+        if (query.provider != null and query.provider != shown.query_provider) kept.row.provider = current.row.provider;
+        shown.choice = kept;
     };
     shown.query_effort = query.effort;
     shown.query_provider = query.provider;
@@ -2717,9 +2710,8 @@ pub fn syncPicker(state: *State, draft: Draft) void {
 fn pick(state: *State, effects: *Effects) void {
     const picker = &state.picker.?;
     const choice = picker.choice orelse return;
-    const entry = state.menu.entries[choice.index];
     var binding: Default = .{ .provider = choice.row.provider, .model = .{ .len = 0 }, .effort = choice.row.effort };
-    binding.model.set(entry.id) catch unreachable;
+    binding.model.set(choice.id.slice()) catch unreachable;
     state.default = binding;
     state.default_sign_in_shown = choice.row.providers.count() > 1;
     // The pick is newer than what /configure holds for the next Session.
@@ -5028,7 +5020,6 @@ test "a line the editor rejects says why once; text it could not take clears" {
         .{ .{ .refused = .overflow }, "! Too long to send.", true },
         .{ .{ .refused = .paste_overflow }, "! Paste too long; draft unchanged.", false },
         .{ .{ .refused = .edit_rejected }, "! Can't add that character alone.", false },
-        .{ .{ .refused = .unbound }, "! That key does nothing here.", false },
     }) |case| {
         var state = try opened(&mixed);
         defer state.deinit();
@@ -5040,6 +5031,18 @@ test "a line the editor rejects says why once; text it could not take clears" {
         draft = try typeText(&state, "second");
         try expectNotice(&state, null);
     }
+}
+
+test "unbound overview input posts no notice and leaves draft alone" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const draft = try typeText(&state, "first");
+    const input = Event{ .composed = .{ .input = .{ .composer = .{ .refused = .unbound } }, .draft = draft } };
+    try expectEffects(&.{}, try step(&state, input));
+    try expectNotice(&state, null);
+    state.say(.attention, "existing", .{});
+    try expectEffects(&.{}, try step(&state, input));
+    try expectNotice(&state, null);
 }
 
 test "session resume opens its Session through the overview, which then keeps it selected" {
@@ -5901,10 +5904,144 @@ test "/model retains selected row and effort when a pending list refreshes" {
     try answerModels(&state, &both);
     try std.testing.expectEqual(true, state.picker.?.choice != null);
     const refreshed = state.picker.?.choice.?;
-    try std.testing.expectEqualStrings("gpt-6-luna", state.menu.entries[refreshed.index].id);
+    try std.testing.expectEqualStrings("gpt-6-luna", refreshed.id.slice());
     try std.testing.expectEqual(expected, refreshed.row.effort);
     const effects = try submit(&state, draft);
     try std.testing.expectEqual(expected, effects.items[1].save_default.effort);
+}
+
+test "/model reconciles owned choices across absent listed and changed sign-ins" {
+    const id = "private-refresh";
+    const Scenario = struct {
+        served: model_picker.Providers,
+        listed: model_picker.Providers,
+        provider: Provider,
+    };
+    const all: model_picker.Providers = .initMany(&.{ .codex, .openai });
+    const scenarios = [_]Scenario{
+        .{ .served = all, .listed = .empty, .provider = .openai },
+        .{ .served = .initOne(.codex), .listed = .empty, .provider = .codex },
+        .{ .served = .initOne(.openai), .listed = .empty, .provider = .openai },
+        .{ .served = all, .listed = all, .provider = .openai },
+        .{ .served = .initOne(.codex), .listed = .initOne(.codex), .provider = .codex },
+        .{ .served = .initOne(.openai), .listed = .initOne(.openai), .provider = .openai },
+        .{ .served = all, .listed = .initOne(.codex), .provider = .codex },
+        .{ .served = all, .listed = .initOne(.openai), .provider = .openai },
+    };
+    for ([_]bool{ false, true }) |initially_listed| {
+        for (scenarios) |scenario| {
+            var state = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+            defer state.deinit();
+            state.default.?.effort = .low;
+            var initial: [2]model_list.Entry = undefined;
+            for (std.enums.values(Provider), &initial) |provider, *entry| entry.* = .{
+                .provider = provider,
+                .list = .{ .live = .{ .bytes = if (initially_listed) "first-chat\nprivate-refresh\n" else "first-chat\n" } },
+            };
+            try openPicker(&state, &initial);
+            const draft = try typeText(&state, "/model " ++ id);
+            _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
+            _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
+            try std.testing.expectEqual(ReasoningEffort.medium, state.picker.?.choice.?.row.effort.?);
+            try std.testing.expectEqual(Provider.openai, state.picker.?.choice.?.row.provider);
+            var refreshed_lists: [2]model_list.Entry = undefined;
+            var count: usize = 0;
+            var served = scenario.served.iterator();
+            while (served.next()) |provider| {
+                refreshed_lists[count] = .{
+                    .provider = provider,
+                    .list = .{ .live = .{ .bytes = if (scenario.listed.contains(provider)) "private-refresh\nz-other-chat\n" else "z-other-chat\n" } },
+                };
+                count += 1;
+            }
+            try answerModels(&state, refreshed_lists[0..count]);
+            syncPicker(&state, draft);
+            // The next-frame reconciliation and cached frames keep controls
+            // while this ID remains the choice, whether listed or typed.
+            for (0..2) |_| {
+                try std.testing.expectEqual(true, state.picker.?.choice != null);
+                const choice = state.picker.?.choice.?;
+                try std.testing.expectEqualStrings(id, choice.id.slice());
+                try std.testing.expectEqual(ReasoningEffort.medium, choice.row.effort.?);
+                try std.testing.expectEqual(scenario.provider, choice.row.provider);
+                try std.testing.expectEqual(if (scenario.listed.count() == 0) scenario.served else scenario.listed, choice.row.providers);
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const plan = try model_picker_view.rows(arena.allocator(), &state.menu, pickerWords(draft.bytes), pickerDefaults(&state), choice, 100, .unicode, true, .read);
+                const line = try plan.row(arena.allocator(), plan.selected.?);
+                try std.testing.expectEqual(state.menu.find(id) orelse state.menu.entries.len, line.model.?);
+                try std.testing.expect(std.mem.indexOf(u8, line.text, id) != null);
+                try std.testing.expect(std.mem.indexOf(u8, line.text, "‹ medium ›") != null);
+                syncPicker(&state, draft);
+            }
+            const effects = try submit(&state, draft);
+            const saved = effects.items[1].save_default;
+            try std.testing.expectEqualStrings(id, saved.model.slice());
+            try std.testing.expectEqual(ReasoningEffort.medium, saved.effort.?);
+            try std.testing.expectEqual(scenario.provider, saved.provider);
+        }
+    }
+}
+
+test "/model pending typed choices yield only to listed matches after a menu reply" {
+    const Case = struct { models: []const u8, matches: usize };
+    const cases = [_]Case{
+        .{ .models = "unrelated-chat\n", .matches = 0 },
+        .{ .models = "gpt-6-luna\n", .matches = 1 },
+        .{ .models = "gpt-5.6-luna\ngpt-6-luna\n", .matches = 2 },
+    };
+    for ([_]bool{ false, true }) |saved_matches| {
+        for (cases) |case| {
+            var state = try pickerState(Default.of("codex", if (saved_matches) "gpt-6-luna" else "gpt-5.5"));
+            defer state.deinit();
+            state.default.?.effort = .medium;
+            try openPicker(&state, &.{
+                .{ .provider = .codex, .list = .{ .live = .{ .bytes = "unrelated-chat\n" } } },
+                .{ .provider = .openai, .list = .{ .live = .{ .bytes = "unrelated-chat\n" } } },
+            });
+            const draft = try typeText(&state, "/model luna");
+            _ = try step(&state, .{ .picker_action = .{ .action = .higher_effort, .draft = draft } });
+            _ = try step(&state, .{ .picker_action = .{ .action = .next_sign_in, .draft = draft } });
+            try std.testing.expectEqualStrings("luna", state.picker.?.choice.?.id.slice());
+            try std.testing.expectEqual(ReasoningEffort.high, state.picker.?.choice.?.row.effort.?);
+            try std.testing.expectEqual(Provider.openai, state.picker.?.choice.?.row.provider);
+            try answerModels(&state, &.{
+                .{ .provider = .codex, .list = .{ .live = .{ .bytes = case.models } } },
+                .{ .provider = .openai, .list = .{ .live = .{ .bytes = case.models } } },
+            });
+            // Even an unreconciled owned choice cannot add a synthetic row
+            // beside matching entries. Exercise both locales and fixture widths.
+            for ([_]bool{ false, true }) |use_unicode| {
+                for ([_]usize{ 50, 80 }) |width| {
+                    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                    defer arena.deinit();
+                    const plan = try model_picker_view.rows(arena.allocator(), &state.menu, "luna", pickerDefaults(&state), state.picker.?.choice, width, .unicode, use_unicode, .read);
+                    try std.testing.expectEqual(@max(@as(usize, 1), case.matches), plan.count);
+                    try std.testing.expectEqual(case.matches == 0, plan.typed_row);
+                    for (0..plan.count) |at| {
+                        const line = try plan.row(arena.allocator(), at);
+                        try std.testing.expectEqual(case.matches == 0, line.model.? == state.menu.entries.len);
+                    }
+                }
+            }
+            // No draft edit occurs: the model reply itself must invalidate
+            // cached selection and reconcile it against the current query.
+            syncPicker(&state, draft);
+            const expected = if (case.matches == 0) "luna" else if (case.matches == 1 or saved_matches) "gpt-6-luna" else "gpt-5.6-luna";
+            try std.testing.expectEqualStrings(expected, state.picker.?.choice.?.id.slice());
+            try std.testing.expectEqual(if (case.matches == 0) ReasoningEffort.high else .medium, state.picker.?.choice.?.row.effort.?);
+            try std.testing.expectEqual(if (case.matches == 0) Provider.openai else .codex, state.picker.?.choice.?.row.provider);
+            // Down moves among listed matches, with no extra typed stop.
+            _ = try step(&state, .{ .picker_action = .{ .action = .next, .draft = draft } });
+            const final_id = if (case.matches == 0) "luna" else "gpt-6-luna";
+            try std.testing.expectEqualStrings(final_id, state.picker.?.choice.?.id.slice());
+            const effects = try submit(&state, draft);
+            const saved = effects.items[1].save_default;
+            try std.testing.expectEqualStrings(final_id, saved.model.slice());
+            try std.testing.expectEqual(if (case.matches == 0) ReasoningEffort.high else .medium, saved.effort.?);
+            try std.testing.expectEqual(if (case.matches == 0) Provider.openai else .codex, saved.provider);
+        }
+    }
 }
 
 test "/model keeps adjusted controls after a whitespace edit" {
@@ -5972,13 +6109,13 @@ test "a model Rui does not list shows under Other models and is picked like any 
     const draft = try typeText(&state, "/model unlisted-z");
     try highlightModel(&state, draft, "unlisted-z");
     const choice = state.picker.?.choice.?;
-    try std.testing.expect(!state.menu.entries[choice.index].known);
+    try std.testing.expect(!state.menu.entries[choice.index(&state.menu)].known);
     const effects = try submit(&state, draft);
     try std.testing.expectEqual(Provider.openai, effects.items[1].save_default.provider);
     try std.testing.expectEqualStrings("unlisted-z", effects.items[1].save_default.model.slice());
 }
 
-test "a pick remains selected before its save ends and refresh preserves its identity" {
+test "a pick remains selected before its save ends and refresh preserves matching identity" {
     var state = try pickerState(Default.of("codex", "gpt-6-luna"));
     defer state.deinit();
     try openPicker(&state, &.{chatgpt});
@@ -5988,15 +6125,15 @@ test "a pick remains selected before its save ends and refresh preserves its ide
     const running = state.save.running.?;
     try openPicker(&state, &.{chatgpt});
     const draft = try typeText(&state, "/model");
-    try std.testing.expectEqualStrings("gpt-5.5", state.menu.entries[state.picker.?.choice.?.index].id);
+    try std.testing.expectEqualStrings("gpt-5.5", state.picker.?.choice.?.id.slice());
     try highlightModel(&state, draft, "gpt-6.1-sol");
     try expectEffects(&.{}, try step(&state, .{ .saved = .{ .ended = .{ .binding = running, .outcome = .done } } }));
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[state.picker.?.choice.?.index].id);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.choice.?.id.slice());
     try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6-sol\ngpt-6.1-sol\n" } } }});
-    try std.testing.expectEqualStrings("gpt-6.1-sol", state.menu.entries[state.picker.?.choice.?.index].id);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", state.picker.?.choice.?.id.slice());
     try answerModels(&state, &.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }});
     syncPicker(&state, draft);
-    try std.testing.expectEqualStrings("gpt-5.5", state.menu.entries[state.picker.?.choice.?.index].id);
+    try std.testing.expectEqualStrings("gpt-5.5", state.picker.?.choice.?.id.slice());
 }
 
 test "a start submitted before the pick's save ends runs on the pick" {
@@ -6071,6 +6208,43 @@ test "a failed save is not retried, but picking the same model again saves it" {
     try std.testing.expect(state.notice == null);
 }
 
+test "a defaults write that was no pick moves the default only when no pick is on its way, and is admitted in pick order" {
+    const written = Default.of("codex", "gpt-6.1-sol").?;
+    const Picks = enum { none, running, waiting };
+    for (std.enums.values(Picks)) |picks| {
+        for ([_]?Default{ null, written }) |saved| {
+            var state = try pickerState(Default.of("codex", "gpt-6-luna"));
+            defer state.deinit();
+            if (picks != .none) {
+                try openPicker(&state, &.{chatgpt});
+                _ = try submit(&state, try typeText(&state, "/model gpt-5.5"));
+                try std.testing.expect(state.save.running != null);
+            }
+            if (picks == .waiting) {
+                try openPicker(&state, &.{chatgpt});
+                _ = try submit(&state, try typeText(&state, "/model gpt-6-luna"));
+                try std.testing.expect(state.save.wanted != null);
+            }
+            // Only a pick outside the shell's queue could be written after a
+            // newer edit.
+            try std.testing.expectEqual(picks != .waiting, admitsDefaultsEdit(&state));
+            const before = state.default.?;
+            try expectEffects(&.{}, try step(&state, .{ .defaults_saved = saved }));
+            const expected = if (picks == .none) saved orelse before else before;
+            try std.testing.expect(expected.eql(&state.default.?));
+        }
+    }
+    var held = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer held.deinit();
+    try expectEffects(&.{}, try step(&held, .start_upgrade));
+    try std.testing.expect(held.upgrade.run.? == .checking);
+    try std.testing.expect(!admitsDefaultsEdit(&held));
+    var left = try pickerState(Default.of("codex", "gpt-6-luna"));
+    defer left.deinit();
+    _ = try step(&left, .leave);
+    try std.testing.expect(!admitsDefaultsEdit(&left));
+}
+
 test "the lines that name the next Session's model name the saved effort its start applies" {
     // gpt-6-luna offers max and gpt-5.5 does not. An effort /configure
     // holds, `default` included, keeps the saved one from the next start,
@@ -6143,7 +6317,7 @@ test "picker tag columns admit ids at and beyond the 24-column cap" {
         try std.testing.expectEqual(length, state.menu.widest);
         const draft = try typeText(&state, "/model");
         try highlightModel(&state, draft, id[0..length]);
-        try std.testing.expectEqualStrings(id[0..length], state.menu.entries[state.picker.?.choice.?.index].id);
+        try std.testing.expectEqualStrings(id[0..length], state.picker.?.choice.?.id.slice());
     }
 }
 
@@ -6189,7 +6363,7 @@ test "Shift-Up and Shift-Down leave hidden Sessions unchanged while picking a mo
     try std.testing.expect(std.meta.eql(picker_choice, state.picker.?.choice));
 }
 
-test "with no sign-in served, the picker shows each login line instead of models" {
+test "with no sign-in served, the picker has no model rows or shell instructions" {
     var state = try pickerState(null);
     defer state.deinit();
     try openPicker(&state, &.{});
@@ -6197,14 +6371,14 @@ test "with no sign-in served, the picker shows each login line instead of models
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const rows = try model_picker_view.rows(arena.allocator(), &state.menu, "", pickerDefaults(&state), state.picker.?.choice, 80, .unicode, true, .read);
-    var codex = false;
-    var openai = false;
-    for (0..rows.count) |index| {
-        const row = try rows.row(arena.allocator(), index);
-        codex = codex or std.mem.indexOf(u8, row.text, Provider.codex.login()) != null;
-        openai = openai or std.mem.indexOf(u8, row.text, Provider.openai.login()) != null;
+    try std.testing.expectEqual(@as(usize, 0), rows.count);
+    try std.testing.expect(rows.selected == null and state.picker.?.choice == null);
+    const screen = try screenText(&state, 80, 24, .{});
+    defer std.testing.allocator.free(screen);
+    for (std.enums.values(Provider)) |provider| {
+        try std.testing.expect(state.menu.sources.get(provider) == null);
+        try std.testing.expect(std.mem.indexOf(u8, screen, provider.login()) == null);
     }
-    try std.testing.expect(codex and openai);
     try expectEffects(&.{}, try submit(&state, draft));
     try std.testing.expect(state.default == null);
 }
