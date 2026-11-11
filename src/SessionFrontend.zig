@@ -5531,12 +5531,6 @@ test "tool folds share key and click ownership across live output, bounds, failu
             try output.finish(&file);
             try finish(fixture, request);
         }
-        fn completeRows(fixture: *ChromeFixture, rows: []const u8) !void {
-            const request = fixture.self.tools.start(fixture.self.pageAsked()).?;
-            try fixture.page.setLength(std.testing.io, 0);
-            try fixture.page.writePositionalAll(std.testing.io, rows, 0);
-            try finish(fixture, request);
-        }
         fn finish(fixture: *ChromeFixture, request: ToolFolds.Request) !void {
             const outcome: ToolFolds.State = if (reader_policy.messageShows(request.asked, fixture.self.pageAsked()))
                 if (try fixture.self.showTool(request)) .shown else .failed
@@ -5595,7 +5589,7 @@ test "tool folds share key and click ownership across live output, bounds, failu
         try Harness.click(&fixture, first);
         try Harness.complete(&fixture, "README.md\nsrc\n");
         try Harness.click(&fixture, second);
-        try Harness.completeRows(&fixture, tool_fold.output_marker ++ "    bad \\x1b[2J\n" ++ tool_fold.stderr_marker ++ "    error line\n");
+        try Harness.complete(&fixture, "bad \x1b[2J\nerror line\n");
         try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
         try std.testing.expect(document.toolIsOpen(document.findTool(second).?));
         try std.testing.expect(std.mem.indexOf(u8, document.text(), "    bad \\x1b[2J") != null);
@@ -5609,17 +5603,17 @@ test "tool folds share key and click ownership across live output, bounds, failu
         var screen = try vaxis.Screen.init(arena, .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &screen };
         surface.render(window, self.app_input.composer.widget());
-        var saw_body = false;
+        var saw_output = false;
         var saw_heading = false;
-        var saw_stderr = false;
+        var saw_second_line = false;
         var saw_footer = false;
         for (0..24) |row| for (0..80) |col| {
             const cell = screen.readCell(@intCast(col), @intCast(row)).?;
             if (std.mem.eql(u8, cell.char.grapheme, "R") and col + 1 < 80 and std.mem.eql(u8, screen.readCell(@intCast(col + 1), @intCast(row)).?.char.grapheme, "E")) {
-                saw_body = true;
+                saw_output = true;
                 try std.testing.expectEqual(@as(usize, 4), col);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
-                try std.testing.expectEqual(self.app_content.style.fg, cell.style.fg);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
             }
             try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "▸"));
             if (std.mem.eql(u8, cell.char.grapheme, @import("marks.zig").marks.get(.finished).unicode)) {
@@ -5629,7 +5623,7 @@ test "tool folds share key and click ownership across live output, bounds, failu
                 try std.testing.expectEqual(if (colour) self.app_content.colours.selection else self.app_content.style.bg, cell.style.bg);
             }
             if (col == 4 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(5, @intCast(row)).?.char.grapheme, "r")) {
-                saw_stderr = true;
+                saw_second_line = true;
                 try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
             }
@@ -5638,7 +5632,7 @@ test "tool folds share key and click ownership across live output, bounds, failu
                 for ("ctrl+o close", 0..) |byte, index| try std.testing.expectEqualStrings(&.{byte}, screen.readCell(@intCast(67 + index), @intCast(row)).?.char.grapheme);
             }
         };
-        try std.testing.expect(saw_body and saw_heading and saw_stderr and saw_footer);
+        try std.testing.expect(saw_output and saw_heading and saw_second_line and saw_footer);
         try std.testing.expectEqualStrings("ctrl+o close", self.chrome.status.bar.right_key);
         // Close by click, then the twenty-row bound and exact omitted count.
         try Harness.click(&fixture, second);

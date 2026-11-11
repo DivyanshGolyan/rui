@@ -14,7 +14,6 @@ import (
 	"strings"
 	"sync"
 
-	"rui.local/qualification/bashresult"
 	"rui.local/qualification/measurement"
 )
 
@@ -188,8 +187,7 @@ func (e *endpoint) serve(w http.ResponseWriter, r *http.Request) {
 		for _, item := range envelope.Input {
 			if item.Type == "function_call_output" {
 				results++
-				body, framed := bashresult.Body(item.Output)
-				if !framed || !strings.HasPrefix(body, "Bash timed_out. ") {
+				if !strings.HasPrefix(item.Output, "Bash timed_out. ") {
 					e.faults = append(e.faults, "wrong Bash timeout outcome")
 				}
 			}

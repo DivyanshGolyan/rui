@@ -14,7 +14,6 @@ const cores = .{
     .{ "attempt.zig", @import("attempt.zig") },
     .{ "attention.zig", @import("attention.zig") },
     .{ "bash_action_text.zig", @import("bash_action_text.zig") },
-    .{ "bash_result_format.zig", @import("bash_result_format.zig") },
     .{ "BashLifecycle.zig", @import("BashLifecycle.zig") },
     .{ "bounded.zig", @import("bounded.zig") },
     .{ "built_in_tool.zig", @import("built_in_tool.zig") },

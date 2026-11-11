@@ -219,8 +219,12 @@ class FramesTest(unittest.TestCase):
                 self.assertIn("C-o", keys)
                 self.assertIn("ctrl+o close", state["expect"])
                 self.assertTrue(any(text.startswith(("✓ ", "× ")) for text in state["expect"]))
-                for text in ("▸", "Bash failed. Exit code:", "Bash succeeded. Exit code:", "stdout tail:", "stderr tail:"):
-                    self.assertIn({"gone": text}, state["steps"])
+                self.assertIn({"gone": "▸"}, state["steps"])
+                status = "    Bash succeeded. Exit code: 0." if name == "tool-open-long" else "    Bash failed. Exit code: 1."
+                label = "    stdout tail:" if name == "tool-open-long" else "    stderr tail:"
+                self.assertIn(status, state["expect"])
+                self.assertIn(label, state["expect"])
+                self.assertFalse(any(step.get("gone", "").startswith(("Bash ", "stdout tail:", "stderr tail:")) for step in state["steps"]))
                 self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
                 # Do not capture the asynchronous opening notice as the finished fold.
                 self.assertIn({"gone": "Opening tool output…"}, state["steps"])
@@ -248,7 +252,7 @@ class FramesTest(unittest.TestCase):
             {"gone": "Opening tool output…"},
             {"keys": ["PgDn"]},
             {"wait": "    unknown option --help"},
-            {"keys": ["Up"] * 10},
+            {"keys": ["Up"] * 12},
             {"wait": "✓ List project files"},
             {"gone": "× Fail with exit 127"},
             {"keys": ["C-o"]},
@@ -257,6 +261,7 @@ class FramesTest(unittest.TestCase):
         ])
         for text in ("✓ List project files", "    README.md", "    src",
                      "× Fail with exit 127 · exit 127", "× Fail with an excerpt · exit 1",
+                     "    Bash succeeded. Exit code: 0.", "    stdout tail:", "    Bash failed. Exit code: 1.", "    stderr tail:",
                      "    usage: example", "    unknown option --help", "ctrl+o close"):
             self.assertIn(text, state["expect"])
 

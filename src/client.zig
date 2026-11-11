@@ -1,5 +1,4 @@
 const std = @import("std");
-const result_format = @import("bash_result_format.zig");
 const socket_os = @import("os/socket.zig");
 const platform = @import("platform.zig");
 const protocol = @import("protocol.zig");
@@ -411,13 +410,6 @@ fn readPublicContentResponse(requests: Requests, fd: std.posix.fd_t, expected: ?
     }
     if (head.kind != .content_bytes or head.total != head.content_length or head.next != head.content_length) return error.InvalidResponse;
     if (expected) |reference| if (head.content_length != reference.bytes) return error.ContentBindingMismatch;
-    if (comptime @TypeOf(sink) != std.Io.File) {
-        const Sink = switch (@typeInfo(@TypeOf(sink))) {
-            .pointer => |pointer| pointer.child,
-            else => @TypeOf(sink),
-        };
-        if (comptime @hasDecl(Sink, "begin")) sink.begin(head.tool_kind, head.content_length);
-    }
     var hash = protocol.contentHasher();
     var remaining = head.content_length;
     var window: [protocol.content_window_bytes]u8 = undefined;
@@ -2204,7 +2196,6 @@ const ResponseHead = struct {
     kind: ResponseKind,
     total: ?u64 = null,
     next: ?u64 = null,
-    tool_kind: result_format.Kind = .plain,
 };
 
 fn readResponseHead(fd: std.posix.fd_t) !ResponseHead {
@@ -2256,7 +2247,6 @@ fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostIn
     var kind: ?ResponseKind = null;
     var total: ?u64 = null;
     var next: ?u64 = null;
-    var tool_kind: ?result_format.Kind = null;
     while (lines.next()) |line| {
         if (line.len == 0) return error.InvalidResponse;
         const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.InvalidResponse;
@@ -2284,9 +2274,6 @@ fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostIn
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Next-Offset")) {
             if (next != null) return error.InvalidResponse;
             next = try std.fmt.parseInt(u64, value, 10);
-        } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Tool")) {
-            if (tool_kind != null or !std.mem.eql(u8, value, "bash")) return error.InvalidResponse;
-            tool_kind = .bash;
         } else if (std.ascii.eqlIgnoreCase(name, "Content-Type")) {
             if (kind != null) return error.InvalidResponse;
             kind = if (std.ascii.eqlIgnoreCase(value, "application/json"))
@@ -2309,7 +2296,6 @@ fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostIn
         .kind = kind orelse return error.InvalidResponse,
         .total = total,
         .next = next,
-        .tool_kind = tool_kind orelse .plain,
     };
     if (wire_ok == null) return error.InvalidResponse;
     if (!wire_ok.?) return error.WrongWireVersion;
@@ -5047,34 +5033,4 @@ test "schema file capture writes an object and refuses invalid input before publ
     var bytes: [64]u8 = undefined;
     const count = try saved.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings("{\"type\":\"object\"}", bytes[0..count]);
-}
-
-test "public content tool metadata is optional strict and handed off before bytes" {
-    const base = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 3\r\nX-Rui-Content-Bytes: 3\r\nX-Rui-Next-Offset: 3\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n";
-    try std.testing.expectEqual(result_format.Kind.plain, (try parseResponseHead(base ++ "\r\n")).tool_kind);
-    try std.testing.expectEqual(result_format.Kind.bash, (try parseResponseHead(base ++ "X-Rui-Tool: bash\r\n\r\n")).tool_kind);
-    try std.testing.expectError(error.InvalidResponse, parseResponseHead(base ++ "X-Rui-Tool: bash\r\nx-rui-tool: bash\r\n\r\n"));
-    try std.testing.expectError(error.InvalidResponse, parseResponseHead(base ++ "X-Rui-Tool: other\r\n\r\n"));
-    const Sink = struct {
-        begun: bool = false,
-        count: usize = 0,
-        pub fn begin(self: *@This(), kind: result_format.Kind, total: u64) void {
-            std.debug.assert(kind == .bash and total == 3);
-            self.begun = true;
-        }
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            try std.testing.expect(self.begun);
-            self.count += bytes.len;
-        }
-    };
-    const descriptors = try testPipe();
-    defer closeTestDescriptor(descriptors[0]);
-    {
-        defer closeTestDescriptor(descriptors[1]);
-        try writeAll(descriptors[1], base ++ "X-Rui-Tool: bash\r\n\r\nabc");
-    }
-    var sink: Sink = .{};
-    const expected: protocol_reply.CommandObservation.ContentReference = .{ .bytes = 3, .digest = protocol.contentDigest("abc") };
-    try std.testing.expect(try readPublicContentResponse(.{ .io = std.testing.io }, descriptors[0], expected, &sink) == null);
-    try std.testing.expectEqual(@as(usize, 3), sink.count);
 }

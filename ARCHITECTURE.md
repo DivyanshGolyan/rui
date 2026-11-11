@@ -2810,13 +2810,11 @@ At most 20 indented rows show, with long logical lines ending in `…` rather th
 The printed prefix keeps at most 8,192 raw bytes and at most 8,192 bytes after terminal-control escaping, before the document escapes invisible clusters.
 Opened headings keep the canonical mark and text in their folded columns; only the selection background changes.
 Code and tool output share one line-level selvedge band owner in `ConversationViewport`: the trusted line marker selects the band, quiet output or heading selection; all blank cells and wrapped rows use that same paint path.
-Output uses body foreground; NO_COLOR removes the backgrounds, not the indent.
-Bash's formatter prefixes the model-facing result with a versioned, exact-byte-count frame identifying preamble, stdout, separator, stderr and footer spans after UTF-8 encoding.
-The display decoder uses that frame only when the Host identifies the canonical stored call as Bash; it never derives stream boundaries from printed prose or delimiter lines.
-Only the stdout/stderr spans enter the fold. Literal header, label and footer text printed by a tool remains output, even across read-window boundaries.
-Legacy, unsupported or malformed frames and non-Bash results remain literal: ambiguous old envelopes cannot be losslessly unwrapped.
-When both streams exist, stderr uses the quiet foreground rather than a label; stderr alone uses the body foreground.
-The display read changes neither saved content nor model replay; new Bash results carry the frame for both. Empty output opens a blank indented row.
+The entire folded Tool Result uses quiet foreground; NO_COLOR removes the colours and backgrounds, not the indent.
+The fold shows the stored Tool Result literally, including status, stream labels, warnings and capture pointers. No envelope or stdout/stderr parsing changes, omits or styles any of its lines.
+The same display path handles every tool kind and preserves printed text that resembles envelope headers or delimiters, across read-window boundaries.
+Terminal escaping and the row/byte bounds still apply; an empty result opens a blank indented row.
+Opening changes neither the Store nor model-facing text or the wire protocol.
 Internal tool line markers reuse the document's hidden address representation without adding per-byte styling storage, and never become terminal hyperlinks or clipboard text.
 `ToolFolds` owns the frontend lifecycle: requested, shown, failed, cancelled and closed. Only a successful insertion becomes shown; failed, cancelled, superseded or refused reads release pending intent so the next toggle retries.
 Intent is keyed by the complete `tool_fold.Reference`, never a retained byte position. Live Activity and history construct the same canonical Conversation result Reference.
@@ -3219,8 +3217,6 @@ These checks retain only constant-size identity/metadata values and no payload o
 `POST /v1/conversation-content` takes `session`, `position`, `ordinal` and `start` as decimal strings; it resolves the public item in that Session rather than trusting a caller-supplied digest.
 Position and ordinal share the signed SQLite domain; invalid values fail as ordinary identities.
 By default the raw octet-stream response contains at most 4 KiB, with total `X-Rui-Content-Bytes` and exclusive `X-Rui-Next-Offset`; repeat until the offset equals total.
-Public Activity and Conversation content replies optionally carry `X-Rui-Tool: bash` for a Tool Result whose provenance-checked stored call-name reference has the exact length and content digest of `bash`.
-Ordinal-zero and non-Bash values omit it; clients without the header treat content as plain. This metadata selects the display decoder, not the saved content or authentication policy.
 A range can split UTF-8: join bytes before decoding/display.
 Out-of-range or nonpublic identities fail without leaking content.
 The server requests public byte ranges; the Store owns representation selection, positioning, decoding and validation.

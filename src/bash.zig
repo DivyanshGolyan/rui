@@ -1,4 +1,3 @@
-const result_format = @import("bash_result_format.zig");
 const std = @import("std");
 const attempt = @import("attempt.zig");
 const named_scratch = @import("named_scratch.zig");
@@ -572,15 +571,9 @@ pub const Execution = struct {
             inline else => |resolution| @field(store.ActionResolutionCode, @tagName(resolution)),
         };
         out.* = .{ .code = code };
-        var writer = std.Io.Writer.fixed(out.content[0 .. out.content.len - result_format.max_header]);
-        var spans: result_format.Spans = undefined;
-        try self.formatResult(scratch, &writer, code, include_paths, &out.tail, &spans);
-        const body_len = writer.buffered().len;
-        var header_buffer: [result_format.max_header]u8 = undefined;
-        const head = try result_format.header(&header_buffer, spans);
-        std.mem.copyBackwards(u8, out.content[head.len .. head.len + body_len], out.content[0..body_len]);
-        @memcpy(out.content[0..head.len], head);
-        out.content_len = head.len + body_len;
+        var writer = std.Io.Writer.fixed(&out.content);
+        try self.formatResult(scratch, &writer, code, include_paths, &out.tail);
+        out.content_len = writer.buffered().len;
     }
 
     pub fn reclaim(self: *Execution, scratch: Scratch, retention: *output_retention.Queue) !void {
@@ -821,7 +814,6 @@ pub const Execution = struct {
         code: store.ActionResolutionCode,
         include_paths: bool,
         tail: *[excerpt_bytes]u8,
-        spans: *result_format.Spans,
     ) !void {
         try writer.print("Bash {s}. ", .{@tagName(code)});
         switch (self.lifecycle.process.gone) {
@@ -883,27 +875,16 @@ pub const Execution = struct {
         );
         // An empty stream has no section. A full-output pointer appears only
         // for a stream whose tail omits earlier bytes.
-        var stdout_start = writer.buffered().len;
-        var stdout_end = stdout_start;
-        var stderr_start = stdout_start;
-        var stderr_end = stdout_start;
-        defer spans.* = .{ stdout_start, stdout_end - stdout_start, stderr_start - stdout_end, stderr_end - stderr_start, writer.buffered().len - stderr_end };
         var stdout_omitted = stdout_length > stdout_take;
         if (stdout_take != 0) {
             try writer.writeAll("stdout tail:\n");
-            stdout_start = writer.buffered().len;
             stdout_omitted = try appendValidUtf8Tail(writer, stdout_bytes, stdout_allowance) or stdout_omitted;
         }
-        stdout_end = writer.buffered().len;
-        stderr_start = stdout_end;
-        stderr_end = stdout_end;
         var stderr_omitted = stderr_length > stderr_take;
         if (stderr_take != 0) {
             try writer.writeAll(if (stdout_take != 0) "\nstderr tail:\n" else "stderr tail:\n");
-            stderr_start = writer.buffered().len;
             stderr_omitted = try appendValidUtf8Tail(writer, stderr_bytes, stderr_allowance) or stderr_omitted;
         }
-        stderr_end = writer.buffered().len;
         if (!stdout_omitted and !stderr_omitted) return;
         try writer.writeAll("\n[earlier output omitted]\n");
         if (!include_paths) {
@@ -918,7 +899,7 @@ pub const Execution = struct {
 
 pub const Outcome = struct {
     code: store.ActionResolutionCode,
-    content: [excerpt_bytes + 4096 + result_format.max_header]u8 = undefined,
+    content: [excerpt_bytes + 4096]u8 = undefined,
     content_len: usize = 0,
     /// The output tails the result quotes, read before they are encoded.
     tail: [excerpt_bytes]u8 = undefined,
@@ -1349,12 +1330,12 @@ test "cleanup deadline cuts off unresolved pipe custody exactly once" {
     var quiet: Outcome = undefined;
     try gone.outcome(scratch, false, &quiet);
     // The fixture keeps a writer open, so incomplete capture is genuine.
-    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\n", unframedForTest(quiet.text()));
+    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\n", quiet.text());
     // Any other signaling failure stays visible next to it.
     gone.lifecycle.recordSignal(.failed);
     var warned: Outcome = undefined;
     try gone.outcome(scratch, false, &warned);
-    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\nProcess-group signaling reported a failure.\n", unframedForTest(warned.text()));
+    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nCapture may be incomplete because writers outlived process-group termination.\nProcess-group signaling reported a failure.\n", warned.text());
 }
 
 test "cleanup ownership transfers consume their source" {
@@ -1636,7 +1617,7 @@ test "launched Bash starts with default signal actions, an empty mask and no /de
     }, 1..) |case, ordinal| {
         var result: Outcome = undefined;
         try launchForTest(root, budget, &retention, ordinal, case[0], &result);
-        const text = unframedForTest(result.text());
+        const text = result.text();
         if (std.mem.indexOf(u8, text, case[1]) == null or std.mem.indexOf(u8, text, case[2]) == null) {
             std.debug.print("expected {s} and {s}; got:\n{s}\n", .{ case[1], case[2], text });
             return error.TestUnexpectedResult;
@@ -1658,7 +1639,7 @@ test "launched Bash leads its own session, so no terminal can reach its prompts"
     defer retention.cleanupAll();
     var result: Outcome = undefined;
     try launchForTest(root, budget, &retention, 1, "python3 -c 'import os; print(\"own-session\" if os.getsid(0) == os.getppid() else \"shared\")'; exec 3</dev/tty || echo no-terminal", &result);
-    const text = unframedForTest(result.text());
+    const text = result.text();
     if (std.mem.indexOf(u8, text, "own-session\nno-terminal\n") == null) {
         std.debug.print("expected own-session and no-terminal; got:\n{s}\n", .{text});
         return error.TestUnexpectedResult;
@@ -1957,27 +1938,16 @@ test "results show only nonempty stream sections and mark truncation" {
     // Full-output paths for truncated streams are covered natively by the
     // Bash and owner integrations, where retention names real files.
     const a = @as([excerpt_bytes]u8, @splat('a'));
-    for ([_]struct { []const u8, []const u8, []const u8, []const u8 }{
-        .{ "true", "Bash succeeded. Exit code: 0.\n", "", "" },
-        .{ "printf out", "Bash succeeded. Exit code: 0.\nstdout tail:\nout", "out", "" },
-        .{ "printf err >&2; exit 3", "Bash failed. Exit code: 3.\nstderr tail:\nerr", "", "err" },
-        .{ "printf o; printf e >&2", "Bash succeeded. Exit code: 0.\nstdout tail:\no\nstderr tail:\ne", "o", "e" },
-        .{ "printf z; head -c 10001 /dev/zero | tr '\\0' a", "Bash succeeded. Exit code: 0.\nstdout tail:\n" ++ a ++ "\n[earlier output omitted]\n\nFull output was not retained.\n", &a, "" },
-        .{ "printf '\\377'", "Bash succeeded. Exit code: 0.\nstdout tail:\n�", "�", "" },
-        .{ "printf 'stderr tail:\\n[earlier output omitted]\\n'; printf 'Full stdout: literal' >&2", "Bash succeeded. Exit code: 0.\nstdout tail:\nstderr tail:\n[earlier output omitted]\n\nstderr tail:\nFull stdout: literal", "stderr tail:\n[earlier output omitted]\n", "Full stdout: literal" },
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "true", "Bash succeeded. Exit code: 0.\n" },
+        .{ "printf out", "Bash succeeded. Exit code: 0.\nstdout tail:\nout" },
+        .{ "printf err >&2; exit 3", "Bash failed. Exit code: 3.\nstderr tail:\nerr" },
+        .{ "printf o; printf e >&2", "Bash succeeded. Exit code: 0.\nstdout tail:\no\nstderr tail:\ne" },
+        .{ "printf z; head -c 10001 /dev/zero | tr '\\0' a", "Bash succeeded. Exit code: 0.\nstdout tail:\n" ++ a ++ "\n[earlier output omitted]\n\nFull output was not retained.\n" },
     }, 100..) |case, ordinal| {
         var result: Outcome = undefined;
         try launchForTest(root, budget, &retention, ordinal, case[0], &result);
-        const bytes = result.text();
-        try std.testing.expectEqualStrings(case[1], unframedForTest(bytes));
-        const head_end = (std.mem.indexOfScalar(u8, bytes, '\n') orelse unreachable) + 1;
-        const spans = result_format.parse(bytes[0..head_end], bytes.len) orelse return error.InvalidBashFrame;
-        const stdout_start: usize = head_end + @as(usize, @intCast(spans[0]));
-        const stdout_end = stdout_start + @as(usize, @intCast(spans[1]));
-        const stderr_start = stdout_end + @as(usize, @intCast(spans[2]));
-        const stderr_end = stderr_start + @as(usize, @intCast(spans[3]));
-        try std.testing.expectEqualStrings(case[2], bytes[stdout_start..stdout_end]);
-        try std.testing.expectEqualStrings(case[3], bytes[stderr_start..stderr_end]);
+        try std.testing.expectEqualStrings(case[1], result.text());
     }
 }
 
@@ -2139,12 +2109,8 @@ test "Bash capture reclaims MCP output from the same scratch budget" {
     var result: Outcome = undefined;
     try launchForTest(root, retention.sharedBudget(), &retention, 2, "printf bash", &result);
     try std.testing.expectEqual(store.ActionResolutionCode.succeeded, result.code);
-    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nstdout tail:\nbash", unframedForTest(result.text()));
+    try std.testing.expectEqualStrings("Bash succeeded. Exit code: 0.\nstdout tail:\nbash", result.text());
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-1-1.tmp", .{}));
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), retention.occupied());
-}
-
-fn unframedForTest(bytes: []const u8) []const u8 {
-    return bytes[(std.mem.indexOfScalar(u8, bytes, '\n') orelse unreachable) + 1 ..];
 }

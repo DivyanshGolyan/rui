@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -317,39 +316,4 @@ func TestWriteEvidenceProducesReviewableSummaryAndLosslessRawArtifact(t *testing
 
 func osRead(path string) ([]byte, error) {
 	return os.ReadFile(path)
-}
-
-func TestBashContinuationRequiresCompleteFramedTimeout(t *testing.T) {
-	body := "Bash timed_out. Signal: 15.\nExecution timed out.\n"
-	framed := fmt.Sprintf("RUI-BASH-RESULT/1 %d 0 0 0 0\n%s", len(body), body)
-	for _, test := range []struct {
-		name, output string
-		valid        bool
-	}{
-		{"framed timeout", framed, true},
-		{"legacy timeout", body, false},
-		{"trailing bytes", framed + "x", false},
-		{"truncated", framed[:len(framed)-1], false},
-		{"other outcome", "RUI-BASH-RESULT/1 15 0 0 0 0\nBash succeeded.", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			e := &endpoint{plans: map[string][]*requestPlan{}, releases: map[string]chan struct{}{}}
-			e.add("timeout", &requestPlan{BashContinuation: true, Response: []byte("data: [DONE]\n\n")})
-			payload, err := json.Marshal(map[string]any{
-				"model": "gpt-6-luna",
-				"input": []any{
-					map[string]any{"role": "user", "content": []any{map[string]any{"text": "timeout"}}},
-					map[string]any{"type": "function_call_output", "output": test.output},
-				},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			reply := httptest.NewRecorder()
-			e.serve(reply, httptest.NewRequest("POST", "/responses", bytes.NewReader(payload)))
-			if valid := e.audit() == nil; valid != test.valid {
-				t.Fatalf("valid=%v want=%v faults=%v", valid, test.valid, e.faults)
-			}
-		})
-	}
 }

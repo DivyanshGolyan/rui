@@ -459,7 +459,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             var end = offset;
             while (end < self.text().len and foregroundIndex(self.styles[end]) == address_index) : (end += 1) {}
             const uri = self.bytes[offset..end];
-            if (!std.mem.startsWith(u8, uri, tool_fold.prefix) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.stderr_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
+            if (!std.mem.startsWith(u8, uri, tool_fold.prefix) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
             return .{ .uri = uri, .end = end };
         }
 
@@ -489,7 +489,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         fn toolOutput(self: *const Self, offset: usize) bool {
             const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.stderr_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
+            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
         }
 
         pub fn toolIsOpen(self: *const Self, offset: usize) bool {
@@ -601,7 +601,6 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             plain,
             code,
             output,
-            quiet_output,
             selected,
 
             fn style(kind: Line, colour: bool, base: vaxis.Style, colours: Colours) vaxis.Style {
@@ -609,10 +608,10 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 if (!colour) return result;
                 result.bg = switch (kind) {
                     .plain => base.bg,
-                    .code, .output, .quiet_output => colours.band,
+                    .code, .output => colours.band,
                     .selected => colours.selection,
                 };
-                if (kind == .quiet_output) result.fg = colours.quiet;
+                if (kind == .output) result.fg = colours.quiet;
                 return result;
             }
         };
@@ -621,8 +620,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// painter or a retained list of byte offsets to repair after edits.
         fn lineKind(self: *const Self, offset: usize) Line {
             if (self.lineMarker(offset)) |mark| {
-                if (std.mem.eql(u8, mark.uri, tool_fold.output_uri)) return .output;
-                if (std.mem.eql(u8, mark.uri, tool_fold.stderr_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri)) return .quiet_output;
+                if (std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri)) return .output;
                 if (self.toolIsOpen(offset)) return .selected;
             }
             if (styled and offset < self.length and foregroundIndex(self.styles[offset]) == code_index) return .code;
@@ -637,7 +635,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const mark = self.lineMarker(offset);
             const content_start = if (mark) |value| value.end else offset;
             const kind = self.lineKind(offset);
-            const output = kind == .output or kind == .quiet_output;
+            const output = kind == .output;
             const plain = kind.style(colour, base, colours);
             // Every band (including selection) is painted here, over the
             // measured logical line's blank cells and wrapped rows alike.
@@ -1763,7 +1761,7 @@ test "one line band owner covers adjacent code, selected tool, output and plain 
     second.position = 2;
     try input.feed("before\n\x1b[40m  abcdefghijkl\n\x1b[0m\x1b[40m\n\x1b[0m");
     try tool_fold.marker(first, &input);
-    try input.feed("✓ A\n" ++ tool_fold.output_marker ++ "    out\n" ++ tool_fold.stderr_marker ++ "    err\n" ++ tool_fold.more_marker ++ "    … 2 more lines\n");
+    try input.feed("✓ A\n" ++ tool_fold.output_marker ++ "    out\n" ++ tool_fold.output_marker ++ "    err\n" ++ tool_fold.more_marker ++ "    … 2 more lines\n");
     try tool_fold.marker(second, &input);
     try input.feed("✓ B\nafter\n");
     const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
@@ -1789,7 +1787,7 @@ test "one line band owner covers adjacent code, selected tool, output and plain 
                     const expected = if (!colour or !band) plain.bg else if (row == selected) colours.selection else colours.band;
                     try std.testing.expectEqual(expected, cell.style.bg);
                     if (view.cellOffset(cell) != null) {
-                        const quiet = colour and (row == selected + 2 or row == selected + 3);
+                        const quiet = colour and (row > selected and row <= selected + 3);
                         try std.testing.expectEqual(if (quiet) colours.quiet else plain.fg, cell.style.fg);
                     }
                 };

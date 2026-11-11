@@ -869,7 +869,7 @@ pub const Document = struct {
                     try d.schemas.put(d.arena, reply_name, try schema(d));
                     try responses.put(d.arena, "200", try d.response("The reply.", "application/json", try d.ref(reply_name)));
                 },
-                .bytes => try responses.put(d.arena, "200", try d.response("The content bytes, from the requested offset. Optional X-Rui-Tool: bash identifies a canonical Bash Tool Result; absence means plain content.", "application/octet-stream", try d.binary())),
+                .bytes => try responses.put(d.arena, "200", try d.response("The content bytes, from the requested offset.", "application/octet-stream", try d.binary())),
                 .text => try responses.put(d.arena, "200", try d.response("The content, as text.", "text/plain", try d.object(.{ .type = Value{ .string = "string" } }))),
                 .report => {
                     var content: ObjectMap = .empty;

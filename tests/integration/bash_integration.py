@@ -13,7 +13,6 @@ import threading
 import time
 from collections import Counter
 
-from bash_result_frame import result_body
 import model_fixture as fixture
 import host_process
 from host_process import HostDiagnostics, assert_caller_error, ReleaseGate, canonical_fixture_root, dispose_all, retain_failure_state
@@ -124,8 +123,6 @@ def prove_stdin(state):
             fixture.wait_for(lambda: fixture.completed_observation(store, f"stdin-{name}-request"), f"{name} continuation")
             assert resolution(store, session) == expected, (name, result_text(store, session))
             result = result_text(store, session)
-            if name != "over":
-                result_body(result)
             if name == "large":
                 assert (workspace / "input.bin").read_bytes() == large.encode(), "large input changed or stopped before EOF"
                 assert "[earlier output omitted]" in result and "Full stdout:" in result and "Full stderr:" in result, result
@@ -135,12 +132,12 @@ def prove_stdin(state):
                 assert not (workspace / "forbidden-over-limit").exists(), "over-limit input launched"
             elif name in ("null", "missing", "empty"):
                 expected_kind = "file" if name == "empty" else "null"
-                assert result_body(result) == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{expected_kind}\n0\n", result
+                assert result == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{expected_kind}\n0\n", result
             elif name == "closed":
                 assert "closed" in result, result
             elif name in ("empty-send", "null-send"):
-                assert result_body(result).startswith(failed_send), result
-                refusal = result_body(result)[len(failed_send):]
+                assert result.startswith(failed_send), result
+                refusal = result[len(failed_send):]
                 assert_caller_error(refusal, "rui session send: ", "message_empty", not_sent=False)
                 retained_output_bytes[name] = len(refusal.encode())
                 assert not (state / f"{name}.json").exists(), "empty input published a capture"
@@ -359,11 +356,11 @@ def prove_reused_session(state):
             "reuse-fast-call",
             "reuse-invalid-call",
         ], continuation_outputs
-        assert result_body(output_by_call["reuse-slow-call"]).startswith(
+        assert output_by_call["reuse-slow-call"].startswith(
             "Bash failed. Exit code: 7.\n"
         ), output_by_call
         assert output_by_call["reuse-unknown-call"] == "Unknown tool: missing-tool."
-        assert result_body(output_by_call["reuse-fast-call"]).startswith(
+        assert output_by_call["reuse-fast-call"].startswith(
             "Bash succeeded. Exit code: 0.\n"
         ), output_by_call
         assert output_by_call["reuse-invalid-call"] == "Invalid arguments for tool 'bash': cmd must be a string of UTF-8 text with no NUL characters."

@@ -13,7 +13,6 @@ import tempfile
 import threading
 
 import bash_fixture
-from bash_result_frame import result_body
 import model_fixture as fixture
 import host_process
 from host_process import canonical_fixture_root, is_peer_disconnect, retain_failure_state
@@ -287,7 +286,7 @@ def natural_exit_signaling(root, inherited_ignore=False):
         result = bash_fixture.result_text(store, session)
         # Confirmed retirement is not news, including macOS group-signal EPERM
         # after the reap: the result is the outcome and the nonempty stream.
-        assert result_body(result) == "Bash succeeded. Exit code: 0.\nstdout tail:\nfinished", result
+        assert result == "Bash succeeded. Exit code: 0.\nstdout tail:\nfinished", result
         request = json.loads(endpoint.requests[-1])
         outputs = [item["output"] for item in request["input"] if item.get("type") == "function_call_output"]
         assert outputs == [result], outputs
