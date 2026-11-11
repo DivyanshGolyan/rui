@@ -358,6 +358,12 @@ fn sendPass(self: *Mysql) Failure!void {
         self.state.batch_end = self.state.connection.writer.end;
         self.state.connection.sendBatch() catch return self.lost();
         if (self.state.inline_commit == .buffered) self.state.inline_commit = .sent;
+        if (is_test and self.state.inline_commit == .sent and self.state.testing_drop == .after_commit) {
+            // The server ran the whole message; every answer is lost.
+            self.state.testing_drop = .none;
+            while (!self.state.connection.isReady()) _ = self.state.connection.next() catch break;
+            self.state.connection.disconnect();
+        }
         if (self.state.begin == .buffered) self.state.begin = .{ .sent = .{} };
         if (self.state.replacement == .buffered) {
             self.state.replacement = .none;
@@ -608,12 +614,6 @@ pub fn appendCommit(self: *Mysql) bool {
 /// Steps `appendCommit`'s answer: the transaction is saved.
 pub fn stepCommit(self: *Mysql) Failure!void {
     const s = self.state;
-    if (is_test and s.testing_drop == .after_commit) {
-        // The server has committed; only its OK is lost.
-        s.testing_drop = .none;
-        _ = s.connection.next() catch {};
-        s.connection.disconnect();
-    }
     _ = try self.stepWrite();
     s.inline_commit = .none;
     self.committed();
@@ -669,6 +669,9 @@ fn settleLostCommit(self: *Mysql) Failure!void {
         error.OwnershipLost
     else if (owner.commit_seq == s.commit_seq + 1) {
         s.failure = null;
+        // The fence's row at least, whose answer the loss may have taken:
+        // the entry point changed the Store (`Entry.release`).
+        s.changes +|= 1;
         s.commit_seq += 1;
         s.armed = false;
         return self.sendAgain(reads);

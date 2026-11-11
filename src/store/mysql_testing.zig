@@ -990,6 +990,30 @@ test "store.mysql live a lone write sends its transaction, its writes and its CO
     try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000402", .{}));
 }
 
+test "store.mysql live a lone write saved with every answer lost still counts as a change" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const state = storage.engine.mysql.state;
+    const generation = storage.commitGeneration();
+    // The server runs the transaction's one message whole; the connection
+    // is lost before its first answer.
+    state.testing_drop = .after_commit;
+    try storage.queue().write(insertHeld, .{ &storage, 9000600 });
+    try std.testing.expectEqual(@as(u64, 1), state.testing_shape.reconnects);
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000600", .{}));
+    try std.testing.expectEqual(generation + 1, storage.commitGeneration());
+    // Lost before it was sent, the write runs again and counts once.
+    state.testing_drop = .before_commit;
+    try storage.queue().write(insertHeld, .{ &storage, 9000601 });
+    try std.testing.expectEqual(@as(u64, 2), state.testing_shape.reconnects);
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000601", .{}));
+    try std.testing.expectEqual(generation + 2, storage.commitGeneration());
+}
+
 test "store.mysql live a lone write whose fence fails saves nothing, though COMMIT shares its message" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
