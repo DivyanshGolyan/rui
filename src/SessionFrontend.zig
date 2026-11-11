@@ -465,11 +465,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_hooks = hooks;
     if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
         defer draft.deinit(self.init.gpa);
-        const editor = &self.input.editors[self.input.active];
-        std.debug.assert(draft.bytes.len <= editor.buffer.len);
-        @memcpy(editor.buffer[0..draft.bytes.len], draft.bytes);
-        editor.length = draft.bytes.len;
-        editor.cursor = draft.cursor;
+        self.input.restore(draft.snapshot);
     };
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
@@ -767,8 +763,7 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
         const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
         if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
         if (self.app_hooks.drafts) |drafts| {
-            const draft = self.input.composition();
-            try drafts.put(self.init.gpa, self.session, draft.bytes, draft.cursor);
+            try drafts.put(self.init.gpa, self.session, self.input.snapshot());
         }
         self.app_consent.withdraw();
         self.app_card.ready_pending = false;
@@ -3612,6 +3607,72 @@ test "App Session draft save failure retains the active text and does not leave"
     try std.testing.expectEqualStrings("kept", a.self.input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 3), a.self.input.composition().cursor);
     try std.testing.expect(drafts.take(std.testing.allocator, "aaaaaa") == null);
+}
+
+test "App Session draft handoff preserves valid overflow-rejected and malformed-rejected input" {
+    const Open = struct {
+        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+    };
+    const gpa = std.testing.allocator;
+    const full = try gpa.alloc(u8, Input.capacity);
+    defer gpa.free(full);
+    @memset(full, 'x');
+    const cases = [_]struct { bytes: []const u8, rejected: ?keymap.Refusal }{
+        .{ .bytes = "first\nαbeta", .rejected = null },
+        .{ .bytes = full, .rejected = .overflow },
+        .{ .bytes = "first\nαbeta", .rejected = .invalid },
+        .{ .bytes = "", .rejected = .invalid },
+    };
+    for (cases) |case| {
+        for ([_]enum { back, peer, detached }{ .back, .peer, .detached }) |path| {
+            var drafts: session_drafts.Drafts = .{};
+            defer drafts.deinit(gpa);
+            const cursor = case.bytes.len - @min(case.bytes.len, 2);
+            {
+                const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+                defer a.destroy();
+                try a.keys(case.bytes);
+                try a.keys("\x1b[D\x1b[D");
+                if (case.rejected) |why| try a.keys(if (why == .overflow) "x" else "\xff");
+                try std.testing.expectEqualStrings(case.bytes, a.self.input.composition().bytes);
+                try std.testing.expectEqual(cursor, a.self.input.composition().cursor);
+                try std.testing.expectEqual(case.rejected, a.self.input.snapshot().rejected);
+                switch (path) {
+                    .back => try a.keys("\x07"),
+                    .peer => {
+                        a.self.app_hooks.on_open = Open.peer;
+                        var ctx = a.context();
+                        try a.self.openPeer(&ctx, "bbbbbb");
+                    },
+                    .detached => try a.keys("\x03"),
+                }
+                try std.testing.expectEqual(if (path == .detached) Outcome.detached else Outcome.returned, a.left.?);
+            }
+            {
+                const b = try HeldFrontend.createWithDrafts("bbbbbb", &drafts);
+                defer b.destroy();
+                try std.testing.expectEqualStrings("", b.self.input.composition().bytes);
+                try b.keys("other\x1b[D\x07");
+            }
+            {
+                const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+                defer a.destroy();
+                try std.testing.expectEqualStrings(case.bytes, a.self.input.composition().bytes);
+                try std.testing.expectEqual(cursor, a.self.input.composition().cursor);
+                // Assert the boundary outcome, not just the restored flag.
+                try a.keys("\r");
+                try std.testing.expectEqual(@as(u64, if (case.rejected == null) 1 else 0), a.self.admission.sent);
+                if (case.rejected) |why| try std.testing.expectEqualStrings(refusedNotice(why), a.self.shown_notice.current(a.self.nowMs()).?);
+                try std.testing.expectEqualStrings("", a.self.input.composition().bytes);
+            }
+            {
+                const b = try HeldFrontend.createWithDrafts("bbbbbb", &drafts);
+                defer b.destroy();
+                try std.testing.expectEqualStrings("other", b.self.input.composition().bytes);
+                try std.testing.expectEqual(@as(usize, 4), b.self.input.composition().cursor);
+            }
+        }
+    }
 }
 
 test "App Session drafts survive switching chats with their caret and sending removes only that chat's draft" {

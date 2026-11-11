@@ -97,7 +97,6 @@ const cores = .{
     .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
-    .{ "session_drafts.zig", @import("session_drafts.zig") },
     .{ "session_field.zig", @import("session_field.zig") },
     .{ "session_settings.zig", @import("session_settings.zig") },
     .{ "session_id.zig", @import("session_id.zig") },
@@ -155,6 +154,7 @@ test {
     _ = @import("ConversationViewport.zig");
     _ = @import("transcript_selection.zig");
     _ = @import("session_follow.zig");
+    _ = @import("session_drafts.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
     _ = @import("tools.zig");
