@@ -44,11 +44,11 @@ fn run(case: *store.testing.Case, comptime scenario: Scenario) !void {
         for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
         break :blk out;
     };
-    const catalog: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: store.Store = undefined;
-    try store.testingStoreWith(case, &storage, &tmp, std.testing.io, if (scenario == .current_mcp) .{ .host_tool_set = &catalog } else .{});
+    try store.testingStoreWith(case, &storage, &tmp, std.testing.io, if (scenario == .current_mcp) .{ .host_tool_set = &host_tool_set } else .{});
     defer storage.close() catch unreachable;
     var root: [protocol.max_store_bytes]u8 = undefined;
     const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];

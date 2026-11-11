@@ -798,7 +798,7 @@ test "a time limit shows in its largest whole unit, never rounded" {
 /// its stdin. ConversationViewport hangs wrapped rows under the text after it.
 pub const content_mark = "│ ";
 
-/// Frozen call identity and its saved conversation line, never the latest catalog.
+/// Frozen call identity and its saved conversation line, never the latest tool set.
 pub const ActionTool = struct {
     name: protocol.Bounded(protocol.max_tool_name_bytes),
     description: protocol.Bounded(protocol.max_tool_description_bytes),

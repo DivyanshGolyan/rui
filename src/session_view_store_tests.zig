@@ -30,11 +30,11 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
         for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
         break :blk out;
     };
-    const catalog: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &host_tool_set);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("approval-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");

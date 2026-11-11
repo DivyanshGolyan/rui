@@ -152,7 +152,7 @@ const testing_digests = blk: {
     for (&testing_records, &out) |*each, *digest| digest.* = tool_defs.recordDigest(each);
     break :blk out;
 };
-const testing_catalog: tool_defs.HostToolSet = .{ .records = &testing_records, .digests = &testing_digests };
+const testing_tool_set: tool_defs.HostToolSet = .{ .records = &testing_records, .digests = &testing_digests };
 
 const testingStoreToolSet = store_testing.testingStoreToolSet;
 const testingStore = store_testing.testingSqliteStore;
@@ -592,7 +592,7 @@ test "a rolled-back transaction's identities are handed out again, a committed o
 
     // Committing the given-back values in every column: none is handed out
     // again. A Host offering one more tool saves its record at open.
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &testing_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &testing_tool_set);
     defer storage.close() catch unreachable;
     const second_session = try configureTestSessionAsk(&storage, "identity-later");
     try store_testing.sqlite_only.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ before.parent.slice(), second_session.slice() });
@@ -9384,11 +9384,11 @@ test "a tool set at its bound saves and opens again" {
     }
     sortHostToolRecords(&records);
     for (&records, &digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
-    const catalog: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
+    const host_tool_set: tool_defs.HostToolSet = .{ .records = &records, .digests = &digests };
     var storage: Store = undefined;
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &host_tool_set);
     try storage.close();
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &host_tool_set);
     defer storage.close() catch unreachable;
     try std.testing.expectEqual(@as(u64, tool_defs.max_host_tool_records), try store_testing.queryU64(&storage, "SELECT max(member_count) FROM tool_set", .{}));
 }
@@ -9402,7 +9402,7 @@ const mcp_digests = blk: {
     for (&mcp_records, &out) |*each, *digest| digest.* = tool_defs.recordDigest(each);
     break :blk out;
 };
-const mcp_catalog: tool_defs.HostToolSet = .{ .records = &mcp_records, .digests = &mcp_digests };
+const mcp_tool_set: tool_defs.HostToolSet = .{ .records = &mcp_records, .digests = &mcp_digests };
 
 fn expectHostToolSet(expected: *const tool_defs.HostToolSet, saved: *const store_core.SavedHostToolSet) !void {
     try std.testing.expectEqual(expected.records.len, saved.records.len);
@@ -9422,32 +9422,32 @@ test "a Store opened without a tool set reads back the last one saved, an MCP se
     var storage: Store = undefined;
     try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
     try std.testing.expect(try storage.readHostToolSet(std.testing.allocator) == null);
-    try storage.saveHostToolSet(&mcp_catalog);
+    try storage.saveHostToolSet(&mcp_tool_set);
     try storage.close();
 
     try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
     {
         var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
         defer saved.deinit(std.testing.allocator);
-        try expectHostToolSet(&mcp_catalog, &saved);
+        try expectHostToolSet(&mcp_tool_set, &saved);
         // The Host saves what it read when it reaches no server.
         const read = saved.toolSet();
         try storage.saveHostToolSet(&read);
     }
     // A later tool set without the server's tool replaces it, and saving
     // the earlier one again finds its set.
-    try storage.saveHostToolSet(&testing_catalog);
+    try storage.saveHostToolSet(&testing_tool_set);
     {
         var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
         defer saved.deinit(std.testing.allocator);
-        try expectHostToolSet(&testing_catalog, &saved);
+        try expectHostToolSet(&testing_tool_set, &saved);
     }
     const sets = try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{});
-    try storage.saveHostToolSet(&mcp_catalog);
+    try storage.saveHostToolSet(&mcp_tool_set);
     try std.testing.expectEqual(sets, try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_set", .{}));
     var saved = (try storage.readHostToolSet(std.testing.allocator)).?;
     defer saved.deinit(std.testing.allocator);
-    try expectHostToolSet(&mcp_catalog, &saved);
+    try expectHostToolSet(&mcp_tool_set, &saved);
     try storage.close();
 }
 
@@ -9457,7 +9457,7 @@ test "a saved tool set whose text no longer matches its digest fences the Store"
     var storage: Store = undefined;
     try testingStoreToolSet(&storage, &tmp, std.testing.io, null);
     defer storage.close() catch unreachable;
-    try storage.saveHostToolSet(&mcp_catalog);
+    try storage.saveHostToolSet(&mcp_tool_set);
     try sqlite.exec(storage.sqliteDatabase(), "UPDATE content SET payload=CAST(upper(CAST(payload AS TEXT)) AS BLOB) WHERE content_id=(SELECT description_content_id FROM tool_record WHERE owner='mcp')");
     try std.testing.expectError(error.CorruptStore, storage.readHostToolSet(std.testing.allocator));
     try std.testing.expect(storage.isFenced());
@@ -9468,7 +9468,7 @@ test "a Session offering an MCP server's tool is listed, reported and settled" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -9533,7 +9533,7 @@ test "MCP Actions follow ask and bypass permission and continue after resolution
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
-        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
         defer storage.close() catch unreachable;
         var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
         const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
@@ -9594,7 +9594,7 @@ test "MCP and Bash admission seek each Action's call without scanning calls" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     inline for ([_][:0]const u8{ next_action_attempt_sql, action_domain.next_mcp_action_sql }, 0..) |sql, index| {
         const statement = try sqlite.prepare(storage.sqliteDatabase(), "EXPLAIN QUERY PLAN " ++ sql);
@@ -9633,7 +9633,7 @@ test "MCP invalid and removed calls share their batch rejection lookup rounds" {
             var tmp = std.testing.tmpDir(.{});
             defer tmp.cleanup();
             var storage: Store = undefined;
-            try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+            try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
             defer storage.close() catch unreachable;
             var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
             var command = try completeConfiguration("mcp-rounds-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -9682,7 +9682,7 @@ test "MCP permission and core authorization coexist in one Turn" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("mixed-core-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -9737,7 +9737,7 @@ test "MCP work selected before its parent stops yields to the owed child stop" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     const parent = try configureTestSession(&storage, "mcp-parent");
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
@@ -9794,7 +9794,7 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
-        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
         defer storage.close() catch unreachable;
         var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
         var configuration = try completeConfiguration("bash-population", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
@@ -9825,7 +9825,7 @@ test "MCP attempts serialize Sessions and recover without replay" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
     defer storage.close() catch unreachable;
     var sessions: [2]protocol.Bounded(protocol.max_session_bytes) = undefined;
     for (&sessions, 0..) |*session, index| {
@@ -9855,8 +9855,8 @@ test "MCP attempts serialize Sessions and recover without replay" {
     }
     var replacement_digests: [mcp_records.len][32]u8 = undefined;
     for (&replacement_records, &replacement_digests) |*record, *digest| digest.* = tool_defs.recordDigest(record);
-    const replacement_catalog: tool_defs.HostToolSet = .{ .records = &replacement_records, .digests = &replacement_digests };
-    try storage.saveHostToolSet(&replacement_catalog);
+    const replacement_tool_set: tool_defs.HostToolSet = .{ .records = &replacement_records, .digests = &replacement_digests };
+    try storage.saveHostToolSet(&replacement_tool_set);
     const first = (try storage.nextCoreWork()).?.mcp.action_id;
     // Selection repeats until admission: later calls cannot overtake it.
     try std.testing.expectEqual(first, (try storage.nextCoreWork()).?.mcp.action_id);

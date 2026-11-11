@@ -30,7 +30,7 @@ const digests = blk: {
     for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
     break :blk out;
 };
-const catalog: tools.HostToolSet = .{ .records = &records, .digests = &digests };
+const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
 const reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"page payload\"}]}}");
 const arguments = "{\"q\":\"first\",\"rui_call_description\":\"Read docs\",\"unexpected\":\"must not leave Host\"}";
 const second_arguments = "{\"q\":\"second\",\"rui_call_description\":\"Read next\"}";
@@ -70,7 +70,7 @@ fn run(case: Case) !void {
     defer tmp.cleanup();
     const storage = try allocator.create(store.Store);
     defer allocator.destroy(storage);
-    try store.testingStoreWith(&.{ .engine = .sqlite }, storage, &tmp, std.testing.io, .{ .host_tool_set = &catalog });
+    try store.testingStoreWith(&.{ .engine = .sqlite }, storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
     defer storage.close() catch unreachable;
     const workspace_buffer = try allocator.create([protocol.max_workspace_bytes]u8);
     defer allocator.destroy(workspace_buffer);

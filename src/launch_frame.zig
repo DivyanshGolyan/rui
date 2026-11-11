@@ -13,7 +13,7 @@ const platform = @import("platform.zig");
 pub const MysqlUrl = @import("mysql_url.zig");
 const http1 = @import("http1/request.zig");
 
-test "launch presets resolve MCP tools through the same catalog as configure" {
+test "launch presets resolve MCP tools through the same tool set as configure" {
     const store_testing = @import("store.zig").testing;
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -778,7 +778,7 @@ test "presets in a launch frame are owned until frame deinit" {
     try std.testing.expect(frame.presets_memory == null);
 }
 
-test "presets in a launch frame accept catalog-backed tool names" {
+test "presets in a launch frame accept tool-set-backed names" {
     var frame: Frame = .{};
     defer frame.deinit();
     var refusal: Refusal = undefined;
