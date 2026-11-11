@@ -2137,8 +2137,6 @@ fn finishRetry(self: *Self) !void {
         .failure => |failure| self.notice = switch (failure) {
             .no_message => "! Retry unavailable: no earlier Message. Nothing sent.",
             .too_large => "! Retry unavailable: last Message too large. Nothing sent.",
-            .incomplete => "! Retry unavailable: last Message incomplete. Nothing sent.",
-            .unavailable => "! Retry unavailable: last Message unreadable. Nothing sent.",
         },
         .message => |message| {
             const ticket = try self.input.submitPreservingDraft(self.init.io, self.files.scratch, message.length);
@@ -6751,8 +6749,8 @@ test "failed reply Ctrl-R schedules exact literal Message bytes without changing
     }
 }
 
-test "failed reply retry stale and every read failure send nothing" {
-    for ([_]?reads.RetryFailure{ null, .no_message, .too_large, .incomplete, .unavailable }) |failure| {
+test "failed reply retry stale and every Message state refusal send nothing" {
+    for ([_]?reads.RetryFailure{ null, .no_message, .too_large }) |failure| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         const self = &held.self;
@@ -7406,6 +7404,193 @@ fn launchRetrySettlementForTest(self: *Self, worker: Task.Run) !void {
     const job = self.freeze(.retry);
     job.retry = fence.ending;
     try self.launch(job, worker);
+}
+
+test "failed reply retry reader keeps every read failure at the shared settlement boundary" {
+    const Host = struct {
+        frontend: *Self,
+        listener: *std.Io.net.Server,
+        fault: Fault,
+        target: Stage,
+        requests: usize = 0,
+        losses: usize = 0,
+        const Stage = enum { head, admission, content };
+        const Fault = enum { canonical, fenced, refused, truncated, invalid, length, digest, cancelled };
+        const text = "last literal Message";
+
+        fn code(fault: Fault) ?[]const u8 {
+            return switch (fault) {
+                .canonical => "canonical_store_failure",
+                .fenced => "dispatch_fenced",
+                .refused => "ContentNotFound",
+                else => null,
+            };
+        }
+        fn failure(fault: Fault) anyerror {
+            return switch (fault) {
+                .canonical => error.CanonicalStoreFailure,
+                .fenced, .refused => error.HostInvocationFailed,
+                .truncated => error.TruncatedResponse,
+                .invalid => error.InvalidResponse,
+                .length, .digest => error.ContentBindingMismatch,
+                .cancelled => error.Cancelled,
+            };
+        }
+        fn held(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.losses != 0;
+        }
+        fn lost(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.losses += 1;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return error.TestUnexpectedResult;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+        fn pump(host: *@This()) !bool {
+            const io = std.testing.io;
+            var fds = [_]std.posix.pollfd{.{ .fd = host.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 0) != 0) {
+                const peer = try host.listener.accept(io);
+                defer peer.close(io);
+                var request: [4096]u8 = undefined;
+                var used: usize = 0;
+                while (true) {
+                    const got = try std.posix.read(peer.socket.handle, request[used..]);
+                    if (got == 0) return error.UnexpectedEof;
+                    used += got;
+                    if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                        const start_at = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                        const finish = std.mem.indexOfScalarPos(u8, request[0..end], start_at, '\r').?;
+                        if (used == end + 4 + try std.fmt.parseInt(usize, request[start_at..finish], 10)) break;
+                    }
+                }
+                const stage: Stage = switch (host.requests) {
+                    0 => .head,
+                    1 => .admission,
+                    2 => .content,
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectStringStartsWith(request[0..used], if (stage == .content) "POST /v1/activity-content " else "POST /v1/activity-page ");
+                // Record the observed boundary before replying, closing or cancelling.
+                host.requests += 1;
+                const failing = stage == host.target;
+                if (failing and host.fault == .cancelled) {
+                    host.frontend.reader.cancel();
+                    return host.frontend.reader.completed();
+                }
+                var buffer: [4096]u8 = undefined;
+                var out = std.Io.Writer.fixed(&buffer);
+                var extra_buffer: [128]u8 = undefined;
+                var extra: []const u8 = "";
+                var kind: []const u8 = "application/json";
+                const status: []const u8 = if (!failing) "200 OK" else switch (host.fault) {
+                    .canonical => "500 Internal Server Error",
+                    .fenced => "503 Service Unavailable",
+                    .refused => "409 Conflict",
+                    else => "200 OK",
+                };
+                if (failing and code(host.fault) != null) {
+                    try protocol.writeShape(&out, protocol.error_reply, .{ switch (host.fault) {
+                        .canonical => protocol.ErrorType.invocation_error,
+                        .fenced => protocol.ErrorType.busy,
+                        .refused => protocol.ErrorType.activity_unavailable,
+                        else => unreachable,
+                    }, code(host.fault).? });
+                } else if (stage == .content) {
+                    kind = if (failing and host.fault == .invalid) "text/plain" else "application/octet-stream";
+                    extra = try std.fmt.bufPrint(&extra_buffer, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len });
+                    try out.writeAll(if (failing and host.fault == .digest) "LOST literal Message" else text);
+                } else {
+                    var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+                    try facts.work.workspace.set("/");
+                    const reference: protocol.ActivityItem.Content = .{ .length = text.len + @intFromBool(host.fault == .length), .digest = protocol.contentDigest(text) };
+                    facts.items[0] = .{ .position = if (stage == .head) 3 else 2, .at = 1, .value = .{ .admission = .{ .admission = 2, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
+                    if (stage == .head) {
+                        var ending: protocol.ActivityItem.TurnEnded = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .failed, .code = .{}, .content = null };
+                        try ending.code.set("malformed_provider_output");
+                        facts.items[0].value = .{ .turn_ended = ending };
+                    }
+                    try activity_reply.writePage(&out, &facts);
+                }
+                var header: [512]u8 = undefined;
+                var writer = peer.writer(io, &.{});
+                try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ status, kind, out.buffered().len, extra }));
+                const body = out.buffered();
+                try writer.interface.writeAll(if (failing and host.fault == .truncated) body[0..1] else body);
+            }
+            return host.frontend.reader.completed();
+        }
+    };
+    const io = std.testing.io;
+    for (std.enums.values(Host.Fault)) |fault| for (std.enums.values(Host.Stage)) |target| {
+        if ((fault == .invalid or fault == .length or fault == .digest) and target != .content) continue;
+        for ([_]bool{ false, true }) |app| for ([_]bool{ false, true }) |superseded| {
+            if (superseded and fault != .cancelled) continue;
+            errdefer std.debug.print("retry fault={s}, target={s}, app={}, superseded={}\n", .{ @tagName(fault), @tagName(target), app, superseded });
+            const fixture = try FeedFixture.create();
+            defer fixture.destroy();
+            const held = fixture.held;
+            const self = &held.self;
+            var tmp = try @import("socket_fixture.zig").Directory.init();
+            defer tmp.cleanup();
+            const root = tmp.root[0..tmp.root_len];
+            var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+            defer lease.release();
+            try lease.prepareForServing(false);
+            const paths = lease.paths;
+            var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+            defer {
+                listener.deinit(io);
+                std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+            }
+            self.store = root;
+            self.session = "k7m2qx";
+            self.failedRetryForTest();
+            self.live.latest_ending.?.key = .{ .position = 3 };
+            var host: Host = .{ .frontend = self, .listener = &listener, .fault = fault, .target = target };
+            if (app) self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice };
+            defer self.app_hooks.host = null;
+            defer {
+                self.reader.cancel();
+                // On an assertion failure, reap without replacing that failure.
+                self.reader.join() catch {};
+            }
+            try held.keys("kept éZ\x1b[D\x12");
+            const before = self.input.snapshot();
+            try self.startRetry(); // The production worker, not a synthesized completion.
+            if (superseded) self.input.queueCommand("/help");
+            try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &host, Host.pump);
+            const loss = app and (fault == .fenced or fault == .truncated);
+            if (loss or superseded) {
+                try self.settleReader();
+            } else try std.testing.expectError(Host.failure(fault), self.settleReader());
+            try std.testing.expectEqual(@as(usize, @backingInt(target) + 1), host.requests);
+            try std.testing.expectError(Host.failure(fault), self.reader.result.outcome.?);
+            try std.testing.expectEqual(if (fault == .truncated) client.FailureOrigin.host_transport else .local, self.reader.result.failure_origin);
+            try std.testing.expectEqual(@as(usize, @intFromBool(loss)), host.losses);
+            try std.testing.expect(self.reader.thread == null and self.reader.read_failure == null);
+            try std.testing.expect(self.retry_fence == null and self.job.retry == null and self.submission.intent == null);
+            try std.testing.expectEqual(ReadPhase.activity, self.reading.phase);
+            try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+            try std.testing.expectEqualDeep(before, self.input.snapshot());
+            try std.testing.expect(self.notice == null and self.leaving == null);
+            if (!loss and Host.code(fault) != null) {
+                const pending = self.reading.pending_diagnostic.?;
+                try std.testing.expectEqual(ReadPhase.retry, pending.phase);
+                try std.testing.expect(!pending.recoverable);
+                try std.testing.expectEqualStrings(Host.code(fault).?, pending.failure.diagnostic.code.slice());
+                var bytes: [512]u8 = undefined;
+                var out = std.Io.Writer.fixed(&bytes);
+                try self.writePendingDiagnostic(&out);
+                try std.testing.expect(std.mem.endsWith(u8, out.buffered(), Host.code(fault).?));
+            } else try std.testing.expect(self.reading.pending_diagnostic == null);
+            if (loss) try std.testing.expectEqual(@as(i64, 0), self.poll_at);
+        };
+    };
 }
 
 test "failed reply retry settlement lets queued inspections cancel the read and run without sending" {

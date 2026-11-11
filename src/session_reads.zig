@@ -319,7 +319,7 @@ pub const Job = struct {
     }
 };
 
-pub const RetryFailure = enum { no_message, too_large, incomplete, unavailable };
+pub const RetryFailure = enum { no_message, too_large };
 pub const RetryMessage = struct { ending: Key, position: u64, length: usize };
 const Retry = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
 pub const RetryCompletion = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
@@ -368,22 +368,7 @@ pub fn retry(raw: *anyopaque, task: *Task) !void {
     }
     var staging: RetryStaging = .{ .io = task.io, .file = job.files.scratch, .length = content.length };
     const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
-    const failed = requests.readActivityContent(job.store, job.session, item.position, item.ordinal, reference, &staging) catch |err| switch (err) {
-        error.ContentLengthMismatch, error.ContentBindingMismatch, error.InvalidResponse, error.TruncatedResponse => {
-            job.result.retry = .{ .failure = .incomplete };
-            return;
-        },
-        else => return err,
-    };
-    if (failed) |failure| {
-        if (failure.err() == error.CanonicalStoreFailure) return requests.failRead(failure);
-        job.result.retry = .{ .failure = .unavailable };
-        return;
-    }
-    if (staging.offset != content.length) {
-        job.result.retry = .{ .failure = .incomplete };
-        return;
-    }
+    if (try requests.readActivityContent(job.store, job.session, item.position, item.ordinal, reference, &staging)) |failure| return requests.failRead(failure);
     job.result.retry = .{ .message = .{ .ending = key, .position = item.position, .length = @intCast(staging.offset) } };
 }
 
@@ -2086,13 +2071,11 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
     try std.testing.expectEqual(@as(usize, 1), host.contents);
 }
 
-test "session_reads retry fails on newest unreadable Message without falling back" {
-    for ([_]enum { absent, too_large, refused, short, digest }{ .absent, .too_large, .refused, .short, .digest }) |case| {
+test "session_reads retry reports only Message state without falling back" {
+    for ([_]enum { absent, too_large }{ .absent, .too_large }) |case| {
         var message = FakeHost.message(2).admission;
         switch (case) {
             .too_large => message.content.length = Input.capacity + 1,
-            .short => message.content.length += 1,
-            .digest => message.content.digest = @splat(0),
             else => {},
         }
         const tail = [_]FakeHost.Tail{
@@ -2100,19 +2083,17 @@ test "session_reads retry fails on newest unreadable Message without falling bac
             .{ .value = .{ .admission = message } },
             .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
         };
-        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = if (case == .absent) 1 else tail.len, .refuse_content = case == .refused };
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = if (case == .absent) 1 else tail.len };
         var job: Job = .{ .retry = .{ .position = if (case == .absent) 1 else 3 } };
         try host.readWith(&job, retry);
         const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
         const expected: RetryFailure = switch (case) {
             .absent => .no_message,
             .too_large => .too_large,
-            .refused => .unavailable,
-            .short, .digest => .incomplete,
         };
         try std.testing.expectEqual(expected, job.retryCompletion(latest).failure);
         try std.testing.expectEqual(@as(usize, 2), host.pages);
-        try std.testing.expectEqual(@as(usize, if (case == .absent or case == .too_large) 0 else 1), host.contents);
+        try std.testing.expectEqual(@as(usize, 0), host.contents);
     }
 }
 
