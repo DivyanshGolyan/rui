@@ -184,11 +184,22 @@ pub const Query = struct {
         return query;
     }
 
-    /// The row of `entry`, or null when a word leaves it out. Its effort
+    /// The row of `entry`, or null for non-chat or non-matching models. Its effort
     /// and sign-in are the typed ones where the model offers them, else the
     /// saved ones where it offers those, else the model's own: the product's
     /// sign-in where it offers both, the effort a start applies.
     pub fn row(self: Query, entry: Entry, defaults: Defaults) ?Row {
+        if (!catalog.canChat(entry.id)) return null;
+        return self.match(entry, defaults);
+    }
+
+    /// An explicitly typed, unlisted choice bypasses list admission. Its ID
+    /// and controls go to the provider rather than pretending it is listed.
+    pub fn typed(self: Query, entry: Entry, defaults: Defaults) Row {
+        return (Query{ .words = "", .effort = self.effort, .provider = self.provider }).match(entry, defaults).?;
+    }
+
+    fn match(self: Query, entry: Entry, defaults: Defaults) ?Row {
         var efforts: catalog.Efforts = .empty;
         for (std.enums.values(ReasoningEffort)) |effort| {
             if (model_capability.supportsReasoningEffort(catalog.shipped, entry.id, effort)) efforts.insert(effort);
@@ -461,7 +472,7 @@ fn pickerMenu() !Menu {
     return testMenu(&.{
         .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-terra\ngpt-6.1-sol\ngpt-6.1-sol-2026-10-14\nft:custom\n" ++
-            "@cf/deepseek-ai/deepseek-v4-flash-0731\nazure/gpt-5-pro\nopenai/whisper-1\nalibaba/qwen-max\nauto/mistralai/mistral-medium-3.5\n" } } },
+            "@cf/deepseek-ai/deepseek-v4-flash-0731\nazure/gpt-5-pro\nopenai/gpt-4.1\nalibaba/qwen-max\nauto/mistralai/mistral-medium-3.5\n" } } },
     });
 }
 
@@ -491,7 +502,7 @@ test "a row would save the saved effort and sign-in where its model offers them,
         // Rui's catalog does not list it, so the provider decides.
         .{ .id = "ft:custom", .effort = .none, .provider = .openai },
         .{ .id = "azure/gpt-5-pro", .effort = .high, .provider = .openai },
-        .{ .id = "openai/whisper-1", .effort = null, .provider = .openai },
+        .{ .id = "openai/gpt-4.1", .effort = null, .provider = .openai },
     }) |case| {
         const row = plainRow(&menu, case.id, saved);
         try std.testing.expectEqual(case.effort, row.effort);
@@ -519,7 +530,7 @@ test "the ✓ marks the row of the model new Sessions use, whatever its sign-in"
     defer menu.deinit(std.testing.allocator);
     var marked: usize = 0;
     for (menu.entries) |entry| {
-        const row = Query.parse("").row(entry, .{ .model = "gpt-6.1-sol", .provider = .codex }).?;
+        const row = Query.parse("").row(entry, .{ .model = "gpt-6.1-sol", .provider = .codex }) orelse continue;
         try std.testing.expectEqual(std.mem.eql(u8, entry.id, "gpt-6.1-sol"), row.current);
         marked += @intFromBool(row.current);
         try std.testing.expect(!Query.parse("").row(entry, .{ .provider = .codex, .effort = .high }).?.current);
@@ -545,8 +556,8 @@ test "left and right step the effort through those the model offers and stop at 
         // One effort, or none: the keys do nothing.
         .{ .id = "azure/gpt-5-pro", .side = .lower, .steps = &.{ .high, .high } },
         .{ .id = "azure/gpt-5-pro", .side = .higher, .steps = &.{ .high, .high } },
-        .{ .id = "openai/whisper-1", .side = .lower, .steps = &.{ null, null } },
-        .{ .id = "openai/whisper-1", .side = .higher, .steps = &.{ null, null } },
+        .{ .id = "openai/gpt-4.1", .side = .lower, .steps = &.{ null, null } },
+        .{ .id = "openai/gpt-4.1", .side = .higher, .steps = &.{ null, null } },
     }) |case| {
         var row = plainRow(&menu, case.id, saved);
         for (case.steps) |expected| {
@@ -559,7 +570,7 @@ test "left and right step the effort through those the model offers and stop at 
     try std.testing.expectEqual(@as(usize, 5), plainRow(&menu, "gpt-6.1-sol", saved).efforts.count());
     try std.testing.expectEqual(@as(usize, 6), plainRow(&menu, "ft:custom", saved).efforts.count());
     try std.testing.expectEqual(@as(usize, 1), plainRow(&menu, "azure/gpt-5-pro", saved).efforts.count());
-    try std.testing.expectEqual(@as(usize, 0), plainRow(&menu, "openai/whisper-1", saved).efforts.count());
+    try std.testing.expectEqual(@as(usize, 0), plainRow(&menu, "openai/gpt-4.1", saved).efforts.count());
 }
 
 test "tab switches between the sign-ins the row offers, and does nothing with one" {
@@ -636,8 +647,40 @@ test "a word narrows to the rows whose ID holds it or that offer the effort or s
     const mistral = entryOf(&menu, "auto/mistralai/mistral-medium-3.5");
     try std.testing.expectEqual(@as(?ReasoningEffort, .high), Query.parse("mistral medium").row(mistral, .{ .effort = .high }).?.effort);
     try std.testing.expectEqual(@as(?ReasoningEffort, .none), Query.parse("mistral medium").row(mistral, .{ .effort = .xhigh }).?.effort);
-    // Every row stays with nothing typed.
+    // Every chat row stays with nothing typed.
     var all: usize = 0;
     for (menu.entries) |entry| all += @intFromBool(Query.parse(" ").row(entry, .{}) != null);
-    try std.testing.expectEqual(menu.entries.len, all);
+    var chat_count: usize = 0;
+    for (menu.entries) |entry| if (catalog.canChat(entry.id)) {
+        chat_count += 1;
+    };
+    try std.testing.expectEqual(chat_count, all);
+}
+
+test "model picker domain admits chat and unknown live IDs but not catalog-proven non-chat families" {
+    var menu = try testMenu(&.{.{ .provider = .openai, .list = .{ .live = .{
+        .bytes = "gpt-6.1-sol\ngpt-4.1\nfuture-chat\ngpt-imagery-next\n" ++
+            "gpt-image-2\ngpt-image-1-mini\ntext-embedding-3-large\ngpt-realtime-2.1\n" ++
+            "openai/whisper-1\ngpt-image-next\ntext-embedding-next\ngpt-realtime-next\n",
+    } } }});
+    defer menu.deinit(std.testing.allocator);
+    try expectRows(&menu, "", &.{ "gpt-4.1", "gpt-6.1-sol", "future-chat", "gpt-imagery-next" });
+    try std.testing.expect(!entryOf(&menu, "future-chat").known);
+
+    // Exercise every shipped ID through live-list ingestion and row admission.
+    // The independent exclusion projection is generated from the source's
+    // type/modalities, not from canChat or the picker's filtering result.
+    const facts = @import("model_catalog_snapshot.zig");
+    var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer body.deinit();
+    for (catalog.shipped) |entry| try body.writer.print("{s}\n", .{entry.id});
+    var whole = try testMenu(&.{.{ .provider = .openai, .list = .{ .live = .{ .bytes = body.written() } } }});
+    defer whole.deinit(std.testing.allocator);
+    var offered_chat: usize = 0;
+    for (whole.entries) |entry| {
+        try std.testing.expect(entry.known);
+        offered_chat += @intFromBool(Query.parse("").row(entry, .{}) != null);
+    }
+    try std.testing.expectEqual(catalog.shipped.len - facts.non_chat_ids.len, offered_chat);
+    for (facts.non_chat_ids) |id| try std.testing.expect(Query.parse("").row(entryOf(&whole, id), .{}) == null);
 }

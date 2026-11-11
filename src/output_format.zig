@@ -356,7 +356,7 @@ pub fn readHexScalar(source: anytype) !u21 {
 /// Streams a value's decoded bytes through a whole content window.
 pub const EncodedStringReader = EncodedStringWindow(conversation_read.content_window_bytes);
 
-/// Reads a call name, which the Host only compares with a catalog name or
+/// Reads a call name, which the Host only compares with a tool set name or
 /// quotes as a 32-byte prefix, so a short window serves it.
 pub const NameReader = EncodedStringWindow(64);
 

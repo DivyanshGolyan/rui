@@ -36,7 +36,7 @@ pub const Handler = struct {
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, resident.Point) anyerror!void = null,
     on_retry: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
-pub const Openable = union(enum) { message: View.Collapsed, session: [6]u8 };
+pub const Openable = union(enum) { message: View.Collapsed, session: [6]u8, tool: resident.Key };
 const Cell = struct { row: i32, col: i32 };
 // Both bounds of both clusters are keyed. No saved offset counts from the
 // window's start/end; a prepend or removal of another row cannot move them.
@@ -87,6 +87,10 @@ pub fn messageAt(self: *const Self, point: resident.Point) ?View.Collapsed {
     return self.window.messageAt(point);
 }
 
+pub fn toolAt(self: *const Self, point: resident.Point) ?resident.Key {
+    return self.window.toolAt(point);
+}
+
 /// Lowest actually painted mark/link, not an ordinal counted from the end.
 /// Looking at source cells also excludes links on hidden wrapped rows.
 pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
@@ -97,6 +101,7 @@ pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
     while (row > 0) {
         row -= 1;
         const position = self.rowPosition(row) orelse continue;
+        if (self.window.document.toolHeading(position.offset)) return .{ .tool = self.window.pointAt(position.offset).?.key };
         self.paintRow(cells, position);
         var column: usize = cells.len;
         while (column > 0) {

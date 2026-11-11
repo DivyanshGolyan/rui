@@ -5,7 +5,9 @@ human_cli_integration.py runs these cases in its full and renderer modes, and
 alone as `session-chrome`. Each case judges the screen the person sees, at
 80×24 unless it says otherwise: the feed fills rows 0–17, row 18 is
 reserved for the marker even at the end, and the input sits
-between the rules on rows 19–21, the facts row is 22 and the last row 23."""
+between the rules on rows 19–21, the facts row is 22 and the last row 23.
+Feed/page/activity rows have one gutter column; input, facts and status
+retain their own margins."""
 import json
 import os
 import select
@@ -18,6 +20,7 @@ import model_fixture as fixture
 from host_process import dispose_all, screen_fixture_root, stop_process
 from human_cli_fixture import (
     admit,
+    chat_content_row,
     keyed_frame,
     run,
     settle_screen,
@@ -35,10 +38,15 @@ def rows(screen):
     return screen.split("\n")
 
 
+def transcript_rows(screen):
+    """Content coordinates, excluding only the feed gutter, above the input."""
+    return [chat_content_row(row) for row in rows(screen)[:BOTTOM + 1]]
+
+
 def tail_rows(screen):
     """The feed's final block, excluding the permanently reserved chip row.
     The activity tail is an entry in that same feed, not separate chrome."""
-    shown = rows(screen)[:BOTTOM]
+    shown = transcript_rows(screen)[:BOTTOM]
     start = max((n for n, row in enumerate(shown) if not row.strip()), default=-1) + 1
     return shown[start:]
 
@@ -128,7 +136,7 @@ def composing(screen, draft):
 
 
 def latest(screen, text):
-    return text in "\n".join(rows(screen)[:BOTTOM + 1]) and marker(screen) is None
+    return text in "\n".join(transcript_rows(screen)) and marker(screen) is None
 
 
 def frames_until(master, keys, accept, timeout=15):
@@ -176,10 +184,10 @@ def activity_case():
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             # The activity block is the feed's final entry, directly after
             # the person's row; no blank separator owns a separate tail pane.
-            tail = rows(running)[BOTTOM - 1:BOTTOM]
-            assert [line for line in rows(running)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, running
+            tail = transcript_rows(running)[BOTTOM - 1:BOTTOM]
+            assert [line for line in transcript_rows(running)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, running
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
-            assert rows(running)[BOTTOM - 1].startswith("⠹ Held call · ") and not rows(running)[BOTTOM].strip(), running
+            assert transcript_rows(running)[BOTTOM - 1].startswith("⠹ Held call · ") and not rows(running)[BOTTOM].strip(), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
             # Alone at the right of the last row, inside its one-column margin.
             last = rows(running)[LAST]
@@ -190,10 +198,10 @@ def activity_case():
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, ""))
-            tail = rows(waiting)[BOTTOM - 2:BOTTOM]
-            assert [line for line in rows(waiting)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, waiting
+            tail = transcript_rows(waiting)[BOTTOM - 2:BOTTOM]
+            assert [line for line in transcript_rows(waiting)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, waiting
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
-            assert rows(waiting)[BOTTOM - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[BOTTOM].strip(), waiting
+            assert transcript_rows(waiting)[BOTTOM - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[BOTTOM].strip(), waiting
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
             assert rows(waiting)[LAST].endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
@@ -227,7 +235,7 @@ def send_state_case():
         assert rows(cleared[0])[LAST] == "Sending…", cleared[0]
         seen = set()
         for frame in cleared:
-            last, shown = rows(frame)[LAST].strip(), "\n".join(rows(frame)[:BOTTOM + 1])
+            last, shown = rows(frame)[LAST].strip(), "\n".join(transcript_rows(frame))
             seen.add(last)
             if "› SEND-ME" in shown:
                 break
@@ -268,18 +276,23 @@ def scroll_marker_case():
         end = chrome.frame(master, b"", lambda screen: composing(screen, "keep"))
         assert not rows(end)[BOTTOM].strip(), end
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓")
-            assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
-            assert rows(scrolled)[LAST].strip() == "", (keys, "no heading or hint", scrolled)
-            assert not any(row.startswith("Browsing") for row in rows(scrolled)), scrolled
             # The chip has not stolen a row: every overlapping unique content
             # line moves by exactly half the feed height, not by half plus one.
-            end_rows, held_rows = rows(end)[:BOTTOM], rows(scrolled)[:BOTTOM]
+            # Rows above the loaded ones join first, so judge the frame where
+            # the whole move has landed.
+            end_rows = rows(end)[:BOTTOM]
             before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
-            after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
-            shared = before.keys() & after.keys()
-            assert shared, (end, scrolled)
-            assert all(after[line] - before[line] == BOTTOM // 2 for line in shared), (end, scrolled)
+
+            def moved(screen):
+                held_rows = rows(screen)[:BOTTOM]
+                after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
+                shared = before.keys() & after.keys()
+                return bool(shared) and all(after[line] - before[line] == BOTTOM // 2 for line in shared)
+
+            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓" and moved(screen))
+            assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
+            assert rows(scrolled)[LAST].strip() == "", (keys, "no heading or hint", scrolled)
+            assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
             # End edits this nonempty draft without moving the feed. Empty-
             # draft End and Ctrl-End delegate to the conversation's end action.
             # Older pages may still join above; judge the settled view.
@@ -323,18 +336,18 @@ def pages_case():
         chrome.answered(session, "seed")
         master, caller, _ = chrome.open(session, lambda screen: "SEED-ANSWER" in screen)
         try:
-            status = chrome.frame(master, b"/status\r", lambda screen: rows(screen)[0].strip() == f"Status · {session}")
+            status = chrome.frame(master, b"/status\r", lambda screen: transcript_rows(screen)[0].strip() == f"Status · {session}")
             assert marker(status) == "↓" and composing(status, ""), status
-            assert not any(row.startswith("Browsing") for row in rows(status)), status
+            assert not any(row.startswith("Browsing") for row in transcript_rows(status)), status
             chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER"))
-            help_page = chrome.frame(master, b"/help\r", lambda screen: rows(screen)[0] == "Marks")
+            help_page = chrome.frame(master, b"/help\r", lambda screen: transcript_rows(screen)[0] == "Marks")
             assert "ctrl+x                 stop" in help_page and "shift+↑↓               scroll" in help_page, help_page
             assert "ctrl+o                 open" in help_page and marker(help_page) == "↓", help_page
             chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER"))
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
-            working = chrome.frame(master, b"/status\r", lambda screen: rows(screen)[0].strip() == f"Status · {session}")
+            working = chrome.frame(master, b"/status\r", lambda screen: transcript_rows(screen)[0].strip() == f"Status · {session}")
             assert rows(working)[LAST].endswith("ctrl+x stop"), working
             chrome.frame(master, b"\x1b", lambda screen: "⠹ Held call · " in screen and marker(screen) is None)
             (chrome.workspace / "release").write_text("")
@@ -348,8 +361,8 @@ def pages_case():
 
 def opening_case():
     """A Session reopened while Messages wait shows them as one counted
-    `◌ N · <newest>` row; a collapsed Message opens with Ctrl-O, and Esc
-    returns to the transcript."""
+    `◌ N · <newest>` row; Ctrl-O opens the lowest tool or collapsed Message, and Esc
+    returns from the Message page to the transcript."""
     release = threading.Event()
     long_text = "\n".join(f"LONG line {i:02d}" for i in range(40))
     with Chrome("rui-chrome-opening.", []) as chrome:
@@ -373,9 +386,22 @@ def opening_case():
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "HELD-DONE") and "◌" not in screen, timeout=30)
             chrome.leave(master, caller)
-            master, caller, _ = chrome.open(session, lambda screen: "HELD-DONE" in screen)
+            master, caller, reopened = chrome.open(session, lambda screen: "HELD-DONE" in screen)
+            assert "    done" not in reopened, reopened
             folded = chrome.frame(master, b"\x1b[5~\x1b[5~", lambda screen: "┄ 38 more lines" in screen)
-            whole = chrome.frame(master, b"\x0f", lambda screen: rows(screen)[0].startswith("Message · 40 lines"))
+            # The newer tool is below the old Message. Ctrl-O therefore opens
+            # the tool, and only this key—not reopening the Session—opens it.
+            tool = chrome.frame(master, b"\x0f", lambda screen: "    done" in screen)
+            assert "Message · 40 lines" not in tool, tool
+            chrome.frame(master, b"\x0f", lambda screen: "    done" not in screen)
+            chrome.leave(master, caller)
+            # Now put the long Message below the tool so the same nearest-in-
+            # view rule selects the Message, rather than assuming tools lose.
+            chrome.endpoint.responses.append(fixture.sse_answer("later-long", "r", "m", "LATER-LONG-ANSWER")[0])
+            chrome.answered(session, long_text)
+            master, caller, reopened = chrome.open(session, lambda screen: "LATER-LONG-ANSWER" in screen and "┄ 38 more lines" in screen)
+            assert "    done" not in reopened, reopened
+            whole = chrome.frame(master, b"\x0f", lambda screen: transcript_rows(screen)[0].startswith("Message · 40 lines"))
             assert "LONG line 11" in whole and marker(whole) == "↓", whole
             chrome.frame(master, b"\x1b", lambda screen: "Message · 40 lines" not in screen)
             chrome.leave(master, caller)
@@ -383,7 +409,7 @@ def opening_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O opens a collapsed Message", flush=True)
+    print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
 def notice_case():

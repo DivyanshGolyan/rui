@@ -53,9 +53,41 @@ pub const entry_capacity = 512;
 // screens, so neither a large row nor many tiny ones makes loading and
 // eviction ping-pong.
 pub const byte_capacity = 65 * 1024;
-// Remember the latest 64 opened keys, including evicted entries; oldest-opened
-// is forgotten when full. Lookup does not mutate order. Closing releases a slot.
-pub const open_capacity = 64;
+/// The tool rows the person opened, by key. A row renders with its output
+/// while its key is here, so it stays open across trimming and reloading.
+/// Holds at most 64 and never forgets one: a full set refuses another
+/// opening, so the set and the rows' text cannot disagree. Closing releases
+/// a slot.
+pub const Opened = struct {
+    pub const capacity = 64;
+    keys: [capacity]Key = undefined,
+    count: usize = 0,
+
+    pub fn has(self: *const Opened, key: Key) bool {
+        for (self.keys[0..self.count]) |item| if (item.order(key) == .eq) return true;
+        return false;
+    }
+
+    pub fn full(self: *const Opened) bool {
+        return self.count == capacity;
+    }
+
+    /// The caller asks `full` before opening another row.
+    pub fn set(self: *Opened, key: Key, open: bool) void {
+        for (self.keys[0..self.count], 0..) |item, i| {
+            if (item.order(key) != .eq) continue;
+            if (!open) {
+                std.mem.copyForwards(Key, self.keys[i..], self.keys[i + 1 .. self.count]);
+                self.count -= 1;
+            }
+            return;
+        }
+        if (!open) return;
+        std.debug.assert(!self.full());
+        self.keys[self.count] = key;
+        self.count += 1;
+    }
+};
 
 pub const LatestEnding = @import("feed_reads.zig").Ending(Key);
 /// Padding on a synthetic-only wrapped row has no resident text to select.
@@ -126,8 +158,7 @@ pub const Window = struct {
     document: Document = .{ .dirty = false, .sidenotes = true, .quotes = true },
     entries: [entry_capacity]Stored = undefined,
     count: usize = 0,
-    opened: [open_capacity]Key = undefined,
-    opened_count: usize = 0,
+    opened: Opened = .{},
     // Page cursors are facts, not aliases for rendered row keys: filtered or
     // empty pages can advance them without adding any rendered text.
     at_start: bool = false,
@@ -149,29 +180,6 @@ pub const Window = struct {
 
     pub fn edges(self: *const Window) Feed.Edges {
         return .{ .start = self.at_start, .end = self.at_end };
-    }
-
-    pub fn isOpen(self: *const Window, key: Key) bool {
-        for (self.opened[0..self.opened_count]) |item| if (item.order(key) == .eq) return true;
-        return false;
-    }
-
-    pub fn setOpen(self: *Window, key: Key, open: bool) void {
-        for (self.opened[0..self.opened_count], 0..) |item, i| {
-            if (item.order(key) != .eq) continue;
-            if (!open) {
-                std.mem.copyForwards(Key, self.opened[i..], self.opened[i + 1 .. self.opened_count]);
-                self.opened_count -= 1;
-            }
-            return;
-        }
-        if (!open) return;
-        if (self.opened_count == open_capacity) {
-            std.mem.copyForwards(Key, &self.opened, self.opened[1..]);
-            self.opened_count -= 1;
-        }
-        self.opened[self.opened_count] = key;
-        self.opened_count += 1;
     }
 
     /// All edits copy their input. Input must not alias this window. Errors are
@@ -303,6 +311,15 @@ pub const Window = struct {
     pub fn offsetOf(self: *const Window, point: Point) ?usize {
         const entry = self.entries[self.indexOf(point.key) orelse return null];
         return entry.offset + @min(point.offset, entry.length);
+    }
+
+    /// The tool row whose heading line holds this point.
+    pub fn toolAt(self: *const Window, point: Point) ?Key {
+        const offset = self.offsetOf(point) orelse return null;
+        const entry = self.entries[self.indexOf(point.key).?];
+        var line = offset;
+        while (line > entry.offset and self.document.bytes[line - 1] != '\n') : (line -= 1) {}
+        return if (self.document.toolHeading(line)) point.key else null;
     }
 
     pub fn messageAt(self: *const Window, point: Point) ?View.Collapsed {
@@ -644,27 +661,30 @@ test "feed_window open keys survive trimming either edge and reloading" {
     window.at_end = true;
     window.low = .{ .position = 10 };
     window.high = .{ .position = 30 };
-    for ([_]u64{ 10, 30 }) |position| window.setOpen(.{ .position = position }, true);
+    for ([_]u64{ 10, 30 }) |position| window.opened.set(.{ .position = position }, true);
     window.trim(1, 1);
     try testing.expect(!window.at_start and !window.at_end);
     try testing.expectEqualDeep(@as(?Key, .{ .position = 20 }), window.low);
     try testing.expectEqualDeep(@as(?Key, .{ .position = 20 }), window.high);
     try window.prepend(&.{testEntry(10, "opened old tool")});
     try window.append(&.{testEntry(30, "opened new tool")});
-    for ([_]u64{ 10, 30 }) |position| try testing.expect(window.isOpen(.{ .position = position }));
+    for ([_]u64{ 10, 30 }) |position| try testing.expect(window.opened.has(.{ .position = position }));
     window.trim(3, 0);
     try window.append(&.{testEntry(10, "opened again")});
-    try testing.expect(window.isOpen(.{ .position = 10 }));
-    window.setOpen(.{ .position = 10 }, false);
-    try testing.expect(!window.isOpen(.{ .position = 10 }));
+    try testing.expect(window.opened.has(.{ .position = 10 }));
+    window.opened.set(.{ .position = 10 }, false);
+    try testing.expect(!window.opened.has(.{ .position = 10 }));
     // Same position, different ordinal is a distinct tool.
-    window.setOpen(.{ .position = 30, .ordinal = 1 }, true);
-    window.setOpen(.{ .position = 30 }, false);
-    try testing.expect(window.isOpen(.{ .position = 30, .ordinal = 1 }));
-    for (0..open_capacity) |i| window.setOpen(.{ .position = 100 + i }, true);
-    try testing.expectEqual(open_capacity, window.opened_count);
-    try testing.expect(!window.isOpen(.{ .position = 30, .ordinal = 1 }));
-    for (0..open_capacity) |i| try testing.expect(window.isOpen(.{ .position = 100 + i }));
+    window.opened.set(.{ .position = 30, .ordinal = 1 }, true);
+    window.opened.set(.{ .position = 30 }, false);
+    try testing.expect(window.opened.has(.{ .position = 30, .ordinal = 1 }));
+    // A full set says so and keeps every key; closing one makes room.
+    var position: u64 = 100;
+    while (!window.opened.full()) : (position += 1) window.opened.set(.{ .position = position }, true);
+    try testing.expectEqual(Opened.capacity, window.opened.count);
+    try testing.expect(window.opened.has(.{ .position = 30, .ordinal = 1 }));
+    window.opened.set(.{ .position = 100 }, false);
+    try testing.expect(!window.opened.full());
 }
 
 fn totalRows(entries: []const Feed.Entry) u64 {

@@ -10,41 +10,35 @@ const word_search = @import("../../word_search.zig");
 const rsql = @import("../rsql.zig");
 const action = @import("action.zig");
 const command = @import("command.zig");
-const configuration = @import("configuration.zig");
 const content = @import("content.zig");
 const tool_set = @import("tool_set.zig");
+const configuration = @import("configuration.zig");
+const tool_offer = @import("tool_offer.zig");
 const Faults = @import("../Store.zig").Faults;
 
 const settings = rsql.Read(.{
-    .sql = "SELECT revision,tool_set_id," ++ tool_set.offeredSetSql("session") ++ " AS loaded_set FROM session WHERE session_ref=?1",
+    .sql = "SELECT revision,tool_set_id,loaded_tool_set_id FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
-    .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_set: rsql.Positive },
+    .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_tool_set_id: ?rsql.Positive },
     .cardinality = .one,
 });
 
-/// SQL narrows identities only; the shared Host matcher decides every hit.
-/// Saved records, not the Host's potentially newer catalog, define the search.
-const candidates = rsql.Read(.{
-    .sql = "SELECT tool.name,description.content_id,description.byte_length,description.digest " ++
-        "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "JOIN content description ON description.content_id=tool.description_content_id WHERE member.tool_set_id=?1 " ++
-        "AND NOT EXISTS(SELECT 1 FROM tool_set_member loaded WHERE loaded.tool_set_id=?2 AND loaded.tool_record_id=member.tool_record_id) ORDER BY tool.name",
-    .Args = struct { set: u64, loaded: u64 },
-    .Row = struct { name: Bounded(tools.max_name_bytes), content_id: rsql.Positive, byte_length: u64, digest: [32]u8 },
-    .cardinality = .each,
-});
+/// The shared current projection supplies available identities; only unloaded
+/// records enter matching. Description text is streamed below, never copied.
+const Candidate = struct { name: Bounded(tools.max_name_bytes), content_id: rsql.Positive, byte_length: u64, digest: [32]u8 };
 
 const Candidates = struct {
-    rows: [tool_name.max_tools]candidates.Row = undefined,
+    rows: [tool_name.max_tools]Candidate = undefined,
     count: usize = 0,
     invalid: bool = false,
 
-    pub fn visit(self: *Candidates, row: *const candidates.Row) bool {
+    pub fn visit(self: *Candidates, row: *const tool_offer.OfferedRecord) bool {
+        if (row.loaded) return true;
         if (self.count == self.rows.len) {
             self.invalid = true;
             return false;
         }
-        self.rows[self.count] = row.*;
+        self.rows[self.count] = .{ .name = row.name, .content_id = row.content_id, .byte_length = row.byte_length, .digest = row.description };
         self.count += 1;
         return true;
     }
@@ -72,7 +66,7 @@ const LoadedNames = struct {
 
 const Matches = struct {
     names: command_input.ToolsField = .{ .state = .value },
-    rows: [8]candidates.Row = undefined,
+    rows: [8]Candidate = undefined,
     count: usize = 0,
     remaining: usize = 0,
 };
@@ -84,7 +78,7 @@ const SearchScratch = struct {
     matchers: [8]word_search.Matcher = undefined,
 };
 
-fn matchesCandidate(a: anytype, scratch: *SearchScratch, words: *const core.FindTools, row: *const candidates.Row) !bool {
+fn matchesCandidate(a: anytype, scratch: *SearchScratch, words: *const core.FindTools, row: *const Candidate) !bool {
     for (words.words[0..words.count], 0..) |word, index| {
         const matcher = &scratch.matchers[index];
         matcher.init(word);
@@ -109,8 +103,8 @@ fn matchesCandidate(a: anytype, scratch: *SearchScratch, words: *const core.Find
     return false;
 }
 
-/// Merge the two disjoint, ordered sets for the same interning path configure
-/// uses. Equality needs no explicit set; no-match calls need no loaded-name read.
+/// Merge disjoint, ordered loaded intent and new available hits. Preserve
+/// unavailable intended names even when the hits cover all available tools.
 fn includeLoadedNames(a: anytype, arena: std.mem.Allocator, loaded_set: u64, matches: *Matches) !void {
     const loaded = try arena.create(LoadedNames);
     loaded.* = .{};
@@ -171,13 +165,14 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     var current: settings.Result = undefined;
     a.read(settings, .{ .session = &found.session.ref }, &current);
     try a.run();
+    const configured = current.tool_set_id.get();
+    const loaded_intent: ?u64 = if (current.loaded_tool_set_id) |id| id.get() else null;
     const matches = try arena.create(Matches);
     matches.* = .{};
     if (refusal == null) {
         const pending = try arena.create(Candidates);
         pending.* = .{};
-        a.readEach(candidates, .{ .set = current.tool_set_id.get(), .loaded = current.loaded_set.get() }, tool_name.max_tools + 1, pending);
-        try a.run();
+        try tool_offer.project(a, configured, loaded_intent, pending);
         if (pending.invalid) return error.CorruptStore;
         matches.remaining = pending.count;
         if (pending.count > 0) {
@@ -190,8 +185,8 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
                 if (matches.count == matches.rows.len) break;
             }
         }
-        if (matches.count > 0 and matches.remaining > 0)
-            try includeLoadedNames(a, arena, current.loaded_set.get(), matches);
+        if (matches.count > 0)
+            try includeLoadedNames(a, arena, loaded_intent orelse configured, matches);
     }
 
     var output: std.Io.Writer.Allocating = .init(arena);
@@ -221,14 +216,13 @@ pub fn run(a: anytype, binding: action.ActionAttemptBinding, arena: std.mem.Allo
     // The call's binding uniquely identifies its saved arguments, even on retry.
     const digest = content_string.digest(key);
     if (matches.count > 0) {
-        var loaded: ?u64 = null;
-        if (matches.remaining > 0) {
-            var selected = try tool_set.Selection.ofSaved(a, current.tool_set_id.get(), &matches.names);
-            tool_set.lookupSelection(a, &selected);
-            try a.run();
-            loaded = try tool_set.finishSelection(a, &selected, current.tool_set_id.get());
-        }
-        a.write(update_loaded, .{ .session = found.session, .loaded = loaded, .revision = revision });
+        var selected = try tool_set.Selection.ofSaved(a, configured, &matches.names);
+        tool_set.lookupSelection(a, &selected);
+        try a.run();
+        const selected_set = try tool_set.finishSelection(a, &selected, configured);
+        // Sets are saved once per membership: loading every configured name
+        // is the configured set itself, which the Session saves as NULL.
+        a.write(update_loaded, .{ .session = found.session, .loaded = if (selected_set == configured) null else selected_set, .revision = revision });
         var applied: configuration.Applied = .{
             .session = .{},
             .head = found.session,

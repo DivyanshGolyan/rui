@@ -35,6 +35,8 @@ pub const Actions = struct {
 
 /// What the screen read for this frame.
 pub const View = struct {
+    /// Shell fact, never inferred from this pane's width.
+    list_visible: bool = false,
     /// Anchor held away from the end: the reserved marker row shows its chip.
     browsing: bool = false,
     /// Transcript entries that arrived below while browsing.
@@ -46,7 +48,7 @@ pub const View = struct {
     /// Where a send stands (`chrome.Send.progress`).
     progress: ?[]const u8 = null,
     stoppable: bool = false,
-    /// The facts after `‹ `.
+    /// The facts after the narrow back control, or the wide margin.
     facts: []const u8 = "",
     /// The reply to the last key that shows now (`Notice.current`), and
     /// what the overview says (`chrome.Facts.overview`), each borrowed
@@ -95,13 +97,31 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     });
     self.status.key.label = if (view.needs != null) view.needs_key else "";
     self.facts.text = view.facts;
-    screen.input.facts = self.facts.widget();
+    screen.input.facts = if (view.list_visible) self.plainFacts() else self.facts.widget();
     screen.input.status = self.status.widget();
     // The activity block is the Feed's unkeyed last entry, never a shell row.
     screen.tail = null;
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
     screen.marker = if (view.browsing) self.marker.widget() else empty_marker.widget();
     screen.overlay = if (view.shortcuts) self.shortcuts.widget() else view.overlay;
+}
+
+/// The screen budgets facts using the same prefix the row draws.
+pub fn factsInset(list_visible: bool) u16 {
+    return if (list_visible) 1 else FactsRow.text_column;
+}
+
+fn plainFacts(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .drawFn = drawPlainFacts };
+}
+
+fn drawPlainFacts(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const size = ctx.max.size();
+    const surface = try vxfw.Surface.init(ctx.arena, self.plainFacts(), .{ .width = size.width, .height = @min(1, size.height) });
+    @memset(surface.buffer, .{ .style = self.facts.style });
+    _ = Chip.print(surface, self.facts.method, factsInset(true), 0, self.facts.text, self.facts.style, size.width);
+    return surface;
 }
 
 const Recorder = struct {
@@ -200,4 +220,35 @@ test "the status row shows the notice under what needs the person, and the ? sho
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", self.status.bar.left);
     try std.testing.expectEqualStrings("ctrl+r retries", self.status.key.label);
+}
+
+test "Session chrome back control exists only while the shell hides the list" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    var bytes: [1]u8 = undefined;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
+    var screen: AppScreen.Session = .{ .content = undefined, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} };
+    for ([_]bool{ true, false, true, false }) |list_visible| {
+        self.place(&screen, .{ .width = 80, .list_visible = list_visible, .facts = "demo · gpt-5.5 · low · 100% left" });
+        const row = try input.facts.draw(draw);
+        if (list_visible) {
+            try std.testing.expectEqualStrings("d", row.readCell(1, 0).char.grapheme);
+            try std.testing.expectEqual(@as(usize, 0), row.children.len);
+        } else {
+            try std.testing.expectEqualStrings("d", row.readCell(3, 0).char.grapheme);
+            try std.testing.expectEqualStrings("‹", row.children[0].surface.readCell(0, 0).char.grapheme);
+        }
+        const before = recorder.clicked.get(.back);
+        const press: vaxis.Mouse = .{ .col = 1, .row = 0, .button = .left, .mods = .{}, .type = .press };
+        var release = press;
+        release.type = .release;
+        try @import("testing/app_events.zig").mouse(&ctx, row, press);
+        try @import("testing/app_events.zig").mouse(&ctx, row, release);
+        try std.testing.expectEqual(before + @intFromBool(!list_visible), recorder.clicked.get(.back));
+    }
 }

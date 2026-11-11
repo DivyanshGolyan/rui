@@ -12,6 +12,31 @@
       "expect": "Type a task"
     },
     {
+      "name": "settings",
+      "note": "App settings via End/Enter; does not require S5's drawn Settings row",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Rui"
+        },
+        {
+          "wait": "Notifications"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Notifications",
+        "Sign-in",
+        "Version"
+      ]
+    },
+    {
       "name": "start",
       "note": "02-overview",
       "open": "overview",
@@ -146,7 +171,7 @@
     },
     {
       "name": "chat",
-      "note": "10-conversation",
+      "note": "10-conversation: tool rows stay folded, with named failed exits",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -168,9 +193,236 @@
         }
       ],
       "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
         "The project has a README",
         "retry policy notes"
       ]
+    },
+    {
+      "name": "tool-open",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "    stderr tail:"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour"
+    },
+    {
+      "name": "tool-open-two",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up"
+          ]
+        },
+        {
+          "wait": "✓ List project files"
+        },
+        {
+          "gone": "× Fail with exit 127"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn",
+            "PgDn",
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "    Bash succeeded. Exit code: 0.",
+        "    stdout tail:",
+        "    README.md",
+        "    src",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears"
+    },
+    {
+      "name": "tool-open-long",
+      "open": "Long tool output",
+      "cast": [
+        {
+          "label": "Long tool output",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Show long tool output."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Printed thirty-two numbered lines."
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "more lines"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ Print thirty-two lines",
+        "    Bash succeeded. Exit code: 0.",
+        "    stdout tail:",
+        "    output line 18",
+        "    … 14 more lines"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines"
+    },
+    {
+      "name": "tool-open-nocolor",
+      "open": "Fix retry deadline",
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "    stderr tail:"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour"
     },
     {
       "name": "chat-draft-kept",
@@ -288,18 +540,23 @@
     },
     {
       "name": "markdown-wrapped",
-      "note": "12c-markdown-wrapped: code continuation retains its own indent",
+      "note": "12c-markdown-wrapped: pin the four-space code continuation while narrow, then resize to the sidebar layout",
       "open": "Markdown retry",
       "sizes": [
-        "46x30"
+        "46x30",
+        "140x40"
       ],
       "steps": [
         {
           "wait": "retry policy notes"
+        },
+        {
+          "wait": "return null; //\n    expired"
         }
       ],
       "expect": [
-        "return null; //\n    expired",
+        "return null; //",
+        "expired",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
       ]
@@ -534,7 +791,7 @@
     },
     {
       "name": "help",
-      "note": "00-help",
+      "note": "20-help: Ctrl-O opens a row; no separate tool-details command",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -547,12 +804,22 @@
         },
         {
           "wait": "Marks"
+        },
+        {
+          "gone": "/details"
         }
+      ],
+      "expect": [
+        "Marks",
+        "Keys",
+        "ctrl+o                 open",
+        "Commands",
+        "/copy [code|file]"
       ]
     },
     {
       "name": "slash",
-      "note": "00-slash",
+      "note": "21-slash: conversation commands without a tool-details page",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -560,7 +827,15 @@
         },
         {
           "wait": "/help"
+        },
+        {
+          "gone": "/details"
         }
+      ],
+      "expect": [
+        "/copy [code|file]",
+        "/effort LEVEL",
+        "/help"
       ]
     },
     {
@@ -911,17 +1186,14 @@
           "host": "pause"
         },
         {
-          "wait": "The Host stopped."
-        },
-        {
-          "wait": "Pane is dead (status 6"
+          "wait": "Host stopped"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Pane is dead (status 6"
+      "expect": "Host stopped"
     },
     {
       "name": "host-back",

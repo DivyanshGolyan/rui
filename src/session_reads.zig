@@ -3,6 +3,7 @@
 //! not import the frontend, so no worker can read or write it.
 
 const std = @import("std");
+const tool_fold = @import("tool_fold.zig");
 const socket_os = @import("os/socket.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -43,13 +44,14 @@ pub const RenderedRow = struct {
     collapsed_count: usize = 0,
 };
 
-pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
+pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
 /// Writes /requests' recovery handles, and offers each saved Message among
 /// them to the page's list.
-pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
+pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
 /// The saved Messages a /requests page offers, under the Store's key bound.
 pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
-/// Takes what /status reports of the Session from one Current capture, whose
+/// Local-only adapter: consumes an already-read Current and files, never
+/// Host transport. Takes what /status reports of the Session, whose
 /// attention rows are in the first file, into the Session given. True when
 /// it differs from the shown one (always without one): the second file then
 /// lists its Actions awaiting approval, as the page shows them.
@@ -205,8 +207,13 @@ fn plain(comptime limit: usize, bytes: []const u8) Bounded(limit) {
     return value;
 }
 
-/// The Message whose full text an inspection opens.
-pub const Target = union(enum) { message: View.Collapsed };
+/// What a Ctrl-O read renders.
+pub const Target = union(enum) {
+    /// This collapsed block's Message, in full.
+    message: View.Collapsed,
+    /// This tool row again, with its output shown or hidden.
+    tool: struct { key: Key, open: bool },
+};
 
 pub const Job = struct {
     init: std.process.Init = undefined,
@@ -224,7 +231,9 @@ pub const Job = struct {
     cursor: protocol_reply.ActivityCursor = .{},
     opening: bool = false,
     feed_page: ?FeedPolicy.Page = null,
-    target: Target = undefined,
+    target: ?Target = null,
+    /// The tool rows the person left open, as of this read's start.
+    opened: feed_window.Opened = .{},
     recall: ?Input.Step = null,
     /// Frozen live fact for scans; fills neither read nor publish it.
     latest_ending: ?LatestEnding = null,
@@ -483,7 +492,9 @@ const RecallStaging = struct {
 /// through its own descriptor. No command reads terminal input.
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = .{ .io = task.io, .cancellation = job.interrupted }, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
+    var read = task.readContext();
+    read.cancellation = job.interrupted;
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -495,7 +506,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
 pub const CommandRun = struct {
     command: Command,
     init: std.process.Init,
-    requests: client.Requests,
+    requests: client.ReadContext,
     store: []const u8,
     session: []const u8,
     /// Decoded in place.
@@ -528,7 +539,12 @@ pub const CommandRun = struct {
         const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, self.requests, self.store, self.session, self.line);
         const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
         const stderr_restored = std.c.dup2(saved[1], 2) >= 0;
-        return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = if (!stdout_restored or !stderr_restored) error.TerminalCleanupFailed else result };
+        if (!stdout_restored or !stderr_restored) {
+            // Restoration replaced the command's outcome with a local failure.
+            self.requests.origin.* = .local;
+            return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = error.TerminalCleanupFailed };
+        }
+        return .{ .rendering = true, .stderr_restored = true, .outcome = result };
     }
 };
 
@@ -613,6 +629,10 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         }
     }
     try job.files.inspection.setLength(task.io, 0);
+    // One open row at a time uses this buffer; closed rows never touch it.
+    const toggled: ?@FieldType(Target, "tool") = if (job.target) |target| if (target == .tool) target.tool else null else null;
+    const output: ?*tool_fold.Output = if (job.opened.count != 0 or toggled != null) try job.init.gpa.create(tool_fold.Output) else null;
+    defer if (output) |held| job.init.gpa.destroy(held);
     var offset: u64 = 0;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (page.facts.direction == .backward) page.facts.count - index - 1 else index];
@@ -623,15 +643,16 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // an Admission visible without adding another Activity row.
         const pending = item.value == .admission and item.value.admission.state == .queued;
         var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
-        var output: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
+        const open = if (toggled != null and toggled.?.key.order(key) == .eq) toggled.?.open else job.opened.has(key);
+        var capture: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
             else => null,
         } };
         var compact = false;
-        row.provisional = try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &output, job.colour, &compact, job.home, .{ .viewport = job.width_method }) or pending;
+        row.provisional = try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, &compact, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
         row.tight = compact;
-        try output.finish();
-        row.length = output.length;
+        try capture.finish();
+        row.length = capture.length;
         if (row.length == 0 and !row.provisional) continue;
         job.result.rows[job.result.row_count] = row;
         job.result.row_count += 1;
@@ -676,6 +697,15 @@ fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
     }
 }
 
+/// Ctrl-O on a tool row: that one row again, with its output shown or hidden.
+pub fn tool(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const key = job.target.?.tool.key;
+    job.feed_page = .{ .direction = .forward, .kinds = .visible, .limit = 1, .started_from = key, .from = key, .replace_from = key };
+    try scan(raw, task);
+    if (job.result.row_count != 1 or job.result.rows[0].key.order(key) != .eq) return error.ToolRowMissing;
+}
+
 /// The submission the UI shows under a page.
 /// `failure` is what its last attempt's failure says the person must do,
 /// in place of the state's own words.
@@ -683,17 +713,6 @@ pub fn writeSubmission(view: ?Submission.View, failure: ?[]const u8, out: *std.I
     const submission = view orelse return;
     try out.print("Original reserved request: {s}\n{s}\n", .{ submission.key, failure orelse if (submission.state == .rejected) "Submission rejected; /discard releases only this original, retaining the next draft." else "Publication/admission may be incomplete; Ctrl-R retries this exact original." });
     if (submission.last_error) |err| try out.print("Last submission error: {s}\n", .{@errorName(err)});
-}
-
-/// /details keeps bounded Conversation preparation, without transcript seams.
-pub fn details(raw: *anyopaque, task: *Task) !void {
-    const job: *Job = @ptrCast(@alignCast(raw));
-    const prepared = try History.prepare(task.requests(), job.store, job.session, .{ .end = 0 }, job.files.scratch);
-    job.result.rendering = true;
-    try job.files.inspection.setLength(task.io, 0);
-    var output: DisplayCapture = .{ .task = task, .file = job.files.inspection };
-    try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, job.colour, job.home, .{ .viewport = job.width_method });
 }
 
 const DisplayCapture = struct {
@@ -819,7 +838,7 @@ const RowCapture = struct {
 pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();
-    const target = job.target.message;
+    const target = job.target.?.message;
     const Staging = struct {
         io: std.Io,
         file: std.Io.File,
@@ -1065,7 +1084,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);
-        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
+        try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);
         try writeSubmission(job.inspection_submission, null, &output.interface);
     }
     try output.flush();
@@ -1085,7 +1104,7 @@ test "session_reads a Host command writes its page and inherits no saved termina
             return open;
         }
 
-        fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+        fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) anyerror!void {
             for (inheritable(), before, 0..) |now, was, fd| if (now and !was) {
                 leaked = @intCast(fd);
             };
@@ -1465,7 +1484,7 @@ test "session_view Message placement is identical in either direction at every p
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
                             var compact = false;
-                            const provisional = try View.render(requests, root, "k7m2qx", rows[index], queued, held, &sink, false, &compact, "", .{ .viewport = .wcwidth });
+                            const provisional = try View.render(requests, root, "k7m2qx", rows[index], queued, held, &sink, false, &compact, "", .{ .viewport = .wcwidth }, .none);
                             try std.testing.expectEqualStrings(expected[index].text, out.buffered());
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
@@ -1640,14 +1659,14 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                 if (!split) page.facts.items[1] = if (historical) stop else ended;
                 for (0..page.facts.count) |index| {
                     const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                    _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth });
+                    _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth }, .none);
                 }
                 if (split) {
                     try std.testing.expectEqualStrings("", out.buffered());
                     page.facts.items[0] = ended;
                     for (0..page.facts.count) |index| {
                         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                        _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth });
+                        _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
                 try std.testing.expectEqualStrings(if (colour) "\n\x1b[39m■\x1b[39m Stopped\n" else "\n■ Stopped\n", out.buffered());
@@ -1663,7 +1682,7 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
     var compact = false;
-    _ = try View.render(undefined, "unused", session.slice(), page.facts.items[0], .{}, false, &sink, true, &compact, "", .{ .viewport = .wcwidth });
+    _ = try View.render(undefined, "unused", session.slice(), page.facts.items[0], .{}, false, &sink, true, &compact, "", .{ .viewport = .wcwidth }, .none);
     try std.testing.expectEqualStrings("\n\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }
 

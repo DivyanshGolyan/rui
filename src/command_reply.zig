@@ -34,7 +34,7 @@ pub const RejectedConfiguration = struct {
     replayed: bool,
     code: configuration_admission.Rejection,
     /// Advisory detail from the current Host, not a saved command field.
-    message: ?@import("tool_record.zig").Catalog.MissingTool = null,
+    message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
 };
 
 pub const ConfigureReply = union(enum) {
@@ -55,7 +55,7 @@ pub const RejectedMessage = struct {
     replayed: bool,
     code: message_admission.Rejection,
     /// Advisory detail from the current Host, not a saved command field.
-    message: ?@import("tool_record.zig").Catalog.MissingTool = null,
+    message: ?@import("tool_record.zig").HostToolSet.MissingTool = null,
     content: ContentReference,
 };
 

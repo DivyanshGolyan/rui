@@ -2,7 +2,7 @@
 //! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
-pub const ReadPhase = enum { activity, fill, details, inspection, permission, message, recall, retry };
+pub const ReadPhase = enum { activity, fill, inspection, permission, message, tool, recall, retry };
 /// `inspection`: a pending inspection supersedes a silent read it cancelled.
 pub const Mode = enum { active, inspection, final_exit };
 pub const ReadEnd = union(enum) {
@@ -15,7 +15,7 @@ pub const ReadEnd = union(enum) {
 
     pub fn preparationFailure(self: ReadEnd) bool {
         return self == .failed and self.failed.err != error.CanonicalStoreFailure and
-            (self.failed.progress.phase == .fill or self.failed.progress.phase == .details or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message or self.failed.progress.phase == .recall) and
+            (self.failed.progress.phase == .fill or self.failed.progress.phase == .inspection or self.failed.progress.phase == .message or self.failed.progress.phase == .tool or self.failed.progress.phase == .recall) and
             !self.failed.progress.rendering;
     }
 
@@ -69,7 +69,7 @@ test "departure settlement precedence and reader exit policies retain independen
         const restored: Settled = .{ .restored = {}, .reader = .absent, .admission_error = error.CanonicalStoreFailure };
         try std.testing.expectEqual(error.CanonicalStoreFailure, restored.failure(mode, error.InteractiveInterrupted).?);
     }
-    for ([_]ReadPhase{.details}) |phase| {
+    for ([_]ReadPhase{ .fill, .message, .tool, .inspection, .recall }) |phase| {
         const preparation: ReadEnd = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = phase, .rendering = false } } };
         try std.testing.expect(preparation.failure(.active) == null);
         try std.testing.expect(preparation.failure(.inspection) == null);
@@ -108,9 +108,9 @@ test "departure joined fact matrix preserves precedence and recovery" {
         .{ .reader = .complete, .admission = error.Cancelled },
         .{ .reader = .absent, .admission = error.ConnectionResetByPeer, .exit_error = error.ConnectionResetByPeer },
         .{ .reader = .complete, .admission = error.CanonicalStoreFailure, .cause = error.WriteFailed, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
-        .{ .reader = .{ .failed = .{ .err = error.CanonicalStoreFailure, .progress = .{ .phase = .details, .rendering = false } } }, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
-        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .details, .rendering = false } } }, .exit_error = error.ConnectionResetByPeer },
-        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .details, .rendering = true } } }, .cause = error.WriteFailed, .inspection_error = error.ConnectionResetByPeer, .exit_error = error.WriteFailed },
+        .{ .reader = .{ .failed = .{ .err = error.CanonicalStoreFailure, .progress = .{ .phase = .fill, .rendering = false } } }, .inspection_error = error.CanonicalStoreFailure, .exit_error = error.CanonicalStoreFailure },
+        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .message, .rendering = false } } }, .exit_error = error.ConnectionResetByPeer },
+        .{ .reader = .{ .failed = .{ .err = error.ConnectionResetByPeer, .progress = .{ .phase = .message, .rendering = true } } }, .cause = error.WriteFailed, .inspection_error = error.ConnectionResetByPeer, .exit_error = error.WriteFailed },
         .{ .reader = .{ .cancelled = .{ .phase = .activity, .rendering = false } } },
         .{ .reader = .{ .cancelled = .{ .phase = .permission, .rendering = false } } },
     };
