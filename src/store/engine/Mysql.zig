@@ -636,6 +636,14 @@ pub fn appendCommit(self: *Mysql) bool {
     return true;
 }
 
+/// Unbinds the reads bound after `appendCommit`'s COMMIT, which is still
+/// unsent: the message ends at COMMIT again.
+pub fn dropTail(self: *Mysql) void {
+    const s = self.state;
+    std.debug.assert(s.inline_commit == .buffered and !s.long_query);
+    s.connection.writer.end = s.commit_end;
+}
+
 /// Steps `appendCommit`'s answer: the transaction is saved.
 pub fn stepCommit(self: *Mysql) Failure!void {
     const s = self.state;
@@ -659,7 +667,8 @@ pub fn settleCommit(self: *Mysql) Failure!void {
     if (state == .none) return;
     if (s.failure) |err| {
         if (err != error.CommitOutcomeUnknown) return err;
-        // Nothing follows COMMIT in its message.
+        // Reads that followed COMMIT in its message are not sent again:
+        // they were a survey's (`Store.commitWithSurvey`), which is dropped.
         s.batch_end = s.commit_end;
         return self.settleLostCommit();
     }

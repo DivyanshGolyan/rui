@@ -406,6 +406,175 @@ test "store.mysql open preserves an unreachable socket" {
     }, "/mysql-refusal-probe", .{}));
 }
 
+/// Admission under the fixture's SELECT/INSERT/UPDATE-only runtime grant.
+fn admitMetadata(name: []const u8, selector: []const u8) !Mysql {
+    const config = (try dialect.rootConfig()).?;
+    return Mysql.open(std.testing.io, .{
+        .address = .{ .unix_socket = config.socket },
+        .user = "rui_conformance",
+        .password = "rui_conformance",
+        .database = name,
+    }, selector, .{});
+}
+
+fn refusesMetadata(name: []const u8, selector: []const u8, expected: anyerror) !void {
+    const admission = admitMetadata(name, selector);
+    if (admission) |engine| {
+        var admitted = engine;
+        try admitted.close();
+    } else |_| {}
+    try std.testing.expectError(expected, admission);
+    // Refusal closes an undrained connection. COM_QUIT/socket close releases
+    // GET_LOCK when the server finishes that session, not at local return.
+    // Observe that boundary before the next probe, without a timing delay.
+    var buffer: [128]u8 = undefined;
+    try root.query(try std.fmt.bufPrint(&buffer, "SELECT GET_LOCK('{s}',10)", .{name}));
+    try std.testing.expectEqual(@as(u64, 1), try readU64());
+    try run("DO RELEASE_ALL_LOCKS()");
+}
+
+test "store.mysql live metadata validates canonical identity independently of a renamed database" {
+    var original_tmp = std.testing.tmpDir(.{});
+    defer original_tmp.cleanup();
+    var restored_tmp = std.testing.tmpDir(.{});
+    defer restored_tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &original_tmp);
+    const original_name = storage.engine.mysql.state.testing_database;
+    const id = storage.engine.mysql.state.store_id;
+    const selector = storage.selector;
+    try storage.close();
+    try openLive(&storage, &restored_tmp);
+    const restored_name = storage.engine.mysql.state.testing_database;
+    try storage.close();
+    const name = std.mem.sliceTo(&original_name, 0);
+    const restored = std.mem.sliceTo(&restored_name, 0);
+    try std.testing.expect(!std.mem.eql(u8, name, restored));
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    var buffer: [1024]u8 = undefined;
+    try run(try std.fmt.bufPrint(&buffer, "USE {s}", .{name}));
+    // Missing selectors are repaired atomically; the id never changes.
+    // Exercise SQL metacharacters and UTF-8 through the actual repair path.
+    const canonical = "/canonical/'\\é";
+    try run("DELETE FROM store_meta WHERE meta_key='store_selector'");
+    var repaired = try admitMetadata(name, canonical);
+    try std.testing.expectEqualStrings(&id, &repaired.state.store_id);
+    try repaired.close();
+    var reopened = try admitMetadata(name, canonical);
+    try std.testing.expectEqualStrings(&id, &reopened.state.store_id);
+    try reopened.close();
+    try refusesMetadata(name, selector.slice(), error.WrongStoreIdentity);
+    for ([_][]const u8{
+        "UPDATE store_meta SET meta_value='different-database' WHERE meta_key='store_selector'",
+        "UPDATE store_meta SET meta_value=REPEAT('x',600) WHERE meta_key='store_selector'",
+    }) |change| {
+        try run(change);
+        try refusesMetadata(name, canonical, error.WrongStoreIdentity);
+    }
+    // A database rename is independent of canonical identity: restoring the
+    // same metadata under a new database name keeps both selector and id.
+    try run("DELETE FROM store_meta WHERE meta_key='store_selector'");
+    var matching = try admitMetadata(name, canonical);
+    try matching.close();
+    try run(try std.fmt.bufPrint(
+        &buffer,
+        "DELETE FROM {s}.store_meta;INSERT INTO {s}.store_meta SELECT * FROM store_meta;DELETE FROM {s}.store_owner;INSERT INTO {s}.store_owner SELECT * FROM store_owner",
+        .{ restored, restored, restored, restored },
+    ));
+    try refusesMetadata(restored, restored, error.WrongStoreIdentity);
+    var admitted = try admitMetadata(restored, canonical);
+    defer admitted.close() catch unreachable;
+    try std.testing.expectEqualStrings(&id, &admitted.state.store_id);
+}
+
+test "store.mysql live metadata failures precede missing-key repair and ownership writes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    const name_buffer = storage.engine.mysql.state.testing_database;
+    const name = std.mem.sliceTo(&name_buffer, 0);
+    const selector = storage.selector;
+    try storage.close();
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    var buffer: [512]u8 = undefined;
+    try run(try std.fmt.bufPrint(&buffer, "USE {s}", .{name}));
+    const cases = .{
+        .{ "UPDATE store_meta SET meta_value='0' WHERE meta_key='format'", error.StoreSchemaBehind },
+        .{ std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version + 1}), error.StoreSchemaAhead },
+        .{ "UPDATE store_meta SET meta_value='not-a-number' WHERE meta_key='format'", error.MalformedStoreFormat },
+        .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='format'", error.MalformedStoreFormat },
+        .{ "UPDATE store_meta SET meta_value='wrong-wire' WHERE meta_key='wire_version'", error.WrongStoreVersion },
+        .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='wire_version'", error.WrongStoreVersion },
+        .{ "INSERT INTO store_meta VALUES('store_id','not-an-id')", error.WrongStoreIdentity },
+        .{ "INSERT INTO store_meta VALUES('store_id',REPEAT('a',600))", error.WrongStoreIdentity },
+        .{ "UPDATE store_meta SET meta_value='different' WHERE meta_key='store_selector'", error.WrongStoreIdentity },
+        .{ "UPDATE store_meta SET meta_value=REPEAT('x',600) WHERE meta_key='store_selector'", error.WrongStoreIdentity },
+        .{ "INSERT INTO store_meta VALUES('unexpected','private-value')", error.WrongStoreSchema },
+    };
+    inline for (cases) |case| {
+        try run("DELETE FROM store_meta WHERE meta_key='store_id' OR meta_key='unexpected';" ++
+            "UPDATE store_meta SET meta_value='" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "' WHERE meta_key='format';" ++
+            "UPDATE store_meta SET meta_value='" ++ @import("../wire_version.zig").wire_version ++ "' WHERE meta_key='wire_version'");
+        try run("DELETE FROM store_meta WHERE meta_key='store_selector'");
+        var baseline = try admitMetadata(name, selector.slice());
+        try baseline.close();
+        try run("DELETE FROM store_meta WHERE meta_key='store_id'");
+        const unexpected_key = case[1] == error.WrongStoreSchema;
+        if (unexpected_key) try run("ALTER TABLE store_meta ALTER CHECK store_meta_chk_1 NOT ENFORCED");
+        defer if (unexpected_key) {
+            run("DELETE FROM store_meta WHERE meta_key='unexpected';ALTER TABLE store_meta ALTER CHECK store_meta_chk_1 ENFORCED") catch @panic("cannot restore metadata CHECK enforcement");
+        };
+        try run(case[0]);
+        try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
+        const epoch = try readU64();
+        try root.query("SELECT BIT_XOR(CRC32(CONCAT(meta_key,'=',meta_value))) FROM store_meta");
+        const before = try readU64();
+        try refusesMetadata(name, selector.slice(), case[1]);
+        try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
+        try std.testing.expectEqual(epoch, try readU64());
+        try root.query("SELECT BIT_XOR(CRC32(CONCAT(meta_key,'=',meta_value))) FROM store_meta");
+        try std.testing.expectEqual(before, try readU64());
+    }
+    try run("DELETE FROM store_meta WHERE meta_key='unexpected'");
+}
+
+test "store.mysql live metadata repair rolls back with a refused ownership update" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    const name_buffer = storage.engine.mysql.state.testing_database;
+    const name = std.mem.sliceTo(&name_buffer, 0);
+    const epoch = storage.engine.mysql.state.epoch;
+    try storage.close();
+    mutex.lockUncancelable(std.testing.io);
+    defer mutex.unlock(std.testing.io);
+    var buffer: [128]u8 = undefined;
+    try run(try std.fmt.bufPrint(&buffer, "USE {s}", .{name}));
+    try run("DELETE FROM store_meta;CREATE TRIGGER refuse_owner_update BEFORE UPDATE ON store_owner FOR EACH ROW SIGNAL SQLSTATE '45000'");
+    {
+        defer run("DROP TRIGGER refuse_owner_update") catch @panic("cannot restore ownership updates");
+        try refusesMetadata(name, name, error.StatementFailed);
+        try root.query("SELECT count(*) FROM store_meta");
+        try std.testing.expectEqual(@as(u64, 0), try readU64());
+        try root.query("SELECT epoch FROM store_owner WHERE owner_key=1");
+        try std.testing.expectEqual(epoch, try readU64());
+    }
+    var repaired = try admitMetadata(name, name);
+    const id = repaired.state.store_id;
+    try std.testing.expect(schema.isStoreId(&id));
+    try std.testing.expectEqual(epoch + 1, repaired.state.epoch);
+    try repaired.close();
+    try root.query("SELECT count(*) FROM store_meta");
+    try std.testing.expectEqual(@as(u64, 4), try readU64());
+    var reopened = try admitMetadata(name, name);
+    defer reopened.close() catch unreachable;
+    try std.testing.expectEqualStrings(&id, &reopened.state.store_id);
+}
+
 test "store.mysql live admission checks the index plan domain without pinning generated key names" {
     const Alter = struct {
         fn index(name: []const u8, comptime table: []const u8, comptime alteration: []const u8) !void {
@@ -424,7 +593,7 @@ test "store.mysql live admission checks the index plan domain without pinning ge
                 // A mutation that admits the Store must still close its lock.
                 const admission = open(&refused, tmp, std.testing.io, .{});
                 if (admission) |_| try refused.close() else |_| {}
-                try std.testing.expectError(error.StoreSchemaBehind, admission);
+                try std.testing.expectError(error.StoreCatalogMismatch, admission);
             }
             // Restoring only the altered property repairs admission; no
             // migration is needed, and the refused open released GET_LOCK.
@@ -1185,6 +1354,133 @@ test "store.mysql live a lone write saved with every answer lost still counts as
     try std.testing.expectEqual(@as(u64, 2), state.testing_shape.reconnects);
     try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000601", .{}));
     try std.testing.expectEqual(generation + 2, storage.commitGeneration());
+}
+
+test "store.mysql live a lone write's message carries the dispatch survey the Host asks for next" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const queries = &storage.engine.mysql.state.connection.queries;
+    // Until the Host asks, a commit carries nothing.
+    var before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000800 });
+    try std.testing.expectEqual(before + 1, queries.*);
+    const asked = try storage.dispatchWork(false);
+    try std.testing.expectEqual(before + 2, queries.*);
+    // Then a commit's one message carries the survey, and the next ask
+    // sends nothing and answers as a survey of its own does.
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000801 });
+    try std.testing.expectEqual(before + 1, queries.*);
+    const carried = try storage.dispatchWork(false);
+    try std.testing.expectEqual(before + 1, queries.*);
+    try std.testing.expectEqual(asked, carried);
+    // It answers one ask.
+    try std.testing.expectEqual(carried, try storage.dispatchWork(false));
+    try std.testing.expectEqual(before + 2, queries.*);
+    // An ask with Turns held is another survey.
+    before = queries.*;
+    try storage.queue().write(insertHeld, .{ &storage, 9000802 });
+    _ = try storage.dispatchWork(true);
+    try std.testing.expectEqual(before + 2, queries.*);
+    // A write that saved nothing leaves no survey: the message, ROLLBACK,
+    // then the Host's own.
+    before = queries.*;
+    try std.testing.expectError(error.LiveGuard, storage.queue().write(insertTouching, .{ &storage, 9000803, 9000899 }));
+    _ = try storage.dispatchWork(true);
+    try std.testing.expectEqual(before + 3, queries.*);
+    try std.testing.expect(!storage.isFenced());
+    // A carried survey is dropped by a later commit that carries none:
+    // two writes sharing a batch.
+    _ = try storage.dispatchWork(false);
+    try storage.queue().write(insertHeld, .{ &storage, 9000804 });
+    const Writer = struct {
+        result: anyerror!void = {},
+        fn hold() error{}!void {}
+        fn write(self: *@This(), s: *Store, id: u64) void {
+            self.result = s.queue().write(insertHeld, .{ s, id });
+        }
+    };
+    try storage.queue().callHeld(Writer.hold, .{});
+    var writers: [2]Writer = .{ .{}, .{} };
+    var threads: [2]std.Thread = undefined;
+    for (&threads, &writers, 0..) |*thread, *writer, index| {
+        thread.* = try std.Thread.spawn(.{}, Writer.write, .{ writer, &storage, 9000805 + index });
+        @import("queue.zig").waitQueued(storage.queue(), index + 1);
+    }
+    storage.queue().release();
+    for (threads) |thread| thread.join();
+    for (writers) |writer| try writer.result;
+    before = queries.*;
+    _ = try storage.dispatchWork(false);
+    try std.testing.expectEqual(before + 1, queries.*);
+}
+
+/// `insertHeld`, committing into a batch with `room` bytes left after the
+/// insert.
+fn insertWithRoom(storage: *Store, id: u64, room: usize) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
+    const wire_connection = &storage.engine.mysql.state.connection;
+    const limit = wire_connection.batch_limit;
+    defer wire_connection.batch_limit = limit;
+    wire_connection.batch_limit = limit - (wire_connection.batchRoom() - room);
+    return entry.finishTransaction(store_core.Ordinary.none, .{}, access.end(.{}, access.commit()));
+}
+
+test "store.mysql live a write saves in its one message whether or not the batch has room for the survey" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const queries = &storage.engine.mysql.state.connection.queries;
+    _ = try storage.dispatchWork(false);
+    // From room for COMMIT and none of the survey, through part of it, to
+    // all of it: the write is one message and saves, and the Host's ask
+    // is free only when the whole survey rode.
+    var id: u64 = 9000900;
+    var carried: [2]bool = .{ false, false };
+    var room: usize = 32;
+    while (room <= 32768) : (room *= 2) {
+        const before = queries.*;
+        try storage.queue().write(insertWithRoom, .{ &storage, id, room });
+        try std.testing.expectEqual(before + 1, queries.*);
+        try std.testing.expect(!storage.isFenced());
+        _ = try storage.dispatchWork(false);
+        const asked = queries.* - before - 1;
+        try std.testing.expect(asked <= 1);
+        carried[@intFromBool(asked == 0)] = true;
+        // Once the whole survey fits, more room changes nothing.
+        if (asked == 1) try std.testing.expect(!carried[1]);
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+        id += 1;
+    }
+    try std.testing.expect(carried[0] and carried[1]);
+}
+
+test "store.mysql live a carried survey whose read fails fences as the Host's own does, and the write stands" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch |err| {
+        std.testing.expectEqual(error.StoreCloseFailed, err) catch unreachable;
+    };
+    _ = try storage.dispatchWork(false);
+    const generation = storage.commitGeneration();
+    // A table the survey reads is gone: its SELECT fails after COMMIT ran.
+    try rawExec(&storage, "RENAME TABLE session_stop_owed TO session_stop_owed_gone");
+    try storage.queue().write(insertHeld, .{ &storage, 9000950 });
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectEqual(generation + 1, storage.commitGeneration());
+    try rawExec(&storage, "RENAME TABLE session_stop_owed_gone TO session_stop_owed");
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000950", .{}));
 }
 
 test "store.mysql live a lone write whose fence fails saves nothing, though COMMIT shares its message" {

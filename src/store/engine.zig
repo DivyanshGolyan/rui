@@ -161,6 +161,15 @@ pub const Engine = union(Kind) {
         };
     }
 
+    /// Unbinds what was bound after `appendCommit`'s COMMIT, before the
+    /// message is sent.
+    pub inline fn dropTail(e: *Engine) void {
+        switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.dropTail(),
+        }
+    }
+
     /// Only an adapter that appended COMMIT queues its result/settlement.
     pub inline fn stepCommit(e: *Engine) Failure!void {
         return switch (e.*) {

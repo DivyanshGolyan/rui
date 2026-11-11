@@ -4208,6 +4208,19 @@ test "SQLite selector mismatch retains migration evidence and rolls back metadat
     try std.testing.expectEqualStrings(&original_id, &try storeId(database));
 }
 
+test "metadata seed preserves exact SQLite bootstrap bytes and digest" {
+    // The pre-refactor seed text: parameter slots, tuple order and random
+    // expression are format, not merely row-equivalent implementation details.
+    try std.testing.expectEqualStrings(
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version',?1),('store_selector',?2),('format','" ++
+            std.fmt.comptimePrint("{d}", .{schema_version}) ++ "'),('store_id',lower(hex(randomblob(16))))",
+        comptime store_schema.sqliteMetaSeedSql(),
+    );
+    const pinned = store_schema.bootstrap_digests[store_schema.bootstrap_digests.len - 1];
+    try std.testing.expectEqual(schema_version, pinned.schema_version);
+    try std.testing.expectEqual(pinned.digest, comptime store_schema.digest());
+}
+
 test "SQLite invalid identity metadata is not a selector mismatch" {
     const cases = .{
         .{ "PRAGMA application_id=0", error.WrongStoreIdentity },

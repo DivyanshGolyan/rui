@@ -115,10 +115,42 @@ def main():
         ddl = subprocess.run([rui, "store", "schema", "--engine", "mysql"], check=True, capture_output=True, text=True).stdout
         assert "CREATE TABLE store_meta" in ddl
         sql(f"USE {database};" + ddl)
-        sql(f"INSERT INTO {database}.store_meta VALUES('format','0')")
-        assert frame_host.refusal(launch(good))["code"] == "store_schema_behind"
-        sql(f"DELETE FROM {database}.store_meta")
-        released()
+        # Each refusal must precede metadata repair and ownership writes.
+        # Leave other metadata absent so even a repair is observable.
+        sql(f"INSERT INTO {database}.store_owner VALUES(1,7,9)")
+
+        def admission_snapshot():
+            return sql(f"SELECT meta_key,meta_value FROM {database}.store_meta ORDER BY meta_key;"
+                       f"SELECT owner_key,epoch,commit_seq FROM {database}.store_owner;"
+                       f"SELECT * FROM {database}.action_operation")
+
+        cases = (
+            ("format", "0", "the MySQL Store format is older than this build; apply its forward migrations"),
+            ("format", "4294967295", "the MySQL Store format is newer than this build; use a compatible build"),
+            ("format", "not-a-number", "the MySQL Store format metadata is not a valid number"),
+            ("wire_version", "wrong-wire", "the MySQL Store wire version does not match this build"),
+            ("unexpected", "unexpected-value", "the MySQL Store metadata contains an unexpected key"),
+            ("store_id", "not-an-id", "the MySQL Store identity metadata or connection target is invalid"),
+            (None, None, "the MySQL Store catalog does not match this build"),
+        )
+        for key, value, message in cases:
+            if key is None:
+                sql(f"ALTER TABLE {database}.store_owner ADD COLUMN admission_probe BIGINT")
+            else:
+                if key == "unexpected":
+                    sql(f"ALTER TABLE {database}.store_meta ALTER CHECK store_meta_chk_1 NOT ENFORCED")
+                sql(f"INSERT INTO {database}.store_meta VALUES('{key}','{value}')")
+            before = admission_snapshot()
+            refusal = frame_host.refusal(launch(good))
+            assert refusal == {"code": "store_schema_behind", "message": message}, refusal
+            released()
+            assert admission_snapshot() == before, f"admission wrote durable state for {key or 'catalog'}"
+            if key is None:
+                sql(f"ALTER TABLE {database}.store_owner DROP COLUMN admission_probe")
+            else:
+                sql(f"DELETE FROM {database}.store_meta")
+                if key == "unexpected":
+                    sql(f"ALTER TABLE {database}.store_meta ALTER CHECK store_meta_chk_1 ENFORCED")
         host = launch(good)
         store_id = ready(host)
         # Only private host-info discovery may omit the identity. Once known,
@@ -171,6 +203,25 @@ def main():
         private(host)
         close(host)
         released()
+        for selector in (None, database):
+            sql(f"DELETE FROM {database}.store_meta WHERE meta_key='store_selector'")
+            if selector is not None:
+                sql(f"INSERT INTO {database}.store_meta VALUES('store_selector','{selector}')")
+            host = launch(good)
+            assert ready(host) == store_id, "selector admission changed the durable Store id"
+            close(host)
+            released()
+            assert sql(f"SELECT meta_value FROM {database}.store_meta WHERE meta_key='store_selector'") == database
+        sql(f"UPDATE {database}.store_meta SET meta_value='legacy-other-database' WHERE meta_key='store_selector'")
+        before = admission_snapshot()
+        refusal = frame_host.refusal(launch(good))
+        assert refusal == {"code": "store_schema_behind",
+                           "message": "the MySQL Store identity metadata or connection target is invalid"}, refusal
+        released()
+        assert admission_snapshot() == before, "mismatched selector admission wrote durable state"
+        assert not sock.exists(), "the refused Host retained its socket"
+        # Restore the canonical selector before testing restart and fencing.
+        sql(f"UPDATE {database}.store_meta SET meta_value='{database}' WHERE meta_key='store_selector'")
         host = launch(good)
         assert ready(host) == store_id, "the Store id changed across a Host restart"
         assert frame_host.post(sock, "inspect-session", request)["session"]["reference"] == session
@@ -198,7 +249,7 @@ def main():
         lines = out.decode().splitlines()
         assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
             f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
-        print("MySQL launch frame: readiness, Session round trip, stable id, private credentials, mysql_login, mysql_unreachable, store_locked, stdin close, store_fenced")
+        print("MySQL launch frame: readiness, Session round trip, stable id, selector repair and refusal, private credentials, mysql_login, mysql_unreachable, store_locked, stdin close, store_fenced")
     finally:
         primary = sys.exception()
         cleanup_errors = []
