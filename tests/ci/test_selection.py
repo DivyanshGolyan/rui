@@ -54,6 +54,7 @@ class AssertedTextSelectionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "fixture.py").write_text(dedent('''
+                import helper
                 # "Comments are not asserted text"
                 expected = "A plain Python literal"
                 screen = f"Waiting for session: {session_id} has finished drawing"
@@ -62,16 +63,29 @@ class AssertedTextSelectionTest(unittest.TestCase):
             (root / "fixture.sh").write_text(
                 "printf '%s' \"A shell double-quoted literal\"\n"
                 "test \"$output\" = 'A shell single-quoted literal'\n")
+            (root / "helper.py").write_text('import nested\nmessage = "A helper waits for this message"\n')
+            (root / "nested.py").write_text('message = "A nested helper checks this message"\n')
             fixtures = {"sample-integration": (("fixture.py", "fixture.sh", "absent.py"), (), ()),
                         "other-integration": (("fixture.py",), (), ())}
+            graph = Graph.__new__(Graph)
+            graph.python = {"fixture.py": {"helper.py"}, "helper.py": {"nested.py"}}
             with (patch("select_tests.ROOT", root), patch("select_tests.FIXTURES", fixtures),
-                  patch("select_tests.subprocess.check_output", return_value=b"")):
+                  patch("select_tests.tree_graph", return_value=graph)):
                 # Bypass the cache so the miniature tree cannot poison the real reader.
                 literals = tree_fixture_literals.__wrapped__()
-            python = {"A plain Python literal", "Waiting for session:", "has finished drawing"}
+            python = {"A plain Python literal", "Waiting for session:", "has finished drawing",
+                      "A helper waits for this message", "A nested helper checks this message"}
             self.assertEqual(literals, {"other-integration": python,
                                        "sample-integration": python | {"A shell double-quoted literal",
                                                                         "A shell single-quoted literal"}})
+
+    def test_session_chrome_text_selects_human_cli_integration(self):
+        path = "src/session_chrome.zig"
+        text = (Path(__file__).resolve().parents[2] / path).read_text()
+        self.assertIn("shift+enter or ctrl+j new line", text)
+        result = select([path], "review", AVAILABLE, contents={path: (text, text)})
+        self.assertIn("human-cli-integration", result["targets"])
+        self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
 
     def test_fixture_reader_bounds_shared_text_by_production_file_count(self):
         from select_tests import tree_uncommon_texts

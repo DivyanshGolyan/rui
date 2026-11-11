@@ -339,7 +339,7 @@ def source_strings(source):
 
 @cache
 def tree_fixture_literals():
-    return {target: {text for script in scripts
+    return {target: {text for script in tree_graph().scripts(scripts)
                      if Path(script).suffix in {".py", ".sh"} and (ROOT / script).is_file()
                      for literal in script_literals((ROOT / script).read_text(), Path(script).suffix)
                      if (text := fixture_text(literal))}
