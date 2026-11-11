@@ -165,9 +165,9 @@ def run(rui, admin):
     measure(rui, admin, socket, password, "Store round trips")
     name = f"rui-proxysql-{os.getpid()}"
     config = tempfile.NamedTemporaryFile(prefix="rui-proxysql-", suffix=".cnf")
-    proxy = mysql_server.proxy_socket_path(os.path.dirname(socket), name)
+    proxy = mysql_server.proxy_socket_path(socket, name)
     try:
-        mysql_server.start_proxy(name, os.path.dirname(socket), password, config.name)
+        mysql_server.start_proxy(name, socket, password, config.name)
         measure(rui, admin, proxy, password, "Store round trips behind ProxySQL")
     except BaseException:
         host_process.dispose_all(lambda: print(mysql_server.docker("logs", name, capture_output=True).stderr[-4000:]))

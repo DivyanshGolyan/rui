@@ -44,7 +44,7 @@ PROXY_IMAGE = "proxysql/proxysql:3.0.11@sha256:a504b3624312497f493a37426329af8ef
 PROXY_CONFIG = """datadir="/var/lib/proxysql"
 mysql_variables=
 {{
-    interfaces="/var/run/mysqld/{socket}"
+    interfaces={interface}
     server_version="8.4.13"
     multiplexing=true
     default_authentication_plugin="caching_sha2_password"
@@ -52,13 +52,15 @@ mysql_variables=
 }}
 mysql_servers=
 (
-    {{ address="/var/run/mysqld/mysqld.sock", port=0, hostgroup=0 }}
+    {{ address={server}, port=0, hostgroup=0 }}
 )
 mysql_users=
 (
-    {{ username="root", password="{password}", default_hostgroup=0, active=1 }}
+    {{ username="root", password={password}, default_hostgroup=0, active=1 }}
 )
 """
+# Where the proxy's container sees the directory that holds both sockets.
+PROXY_MOUNT = "/var/run/mysqld"
 
 
 def docker(*args, **kwargs):
@@ -78,18 +80,33 @@ def start(name, socket_dir, root_password, *arguments, command=()):
            "--volume", f"{socket_dir}:/var/run/mysqld", *arguments, IMAGE, *command, capture_output=True)
 
 
-def proxy_socket_path(socket_dir, name):
-    return os.path.join(socket_dir, f"{name}.sock")
+def proxy_socket_path(socket, name):
+    """Where ProxySQL `name` serves clients: beside the server's `socket`."""
+    return os.path.join(os.path.dirname(socket), f"{name}.sock")
 
 
-def start_proxy(name, socket_dir, root_password, config_path):
-    """Starts ProxySQL detached in front of the server whose socket is in
-    `socket_dir`, writing its settings to `config_path`, and returns once
-    it listens on `proxy_socket_path`, where it serves root's clients."""
-    path = proxy_socket_path(socket_dir, name)
+def config_string(value):
+    """`value` as a quoted string of ProxySQL's configuration file."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def proxy_config(socket, name, root_password):
+    """ProxySQL `name`'s configuration in front of the server at `socket`,
+    whose directory its container mounts at PROXY_MOUNT."""
+    return PROXY_CONFIG.format(
+        interface=config_string(f"{PROXY_MOUNT}/{os.path.basename(proxy_socket_path(socket, name))}"),
+        server=config_string(f"{PROXY_MOUNT}/{os.path.basename(socket)}"),
+        password=config_string(root_password))
+
+
+def start_proxy(name, socket, root_password, config_path):
+    """Starts ProxySQL detached in front of the server at `socket`,
+    writing its settings to `config_path`, and returns once it listens on
+    `proxy_socket_path`, where it serves root's clients."""
+    path = proxy_socket_path(socket, name)
     with open(config_path, "w", encoding="utf-8") as config:
-        config.write(PROXY_CONFIG.format(socket=os.path.basename(path), password=root_password))
-    docker("run", "--detach", "--name", name, "--network", "none", "--volume", f"{socket_dir}:/var/run/mysqld",
+        config.write(proxy_config(socket, name, root_password))
+    docker("run", "--detach", "--name", name, "--network", "none", "--volume", f"{os.path.dirname(socket)}:{PROXY_MOUNT}",
            "--volume", f"{config_path}:/etc/proxysql.cnf:ro", PROXY_IMAGE, capture_output=True)
 
     def observe():
