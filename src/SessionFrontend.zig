@@ -5244,3 +5244,103 @@ test "SessionFrontend feed press and drag hold both loading edges until release 
         }
     }
 }
+
+test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source" {
+    const Host = struct {
+        fn respond(listener: *std.Io.net.Server, route: []const u8, kind: []const u8, extra: []const u8, body: []const u8) !void {
+            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
+            const peer = try listener.accept(std.testing.io);
+            defer peer.close(std.testing.io);
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const count = try std.posix.read(peer.socket.handle, request[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOf(u8, request[start..end], "\r\n").? + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                }
+            }
+            var prefix: [96]u8 = undefined;
+            try std.testing.expectStringStartsWith(request[0..used], try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
+            var header: [512]u8 = undefined;
+            var writer = peer.writer(std.testing.io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ kind, body.len, extra }));
+            try writer.interface.writeAll(body);
+        }
+        fn completed(frontend: *Self) !bool {
+            return frontend.reader.completed();
+        }
+    };
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    const scratch = try held.tmp.dir.createFile(io, "message-source", .{ .read = true });
+    defer scratch.close(io);
+    const inspection = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
+    defer inspection.close(io);
+    self.files = .{ .scratch = scratch, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+    self.store = root;
+    self.session = "k7m2qx";
+    self.line.read = .{ .revision = 1, .end = 1 };
+    self.reading.opening = true;
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch |err| switch (err) {
+            error.Cancelled => {},
+            else => @panic(@errorName(err)),
+        };
+    }
+    const source = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 500);
+    defer std.testing.allocator.free(source);
+    @memset(source, 'x');
+    @memcpy(source[source.len - 12 ..], "WHOLE answer");
+    var hash = protocol.contentHasher();
+    hash.update(source);
+    const reference: protocol.ActivityItem.Content = .{ .length = source.len, .digest = hash.finalResult() };
+    var facts: protocol.ActivityFacts = .{ .end = 1, .direction = .backward, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/");
+    facts.items[0] = .{ .position = 1, .ordinal = 0, .at = 1, .value = .{ .assistant = .{ .content = reference, .final = true } } };
+    facts.count = 1;
+    var page_buffer: [4096]u8 = undefined;
+    var page = std.Io.Writer.fixed(&page_buffer);
+    try activity_reply.writePage(&page, &facts);
+    var extra_buffer: [128]u8 = undefined;
+    const extra = try std.fmt.bufPrint(&extra_buffer, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ source.len, source.len });
+    _ = try self.update();
+    try Host.respond(&listener, "/v1/activity-page", "application/json", "", page.buffered());
+    try Host.respond(&listener, "/v1/activity-content", "application/octet-stream", extra, source);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, Host.completed);
+    try self.settleReader();
+    self.poll_at = std.math.maxInt(i96);
+    try std.testing.expect(held.screen.feed.at_start and held.screen.feed.at_end);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "More") != null);
+    try std.testing.expect(std.mem.indexOf(u8, held.screen.feed.document.text(), "WHOLE answer") == null);
+    try held.keys("\x0f");
+    try held.settle();
+    try std.testing.expect(self.expansion.queued == .ready);
+    try std.testing.expectEqualDeep(reference, self.expansion.queued.ready.target.content);
+    _ = try self.update();
+    try std.testing.expectEqual(ReadPhase.message, self.reading.phase);
+    try Host.respond(&listener, "/v1/activity-content", "application/octet-stream", extra, source);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), self, Host.completed);
+    try self.settleReader();
+    try std.testing.expectEqual(.message, held.screen.view);
+    try std.testing.expect(std.mem.indexOf(u8, held.screen.staging.text(), source) != null);
+}
