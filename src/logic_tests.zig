@@ -120,6 +120,7 @@ const cores = .{
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "theme.zig", @import("theme.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
+    .{ "tool_fold.zig", @import("tool_fold.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "tool_proposal.zig", @import("tool_proposal.zig") },
     .{ "tool_record.zig", @import("tool_record.zig") },

@@ -8,6 +8,7 @@ const unicode = @import("terminal_unicode");
 const state_marks = @import("marks.zig");
 const draft_layout = @import("draft_layout.zig");
 const TerminalText = @import("TerminalText.zig");
+const tool_fold = @import("tool_fold.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
@@ -107,6 +108,9 @@ pub const Colours = struct {
     user: vaxis.Color = .default,
     attention: vaxis.Color = .default,
     failure: vaxis.Color = .default,
+    /// A separate line-level band for opened tool output (not code bands).
+    tool_output: vaxis.Color = .default,
+    tool_selection: vaxis.Color = .default,
 };
 
 /// Retained style byte, display-only: bits 0-2 bold, italic and underline,
@@ -459,6 +463,116 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         }
 
+        /// Tool identity uses the same retained, hidden address representation as
+        /// internal Session links, with no new style bytes or closed output cache.
+        fn lineMarker(self: *const Self, offset: usize) ?struct { uri: []const u8, end: usize } {
+            if (!styled or offset >= self.text().len or foregroundIndex(self.styles[offset]) != address_index) return null;
+            var end = offset;
+            while (end < self.text().len and foregroundIndex(self.styles[end]) == address_index) : (end += 1) {}
+            const uri = self.bytes[offset..end];
+            if (!std.mem.startsWith(u8, uri, tool_fold.prefix) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
+            return .{ .uri = uri, .end = end };
+        }
+
+        pub fn toolAt(self: *const Self, offset: usize) ?tool_fold.Reference {
+            const mark = self.lineMarker(offset) orelse return null;
+            return tool_fold.parse(mark.uri);
+        }
+
+        pub fn lastTool(self: *const Self, from: usize, to: usize) ?usize {
+            var offset = from;
+            var last: ?usize = null;
+            while (offset < @min(to, self.text().len)) {
+                if (self.toolAt(offset) != null) last = offset;
+                offset = self.nextLine(offset) orelse break;
+            }
+            return last;
+        }
+
+        pub fn findTool(self: *const Self, reference: tool_fold.Reference) ?usize {
+            var offset: usize = 0;
+            while (offset < self.text().len) {
+                if (self.toolAt(offset)) |found| if (std.meta.eql(found, reference)) return offset;
+                offset = self.nextLine(offset) orelse break;
+            }
+            return null;
+        }
+
+        fn toolOutput(self: *const Self, offset: usize) bool {
+            const mark = self.lineMarker(offset) orelse return false;
+            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
+        }
+
+        pub fn toolIsOpen(self: *const Self, offset: usize) bool {
+            if (self.toolAt(offset) == null) return false;
+            return self.toolOutput(self.nextLine(offset) orelse return false);
+        }
+
+        pub fn hasOpenTools(self: *const Self) bool {
+            var offset: usize = 0;
+            while (offset < self.text().len) {
+                if (self.toolIsOpen(offset)) return true;
+                offset = self.nextLine(offset) orelse break;
+            }
+            return false;
+        }
+
+        /// A display edit relocates the frontend's absolute live anchors too.
+        pub const Edit = struct {
+            at: u64,
+            removed: usize,
+            added: usize,
+
+            pub fn map(self: Edit, offset: u64) u64 {
+                if (offset < self.at) return offset;
+                return self.at + self.added + (offset - self.at -| self.removed);
+            }
+        };
+
+        /// Inserts/removes just this row's bounded output. Other folds and live
+        /// text stay intact. The first visible line is held while the feed grows
+        /// below the heading; normal viewport clamping handles a short close.
+        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool, layout: Layout, height: u16) !?Edit {
+            const heading = self.findTool(reference) orelse return null;
+            if (self.toolIsOpen(heading) == open) return null;
+            var start = @min(self.lineEnd(heading) + 1, self.text().len);
+            var end = start;
+            while (self.toolOutput(end)) end = self.nextLine(end) orelse self.text().len;
+            const added = if (open) rows.length else 0;
+            const removed = end - start;
+            const first_row = self.first(layout, height);
+            self.top = first_row;
+            if (self.length - removed + added > limit) {
+                const wanted = self.length - removed + added - limit;
+                const discard = self.lineEnd(wanted) + 1;
+                // Evict only older complete lines, as live append does. A row
+                // at the very front of a full view cannot grow without losing
+                // that row or newer canonical text: let the frontend say so.
+                if (discard > heading) return error.ToolFoldViewFull;
+                self.discardFront(self.origin + discard);
+                self.top = .{ .offset = first_row.offset -| discard, .row = first_row.row };
+                start -= discard;
+                end -= discard;
+            }
+            if (added > removed) {
+                std.mem.copyBackwards(u8, self.bytes[start + added .. self.length - removed + added], self.bytes[end..self.length]);
+                if (styled) std.mem.copyBackwards(u8, self.styles[start + added .. self.length - removed + added], self.styles[end..self.length]);
+            } else {
+                std.mem.copyForwards(u8, self.bytes[start + added .. self.length - removed + added], self.bytes[end..self.length]);
+                if (styled) std.mem.copyForwards(u8, self.styles[start + added .. self.length - removed + added], self.styles[end..self.length]);
+            }
+            @memcpy(self.bytes[start..][0..added], rows.bytes[0..added]);
+            if (styled) @memcpy(self.styles[start..][0..added], rows.styles[0..added]);
+            const edit: Edit = .{ .at = self.origin + start, .removed = removed, .added = added };
+            if (self.top) |*top| if (top.offset >= start) {
+                top.offset = @intCast(edit.map(self.origin + top.offset) - self.origin);
+            };
+            self.length = self.length - removed + added;
+            self.replacements +%= 1; // A drag must never retain pre-edit byte offsets.
+            self.dirty = true;
+            return edit;
+        }
+
         /// Where the line starting at `offset` ends (its newline or the text end).
         pub fn lineEnd(self: *const Self, offset: usize) usize {
             const bytes = self.text();
@@ -478,8 +592,21 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         /// Prints one logical line with its first row at window row `row`
         /// (negative rows are clipped), or only measures it. Returns its rows.
         /// Measuring and drawing segment identically, so they wrap identically.
-        pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, plain: vaxis.Style, colours: Colours) u16 {
+        pub fn printLine(self: *const Self, window: vaxis.Window, row: i17, offset: usize, commit: bool, colour: bool, base: vaxis.Style, colours: Colours) u16 {
             const end = self.lineEnd(offset);
+            const mark = self.lineMarker(offset);
+            const content_start = if (mark) |value| value.end else offset;
+            const output = self.toolOutput(offset);
+            const opened = self.toolIsOpen(offset);
+            var plain = base;
+            if (colour and (output or opened)) plain.bg = if (output) colours.tool_output else colours.tool_selection;
+            if (colour and mark != null and std.mem.eql(u8, mark.?.uri, tool_fold.more_uri)) plain.fg = colours.quiet;
+            if (commit and colour and (output or opened)) {
+                const used = self.lineRows(.{ .width = window.width, .method = self.width_method }, offset);
+                const first_row: u16 = @intCast(@max(0, row));
+                const last_row: u16 = @intCast(@min(@as(i32, window.height), @max(0, @as(i32, row) + used)));
+                if (last_row > first_row) window.child(.{ .y_off = first_row, .height = last_row - first_row }).fill(.{ .style = plain });
+            }
             var user = false;
             // A line of summary text alone (a peer Message's line) keeps one
             // row, ending in `…` when it does not fit.
@@ -493,10 +620,16 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 if (note == null) note = .{ .start = index, .end = index + 1 } else if (note.?.end == index) note.?.end += 1;
             };
+            // Tool output is bounded in screen rows too: long logical lines
+            // keep their prefix and a visible ellipsis rather than wrapping
+            // past the twenty-row fold budget.
+            if (output) single = true;
             // A single row's text ends where its trailing sidenote begins.
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
             const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
-            const body = window.child(.{ .width = window.width - margin });
+            const prefix: u16 = if (opened) @min(2, window.width - margin) else 0;
+            if (commit and opened and prefix != 0) _ = window.child(.{ .y_off = row, .width = prefix, .height = 1 }).printSegment(.{ .text = "▸", .style = plain }, .{ .wrap = .none });
+            const body = window.child(.{ .x_off = prefix, .width = window.width - margin - prefix });
             if (commit and margin != 0) if (note) |range| {
                 _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
             };
@@ -530,12 +663,12 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 return 1;
             }
-            const split = hanging(self.bytes[offset..end], body.width, user);
-            if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), offset, offset + split.bytes, .none, false, true, colour, plain, colours);
-            const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), offset + split.bytes, end, .word, false, commit, colour, plain, colours));
+            const split = hanging(self.bytes[content_start..end], body.width, user);
+            if (commit) _ = self.printRange(body.child(.{ .y_off = row, .height = 1 }), content_start, content_start + split.bytes, .none, false, true, colour, plain, colours);
+            const rows = rowsUsed(self.printRange(body.child(.{ .x_off = split.cells, .y_off = row }), content_start + split.bytes, end, .word, false, commit, colour, plain, colours));
             if (commit and self.quotes and split.quoted) for (1..rows) |index| {
-                const mark = body.child(.{ .x_off = split.cells - 2, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
-                _ = mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(offset + split.bytes - 2, colour, plain, colours) }, .{ .wrap = .none });
+                const quote_mark = body.child(.{ .x_off = split.cells - 2, .y_off = row + @as(i17, @intCast(index)), .width = 1, .height = 1 });
+                _ = quote_mark.printSegment(.{ .text = "┆", .style = self.segmentStyle(content_start + split.bytes - 2, colour, plain, colours) }, .{ .wrap = .none });
             };
             return rows;
         }

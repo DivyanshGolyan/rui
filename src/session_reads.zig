@@ -3,6 +3,7 @@
 //! not import the frontend, so no worker can read or write it.
 
 const std = @import("std");
+const tool_fold = @import("tool_fold.zig");
 const socket_os = @import("os/socket.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -210,6 +211,7 @@ pub const Target = union(enum) {
     listing: Listing,
     /// This collapsed block's Message, in full.
     message: View.Collapsed,
+    tool: tool_fold.Reference,
 };
 
 pub const Job = struct {
@@ -557,20 +559,18 @@ pub fn writeSubmission(view: ?Submission.View, failure: ?[]const u8, out: *std.I
 
 pub fn history(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const latest = job.phase == .details;
-    if (!latest) switch (job.target) {
+    switch (job.target) {
         .older => {},
         .listing => |step| return list(job, task, step),
-        .message => unreachable,
-    };
-    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
+        .message, .tool => unreachable,
+    }
+    const prepared = try History.prepare(task.requests(), job.store, job.session, job.older.?, job.files.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
-    if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home);
-    if (!latest) job.result.history_cursor = prepared.page.continuation();
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, job.colour, job.home);
+    job.result.history_cursor = prepared.page.continuation();
 }
 
 /// A position before the Admission of every Message in `queued`.
@@ -788,6 +788,10 @@ const DisplayCapture = struct {
         self.lowest = @min(self.lowest orelse position, position);
     }
 
+    pub fn tool(self: *@This(), reference: tool_fold.Reference) !void {
+        try tool_fold.marker(reference, self);
+    }
+
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
         if (self.blocks) |blocks| blocks.add(value);
     }
@@ -821,6 +825,24 @@ const DisplayCapture = struct {
 
 /// The Ctrl-O page. The Message's length, digest and end are validated
 /// before anything shows; its full text then follows at column 0.
+pub fn fullTool(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const requests = task.requests();
+    const target = job.target.tool;
+    const output = try job.init.gpa.create(tool_fold.Output);
+    defer job.init.gpa.destroy(output);
+    output.* = .{};
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
+    const failure = switch (target.source) {
+        .activity => try requests.readActivityContent(job.store, job.session, target.position, target.ordinal, reference, output),
+        .conversation => try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, output),
+    };
+    if (failure) |value| return requests.failRead(value);
+    try job.files.inspection.setLength(task.io, 0);
+    var capture: DisplayCapture = .{ .task = task, .file = job.files.inspection };
+    try output.finish(&capture);
+}
+
 pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();

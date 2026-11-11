@@ -602,40 +602,51 @@ def permission_read_cases(state):
                     caller.stderr.close()
                 close_pty(master)
                 close_pty(slave)
-        # An ordinary details preparation failure stays live and is delivered
+        # An ordinary tool-output preparation failure stays live and is delivered
         # before the next Activity borrower can reset its diagnostic storage.
         configured = invoke(home, "session", "configure", "--store", store,
             "--workspace", state, "--provider", "codex", "--model", "gpt-6-sol")
         assert configured.returncode == 0, configured
-        details_session = json.loads(configured.stdout)["answer"]["session"]
+        fold_session = json.loads(configured.stdout)["answer"]["session"]
+        with endpoint.lock:
+            endpoint.responses.extend([
+                fixture.sse_tool_calls("fold-read", [("bash", "fold-read-call",
+                    '{"cmd":"printf saved-output","timeout_ms":null,"description":"Read saved fold output"}')]),
+                fixture.sse_answer("fold-answer", "fold-reason", "fold-message", "saved fold ready")[0],
+            ])
+        assert invoke(home, "session", "send", "--store", store, "--to", fold_session,
+            input="produce saved output").returncode == 0
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
         body = b'{"version":"' + host_process.WIRE_VERSION.encode() + b'","type":"busy","code":"host_busy"}'
         response = (b"HTTP/1.1 503 Rejected\r\nContent-Type: application/json\r\n"
             b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
-        proxy = ReplyProxy(host, "/v1/conversation-page", lambda reply: response)
+        armed = threading.Event()
+        proxy = ReplyProxy(host, "/v1/activity-content", lambda reply: response if armed.is_set() else reply)
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         caller = None
         try:
-            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), details_session],
+            caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), fold_session],
                 env={**os.environ, "HOME": str(home)}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-            human.read_terminal(master, "› ")
-            os.write(master, b"/details\r")
+            human.read_terminal(master, "saved fold ready")
+            before_fold = len(proxy.exchanges)
+            armed.set()
+            os.write(master, b"\x0f")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
             # The transcript keeps the whole diagnostic, wrapped at the width;
             # the notice under the input names only what failed.
-            assert "! Details unavailable; draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Details unavailable; draft retained.", output
+            assert "! Tool output unavailable; Ctrl-O to retry. Draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
+            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable; Ctrl-O to retry. Draft retained.", output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)
             assert caller.returncode == 0 and b"rui: Read failed:" not in errors, errors
-            assert len(proxy.exchanges) == 1 and proxy.mutations == [], proxy.mutations
+            assert len(proxy.exchanges) == before_fold + 1 and proxy.mutations == [], proxy.mutations
             assert {path.name: path.read_bytes() for path in records.glob("*.json")} == before
             actual = termios.tcgetattr(slave)
-            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "recoverable details failure did not restore terminal"
+            assert os_semantics.user_termios(actual) == os_semantics.user_termios(original), "recoverable tool-output failure did not restore terminal"
         finally:
             proxy.close()
             if caller is not None and caller.poll() is None:

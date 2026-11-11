@@ -22,10 +22,7 @@ pub const Prepared = struct {
     page: protocol_reply.ConversationPage,
     bodies: [protocol.public_conversation_page_items]Body = @splat(.none),
 
-    /// The transcript matches live presentation; details show bounded raw tails.
-    pub const Mode = enum { transcript, details };
-
-    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, mode: Mode, colour: bool, home: []const u8) !void {
+    pub fn render(self: *const Prepared, io: std.Io, scratch: std.Io.File, store: []const u8, session: []const u8, sink: anytype, colour: bool, home: []const u8) !void {
         var window: [protocol.content_window_bytes]u8 = undefined;
         var compact = false;
         for (0..self.page.count) |reverse| {
@@ -76,30 +73,17 @@ pub const Prepared = struct {
                 .omitted => unreachable,
             };
             const staged: Staged = .{ .io = io, .scratch = scratch, .start = span.offset, .bytes = span.length, .window = &window };
-            if ((item.kind == .tool_result or item.kind == .hosted_call) and mode == .transcript) {
-                try View.toolResult(item.presentation.?, if (prepared_body == .tool) prepared_body.tool.facts else .{}, sink, colour, &compact);
+            if (item.kind == .tool_result or item.kind == .hosted_call) {
+                try View.toolResultRow(item.presentation.?, if (prepared_body == .tool) prepared_body.tool.facts else .{}, if (item.kind == .tool_result) .{ .source = .conversation, .position = item.position, .ordinal = item.ordinal, .content = .{ .length = item.content.bytes, .digest = item.content.digest } } else null, sink, colour, &compact);
                 continue;
             }
             compact = false;
             switch (item.kind) {
-                .hosted_call => try View.toolHeading(item.presentation.?, sink, colour, true),
-                .tool_result => {
-                    try View.toolResult(item.presentation.?, prepared_body.tool.facts, sink, colour, &compact);
-                    compact = false;
-                    if (item.content.bytes > span.length) try sink.feed("  Earlier output omitted\n");
-                    try sink.feed("  ");
-                    var indented: View.Indented(@TypeOf(sink)) = .{ .sink = sink };
-                    var escaped: View.Escaped(@TypeOf(&indented)) = .{ .sink = &indented, .text = .{ .mode = .multiline } };
-                    try staged.read(&escaped);
-                    try escaped.finish();
-                    try indented.finish();
-                    try sink.feed("\n  ");
-                    try writeExport(sink, store, session, item.position, item.ordinal);
-                },
+                .hosted_call, .tool_result => unreachable,
                 .user => {
                     try View.userPrefix(sink, colour, item.admitted_at.?);
                     var body: View.UserBody(@TypeOf(sink)) = undefined;
-                    try body.init(sink, item.content.bytes, mode == .details);
+                    try body.init(sink, item.content.bytes, false);
                     try staged.read(&body);
                     if (try body.finish()) try View.noteCollapsed(sink, collapsed(item));
                 },
@@ -255,7 +239,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
     prepared.bodies[1] = .omitted;
     prepared.bodies[2] = .omitted;
     var sink: Sink = .{};
-    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, .details, false, "");
+    try prepared.render(std.testing.io, std.Io.File.stdin(), "/tmp/a'$(false)\x1b[2J\né\u{202e}", "09azvw", &sink, false, "");
     try std.testing.expectEqualSlices(u64, &.{2}, sink.positions[0..sink.notes]);
     // Independent UTF-8 byte-to-hex oracle for Store controls and directional text.
     const identity = " --store-hex 2f746d702f6127242866616c7365291b5b324a0ac3a9e280ae --session 09azvw";
@@ -317,30 +301,11 @@ test "history tool tails are exact bounded suffixes and transcript headers only"
                 var extra: [1]u8 = undefined;
                 try std.testing.expectEqual(@as(usize, 0), try scratch.readPositionalAll(io, &extra, retained));
                 var sink: Sink = .{};
-                try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
+                try prepared.render(io, scratch, "store", "09azvw", &sink, false, "");
                 var heading: Sink = .{};
                 var compact = false;
                 try View.toolResult(page.items[0].presentation.?, .{ .exit = if (code == .failed and size >= first.len) 7 else null }, &heading, false, &compact);
                 try std.testing.expectEqualStrings(heading.bytes[0..heading.length], sink.bytes[0..sink.length]);
-                sink.length = 0;
-                try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "");
-                const output = sink.bytes[0..sink.length];
-                try std.testing.expect(std.mem.startsWith(u8, output, heading.bytes[0..heading.length]));
-                try std.testing.expectEqual(size > item_bytes, std.mem.indexOf(u8, output, "Earlier output omitted") != null);
-                try std.testing.expect(std.mem.indexOf(u8, output, "Historical item omitted") == null);
-                try std.testing.expect(std.mem.endsWith(u8, output, "Raw export: rui session read-conversation --store-hex 73746f7265 --session 09azvw --position 7 --ordinal 2\n"));
-                var expected: Sink = .{};
-                try expected.feed(heading.bytes[0..heading.length]);
-                if (size > item_bytes) try expected.feed("  Earlier output omitted\n");
-                try expected.feed("  ");
-                var line_start = false;
-                for (bytes[size - retained .. size]) |byte| {
-                    if (line_start and byte != '\n') try expected.feed("  ");
-                    line_start = byte == '\n';
-                    try expected.feed(&.{byte});
-                }
-                try expected.feed("\n  Raw export: rui session read-conversation --store-hex 73746f7265 --session 09azvw --position 7 --ordinal 2\n");
-                try std.testing.expectEqualStrings(expected.bytes[0..expected.length], output);
             }
         }
     }
@@ -419,7 +384,7 @@ test "history reopened transcript keeps only the failed numeric header" {
     page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = result.len, .digest = protocol.contentDigest(result) }, .presentation = .{ .description = description, .code = .failed, .publication_position = 7 } };
     const prepared = try stagePage(io, page, scratch, Bytes{});
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
+    try prepared.render(io, scratch, "store", "09azvw", &sink, false, "");
     try std.testing.expectEqualStrings("\n× Run check · exit 7\n", sink.bytes[0..sink.length]);
 }
 
@@ -838,7 +803,7 @@ test "history tool suffix rejects later writes corrupting earlier spans" {
     try std.testing.expectError(error.ContentBindingMismatch, result);
 }
 
-test "history tool raw suffix boundary stays exact while details escape controls" {
+test "history tool raw suffix boundary stays exact without revealing controls" {
     const Sink = struct {
         bytes: [16 * 1024]u8 = undefined,
         length: usize = 0,
@@ -868,12 +833,9 @@ test "history tool raw suffix boundary stays exact while details escape controls
     try std.testing.expectEqual(raw.len, try scratch.readPositionalAll(io, &raw, 0));
     try std.testing.expectEqualSlices(u8, body[8..], &raw);
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "09azvw", &sink, .details, false, "");
+    try prepared.render(io, scratch, "store", "09azvw", &sink, false, "");
     const output = sink.bytes[0..sink.length];
-    const prefix = "\n✓ Tool call\n  Earlier output omitted\n  \\xa9\\x00\\x1b\\u202e";
-    try std.testing.expect(std.mem.startsWith(u8, output, prefix));
-    try std.testing.expectEqualStrings(body[14..], output[prefix.len..][0 .. body.len - 14]);
-    try std.testing.expectEqualStrings("\n  Raw export: rui session read-conversation --store-hex 73746f7265 --session 09azvw --position 1 --ordinal 0\n", output[prefix.len + body.len - 14 ..]);
+    try std.testing.expectEqualStrings("\n✓ Tool call\n", output);
 }
 
 test "history assistant local paths use the borrowed HOME and leave punctuation outside the link" {
@@ -896,6 +858,6 @@ test "history assistant local paths use the borrowed HOME and leave punctuation 
     prepared.page.items[0] = .{ .position = 1, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = text.len, .digest = protocol.contentDigest(text) } };
     prepared.bodies[0] = .{ .whole = .{ .offset = 0, .length = text.len } };
     var sink: Sink = .{};
-    try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "/home/a b");
+    try prepared.render(io, scratch, "store", "09azvw", &sink, false, "/home/a b");
     try std.testing.expectEqualStrings("\nThe report is at \x1b]8;;file:///home/a%20b/report.md\x1b\\\x1b[4m~/report.md\x1b[0m\x1b]8;;\x1b\\;\n", sink.bytes[0..sink.length]);
 }

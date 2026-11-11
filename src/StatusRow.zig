@@ -45,7 +45,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         used += 1;
     }
     if (self.bar.stop and self.bar.stop_column < size.width) {
-        self.stop.label = chrome.stop_key;
+        self.stop.label = self.bar.right_key;
         self.stop.style = self.quiet;
         self.stop.hover = self.quiet;
         self.stop.hover.ul_style = .single;

@@ -45,6 +45,7 @@ pub const View = struct {
     /// Where a send stands (`chrome.Send.progress`).
     progress: ?[]const u8 = null,
     stoppable: bool = false,
+    tool_open: bool = false,
     /// The facts after `‹ `.
     facts: []const u8 = "",
     /// The reply to the last key that shows now (`Notice.current`), and
@@ -89,6 +90,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
         .notice = view.notice,
         .overview = view.overview,
         .stoppable = view.stoppable,
+        .tool_open = view.tool_open,
         .width = view.width,
         .method = self.status.method,
     });
