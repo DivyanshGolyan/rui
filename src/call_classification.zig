@@ -10,7 +10,6 @@ const utf8_validation = @import("utf8_validation.zig");
 const records = @import("tool_record.zig");
 const Record = records.Record;
 const Tool = records.Tool;
-const ToolSet = records.ToolSet;
 const Offered = records.Offered;
 const Description = records.Description;
 const max_name_bytes = records.max_name_bytes;
@@ -304,14 +303,13 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     const skill = complete and std.mem.eql(u8, name[0..length], skill_record.name);
     const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
     const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
-    var tool: ?Record = if (complete) if (offeredFunction(offered.slice(), name[0..length])) |candidate| candidate.* else null else null;
-    if (complete) for (offered.mcp_names, offered.mcp_offered) |*candidate, was_offered| {
-        if (was_offered and std.mem.eql(u8, candidate.slice(), name[0..length])) {
-            tool = .{ .name = candidate.slice(), .owner = .mcp };
-            break;
-        }
-    };
-    const removed = tool == null and complete and withdrawnFunction(offered.withdrawn, name[0..length]);
+    // Provider-run tools return inside the reply, never as function calls.
+    const provider = if (complete) if (records.builtIn(name[0..length])) |builtin| record(builtin).owner == .provider else false else false;
+    const tool: ?Record = if (complete and !provider) if (offered.find(name[0..length])) |candidate|
+        if (records.builtIn(candidate)) |builtin| record(builtin).* else .{ .name = candidate, .owner = .mcp }
+    else
+        null else null;
+    const removed = tool == null and complete and !provider and offered.wasWithdrawn(name[0..length]);
     // A call's arguments are read whether or not it was offered, so a
     // rejected call keeps its description for presentation.
     var discard: Discard = .{};
@@ -427,26 +425,6 @@ noinline fn transcriptDescriptionId(source: anytype) !?Bounded(session_id.bytes)
             },
         }
     }
-}
-
-/// The offered record a function call named `name` resolves to. A
-/// provider-run tool comes back finished inside the reply, never as a
-/// function call, so a call naming one is unknown.
-fn offeredFunction(offered: []const *const Record, name: []const u8) ?*const Record {
-    for (offered) |candidate| {
-        if (candidate.owner != .provider and std.mem.eql(u8, candidate.name, name)) return candidate;
-    }
-    return null;
-}
-
-/// Whether `name` is a function tool in `withdrawn`.
-fn withdrawnFunction(withdrawn: ToolSet, name: []const u8) bool {
-    var tools = withdrawn.iterator();
-    while (tools.next()) |tool| {
-        const candidate = record(tool);
-        if (candidate.owner == .rui and std.mem.eql(u8, candidate.name, name)) return true;
-    }
-    return false;
 }
 
 pub const removed_tool_result = "This tool was removed.";

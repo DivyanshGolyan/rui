@@ -101,6 +101,7 @@ For an application retrying the same logical write, retain and reuse that write'
 ## Connect your application's tools and storage
 
 Supply a SQLite directory as `database`, as above, or an existing MySQL database URL with the [required schema](../clients/ts/README.md#install).
+For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 `Rui.connect` starts an application-owned child Host and communicates over its local socket.
 The child lives while the application keeps the child's stdin pipe open.
 Calling `rui.close()` shuts it down, so do not close immediately after admitting work that you still want to run.

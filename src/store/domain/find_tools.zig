@@ -16,7 +16,7 @@ const tool_set = @import("tool_set.zig");
 const Faults = @import("../Store.zig").Faults;
 
 const settings = rsql.Read(.{
-    .sql = "SELECT revision,tool_set_id,coalesce(loaded_tool_set_id,tool_set_id) AS loaded_set FROM session WHERE session_ref=?1",
+    .sql = "SELECT revision,tool_set_id," ++ tool_set.offeredSetSql("session") ++ " AS loaded_set FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
     .Row = struct { revision: rsql.Positive, tool_set_id: rsql.Positive, loaded_set: rsql.Positive },
     .cardinality = .one,

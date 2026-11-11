@@ -16,7 +16,7 @@ Enter these at the `›` prompt.
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
-| `/upgrade` | On the overview, checks for a stable release and installs it at once, restarting this Store's Host; the status bar says each step, and Esc cancels until publishing starts. |
+| `/upgrade` | On the overview or in a conversation, checks for a stable release and installs it at once, restarting this Store's Host; the status bar says each step, and Esc cancels until publishing starts. |
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 

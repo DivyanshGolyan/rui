@@ -29,7 +29,7 @@ Run `rui --version` to see the selected build.
 `rui upgrade` updates an eligible released managed installation under `~/.local` to that release.
 It restarts the selected Store's Host only if that Host is already running and can be safely activated.
 With an eligible installation and no running Host, Upgrade only installs.
-The terminal's `/upgrade` panel offers Install and Cancel in both the overview and conversation.
+The terminal's `/upgrade` does the same from the overview or a conversation, on the status row: it installs a found release at once, and Esc cancels until publishing starts.
 
 A selected source build or managed build with unknown release identity is refused before installation.
 The [standalone release installer](../README.md#install) can deliberately convert it to a release.
@@ -50,6 +50,7 @@ Retained earlier builds are not an unconditional rollback after a Store migratio
 The target build's schema determines compatibility, not version punctuation.
 At Host startup, Rui backs up and migrates supported SQLite formats.
 MySQL schema changes are operator-owned.
+For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 If target compatibility facts are unavailable, compatibility is unknown until startup validates it.
 See [Store format and upgrades](../ARCHITECTURE.md#store-format-and-upgrades) for the contract.
 

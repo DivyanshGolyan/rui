@@ -13,8 +13,6 @@ const tool_catalog = @import("../../tool_record.zig");
 const rsql = @import("../rsql.zig");
 const content_domain = @import("content.zig");
 
-const Tool = tool_catalog.Tool;
-
 const lookup_set = rsql.Read(.{
     .sql = "SELECT tool_set_id FROM tool_set WHERE digest=?1",
     .Args = struct { digest: [32]u8 },
@@ -47,18 +45,10 @@ const insert_member = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// A Rui SQL expression for the built-in tools the set `set_column` names,
-/// as a tools_mask: each built-in member's bit, and nothing for any other
-/// member. Settlement reads MCP records separately from the same saved set.
-/// A catalog holds the built-ins unchanged, so no other member shares a
-/// built-in's name.
-pub fn maskSql(comptime set_column: []const u8) []const u8 {
-    comptime {
-        var cases: []const u8 = "";
-        for (std.enums.values(Tool)) |tool| cases = cases ++ std.fmt.comptimePrint(" WHEN '{s}' THEN {d}", .{ @tagName(tool), tool_catalog.toolBit(tool) });
-        return "(SELECT coalesce(sum(CASE tool.name" ++ cases ++ " ELSE 0 END),0) " ++
-            "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=" ++ set_column ++ ")";
-    }
+/// SQL for the set offered by a Session or revision: its loaded set when
+/// explicit, otherwise its configured set.
+pub fn offeredSetSql(comptime revision_alias: []const u8) []const u8 {
+    return "coalesce(" ++ revision_alias ++ ".loaded_tool_set_id," ++ revision_alias ++ ".tool_set_id)";
 }
 
 /// A Rui SQL expression for the names of the set `set_column`'s members,
@@ -72,21 +62,6 @@ pub fn namesSql(comptime set_column: []const u8) []const u8 {
 
 /// The longest `namesSql` text of a Session's set.
 pub const max_names_bytes = tool_name.max_names_bytes;
-
-/// SQL for the mask of every built-in in any set of `session`'s revisions
-/// up to `revision`, until the wire names tools.
-pub fn everMaskSql(comptime session: []const u8, comptime revision: []const u8) []const u8 {
-    comptime {
-        var sum: []const u8 = "(0";
-        for (std.enums.values(Tool)) |tool| sum = sum ++ std.fmt.comptimePrint(
-            "+CASE WHEN EXISTS(SELECT 1 FROM session_revision ever JOIN tool_set_member ever_member ON ever_member.tool_set_id=coalesce(ever.loaded_tool_set_id,ever.tool_set_id) " ++
-                "JOIN tool_record ever_tool ON ever_tool.tool_record_id=ever_member.tool_record_id " ++
-                "WHERE ever.session_ref={s} AND ever.revision<={s} AND ever_tool.name='{s}') THEN {d} ELSE 0 END",
-            .{ session, revision, @tagName(tool), tool_catalog.toolBit(tool) },
-        );
-        return sum ++ ")";
-    }
-}
 
 /// A Session's member named `name` in the source set `source`, as
 /// member `ordinal` of `set`. One row, or the source lacks it.
