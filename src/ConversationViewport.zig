@@ -470,7 +470,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             var end = offset;
             while (end < self.text().len and foregroundIndex(self.styles[end]) == address_index) : (end += 1) {}
             const uri = self.bytes[offset..end];
-            if (!std.mem.startsWith(u8, uri, tool_fold.prefix) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
+            if (!std.mem.startsWith(u8, uri, tool_fold.prefix) and !std.mem.eql(u8, uri, tool_fold.output_uri) and !std.mem.eql(u8, uri, tool_fold.stderr_uri) and !std.mem.eql(u8, uri, tool_fold.more_uri)) return null;
             return .{ .uri = uri, .end = end };
         }
 
@@ -500,7 +500,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
 
         fn toolOutput(self: *const Self, offset: usize) bool {
             const mark = self.lineMarker(offset) orelse return false;
-            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
+            return std.mem.eql(u8, mark.uri, tool_fold.output_uri) or std.mem.eql(u8, mark.uri, tool_fold.stderr_uri) or std.mem.eql(u8, mark.uri, tool_fold.more_uri);
         }
 
         pub fn toolIsOpen(self: *const Self, offset: usize) bool {
@@ -600,7 +600,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             const opened = self.toolIsOpen(offset);
             var plain = base;
             if (colour and (output or opened)) plain.bg = if (output) colours.tool_output else colours.tool_selection;
-            if (colour and mark != null and std.mem.eql(u8, mark.?.uri, tool_fold.more_uri)) plain.fg = colours.quiet;
+            if (colour and mark != null and (std.mem.eql(u8, mark.?.uri, tool_fold.more_uri) or std.mem.eql(u8, mark.?.uri, tool_fold.stderr_uri))) plain.fg = colours.quiet;
             if (commit and colour and (output or opened)) {
                 const used = self.lineRows(.{ .width = window.width, .method = self.width_method }, offset);
                 const first_row: u16 = @intCast(@max(0, row));
@@ -627,9 +627,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             // A single row's text ends where its trailing sidenote begins.
             const shown = if (note) |range| (if (range.end == end) range.start else end) else end;
             const margin: u16 = if (styled and self.sidenotes and window.width >= sidenote_width) sidenote_margin else 0;
-            const prefix: u16 = if (opened) @min(2, window.width - margin) else 0;
-            if (commit and opened and prefix != 0) _ = window.child(.{ .y_off = row, .width = prefix, .height = 1 }).printSegment(.{ .text = "▸", .style = plain }, .{ .wrap = .none });
-            const body = window.child(.{ .x_off = prefix, .width = window.width - margin - prefix });
+            const body = window.child(.{ .width = window.width - margin });
             if (commit and margin != 0) if (note) |range| {
                 _ = self.printRange(window.child(.{ .x_off = window.width - sidenote_cells, .y_off = row, .width = sidenote_cells, .height = 1 }), range.start, range.end, .none, true, true, colour, plain, colours);
             };

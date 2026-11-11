@@ -5512,7 +5512,7 @@ test "tool folds share key and click ownership across live output, bounds, failu
         try Harness.click(&fixture, first);
         try Harness.complete(&fixture, "README.md\nsrc\n");
         try Harness.click(&fixture, second);
-        try Harness.complete(&fixture, "bad \x1b[2J\n");
+        try Harness.complete(&fixture, "Bash failed. Exit code: 1.\nstdout tail:\nbad \x1b[2J\n\nstderr tail:\nerror line\n");
         try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
         try std.testing.expect(document.toolIsOpen(document.findTool(second).?));
         try std.testing.expect(std.mem.indexOf(u8, document.text(), "    bad \\x1b[2J") != null);
@@ -5528,6 +5528,8 @@ test "tool folds share key and click ownership across live output, bounds, failu
         surface.render(window, self.app_input.composer.widget());
         var saw_body = false;
         var saw_heading = false;
+        var saw_stderr = false;
+        var saw_footer = false;
         for (0..24) |row| for (0..80) |col| {
             const cell = screen.readCell(@intCast(col), @intCast(row)).?;
             if (std.mem.eql(u8, cell.char.grapheme, "R") and col + 1 < 80 and std.mem.eql(u8, screen.readCell(@intCast(col + 1), @intCast(row)).?.char.grapheme, "E")) {
@@ -5536,12 +5538,24 @@ test "tool folds share key and click ownership across live output, bounds, failu
                 try std.testing.expectEqual(if (colour) self.app_content.colours.tool_output else self.app_content.style.bg, cell.style.bg);
                 try std.testing.expectEqual(self.app_content.style.fg, cell.style.fg);
             }
-            if (std.mem.eql(u8, cell.char.grapheme, "▸")) {
+            try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "▸"));
+            if (std.mem.eql(u8, cell.char.grapheme, @import("marks.zig").marks.get(.finished).unicode)) {
                 saw_heading = true;
+                try std.testing.expectEqual(@as(usize, 0), col);
+                try std.testing.expectEqualStrings("L", screen.readCell(2, @intCast(row)).?.char.grapheme);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.tool_selection else self.app_content.style.bg, cell.style.bg);
             }
+            if (col == 4 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(5, @intCast(row)).?.char.grapheme, "r")) {
+                saw_stderr = true;
+                try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.tool_output else self.app_content.style.bg, cell.style.bg);
+            }
+            if (std.mem.eql(u8, cell.char.grapheme, "‹")) {
+                saw_footer = true;
+                for ("ctrl+o close", 0..) |byte, index| try std.testing.expectEqualStrings(&.{byte}, screen.readCell(@intCast(67 + index), @intCast(row)).?.char.grapheme);
+            }
         };
-        try std.testing.expect(saw_body and saw_heading);
+        try std.testing.expect(saw_body and saw_heading and saw_stderr and saw_footer);
         try std.testing.expectEqualStrings("ctrl+o close", self.chrome.status.bar.right_key);
         // Close by click, then the twenty-row bound and exact omitted count.
         try Harness.click(&fixture, second);

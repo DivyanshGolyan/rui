@@ -823,8 +823,8 @@ const DisplayCapture = struct {
     }
 };
 
-/// The Ctrl-O page. The Message's length, digest and end are validated
-/// before anything shows; its full text then follows at column 0.
+/// Authenticate the selected Tool Result unchanged, then stage only its
+/// bounded printed output. Store/model-facing Bash envelopes stay canonical.
 pub fn fullTool(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();

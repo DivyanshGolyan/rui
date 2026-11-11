@@ -182,7 +182,9 @@ class FramesTest(unittest.TestCase):
                 keys = [key for step in state["steps"] for key in step.get("keys", [])]
                 self.assertIn("C-o", keys)
                 self.assertIn("ctrl+o close", state["expect"])
-                self.assertTrue(any(text.startswith("▸ ") for text in state["expect"]))
+                self.assertTrue(any(text.startswith(("✓ ", "× ")) for text in state["expect"]))
+                for text in ("▸", "Bash failed. Exit code:", "Bash succeeded. Exit code:", "stdout tail:", "stderr tail:"):
+                    self.assertIn({"gone": text}, state["steps"])
                 self.assertTrue(any(text.startswith("    ") for text in state["expect"]))
                 # Do not capture the asynchronous opening notice as the finished fold.
                 self.assertIn({"gone": "Opening tool output…"}, state["steps"])

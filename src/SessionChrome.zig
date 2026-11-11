@@ -22,7 +22,7 @@ pub const Actions = struct {
     userdata: *anyopaque,
     /// `ctrl+r retries`, or whatever key the needs text ends with.
     key: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// `ctrl+x stop`.
+    /// The right-slot key: `ctrl+x stop`, or `ctrl+o close` on the facts line.
     stop: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     /// `‹`: back to the overview, as Esc.
     back: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
@@ -96,6 +96,11 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     });
     self.status.key.label = if (view.needs != null) view.needs_key else "";
     self.facts.text = view.facts;
+    self.status.stop.label = self.status.bar.right_key;
+    self.facts.right = if (self.status.bar.close_tool and self.status.bar.stop)
+        .{ .chip = &self.status.stop, .column = self.status.bar.stop_column }
+    else
+        null;
     screen.input.facts = self.facts.widget();
     screen.input.status = self.status.widget();
     screen.tail = if (view.browsing) null else self.activity.widget();
@@ -201,4 +206,38 @@ test "the status row shows the notice under what needs the person, and the ? sho
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", self.status.bar.left);
     try std.testing.expectEqualStrings("ctrl+r retries", self.status.key.label);
+}
+
+test "tool close shares the facts footer line and click target without an empty status row" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    var bytes: [16]u8 = undefined;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
+    const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
+    defer std.testing.allocator.destroy(document);
+    document.* = .{};
+    var transcript: @import("Transcript.zig") = .{ .document = document };
+    var screen: AppScreen.Session = .{ .input = &input, .content = &transcript, .userdata = &recorder, .on_event = Recorder.event };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 46, 80 }) |width| for ([_]?[]const u8{ null, "Copied 12 lines", "! Not confirmed: a notice that is wider than the whole footer line and must never hide Close" }) |notice| {
+        self.place(&screen, .{ .tool_open = true, .stoppable = true, .facts = "Fix retry deadline · gpt-6.1-sol · high · 100% left", .notice = notice, .width = width });
+        const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(u16, if (notice == null) 4 else 5), drawn.size.height);
+        const facts = drawn.children[1];
+        const column = width - "ctrl+o close".len - 1;
+        try std.testing.expectEqual(@as(usize, 2), facts.surface.children.len);
+        try std.testing.expectEqualStrings("‹", facts.surface.children[0].surface.readCell(0, 0).char.grapheme);
+        try std.testing.expectEqual(@as(i17, @intCast(column)), facts.surface.children[1].origin.col);
+        try std.testing.expectEqualStrings("ctrl+o close", self.facts.right.?.chip.label);
+        try std.testing.expect(facts.surface.children[1].surface.widget.eql(self.status.stop.widget()));
+        const clicks = recorder.clicked.get(.stop);
+        try clickAt(drawn, arena.allocator(), &ctx, @intCast(facts.origin.row), @intCast(column));
+        try std.testing.expectEqual(clicks + 1, recorder.clicked.get(.stop));
+        // A notice has its own row, but never another copy of the close key.
+        try std.testing.expectEqual(@as(u16, if (notice == null) 0 else 1), drawn.children[2].surface.size.height);
+        try std.testing.expectEqual(@as(usize, 0), drawn.children[2].surface.children.len);
+    };
 }

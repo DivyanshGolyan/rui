@@ -274,7 +274,8 @@ pub fn bar(facts: Facts) Bar {
     result.right_key = if (facts.tool_open) "ctrl+o close" else stop_key;
     const stop_cells = session_line.cells(result.right_key, facts.method);
     const left_cells = session_line.cells(result.left, facts.method);
-    const used = if (left_cells == 0) 0 else left_cells + gap;
+    // Close lives on the facts line, not beside this status/notice text.
+    const used = if (result.close_tool or left_cells == 0) 0 else left_cells + gap;
     // One cell of margin at the right edge, as the mocks set it.
     if (used + stop_cells + 1 > facts.width) return result;
     result.stop = true;

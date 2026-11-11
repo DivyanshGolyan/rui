@@ -195,13 +195,27 @@
         },
         {
           "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        },
+        {
+          "gone": "Bash failed. Exit code:"
+        },
+        {
+          "gone": "Bash succeeded. Exit code:"
+        },
+        {
+          "gone": "stdout tail:"
+        },
+        {
+          "gone": "stderr tail:"
         }
       ],
       "expect": [
         "✓ List project files",
         "× Fail with exit 127 · exit 127",
-        "▸ × Fail with an excerpt · exit 1",
-        "    Bash failed. Exit code: 1.",
+        "× Fail with an excerpt · exit 1",
         "    usage: example",
         "    unknown option --help",
         "ctrl+o close"
@@ -210,7 +224,7 @@
         "46x30",
         "140x40"
       ],
-      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded"
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark or envelope prose, close key shares the facts footer"
     },
     {
       "name": "tool-open-two",
@@ -252,11 +266,26 @@
         },
         {
           "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        },
+        {
+          "gone": "Bash failed. Exit code:"
+        },
+        {
+          "gone": "Bash succeeded. Exit code:"
+        },
+        {
+          "gone": "stdout tail:"
+        },
+        {
+          "gone": "stderr tail:"
         }
       ],
       "expect": [
-        "▸ ✓ List project files",
-        "▸ × Fail with an excerpt",
+        "✓ List project files",
+        "× Fail with an excerpt",
         "    README.md",
         "    unknown option --help",
         "ctrl+o close"
@@ -264,7 +293,7 @@
       "sizes": [
         "140x40"
       ],
-      "note": "10b-tool-open-two: two independent selected rows keep their output bands"
+      "note": "10b-tool-open-two: two independent selected rows keep their output bands; no extra mark or envelope prose, close key shares the facts footer"
     },
     {
       "name": "tool-open-long",
@@ -293,19 +322,34 @@
         },
         {
           "gone": "Opening tool output…"
+        },
+        {
+          "gone": "▸"
+        },
+        {
+          "gone": "Bash failed. Exit code:"
+        },
+        {
+          "gone": "Bash succeeded. Exit code:"
+        },
+        {
+          "gone": "stdout tail:"
+        },
+        {
+          "gone": "stderr tail:"
         }
       ],
       "expect": [
-        "▸ ✓ Print thirty-two lines",
-        "    output line 18",
-        "    … 14 more lines",
+        "✓ Print thirty-two lines",
+        "    output line 20",
+        "    … 12 more lines",
         "ctrl+o close"
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "note": "10c-tool-open-long: twenty output rows and a quiet exact remainder, not a result page"
+      "note": "10c-tool-open-long: twenty output rows and a quiet exact remainder, not a result page; no extra mark or envelope prose, close key shares the facts footer"
     },
     {
       "name": "tool-open-nocolor",
@@ -335,13 +379,27 @@
         },
         {
           "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        },
+        {
+          "gone": "Bash failed. Exit code:"
+        },
+        {
+          "gone": "Bash succeeded. Exit code:"
+        },
+        {
+          "gone": "stdout tail:"
+        },
+        {
+          "gone": "stderr tail:"
         }
       ],
       "expect": [
         "✓ List project files",
         "× Fail with exit 127 · exit 127",
-        "▸ × Fail with an excerpt · exit 1",
-        "    Bash failed. Exit code: 1.",
+        "× Fail with an excerpt · exit 1",
         "    usage: example",
         "    unknown option --help",
         "ctrl+o close"
@@ -350,7 +408,7 @@
         "46x30",
         "140x40"
       ],
-      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds"
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark or envelope prose, close key shares the facts footer"
     },
     {
       "name": "chat-scrolled",

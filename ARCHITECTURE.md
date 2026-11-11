@@ -2787,11 +2787,15 @@ Several tool rows may be open together, and new live output leaves them open.
 Opening holds the heading's position where possible, growing the feed below it.
 The frontend reads the selected immutable Store content on toggle, checking its length and digest, and retains only a bounded display prefix for the open row, never all closed outputs.
 At most 20 indented rows show, with long logical lines ending in `…` rather than wrapping past that bound, then a quiet `… N more lines` row; a byte-bound cut counts incomplete lines among those not shown.
-The prefix keeps at most 8,192 raw bytes and at most 8,192 bytes after terminal-control escaping, before the document escapes invisible clusters.
-Output has its own line-level selvedge band, body foreground and a selection background on the opened heading; NO_COLOR removes the backgrounds, not the indent.
+The printed prefix keeps at most 8,192 raw bytes and at most 8,192 bytes after terminal-control escaping, before the document escapes invisible clusters.
+Opened headings keep the canonical mark and text in their folded columns; only the selection background changes.
+Output has its own line-level selvedge band and body foreground; NO_COLOR removes the backgrounds, not the indent.
+The display read unwraps Bash's saved model-facing envelope: status, warnings, stream labels and capture pointers are not printed output and never enter the fold.
+When both streams exist, stderr uses the quiet foreground rather than a label; stderr alone uses the body foreground.
+The Store content and model-facing result stay unchanged; an empty output opens a blank indented row.
 Internal tool line markers reuse the document's hidden address representation without adding per-byte styling storage, and never become terminal hyperlinks or clipboard text.
 Fold state lives only in the open frontend, is not saved, and output leaves with the retained row or when closed.
-The footer offers `ctrl+o close` while a tool row is open.
+The facts footer offers `ctrl+o close` in its right slot while a tool row is open, on the same line as `‹` and the Session name; it creates no separate status row.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
 Rui does not enable alternate scroll mode 1007.
