@@ -2834,7 +2834,7 @@ The three-screen margin is a loading target, not an unbounded promise at arbitra
 Each oversized row retains a bounded head, not its tail; its complete saved source remains available through its exact Message target.
 Summary text and targets share one retention decision: each reader row admits at most 16 pairs, with omitted items represented by one final non-actionable aggregate.
 The window admits a complete row with all its targets or rejects it for normal trim-and-retry at its 512-target bound; it never silently drops a visible summary's target.
-Tool open state belongs to the window's bounded set of row keys and survives trim and reload while its key remains held.
+Tool open state belongs to the window's set of at most 64 row keys and survives trim and reload; with 64 open, another opening is refused, so no open row is forgotten.
 Inspection, Action and Message pages remain separate bounded documents.
 Ctrl-O opens the lowest collapsed Message the latest frame drew in the feed, as a Message page: it is read from the Store and shows only if its length and digest match.
 When a peer's name is drawn below that Message, Ctrl-O follows it instead, under the same rules and refusals as a click on the name, so every link has a keyboard path.

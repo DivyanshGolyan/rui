@@ -2323,6 +2323,10 @@ fn expand(self: *Self) !?[session_id.bytes]u8 {
 fn toggleTool(self: *Self, key: feed_window.Key) void {
     const open = !self.screen.feed.opened.has(key);
     self.dirty = true;
+    if (open and self.screen.feed.opened.full()) {
+        self.notice = "! 64 tool rows are open; close one to open another.";
+        return;
+    }
     self.expansion.queued = .{ .ready = .{ .target = .{ .tool = .{ .key = key, .open = open } }, .asked = self.pageAsked() } };
     if (open) self.notice = "Opening tool output…";
 }
@@ -5956,6 +5960,14 @@ test "SessionFrontend tool row Ctrl-O opens saved output in place, closes it, an
     try self.settleReader();
     try std.testing.expect(!window.opened.has(key));
     try std.testing.expect(!window.document.toolIsOpen(window.entries[window.indexOf(key).?].offset));
+    // With 64 rows open another opening is refused before any read, so no
+    // open row is ever forgotten.
+    var position: u64 = 100;
+    while (!window.opened.full()) : (position += 1) window.opened.set(.{ .position = position }, true);
+    try held.keys("\x0f");
+    try held.settle();
+    try std.testing.expect(self.expansion.queued == .none);
+    try std.testing.expect(!window.opened.has(key));
 }
 
 test "SessionFrontend history physical feed geometry" {
