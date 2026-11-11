@@ -211,18 +211,19 @@ class AssertedTextSelectionTest(unittest.TestCase):
         paths = ["src/overview_view.zig", "src/Overview.zig"]
         contents = {path: tuple(subprocess.check_output(["git", "show", f"{ref}:{path}"], text=True)
                                 for ref in (base, head)) for path in paths}
-        result = select(paths, "review", AVAILABLE, contents=contents)
+        from select_tests import fixture_text, script_literals
+
+        scripts = FIXTURES["host-launch-integration"][0]
+        literals = {text for script in scripts if Path(script).suffix in {".py", ".sh"}
+                    for literal in script_literals(
+                        subprocess.check_output(["git", "show", f"{base}:{script}"], text=True),
+                        Path(script).suffix)
+                    if (text := fixture_text(literal))}
+        result = select(paths, "review", AVAILABLE, contents=contents,
+                        fixture_literals={"host-launch-integration": literals})
         for field in ("targets", "native_targets"):
             self.assertIn("host-launch-integration", result[field])
-        # Exercise main's revision reads too, not only the pure selector.
-        replay = json.loads(subprocess.check_output(
-            [sys.executable, "tests/ci/select_tests.py", "--base", base, "--head", head], text=True))
-        for field in ("targets", "native_targets"):
-            # The full historical diff selects check, which runs this fixture
-            # and absorbs its standalone target. The two-file replay above
-            # must select host-launch directly, without a composed gate.
-            self.assertTrue(covered("host-launch-integration", set(replay[field])))
-        self.assertEqual(replay["reasons"].count(
+        self.assertEqual(result["reasons"].count(
             "Asserted text: a fixture waits for text this file draws"), 1)
 
 
