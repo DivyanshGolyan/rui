@@ -54,7 +54,7 @@ class TerminalProcessTest(unittest.TestCase):
                     self.assertFalse(capture.draft("", 2))
 
         from human_cli_fixture import conversation_text
-        self.assertEqual(conversation_text("list│› line1    01:23\nlist│  line2\n    │edited 2"),
+        self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
     def setUp(self):

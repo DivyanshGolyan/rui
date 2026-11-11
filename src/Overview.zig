@@ -165,6 +165,9 @@ pub const HostLaunch = union(enum) {
 /// One discovery observation, not a UI phase or a launch outcome. A pause
 /// belongs only to a reachable Host; a free Store lease proves it stopped.
 const HostObservation = union(enum) {
+    /// Nothing read yet. The launch that opened this screen saw its Host
+    /// ready, so the first frames say nothing and hold nothing.
+    unread,
     ready: struct { facts: view.Host, paused: bool = false },
     stopped,
     unavailable,
@@ -470,7 +473,7 @@ upgrade_job: UpgradeJob = .{},
 host_process: ?struct { started_at: u64, pid: i32 } = null,
 /// Last discovery observation, invalidated by a Session transport loss.
 /// Counts in the view core are a projection of this same read, not a probe.
-host_observation: HostObservation = .unavailable,
+host_observation: HostObservation = .unread,
 /// The last launch's typed summary, never a boolean standing in for a cause.
 host_launch: ?HostLaunch = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
@@ -1722,6 +1725,7 @@ fn hostState(self: *const Self) HostState {
     if (self.state.holdsHost()) return .paused;
     if (self.hostStarting()) return .starting;
     return switch (self.host_observation) {
+        .unread => .ready,
         .ready => |ready| if (ready.paused) .paused else .ready,
         .unavailable => .paused,
         .stopped => .stopped,
@@ -1730,12 +1734,15 @@ fn hostState(self: *const Self) HostState {
 
 fn hostHeld(raw: *anyopaque) bool {
     const self: *Self = @ptrCast(@alignCast(raw));
-    return self.host_observation != .ready;
+    return switch (self.host_observation) {
+        .unread, .ready => false,
+        .stopped, .unavailable => true,
+    };
 }
 
 fn hostLost(raw: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.host_observation == .ready) self.host_observation = .unavailable;
+    if (!hostHeld(self)) self.host_observation = .unavailable;
     if (self.state.upgrading()) return;
     if (self.worker.thread != null and self.job == .host) return;
     self.queueHost();
@@ -4365,6 +4372,25 @@ test "Host recovery retains a worker failure in the same typed launch result" {
     var shown = try rig.shown(46, 26);
     defer shown.deinit();
     try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Host stopped · worker unavailable · r retry") != null);
+}
+
+test "before the first Host read the screen says nothing about the Host and holds no Session" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, HostRecovery.operations(), &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.host_observation = .unread;
+    try std.testing.expectEqual(HostState.ready, overview.hostState());
+    try std.testing.expect(hostNotice(overview) == null);
+    try std.testing.expect(!hostHeld(overview));
+    try std.testing.expect(overview.hostNext() == null);
+    var shown = try rig.shown(46, 26);
+    defer shown.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Host") == null);
+    // A Session's lost request still holds it until the Host is read again.
+    hostLost(overview);
+    try std.testing.expect(hostHeld(overview));
+    try std.testing.expectEqual(HostState.paused, overview.hostState());
 }
 
 test "a conversation that fails to open still names the unconfirmed start on departure" {

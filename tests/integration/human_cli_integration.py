@@ -72,7 +72,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -502,10 +502,10 @@ def status_frame(master, session, command="/status", timeout=15):
     """The /status page for exactly `session` (escaped as /status shows it)."""
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
     def page(frame):
-        rows = frame.split("\n")
-        # App draws the page from the first row, with no browsing heading.
+        rows = [chat_content_row(row) for row in frame.split("\n")]
+        # App draws the page from the first feed row, with no browsing heading.
         return (rows[0].startswith(" Status · ")
-            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and "\n Work\n" in frame)
+            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and " Work" in rows)
     return command_frame(master, command, page, timeout)
 
 
@@ -522,8 +522,8 @@ def configured_frame(master, command):
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
     frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith(" Status · "):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith(" Status · "), end="")
+    if frame.startswith("  Status · "):
+        command_frame(master, "\x1b", lambda frame: not frame.startswith("  Status · "), end="")
     return frame
 
 
@@ -555,7 +555,7 @@ def overview_store(notice):
 
 def permanent_tool_count(screen, heading):
     """Count a call heading's rows in one frame (not repeated frames)."""
-    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", screen))
+    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", "\n".join(chat_content_row(row) for row in screen.split("\n"))))
 
 
 def pipe_wait_oracles():
@@ -675,6 +675,7 @@ def shown_bash_command(master):
     """
     capture = terminal_capture(master)
     width = capture.screen.columns
+    # PermissionCard is an overlay with its own two-column inset, not feed content.
     rows = [line.rstrip() for line in capture.screen.display]
     start = next(index for index, line in enumerate(rows) if line.startswith("  $ "))
     command = rows[start][4:]
@@ -726,8 +727,8 @@ def raw_export(master, screen):
     Word wrap consumes the space at a soft break; a row filled to the edge
     broke inside a word instead (a long hex identity), so it joins directly.
     """
-    columns = terminal_capture(master).screen.columns
-    lines = screen.split("\n")
+    columns = terminal_capture(master).screen.columns - 1  # Feed width, without its gutter.
+    lines = [chat_content_row(line) for line in screen.split("\n")]
     start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
     previous = lines[start]
@@ -2581,7 +2582,7 @@ def main(selected="all"):
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
-            assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
+            assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
@@ -2594,7 +2595,7 @@ def main(selected="all"):
             # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).
             assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
-            assert "result: completed\nfirst answer" in result, result
+            assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
@@ -2761,7 +2762,7 @@ def main(selected="all"):
             assert "result: failed" in failed, failed
             assert "code: provider_http_422" in failed and "successor done" not in failed, failed
             result = terminal_step(master, f"/result {queued_key}", "result: completed", composer=True)
-            assert "result: completed\nsuccessor done" in result, result
+            assert "result: completed\nsuccessor done" in conversation_text(result), result
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
 
@@ -3001,7 +3002,7 @@ def main(selected="all"):
             "--", unsafe_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
-            assert "Session:" not in greeting and "\nsafe result" in greeting, greeting
+            assert "Session:" not in greeting and "\nsafe result" in conversation_text(greeting), greeting
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {unsafe_session}" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
@@ -3198,7 +3199,7 @@ def main(selected="all"):
             def hold_observation(response):
                 observation_held.set()
                 assert observation_continue.wait(15), "accepted observation gate was not released"
-                return b""  # Lost read framing must be fatal, not partial success.
+                return b""  # Lost read framing is the Host's loss, not partial success.
 
             def after_admission(response):
                 assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
@@ -3219,15 +3220,15 @@ def main(selected="all"):
                 "--key", saved_key)["observation"]["status"] == "accepted"
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             observation_continue.set()
+            # The screen stays up and says so in one line; nothing is sent again.
+            stopped = read_terminal(master, "Host stopped · r start")
+            assert "TruncatedResponse" not in stopped and "Not confirmed" not in stopped and "rui host start" not in stopped, stopped
+            assert entered.poll() is None, "the Host's stop ended the TUI"
+            assert proxy.mutations == [("/v1/message", original)], "a lost observation retransmitted the Message"
+            os.write(master, b"\x03")
             lost, errors = terminal_exit(entered, master)
-            assert entered.returncode != 0, errors
-            stopped = b"rui: The Host stopped. Run rui host start --store $'" + bytes(store) + b"', then resume this Session.\n"
-            assert stopped in errors, errors
-            assert b"TruncatedResponse" not in errors and b"syntax and recovery" not in errors, errors
-            assert b"Message accepted; do not resubmit it" in errors, errors
-            assert f"rui request read-result {saved_key}".encode() in errors, errors
-            assert b"Detached." not in lost and b"Not confirmed" not in lost, lost
-            assert proxy.mutations == [("/v1/message", original)], "fatal observation retransmitted Message"
+            assert entered.returncode == 0, errors
+            assert b"The Host stopped" not in errors and b"TruncatedResponse" not in errors, errors
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)
             assert set(json.loads(run(home, "request", "list"))) == after and record.read_bytes() == original

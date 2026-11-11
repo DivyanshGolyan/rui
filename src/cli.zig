@@ -941,7 +941,8 @@ fn startOverviewHost(init: std.process.Init, selected: []const u8) Overview.Host
 }
 
 fn startOverviewHostUsing(init: std.process.Init, selected: []const u8, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) Overview.HostLaunch {
-    const result = startHost(init, selected, null, readiness, ops, null);
+    var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
+    startHost(init, selected, null, readiness, ops, null, &result);
     return result.summary();
 }
 
@@ -951,48 +952,46 @@ fn startHostForTerminal(init: std.process.Init, selected: []const u8, quiet: boo
 
 fn startHostForTerminalUsing(init: std.process.Init, selected: []const u8, quiet: bool, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps) !void {
     var progress: TerminalHostProgress = .{};
-    const result = startHost(init, selected, capacity, readiness, ops, .{ .context = &progress, .report = TerminalHostProgress.report });
+    var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
+    startHost(init, selected, capacity, readiness, ops, .{ .context = &progress, .report = TerminalHostProgress.report }, &result);
     try reportHostLaunch(init.io, &result, quiet, capacity, progress.shown);
 }
 
-fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kind, err: anyerror, store: ?[]const u8) HostLaunchResult {
+fn launchFailure(result: *HostLaunchResult, kind: HostLaunchResult.Cause.Kind, err: anyerror, store: ?[]const u8) void {
     result.outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = err }, .store = .{ .len = 0 } } };
     // A non-null path came from validated platform.Paths, not user bytes.
     if (store) |canonical| result.outcome.failed.store.set(canonical) catch unreachable;
-    return result.*;
 }
 
-fn launchReady(result: *HostLaunchResult, ready: protocol_reply.HostInfoFacts, paths: *const platform.Paths) HostLaunchResult {
+fn launchReady(result: *HostLaunchResult, ready: protocol_reply.HostInfoFacts, paths: *const platform.Paths) void {
     result.outcome = .{ .ready = .{ .facts = ready, .diagnostics_directory = .{ .len = 0 } } };
     result.outcome.ready.diagnostics_directory.set(paths.diagnosticsDirectory()) catch unreachable;
-    return result.*;
 }
 
-fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps, progress: ?HostLaunchProgress) HostLaunchResult {
-    var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
+fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, readiness: ?*const provider_selection.Readinesses, ops: HostLaunchOps, progress: ?HostLaunchProgress, result: *HostLaunchResult) void {
     const io = init.io;
     const selection = platform.resolveClientSelection(selected);
     const resolved: ?platform.Paths = selection.paths(io) catch |err| switch (err) {
         error.FileNotFound => null,
-        else => return launchFailure(&result, .store_access, error.StoreAccessFailed, null),
+        else => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
     };
     switch (if (resolved) |*paths| ops.observe(ops.context, io, paths, null) else @as(protocol_reply.HostStatus, .unavailable)) {
-        .ready => |ready| return launchReady(&result, ready, &resolved.?),
-        .incompatible => return launchFailure(&result, .incompatible, error.IncompatibleHost, null),
-        .access_failure => return launchFailure(&result, .store_access, error.StoreAccessFailed, null),
+        .ready => |ready| return launchReady(result, ready, &resolved.?),
+        .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, null),
+        .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, null),
         .unavailable, .owned_unavailable => {},
     }
     // Opaque MySQL selections can only attach; they carry no launch login.
-    if (selection == .mysql) return launchFailure(&result, .mysql_unavailable, error.MysqlHostUnavailable, null);
-    var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(&result, .setup, err, null);
+    if (selection == .mysql) return launchFailure(result, .mysql_unavailable, error.MysqlHostUnavailable, null);
+    var dir = std.Io.Dir.cwd().createDirPathOpen(io, selected, .{ .permissions = .fromMode(0o700) }) catch |err| return launchFailure(result, .setup, err, null);
     dir.close(io);
-    const paths = resolved orelse (selection.paths(io) catch |err| return launchFailure(&result, .store_access, err, null));
+    const paths = resolved orelse (selection.paths(io) catch |err| return launchFailure(result, .store_access, err, null));
     var executable_buffer: [std.Io.Dir.max_path_bytes + 1]u8 = undefined;
-    const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(&result, .setup, err, paths.store.slice());
-    if (length == executable_buffer.len) return launchFailure(&result, .setup, error.ExecutablePathTooLong, paths.store.slice());
+    const length = std.process.executablePath(io, &executable_buffer) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
+    if (length == executable_buffer.len) return launchFailure(result, .setup, error.ExecutablePathTooLong, paths.store.slice());
     executable_buffer[length] = 0;
     var store_buffer: [protocol.max_store_bytes + 1]u8 = undefined;
-    const store_z = std.fmt.bufPrintSentinel(&store_buffer, "{s}", .{paths.store.slice()}, 0) catch |err| return launchFailure(&result, .setup, err, paths.store.slice());
+    const store_z = std.fmt.bufPrintSentinel(&store_buffer, "{s}", .{paths.store.slice()}, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice());
     // Prepare all argv storage before the native adapter borrows it through
     // exec/error handoff. Only the serving Host claims the Store lease.
     var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)}) + 1]u8 = undefined;
@@ -1011,7 +1010,7 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
     }
     if (capacity) |value| {
         argv[argc] = "--active-capacity";
-        argv[argc + 1] = (std.fmt.bufPrintSentinel(&capacity_buffer, "{d}", .{value}, 0) catch |err| return launchFailure(&result, .setup, err, paths.store.slice())).ptr;
+        argv[argc + 1] = (std.fmt.bufPrintSentinel(&capacity_buffer, "{d}", .{value}, 0) catch |err| return launchFailure(result, .setup, err, paths.store.slice())).ptr;
         argc += 2;
     }
     var startup_read: c_int = -1;
@@ -1020,9 +1019,9 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
         _ = std.c.close(startup_read);
     };
     if (launched != 0) {
-        _ = launchFailure(&result, .os_launch, error.HostLaunchFailed, paths.store.slice());
+        launchFailure(result, .os_launch, error.HostLaunchFailed, paths.store.slice());
         result.outcome.failed.os_error = launched;
-        return result;
+        return;
     }
     result.wait = .init(ops.now(ops.context, io));
     while (!result.wait.?.expired(ops.now(ops.context, io))) {
@@ -1037,9 +1036,9 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
         {
             // A losing candidate does not hide a competing ready owner.
             if (ops.observe(ops.context, io, &paths, until) != .ready) {
-                if (result.startup_len == HostLaunchResult.max_startup_bytes) return launchFailure(&result, .startup_full, error.HostReadinessUnconfirmed, paths.store.slice());
-                if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(&result, .store_identity, error.StoreIdentityMismatch, paths.store.slice());
-                return launchFailure(&result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.store.slice());
+                if (result.startup_len == HostLaunchResult.max_startup_bytes) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.store.slice());
+                if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.store.slice());
+                return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.store.slice());
             }
         }
         switch (ops.observe(ops.context, io, &paths, until)) {
@@ -1048,16 +1047,16 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
                 const final_count = ops.read(ops.context, startup_read, result.startup_bytes[result.startup_len..]);
                 if (final_count > 0) result.startup_len += @intCast(final_count);
                 result.wait.?.observe(result.startup(), ops.now(ops.context, io));
-                return launchReady(&result, ready, &paths);
+                return launchReady(result, ready, &paths);
             },
-            .incompatible => return launchFailure(&result, .incompatible, error.IncompatibleHost, paths.store.slice()),
-            .access_failure => return launchFailure(&result, .store_access, error.StoreAccessFailed, paths.store.slice()),
+            .incompatible => return launchFailure(result, .incompatible, error.IncompatibleHost, paths.store.slice()),
+            .access_failure => return launchFailure(result, .store_access, error.StoreAccessFailed, paths.store.slice()),
             .unavailable, .owned_unavailable => {},
         }
         const remaining = until - ops.now(ops.context, io);
-        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(&result, .interrupted, err, paths.store.slice());
+        if (remaining > 0) ops.pause(ops.context, io, @intCast(@min(remaining, 100 * std.time.ns_per_ms))) catch |err| return launchFailure(result, .interrupted, err, paths.store.slice());
     }
-    return launchFailure(&result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
+    return launchFailure(result, .readiness_timeout, error.HostReadinessUnconfirmed, paths.store.slice());
 }
 
 /// The terminal adapter renders the settled value without repeating the
@@ -4364,7 +4363,8 @@ test "Host launch owner returns one result for terminal and screen across its wh
             defer std.debug.assert(std.c.dup2(saved_stderr, 2) == 2);
             switch (surface) {
                 .owner => {
-                    const result = startHost(init, store, 9, &readiness, fixture.ops(), null);
+                    var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
+                    startHost(init, store, 9, &readiness, fixture.ops(), null, &result);
                     summary = result.summary();
                     if (fixture.migrated_deadline != null) {
                         try std.testing.expect(result.wait.?.phase == .migrated);

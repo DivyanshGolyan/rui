@@ -2817,9 +2817,8 @@ fn settleReader(self: *Self) !void {
         pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
     else
         false;
-    const host_lost = if (end == .failed and self.reader.result.failure_origin == .host_transport) self.hostFailure() else false;
-    if (fenced and self.app_hooks.host != null) self.app_hooks.host.?.lost(self.app_hooks.host.?.context);
-    if (host_lost or (fenced and self.app_hooks.host != null)) {
+    const lost = fenced or (end == .failed and self.reader.result.failure_origin == .host_transport);
+    if (lost and self.hostFailure()) {
         // A joined failed read has published no staged output. Keep its
         // cursor, opening state, documents, draft and scroll for the next scan.
         self.reading.pending_diagnostic = null;
