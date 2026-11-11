@@ -1563,7 +1563,10 @@ test "Session list capture and cursor storage stay page bounded as dormant Sessi
                 var key_buffer: [32]u8 = undefined;
                 const key = try std.fmt.bufPrint(&key_buffer, "dormant-key-{d}", .{i});
                 var config = try completeConfiguration(key, "", workspace, "model");
-                try std.testing.expect(try storage.configure(&config, .{}) == .accepted);
+                const reply = try storage.configure(&config, .{});
+                // 1,000 creations share these lines: name the one that failed.
+                errdefer std.debug.print("dormant Session {d} (every write run twice: {}): {any}\n", .{ i, case.rerun, reply });
+                try std.testing.expect(reply == .accepted);
                 if (i == 99 or i == 999) {
                     // The change hint counts writes, not Sessions (and can
                     // include rolled-back writes). Cross a wider token boundary
