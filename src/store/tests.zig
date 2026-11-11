@@ -2272,9 +2272,15 @@ test "Current, activity pages and Message progress report one work through an ap
             const action_id = try std.fmt.parseInt(u64, first.object.get("action").?.string, 10);
             try std.testing.expectEqualStrings("approval", parsed.value.object.get("work").?.object.get("state").?.object.get("kind").?.string);
             try pageWorkAgrees(&storage, parsed.value, action_id);
+            // While a Turn is active, the round that reads the command reads
+            // the work too: the Message's own, or the one it waits behind.
+            var rounds = storage.testing_content_work.rounds;
             try std.testing.expectEqual(protocol.MessageProgressStatus.waiting_for_permission, (try store_testing.observeCommandForTesting(&storage, "mixed-message")).kind.message.?.work.?.state.progress().?);
+            try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
             try submitTestMessage(&storage, &tmp, "mixed-queued-file", "mixed-queued", session.slice(), "wait behind approval");
+            rounds = storage.testing_content_work.rounds;
             const queued = try store_testing.observeCommandForTesting(&storage, "mixed-queued");
+            try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
             try std.testing.expect(queued.kind.message.?.queue.?.state == .queued);
             try std.testing.expectEqual(protocol.MessageRequestState.waiting_for_permission, queued.requestState().?);
             try std.testing.expectEqual(action_id, queued.kind.message.?.work.?.first_action.?);
@@ -2307,7 +2313,9 @@ test "Current, activity pages and Message progress report one work through an ap
             try std.testing.expectEqualStrings("bash", state.get("kind").?.string);
             try std.testing.expectEqualStrings("1", state.get("running").?.string);
             try std.testing.expectEqualStrings("1", state.get("approvals").?.string);
+            rounds = storage.testing_content_work.rounds;
             message = (try store_testing.observeCommandForTesting(&storage, "mixed-message")).kind.message.?;
+            try std.testing.expectEqual(rounds + 1, storage.testing_content_work.rounds);
             try std.testing.expectEqual(protocol.MessageProgressStatus.in_flight, message.work.?.state.progress().?);
             try pageWorkAgrees(&storage, bash.value, action_id + 1);
         }
@@ -10466,7 +10474,7 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .archiveSession = 2,
     .interruptModel = 2,
     .decidePermission = 2,
-    .observeCommand = 4,
+    .observeCommand = 3,
     .commandResult = 1,
     .inspectSession = 3,
     .publicConversationPage = 4,
