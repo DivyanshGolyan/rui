@@ -168,18 +168,16 @@ def run(rui, admin):
     proxy = mysql_server.proxy_socket_path(os.path.dirname(socket), name)
     try:
         mysql_server.start_proxy(name, os.path.dirname(socket), password, config.name)
-        try:
-            measure(rui, admin, proxy, password, "Store round trips behind ProxySQL")
-        except BaseException:
-            print(mysql_server.docker("logs", name, capture_output=True).stderr[-4000:])
-            raise
+        measure(rui, admin, proxy, password, "Store round trips behind ProxySQL")
+    except BaseException:
+        host_process.dispose_all(lambda: print(mysql_server.docker("logs", name, capture_output=True).stderr[-4000:]))
+        raise
     finally:
-        # Unchecked: the measurement's own result stays the outcome, and a
-        # proxy that never started leaves nothing to remove.
-        subprocess.run(["docker", "rm", "--force", "--volumes", name], capture_output=True)
-        if os.path.lexists(proxy):
-            os.unlink(proxy)
-        config.close()
+        # A forced removal succeeds when the proxy never started.
+        host_process.dispose_all(
+            lambda: mysql_server.docker("rm", "--force", "--volumes", name, capture_output=True),
+            lambda: os.unlink(proxy) if os.path.lexists(proxy) else None,
+            config.close)
 
 
 def measure(rui, admin, socket, password, label):
