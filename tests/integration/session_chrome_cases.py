@@ -4,7 +4,7 @@ the last row, the `↓` marker, pages without a heading and the send state.
 human_cli_integration.py runs these cases in its full and renderer modes, and
 alone as `session-chrome`. Each case judges the screen the person sees, at
 80×24 unless it says otherwise: the transcript fills rows 0–18, the input sits
-between the rules on rows 19–21, the facts row is 22 and the last row 23."""
+between rules on rows 20–22, the state slot is 19 and the identity/keys footer is 23."""
 import json
 import os
 import select
@@ -28,6 +28,7 @@ from terminal_process import close_pty, open_pty, spawn
 ROWS = 24
 BOTTOM = ROWS - 6  # The transcript's last row, where the marker sits.
 LAST = ROWS - 1
+NOTICE = ROWS - 5
 
 
 def rows(screen):
@@ -122,8 +123,8 @@ class Chrome:
 def composing(screen, draft):
     """The composer shows `draft` on its row between the rules."""
     shown = rows(screen)
-    return len(shown) == ROWS and (set(shown[ROWS - 5]) == {"─"} and set(shown[ROWS - 3]) == {"─"}
-            and shown[ROWS - 4].rstrip() == (" › " + draft).rstrip())
+    return len(shown) == ROWS and (set(shown[ROWS - 4]) == {"─"} and set(shown[ROWS - 2]) == {"─"}
+            and shown[ROWS - 3].rstrip() == (" › " + draft).rstrip())
 
 
 def latest(screen, text):
@@ -167,18 +168,18 @@ def activity_case():
         chrome.answered(session, "seed")
         master, caller, _ = chrome.open(session, lambda screen: "SEED-ANSWER" in screen)
         try:
-            # Idle: no tail, nothing on the last row.
+            # Idle: no tail or stop key; the footer keeps the chat identity.
             idle = settle_screen(master, quiet=0.5)
-            assert rows(idle)[LAST].strip() == "" and "⠹" not in idle, idle
+            assert rows(idle)[LAST].strip().startswith("‹ ") and "ctrl+x stop" not in rows(idle)[LAST] and "⠹" not in idle, idle
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             tail = tail_rows(running)
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
-            # Alone at the right of the last row, inside its one-column margin.
+            # At the right of the footer, beside the chat identity.
             last = rows(running)[LAST]
-            assert last.strip() == "ctrl+x stop" and len(last.rstrip()) == 79, running
+            assert last.strip().startswith("‹ ") and last.endswith("ctrl+x stop") and len(last.rstrip()) == 80, running
             # Waiting Messages: one row, the newest's first line, counted, never called queued.
             for index in range(3):
                 os.write(master, f"WAITING-{index}\nsecond line {index}\r".encode())
@@ -193,7 +194,7 @@ def activity_case():
             # The waiting Messages join the turn when its call ends.
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
                 and "◌" not in screen and "⠹" not in screen, timeout=30)
-            assert rows(done)[LAST].strip() == "", done
+            assert rows(done)[LAST].strip().startswith("‹ ") and "ctrl+x stop" not in rows(done)[LAST], done
             # Each waiting Message is its own row once, in the order sent.
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
@@ -217,10 +218,10 @@ def send_state_case():
         frames = frames_until(master, b"\r", lambda screen: "SENT-ANSWER" in screen)
         cleared = [frame for frame in frames if composing(frame, "")]
         assert cleared, frames
-        assert rows(cleared[0])[LAST] == "Sending…", cleared[0]
+        assert rows(cleared[0])[NOTICE] == "Sending…", cleared[0]
         seen = set()
         for frame in cleared:
-            last, shown = rows(frame)[LAST].strip(), "\n".join(rows(frame)[:BOTTOM + 1])
+            last, shown = rows(frame)[NOTICE].strip(), "\n".join(rows(frame)[:BOTTOM + 1])
             seen.add(last)
             if "› SEND-ME" in shown:
                 break
@@ -259,7 +260,7 @@ def scroll_marker_case():
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
             scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓")
             assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
-            assert rows(scrolled)[LAST].strip() == "", (keys, "no heading or hint", scrolled)
+            assert rows(scrolled)[NOTICE].strip() == "" and rows(scrolled)[LAST].strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
             assert not any(row.startswith("Browsing") for row in rows(scrolled)), scrolled
             # End leaves the view where it is; only Esc or the marker return.
             # Older pages may still join above; End is judged on the settled view.
@@ -363,15 +364,15 @@ def opening_case():
 
 
 def notice_case():
-    """A notice shows on the last row until the next key; `?` on an empty
+    """A notice shows above the input until the next key; `?` on an empty
     draft shows the shortcuts and the next key closes them."""
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
-        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: rows(screen)[LAST].startswith("! Unknown command /nosuch"))
+        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: rows(screen)[NOTICE].startswith("! Unknown command /nosuch"))
         assert composing(unknown, ""), unknown
         gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert rows(gone)[LAST].strip() == "", gone
+        assert rows(gone)[NOTICE].strip() == "" and rows(gone)[LAST].strip().startswith("‹ "), gone
         os.write(master, b"\x15")
         chrome.frame(master, b"", lambda screen: composing(screen, ""))
         shortcuts = chrome.frame(master, b"?", lambda screen: "shift+enter or ctrl+j new line" in screen)

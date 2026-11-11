@@ -170,6 +170,11 @@
       "expect": [
         "The project has a README",
         "retry policy notes"
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
     },
     {
@@ -448,6 +453,11 @@
         {
           "wait": "× Model reply unreadable"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
     },
     {
@@ -461,6 +471,12 @@
         {
           "wait": "Deny"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends",
+        "more lines · shift+↓"
       ]
     },
     {

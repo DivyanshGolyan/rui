@@ -179,3 +179,18 @@ test "Composer clips wide text at every small size without moving its logical ca
         };
     }
 }
+
+test "Composer empty chat shows only its prompt and rules" {
+    var bytes: [16]u8 = undefined;
+    const editor: Editor = .{ .buffer = &bytes };
+    var composer: Self = .{ .editor = &editor };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 140, 46 }) |width| {
+        const shown = try composer.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 3 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(u16, 3), shown.size.height);
+        try std.testing.expectEqualStrings("›", shown.readCell(1, 1).char.grapheme);
+        for (3..width) |col| try std.testing.expectEqualStrings(" ", shown.readCell(col, 1).char.grapheme);
+        try std.testing.expectEqual(@as(u16, 3), shown.cursor.?.col);
+    }
+}

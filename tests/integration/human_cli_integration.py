@@ -2584,21 +2584,21 @@ def main(selected="all"):
             assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
-            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
+            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
             assert help_text.lstrip().startswith("Marks\n"), help_text
             for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).
+            # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
             assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in result, result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command, notice in (("/wait", "Work continues while you compose."),
+            for command, notice in (("/wait", "Work continues."),
                                     ("/login", "Login uses rui auth login codex in your shell.")):
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
