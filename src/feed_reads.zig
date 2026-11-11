@@ -50,10 +50,10 @@ pub fn Policy(comptime Cursor: type) type {
             high: ?Cursor = null,
             scan_cursor: ?Cursor = null,
             window_provisional: ?Cursor = null,
-            /// Scan replay survives eviction from the resident window.
-            scan_provisional: ?Cursor = null,
             scan_continuing: bool = false,
             window_continuing: bool = false,
+            /// A press holds the same read exclusion as an active drag.
+            selection_held: bool = false,
             action_named: bool = false,
             choice_open: bool = false,
             submission: bool = false,
@@ -67,8 +67,8 @@ pub fn Policy(comptime Cursor: type) type {
             if (state.opening) return .opening;
             if (state.now_ns >= state.scan_due_ns) return .scan;
             switch (state.need) {
-                .above => return .fill_above,
-                .below => if (!state.at_end) return .fill_below,
+                .above => if (!state.selection_held) return .fill_above,
+                .below => if (!state.selection_held and !state.at_end) return .fill_below,
                 .none => {},
             }
             // Same permission rule and priority (after page work) as before.
@@ -94,14 +94,14 @@ pub fn Policy(comptime Cursor: type) type {
             continuing: bool = false,
         };
 
-        /// The scan owns its cursor and replay key, independent of the window.
+        /// The scan owns its cursor; the window alone owns the replay boundary.
         /// Opening reads newest backward; permission keeps its existing read.
         /// Capture this plan when the read starts, not when it completes.
         pub fn request(read: Read, state: State) ?Page {
             return switch (read) {
                 .opening => .{ .direction = .backward, .kinds = .all, .started_from = null, .from = null },
                 .fill_above => .{ .direction = .backward, .kinds = .visible, .started_from = state.low, .from = state.low },
-                .scan => forward(state.scan_cursor, state.scan_provisional, .all, state.scan_continuing),
+                .scan => forward(state.scan_cursor, state.window_provisional, .all, state.scan_continuing),
                 .fill_below => forward(state.high, state.window_provisional, .visible, state.window_continuing),
                 .permission => null,
             };
@@ -196,7 +196,6 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     state.high = high;
     state.scan_cursor = .{ .position = 40 };
     state.window_provisional = provisional;
-    state.scan_provisional = .{ .position = 35 };
     const opening = P.request(.opening, state).?;
     try std.testing.expect(opening.direction == .backward and opening.kinds == .all);
     try std.testing.expect(opening.from == null and opening.replace_from == null);
@@ -271,7 +270,7 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
 
     const independent_scan = P.request(.scan, state).?;
     try std.testing.expect(std.meta.eql(state.scan_cursor, independent_scan.started_from));
-    try std.testing.expect(std.meta.eql(state.scan_provisional, independent_scan.from));
+    try std.testing.expect(std.meta.eql(state.window_provisional, independent_scan.from));
     try std.testing.expectEqual(@as(usize, 2), P.applyScan(state.high, independent_scan.started_from, independent_scan.replace_from, state.window_provisional, 2).rows.count_only);
     const independent_fill = P.request(.fill_below, state).?;
     try std.testing.expect(std.meta.eql(state.high, independent_fill.started_from));
@@ -281,7 +280,6 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     // the original edge for attachment/staleness. No provisional means append.
     for ([_]Read{ .scan, .fill_below }) |read| {
         state.scan_cursor = high;
-        state.scan_provisional = provisional;
         state.window_provisional = provisional;
         const page = P.request(read, state).?;
         try std.testing.expect(page.direction == .forward);
@@ -290,7 +288,6 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
         try std.testing.expect(std.meta.eql(@as(?Key, provisional), page.replace_from));
         try std.testing.expect(std.meta.eql(@as(?Key, high), page.started_from));
         try std.testing.expect(P.applyScan(high, page.started_from, page.replace_from, state.window_provisional, 2).rows == .append);
-        state.scan_provisional = null;
         state.window_provisional = null;
         const settled = P.request(read, state).?;
         try std.testing.expect(std.meta.eql(@as(?Key, high), settled.from));
@@ -341,7 +338,6 @@ test "feed_reads forward attachment domain for scan and fill_below" {
                 .high = 30,
                 .scan_cursor = 30,
                 .window_provisional = case.replace_from,
-                .scan_provisional = case.replace_from,
             }).?;
             const applies = P.applies(read, page.started_from, page.replace_from, case.high, case.current);
             switch (read) {
@@ -366,7 +362,7 @@ test "feed_reads forward attachment domain for scan and fill_below" {
 test "feed_reads continues a paginated provisional replay without restarting or replacing twice" {
     const P = Policy(u64);
     for ([_]Read{ .scan, .fill_below }) |read| {
-        var state: P.State = .{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .at_end = false, .high = 30, .scan_cursor = 30, .window_provisional = 10, .scan_provisional = 10 };
+        var state: P.State = .{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .at_end = false, .high = 30, .scan_cursor = 30, .window_provisional = 10 };
         const first = P.request(read, state).?;
         try std.testing.expectEqual(@as(?u64, 10), first.from);
         try std.testing.expect(!first.continuing);
@@ -387,4 +383,24 @@ test "feed_reads ending identity includes position and ordinal" {
     for ([_]u64{ 8, 9, 10 }) |position| for ([_]u64{ 1, 2, 3 }) |ordinal| {
         try std.testing.expectEqual(position == 9 and ordinal == 2, ending.matches(.{ .position = position, .ordinal = ordinal }));
     };
+}
+
+test "feed_reads holds fills during selection without holding scans or permission" {
+    const P = Policy(u64);
+    for ([_]@FieldType(P.State, "need"){ .above, .below }) |need| {
+        for ([_]bool{ false, true }) |at_end| {
+            for ([_]bool{ false, true }) |held| {
+                var state: P.State = .{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .need = need, .at_end = at_end, .selection_held = held };
+                const fill: ?Read = if (held or (need == .below and at_end)) null else if (need == .above) .fill_above else .fill_below;
+                try std.testing.expectEqual(fill, P.nextRead(state));
+                // Selection excludes only fills, not independent work reads.
+                state.action_named = true;
+                try std.testing.expectEqual(fill orelse .permission, P.nextRead(state).?);
+                state.now_ns = state.scan_due_ns;
+                try std.testing.expectEqual(Read.scan, P.nextRead(state).?);
+                state.opening = true;
+                try std.testing.expectEqual(Read.opening, P.nextRead(state).?);
+            }
+        }
+    }
 }

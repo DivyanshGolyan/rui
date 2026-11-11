@@ -225,8 +225,6 @@ pub const Job = struct {
     cursor: protocol_reply.ActivityCursor = .{},
     opening: bool = false,
     feed_page: ?FeedPolicy.Page = null,
-    /// The earliest provisional row in an unfinished forward sweep.
-    scan_provisional: ?Key = null,
     target: Target = undefined,
     recall: ?Input.Step = null,
     /// Frozen live fact for scans; fills neither read nor publish it.
@@ -273,7 +271,6 @@ pub const Job = struct {
         high: ?Key = null,
         at_start: bool = false,
         at_end: bool = false,
-        scan_provisional: ?Key = null,
         new_rows: usize = 0,
         // The Messages waiting at this read's cursor, and the newest one's
         // first line when the row shows it and does not hold it yet.
@@ -601,7 +598,6 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     }
     try job.files.inspection.setLength(task.io, 0);
     var offset: u64 = 0;
-    if (plan.continuing) job.result.scan_provisional = job.scan_provisional;
     for (0..page.facts.count) |index| {
         const item = page.facts.items[if (page.facts.direction == .backward) page.facts.count - index - 1 else index];
         const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
@@ -611,15 +607,15 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // an Admission visible without adding another Activity row.
         const pending = item.value == .admission and item.value.admission.state == .queued;
         var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
-        var output: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row };
+        var output: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
+            .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
+            else => null,
+        } };
         var compact = false;
         row.provisional = try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &output, job.colour, &compact, job.home, .{ .viewport = job.width_method }) or pending;
         row.tight = compact;
         try output.finish();
         row.length = output.length;
-        if (row.provisional) {
-            if (job.result.scan_provisional == null or key.order(job.result.scan_provisional.?) == .lt) job.result.scan_provisional = key;
-        }
         if (row.length == 0 and !row.provisional) continue;
         job.result.rows[job.result.row_count] = row;
         job.result.row_count += 1;
@@ -700,7 +696,8 @@ const DisplayCapture = struct {
 /// source even when full. Cuts end outside UTF-8 scalars and controls; the
 /// marker closes any hyperlink and resets presentation before its notice.
 const RowCapture = struct {
-    const more = TerminalText.link_close ++ "\x1b[0m\n… More — Ctrl-O for whole message\n";
+    const more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
+    const unkeyed_more = TerminalText.link_close ++ View.Mark.reset ++ "\n… More — Ctrl-O for whole message\n";
     task: *Task,
     file: std.Io.File,
     row: *RenderedRow,
@@ -708,6 +705,7 @@ const RowCapture = struct {
     length: u64 = 0,
     first: bool = true,
     cut: bool = false,
+    cap_target: ?View.Collapsed = null,
     boundary: u64 = 0,
     scalar_left: u3 = 0,
     control: enum { none, escape, csi, osc, osc_escape } = .none,
@@ -770,8 +768,16 @@ const RowCapture = struct {
     fn finish(self: *@This()) !void {
         if (!self.cut) return;
         self.length = self.boundary;
-        try self.file.writePositionalAll(self.task.io, more, self.start + self.length);
-        self.length += more.len;
+        // The cap mark follows all retained summaries, so its target must too.
+        const notice = if (self.cap_target != null and self.row.collapsed_count < self.row.collapsed_targets.len) keyed: {
+            const target = self.cap_target.?;
+            self.row.collapsed_targets[self.row.collapsed_count] = target;
+            self.row.collapsed_count += 1;
+            self.row.collapsed = target;
+            break :keyed more;
+        } else unkeyed_more;
+        try self.file.writePositionalAll(self.task.io, notice, self.start + self.length);
+        self.length += notice.len;
         try self.file.setLength(self.task.io, self.start + self.length);
     }
 };
@@ -1160,6 +1166,12 @@ test "session_reads plain text keeps whole code points within its bound, escapes
             try std.testing.expect(kept.len % unit_len == 0 and kept.len + unit_len + session_line.ellipsis.len > 12);
         }
     };
+}
+
+/// Tests derive provisional ownership from the returned rows, as the feed does.
+fn firstProvisional(result: *const @FieldType(Job, "result")) ?Key {
+    for (result.rows[0..result.row_count]) |row| if (row.provisional) return row.key;
+    return null;
 }
 
 /// A Host for tests of what a Session read asks: it answers Activity pages
@@ -1566,7 +1578,7 @@ test "session_reads Messages waiting at an opening show in the queued row, unles
     var opening: Job = .{ .session = "k7m2qx", .opening = true, .line_read = .{ .revision = 1, .end = 22 } };
     try idle.read(&opening);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, idle.shown, "please wait"));
-    try std.testing.expectEqual(@as(?Key, .{ .position = 21 }), opening.result.scan_provisional);
+    try std.testing.expectEqual(@as(?Key, .{ .position = 21 }), firstProvisional(&opening.result));
 }
 
 // This golden exercises the public renderer, including reports that must never
@@ -1681,7 +1693,7 @@ test "session_reads opening exposes ordered rows and the normalized scan edge" {
     }
     try std.testing.expectEqual(job.result.rows[0].length, job.result.rows[1].offset);
     try std.testing.expectEqual(@as(usize, 2), job.result.new_rows);
-    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 2 }), job.result.scan_provisional);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 2 }), firstProvisional(&job.result));
 
     var empty: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
     job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 0 } };
@@ -1708,7 +1720,7 @@ test "session_reads visible fills do not refresh line work queue live or scan cu
     try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
     try std.testing.expectEqual(@as(u64, 0), job.result.rows[0].length);
     try std.testing.expect(job.result.rows[0].provisional);
-    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.result.scan_provisional);
+    try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), firstProvisional(&job.result));
 }
 
 test "session_reads replay replaces a provisional echo after intervening rows and counts only new rows" {
@@ -1731,7 +1743,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
         try host.read(&job);
         for ([_]u64{ 23, 24 }) |end| {
             const previous = job.result.high;
-            const replay = job.result.scan_provisional;
+            const replay = firstProvisional(&job.result);
             host.end = end;
             job.cursor = job.result.cursor;
             job.opening = false;
@@ -1743,7 +1755,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
             try std.testing.expectEqual(@as(usize, if (end == 23) 2 else 1), job.result.new_rows);
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Received message"));
             try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, host.shown, "Messaged"));
-            try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, job.result.scan_provisional);
+            try std.testing.expectEqualDeep(if (end == 23) @as(?Key, .{ .position = 21 }) else null, firstProvisional(&job.result));
             if (end == 24) {
                 try std.testing.expect(std.mem.indexOf(u8, host.shown, "Received message").? < std.mem.indexOf(u8, host.shown, "please wait").?);
                 try std.testing.expectEqual(@as(usize, @intFromBool(excluded)), std.mem.count(u8, host.shown, "◌ not sent"));
@@ -1761,13 +1773,12 @@ test "session_reads first provisional survives every continuation page" {
     var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1 };
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
+    const provisional = firstProvisional(&job.result);
     host.end = tail.len;
     var counted: usize = 0;
     for ([_]u64{ 16, 32, 40 }, 0..) |expected, page_index| {
         const edge = job.result.high;
-        const provisional = job.result.scan_provisional;
         job.cursor = job.result.cursor;
-        job.scan_provisional = provisional;
         job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = if (page_index == 0) provisional else edge, .replace_from = provisional, .continuing = page_index != 0 };
         job.opening = false;
         job.result = .{};
@@ -1776,7 +1787,8 @@ test "session_reads first provisional survives every continuation page" {
         counted += job.result.new_rows;
         try std.testing.expectEqual(expected, job.result.cursor.position);
         try std.testing.expectEqual(page_index == 2, job.result.at_end);
-        try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.result.scan_provisional);
+        try std.testing.expectEqualDeep(@as(?Key, .{ .position = 1 }), job.feed_page.?.replace_from);
+        try std.testing.expectEqualDeep(if (page_index == 0) @as(?Key, .{ .position = 1 }) else null, firstProvisional(&job.result));
         try std.testing.expectEqual(@as(usize, if (page_index == 0) 1 else 0), std.mem.count(u8, host.shown, "please wait"));
     }
     try std.testing.expectEqual(@as(usize, 39), counted);
@@ -1791,7 +1803,7 @@ test "session_reads a hidden queued Admission replays when the queue becomes idl
     try std.testing.expectEqual(@as(u64, 0), job.result.rows[0].length);
     try std.testing.expectEqual(@as(usize, 0), job.result.new_rows);
     const edge = job.result.high;
-    const replay = job.result.scan_provisional;
+    const replay = firstProvisional(&job.result);
     job.cursor = job.result.cursor;
     job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = replay, .replace_from = replay };
     job.opening = false;
@@ -1826,7 +1838,7 @@ test "session_reads row heads are bounded with ordered exact collapsed targets" 
     const shown = large[0..try file.readPositionalAll(io, large, 0)];
     try std.testing.expect(shown.len <= feed_window.row_capacity);
     try std.testing.expect(std.mem.startsWith(u8, shown, "head\nxxx"));
-    try std.testing.expect(std.mem.endsWith(u8, shown, RowCapture.more));
+    try std.testing.expect(std.mem.endsWith(u8, shown, RowCapture.unkeyed_more));
     try std.testing.expect(std.mem.indexOf(u8, shown, "tail") == null);
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
 }
@@ -2043,5 +2055,86 @@ test "session_reads retry fails on newest unreadable Message without falling bac
         try std.testing.expectEqual(expected, job.retryCompletion(latest).failure);
         try std.testing.expectEqual(@as(usize, 1), host.pages);
         try std.testing.expectEqual(@as(usize, if (case == .absent or case == .too_large) 0 else 1), host.contents);
+    }
+}
+
+test "session_reads capped answer target opens the whole authenticated answer" {
+    const Domain = struct {
+        text: []const u8,
+        reference: protocol.ActivityItem.Content,
+        fn run(self: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const inspection = try dir.createFile(io, "inspection", .{ .read = true });
+            defer inspection.close(io);
+            const scratch = try dir.createFile(io, "message-stage", .{ .read = true });
+            defer scratch.close(io);
+            var job: Job = .{ .opening = true, .store = root, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 1 }, .files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .status = inspection, .actions = .{ inspection, inspection } } };
+            var task: Task = .{ .io = io };
+            try scan(&job, &task);
+            const row = job.result.rows[0];
+            try std.testing.expect(row.length <= feed_window.row_capacity);
+            try std.testing.expectEqual(@as(usize, 1), row.collapsed_count);
+            const target = row.collapsed_targets[0];
+            try std.testing.expectEqualDeep(self.reference, target.content);
+            try std.testing.expectEqual(@as(u64, 1), target.position);
+            try std.testing.expectEqual(@as(u64, 0), target.ordinal);
+            try std.testing.expect(!target.row);
+            var document: Viewport.Sized(feed_window.row_capacity + 100, true) = .{};
+            var preview: [feed_window.row_capacity]u8 = undefined;
+            try document.append(preview[0..try inspection.readPositionalAll(io, &preview, 0)]);
+            try document.prepare();
+            try std.testing.expectEqual(@as(usize, 1), document.collapsed(0, document.length).count);
+            job.target = .{ .message = target };
+            try fullMessage(&job, &task);
+            const shown = try std.testing.allocator.alloc(u8, self.text.len + 1024);
+            defer std.testing.allocator.free(shown);
+            const length = try inspection.readPositionalAll(io, shown, 0);
+            try std.testing.expect(std.mem.indexOf(u8, shown[0..length], self.text) != null);
+            try std.testing.expectEqual(@as(usize, 2), host.contents);
+        }
+    };
+    const text = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 500);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    @memcpy(text[text.len - 12 ..], "WHOLE answer");
+    var hash = protocol.contentHasher();
+    hash.update(text);
+    const reference: protocol.ActivityItem.Content = .{ .length = text.len, .digest = hash.finalResult() };
+    const tail = [_]FakeHost.Tail{.{ .value = .{ .assistant = .{ .content = reference, .final = true } } }};
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .content_texts = &.{text} };
+    var domain: Domain = .{ .text = text, .reference = reference };
+    try host.withHost(&domain);
+}
+
+test "session_reads cap target follows prior collapsed markers without mispairing" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "row", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const large = try std.testing.allocator.alloc(u8, feed_window.row_capacity * 2);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    for (0..17) |prior| {
+        try file.setLength(io, 0);
+        var row: RenderedRow = .{ .key = .{ .position = 99 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
+        const target: View.Collapsed = .{ .source = .activity, .position = 99, .ordinal = 7, .row = false, .content = FakeHost.content() };
+        var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row, .cap_target = target };
+        for (0..prior) |index| {
+            try capture.feed(View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
+            try capture.collapsed(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.content() });
+        }
+        try capture.feed(large);
+        try capture.finish();
+        var document: Viewport.Sized(feed_window.row_capacity + 100, true) = .{};
+        var preview: [feed_window.row_capacity]u8 = undefined;
+        try document.append(preview[0..try file.readPositionalAll(io, &preview, 0)]);
+        try document.prepare();
+        const keyed = prior < row.collapsed_targets.len;
+        try std.testing.expectEqual(prior + @intFromBool(keyed), document.collapsed(0, document.length).count);
+        try std.testing.expectEqual(prior + @intFromBool(keyed), row.collapsed_count);
+        for (row.collapsed_targets[0..prior], 1..) |value, position| try std.testing.expectEqual(@as(u64, position), value.position);
+        if (keyed) try std.testing.expectEqualDeep(target, row.collapsed_targets[prior]);
     }
 }
