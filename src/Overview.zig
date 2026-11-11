@@ -798,7 +798,7 @@ fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) 
 
 /// Whether a spinning mark on screen has a step to turn.
 fn wantsFrame(self: *const Self) bool {
-    return self.app_spins and self.animationFrame() != self.app_frame;
+    return self.root.listVisible() and self.app_spins and self.animationFrame() != self.app_frame;
 }
 
 fn animationFrame(self: *const Self) u64 {
@@ -4847,6 +4847,53 @@ test "a Session link that no longer opens ends as any failed open, naming that S
     try std.testing.expectEqualStrings("k7m2qx", &overview.follow.return_to.?);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
     overview.app_session = null;
+}
+
+test "App overview schedules spinning rows only while Root shows the list" {
+    const session: vxfw.Text = .{ .text = "Session" };
+    for ([_]bool{ false, true }) |spinning| {
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        overview.caps = .{};
+        Seen.now.working = @intFromBool(spinning);
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        // Keep unrelated listing refreshes from requesting a frame.
+        overview.state.next_list_ms = std.math.maxInt(u64);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const Layout = struct { width: u16, open: bool, visible: bool };
+        for ([_]Layout{
+            .{ .width = 140, .open = false, .visible = true },
+            .{ .width = 99, .open = false, .visible = true },
+            .{ .width = 100, .open = false, .visible = true },
+            .{ .width = 46, .open = false, .visible = true },
+            // Opening at phone width hides the last drawn spinning row.
+            .{ .width = 46, .open = true, .visible = false },
+            .{ .width = 99, .open = true, .visible = false },
+            .{ .width = 100, .open = true, .visible = true },
+            .{ .width = 99, .open = true, .visible = false },
+            .{ .width = 140, .open = true, .visible = true },
+            .{ .width = 46, .open = true, .visible = false },
+            // Closing at phone width makes the same list eligible again.
+            .{ .width = 46, .open = false, .visible = true },
+        }) |layout| {
+            if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget());
+            if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
+            _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
+            try std.testing.expectEqual(spinning, overview.app_spins);
+            // Force a due animation step without waiting for the clock. A
+            // hidden list cannot advance its last frame, even on later ticks.
+            overview.app_frame = std.math.maxInt(u64);
+            for (0..2) |_| {
+                ctx.redraw = false;
+                try overview.root.widget().handleEvent(&ctx, .tick);
+                try std.testing.expectEqual(spinning and layout.visible, ctx.redraw);
+            }
+        }
+    }
 }
 
 test "App overview panes prepare rows and compose only at their actual widths" {

@@ -17,9 +17,17 @@ divider_style: vaxis.Style = .{},
 session: ?vxfw.Widget = null,
 pasting: bool = false,
 frames: u64 = 0,
+size: vxfw.Size = .{},
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
+}
+
+/// Visibility follows the current viewport and screen selection, not the last
+/// time the list happened to draw. Opening a Session can hide it before drawing.
+pub fn listVisible(self: *const Self) bool {
+    return self.size.width > 0 and self.size.height > 0 and
+        (self.session == null or self.size.width >= split_at);
 }
 
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
@@ -77,6 +85,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
+    self.size = size;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     const child = if (size.width < split_at)
         try (self.session orelse self.overview).draw(ctx)
