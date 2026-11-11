@@ -1,4 +1,5 @@
 const std = @import("std");
+const session_settings = @import("session_settings.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_id = @import("session_id.zig");
 const store_id = @import("store_id.zig");
@@ -159,6 +160,23 @@ fn ConfigurationOf(comptime Custody: type) type {
         /// Display text only: never model input, an address or a selector.
         label: OptionalBounded(max_label_bytes) = .{},
 
+        comptime {
+            const fields = @typeInfo(Configuration).@"struct";
+            if (fields.field_names.len != session_settings.entries.len)
+                @compileError("Session settings table must cover Configuration exactly");
+            for (session_settings.entries, fields.field_names, fields.field_types) |entry, name, Field| {
+                if (!std.mem.eql(u8, entry.field, name))
+                    @compileError("Session settings table must follow Configuration field order: " ++ name);
+                const Expected = switch (entry.kind) {
+                    .text, .choice => |capacity| OptionalBounded(capacity),
+                    .decimal_policy => OptionalBounded(20),
+                    .content => ContentField,
+                    .tools => ToolsField,
+                };
+                if (Field != Expected) @compileError("Session setting kind/type mismatch: " ++ name);
+            }
+        }
+
         pub fn removeTemporaryContent(self: *Configuration, io: Custody.Io) !void {
             var cleanup_error: ?anyerror = null;
             self.instructions.removeTemporaryContent(io) catch |err| {
@@ -218,25 +236,32 @@ fn configureDigest(session: []const u8, configuration: anytype, require_model: b
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hashField(&hash, "rui/core/configure/v1");
     hashField(&hash, session);
-    hashOptional(&hash, &configuration.workspace);
-    hashOptional(&hash, &configuration.provider);
-    hashOptional(&hash, &configuration.model);
-    hashContent(&hash, &configuration.instructions);
-    hashTools(&hash, &configuration.tools);
-    hashOptional(&hash, &configuration.permission_mode);
-    hashContent(&hash, &configuration.output_schema);
-    hashOptional(&hash, &configuration.compaction_trigger);
-    hashOptional(&hash, &configuration.output_reservation);
-    hashOptional(&hash, &configuration.reasoning_effort);
-    hashOptional(&hash, &configuration.label);
+    inline for (session_settings.entries) |entry| {
+        const name = entry.field;
+        if (comptime entry.digest == .always) hashSetting(&hash, entry, &@field(configuration, name));
+    }
     hash.update(&.{@intFromBool(require_model)});
     // Omission retains the pre-loaded-tools digest, including creating
     // Messages: saved requests must still replay after a Store upgrade.
-    if (configuration.loaded_tools.state != .omitted) {
-        hashField(&hash, "rui/core/configure/loaded-tools/v1");
-        hashTools(&hash, &configuration.loaded_tools);
+    inline for (session_settings.entries) |entry| {
+        if (comptime entry.digest == .unless_omitted) {
+            const name = entry.field;
+            const field = &@field(configuration, name);
+            if (field.state != .omitted) {
+                hashField(&hash, "rui/core/configure/loaded-tools/v1");
+                hashSetting(&hash, entry, field);
+            }
+        }
     }
     return hash.finalResult();
+}
+
+fn hashSetting(hash: *std.crypto.hash.sha2.Sha256, comptime entry: session_settings.Entry, field: anytype) void {
+    switch (entry.kind) {
+        .content => hashContent(hash, field),
+        .tools => hashTools(hash, field),
+        .text, .choice, .decimal_policy => hashOptional(hash, field),
+    }
 }
 
 fn MessageCommandOf(comptime Custody: type) type {

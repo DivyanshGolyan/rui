@@ -705,6 +705,14 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const screen = self.screen;
     const normal = style.of(self.app_caps, .{});
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
+    const attention = style.of(self.app_caps, .{ .colour = .attention });
+    const failure = style.of(self.app_caps, .{ .colour = .failure });
+    const colours: viewport.Colours = .{
+        .quiet = quiet.fg,
+        .user = style.of(self.app_caps, .{ .colour = .ink }).fg,
+        .attention = attention.fg,
+        .failure = failure.fg,
+    };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
     self.app_input.composer.style = normal;
@@ -716,10 +724,10 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
-    self.app_preview.quiet = quiet.fg;
+    self.app_preview.colours = colours;
     self.app_preview.method = self.app_caps.width;
     self.app_content.style = normal;
-    self.app_content.quiet = quiet.fg;
+    self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
     self.app_content.document = switch (screen.view) {
         .live => &screen.live,
@@ -729,7 +737,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     // Live output follows the latest rows; only a drag held at its top
     // edge moves it, until the drag ends.
     if (screen.view == .live and !self.app_content.dragging()) screen.live.top = null;
-    const attention = style.of(self.app_caps, .{ .colour = .attention });
     screen.commands = self.nextCommands(screen.commands);
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
@@ -748,7 +755,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const queued = if (browsing) null else self.queuedRow();
     chrome.activity.queued = if (queued) |row| row.waiting else null;
     chrome.activity.method = self.app_caps.width;
-    chrome.activity.styles = .{ .normal = normal, .quiet = quiet, .attention = attention, .failure = attention };
+    chrome.activity.styles = .{ .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
     chrome.status.method = self.app_caps.width;
     chrome.status.quiet = quiet;
     chrome.status.attention = attention;
