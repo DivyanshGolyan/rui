@@ -379,6 +379,21 @@ pub const Window = struct {
         }
         const length = self.document.length - (old_end - old_start) + added;
         if (length > byte_capacity) return error.WindowFull;
+        // Text and all its actionable targets share this capacity decision.
+        // Reject before mutating, just as for byte/entry capacity; callers may
+        // trim and retry the complete entry instead of orphaning its summaries.
+        var targets_needed: usize = 0;
+        for (self.targets[0..self.target_count]) |target| {
+            const index = self.indexOf(target.point.key) orelse continue;
+            if (index < first or index >= first + remove) targets_needed += 1;
+        }
+        for (incoming) |entry| {
+            const p = entryPlan(entry);
+            for (entry.messages) |target| {
+                if (target.offset < p.head) targets_needed += 1;
+            }
+        }
+        if (targets_needed > self.targets.len) return error.WindowFull;
         var kept_targets: usize = 0;
         for (self.targets[0..self.target_count]) |target| {
             const index = self.indexOf(target.point.key) orelse continue;
@@ -425,9 +440,9 @@ pub const Window = struct {
             const message = if (entry.messages.len == 0 and p.marker_length == 0) entry.message else null;
             self.entries[first + i] = .{ .key = entry.key, .offset = offset, .length = p.length, .tight = entry.tight, .provisional = entry.provisional, .message = message };
             for (entry.messages) |target| {
-                // Oversized rows are capped; do not retain targets in omitted
-                // text. Capacity refusal loses a target, never mispairs one.
-                if (target.offset >= p.head or self.target_count == self.targets.len) continue;
+                // Oversized rows are capped; targets in omitted text disappear
+                // with their summaries. Capacity was checked before mutation.
+                if (target.offset >= p.head) continue;
                 self.targets[self.target_count] = .{ .point = .{ .key = entry.key, .offset = target.offset }, .target = target.target };
                 self.target_count += 1;
             }
@@ -857,4 +872,58 @@ test "feed_window invisible provisional keys own replay without adding rows or a
     window.trim(0, 1);
     try testing.expect(!window.forward_partial);
     try testing.expectEqual(@as(usize, 1), window.count);
+}
+
+test "feed_window target capacity admits whole entries atomically across trim reload and replacement" {
+    const window = try testing.allocator.create(Window);
+    defer testing.allocator.destroy(window);
+    window.* = .{};
+    var prepared: viewport.Sized(1024, true) = .{};
+    var targets: [16]MessageTarget = undefined;
+    const reference: View.Collapsed = .{ .source = .activity, .position = 1, .ordinal = 0, .content = .{ .length = 99, .digest = @splat(7) }, .row = false };
+    for (&targets, 0..) |*target, index| {
+        target.* = .{ .offset = index * "┄\n".len, .target = reference };
+        try prepared.append(View.Mark.summary ++ "┄" ++ View.Mark.reset ++ "\n");
+    }
+    try prepared.prepare();
+    for (0..32) |index| {
+        for (&targets, 0..) |*target, ordinal| {
+            target.target.position = 1000 + index * targets.len + ordinal;
+            target.target.ordinal = ordinal;
+        }
+        try window.append(&.{.{ .key = .{ .position = index + 1 }, .text = Text.fromDocument(&prepared), .messages = &targets }});
+    }
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    const length = window.document.length;
+    const last = window.messageAt(.{ .key = .{ .position = 32 }, .offset = targets[15].offset }).?;
+    try testing.expectEqual(@as(u64, 1511), last.position);
+    const next: Entry = .{ .key = .{ .position = 33 }, .text = Text.fromDocument(&prepared), .messages = &targets, .provisional = true };
+    try testing.expectError(error.WindowFull, window.append(&.{next}));
+    try testing.expectError(error.WindowFull, window.prepend(&.{.{ .key = .{ .position = 0 }, .text = Text.fromDocument(&prepared), .messages = &targets }}));
+    try testing.expectEqual(@as(usize, 32), window.count);
+    try testing.expectEqual(length, window.document.length);
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    try testing.expectEqualDeep(last, window.messageAt(.{ .key = .{ .position = 32 }, .offset = targets[15].offset }).?);
+    // Release exactly one entry's targets, then reload another complete entry.
+    window.trim(1, 0);
+    try testing.expect(window.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }) == null);
+    try testing.expectEqual(@as(usize, 496), window.target_count);
+    try window.append(&.{next});
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    // Failed suffix replacement also leaves the old text/targets provisional.
+    const before_replacement = window.document.length;
+    try testing.expectError(error.WindowFull, window.replaceFrom(next.key, &.{ next, .{ .key = .{ .position = 34 }, .text = Text.fromDocument(&prepared), .messages = &targets } }));
+    try testing.expectEqual(before_replacement, window.document.length);
+    try testing.expectEqualDeep(@as(?Key, next.key), window.firstProvisional());
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    // Replacing a provisional suffix reuses its old budget, not a second one.
+    targets[0].target.position = 9000;
+    try window.replaceFrom(next.key, &.{.{ .key = next.key, .text = Text.fromDocument(&prepared), .messages = &targets }});
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    try testing.expectEqual(@as(u64, 9000), window.messageAt(.{ .key = next.key, .offset = 0 }).?.position);
+    window.trim(0, 1);
+    try testing.expect(window.messageAt(.{ .key = next.key, .offset = 0 }) == null);
+    try window.prepend(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&prepared), .messages = &targets }});
+    try testing.expectEqual(@as(usize, 512), window.target_count);
+    try testing.expectEqual(@as(u64, 9000), window.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }).?.position);
 }

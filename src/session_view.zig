@@ -244,10 +244,12 @@ pub const Collapsed = struct {
     row: bool,
 };
 
-/// Tells a sink that records collapsed blocks which Message the one just
-/// written shows.
-pub fn noteCollapsed(sink: anytype, value: Collapsed) !void {
-    if (comptime std.meta.hasMethod(@TypeOf(sink), "collapsed")) try sink.collapsed(value);
+/// Publish a complete summary and the Message it opens as one value. Bounded
+/// sinks may omit both, but never retain a summary without its exact target.
+pub fn writeCollapsed(sink: anytype, value: Collapsed, bytes: []const u8) !void {
+    if (comptime std.meta.hasMethod(@TypeOf(sink), "collapsedSummary")) {
+        try sink.collapsedSummary(value, bytes);
+    } else try sink.feed(bytes);
 }
 
 /// A Message longer than any of these shows a preview and a summary row.
@@ -300,6 +302,14 @@ pub fn UserBody(comptime Sink: type) type {
 
         /// Returns whether the body collapsed.
         pub fn finish(self: *Self) anyerror!bool {
+            return self.finishTarget(null);
+        }
+
+        pub fn finishMessage(self: *Self, target: Collapsed) anyerror!void {
+            _ = try self.finishTarget(target);
+        }
+
+        fn finishTarget(self: *Self, target: ?Collapsed) anyerror!bool {
             if (self.received != self.length) return error.ContentLengthMismatch;
             var collapsed = false;
             if (self.whole) {
@@ -311,17 +321,23 @@ pub fn UserBody(comptime Sink: type) type {
                 if (self.length <= collapse_bytes) try self.scan(self.small[0..self.length]);
                 try self.endLine();
                 if (self.shown != 0) try self.out.feed("\n");
-                try self.out.feed(Mark.summary);
-                var count: [32]u8 = undefined;
+                var count: [96]u8 = undefined;
                 const hidden = self.nonblank - self.shown;
-                try self.out.feed(switch (hidden) {
-                    0 => "┄",
-                    1 => "┄ 1 more line",
-                    else => std.fmt.bufPrint(&count, "┄ {d} more lines", .{hidden}) catch unreachable,
-                });
+                var number: [32]u8 = undefined;
+                const summary = try std.fmt.bufPrint(&count, Mark.summary ++ "┄{s}" ++ Mark.reset, .{switch (hidden) {
+                    0 => "",
+                    1 => " 1 more line",
+                    else => try std.fmt.bufPrint(&number, " {d} more lines", .{hidden}),
+                }});
+                if (target) |value| {
+                    try writeCollapsed(&self.out, value, summary);
+                    // A bounded sink may omit the entire summary, including
+                    // its reset. End the preview's body style independently.
+                    try self.out.feed(Mark.reset);
+                } else try self.out.feed(summary);
                 collapsed = true;
             }
-            try self.out.feed(Mark.reset);
+            if (!collapsed) try self.out.feed(Mark.reset);
             try self.out.finish();
             return collapsed;
         }
@@ -688,6 +704,11 @@ pub fn Indented(comptime Sink: type) type {
                 try out.writeByte(byte);
             }
             if (out.end != 0) try self.sink.feed(out.buffered());
+        }
+        pub fn collapsedSummary(self: *@This(), value: Collapsed, bytes: []const u8) !void {
+            if (self.line_start) try self.sink.feed(self.prefix);
+            try writeCollapsed(self.sink, value, bytes);
+            self.line_start = false;
         }
         pub fn finish(self: *@This()) !void {
             if (self.sgr) return error.IncompleteRenderedText;
@@ -1242,7 +1263,7 @@ pub fn message(requests: client.Requests, store: []const u8, session: []const u8
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
     try content(requests, store, session, item, value.content, &body);
-    if (try body.finish()) try noteCollapsed(sink, block);
+    try body.finishMessage(block);
     try sink.feed("\n");
 }
 

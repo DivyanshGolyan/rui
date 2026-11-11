@@ -580,7 +580,8 @@ const DisplayCapture = struct {
 /// marker closes any hyperlink and resets presentation before its notice.
 const RowCapture = struct {
     const more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
-    const unkeyed_more = TerminalText.link_close ++ View.Mark.reset ++ "\n… More — Ctrl-O for whole message\n";
+    const notice_capacity = 128;
+    const unkeyed_more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More content omitted" ++ View.Mark.reset ++ "\n";
     task: *Task,
     file: std.Io.File,
     row: *RenderedRow,
@@ -589,6 +590,7 @@ const RowCapture = struct {
     first: bool = true,
     cut: bool = false,
     cap_target: ?View.Collapsed = null,
+    omitted_summaries: u64 = 0,
     boundary: u64 = 0,
     scalar_left: u3 = 0,
     control: enum { none, escape, csi, osc, osc_escape } = .none,
@@ -598,7 +600,7 @@ const RowCapture = struct {
         if (raw.len == 0 or self.cut) return;
         const bytes = if (self.first and raw[0] == '\n') raw[1..] else raw;
         self.first = false;
-        const fit = bytes[0..@intCast(@min(bytes.len, feed_window.row_capacity - more.len - self.length))];
+        const fit = bytes[0..@intCast(@min(bytes.len, feed_window.row_capacity - notice_capacity - self.length))];
         if (fit.len != 0) try self.file.writePositionalAll(self.task.io, fit, self.start + self.length);
         for (fit, 0..) |byte, index| {
             const end = self.length + index + 1;
@@ -639,25 +641,40 @@ const RowCapture = struct {
 
     pub fn excluding(_: *@This(), _: u64) void {}
 
-    pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
-        // Only summaries retained in the head have a target; overflow keeps
-        // the first targets so it cannot pair a later target with an earlier mark.
-        if (self.cut or self.row.collapsed_count == self.row.collapsed_targets.len) return;
+    /// One bounded admission for complete summary bytes and their target.
+    fn retainSummary(self: *@This(), value: View.Collapsed, bytes: []const u8, limit: u64) !bool {
+        if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+        if (self.row.collapsed_count == self.row.collapsed_targets.len or bytes.len > limit - self.length) return false;
+        try self.file.writePositionalAll(self.task.io, bytes, self.start + self.length);
+        self.length += bytes.len;
+        self.boundary = self.length;
+        self.first = false;
         self.row.collapsed_targets[self.row.collapsed_count] = value;
         self.row.collapsed_count += 1;
         self.row.collapsed = value;
+        return true;
+    }
+
+    pub fn collapsedSummary(self: *@This(), value: View.Collapsed, bytes: []const u8) !void {
+        if (self.cut) return;
+        if (try self.retainSummary(value, bytes, feed_window.row_capacity - notice_capacity)) return;
+        if (self.row.collapsed_count == self.row.collapsed_targets.len) self.omitted_summaries += 1 else self.cut = true;
     }
 
     fn finish(self: *@This()) !void {
-        if (!self.cut) return;
-        self.length = self.boundary;
-        // The cap mark follows all retained summaries, so its target must too.
-        const notice = if (self.cap_target != null and self.row.collapsed_count < self.row.collapsed_targets.len) keyed: {
-            const target = self.cap_target.?;
-            self.row.collapsed_targets[self.row.collapsed_count] = target;
-            self.row.collapsed_count += 1;
-            self.row.collapsed = target;
-            break :keyed more;
+        var aggregate: [notice_capacity]u8 = undefined;
+        if (!self.cut and self.omitted_summaries == 0) return;
+        if (self.cut) self.length = self.boundary;
+        // Both cap and count notices use the same admission decision as every
+        // other summary. The final aggregate has no per-Message action.
+        const notice = if (self.omitted_summaries != 0)
+            try std.fmt.bufPrint(&aggregate, TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ {d} more summar{s}{s}" ++ View.Mark.reset ++ "\n", .{ self.omitted_summaries, if (self.omitted_summaries == 1) "y" else "ies", if (self.cut) "; more content omitted" else "" })
+        else if (self.cap_target) |target| keyed: {
+            if (try self.retainSummary(target, more, feed_window.row_capacity)) {
+                try self.file.setLength(self.task.io, self.start + self.length);
+                return;
+            }
+            break :keyed unkeyed_more;
         } else unkeyed_more;
         try self.file.writePositionalAll(self.task.io, notice, self.start + self.length);
         self.length += notice.len;
@@ -1293,7 +1310,6 @@ test "session_view Message placement is identical in either direction at every p
             pub fn excluding(self: *@This(), position: u64) void {
                 self.lowest = position;
             }
-            pub fn collapsed(_: *@This(), _: View.Collapsed) !void {}
         };
         const Expected = struct { text: []const u8 = "", provisional: bool = false, lowest: ?u64 = null };
 
@@ -1467,7 +1483,6 @@ test "activity golden stop with interrupted ending draws one line across pages" 
             try self.out.writeAll(bytes);
         }
         pub fn excluding(_: *@This(), _: u64) void {}
-        pub fn collapsed(_: *@This(), _: View.Collapsed) !void {}
     };
     var session: protocol.Bounded(6) = .{};
     try session.set("a1b2c3");
@@ -1703,20 +1718,20 @@ test "session_reads row heads are bounded with ordered exact collapsed targets" 
     var row: RenderedRow = .{ .key = .{ .position = 1 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
     var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
     try capture.feed("\nhead\n");
-    for (0..20) |index| try capture.collapsed(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = false, .content = FakeHost.content() });
+    for (0..20) |index| try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = false, .content = FakeHost.content() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
     for (row.collapsed_targets[0..row.collapsed_count], 1..) |target, position| try std.testing.expectEqual(@as(u64, position), target.position);
     const large = try std.testing.allocator.alloc(u8, 2 * feed_window.row_capacity);
     defer std.testing.allocator.free(large);
     @memset(large, 'x');
     try capture.feed(large);
-    try capture.collapsed(.{ .source = .activity, .position = 99, .ordinal = 0, .row = false, .content = FakeHost.content() });
+    try capture.collapsedSummary(.{ .source = .activity, .position = 99, .ordinal = 0, .row = false, .content = FakeHost.content() }, View.Mark.summary ++ "┄ late" ++ View.Mark.reset);
     try capture.feed("tail");
     try capture.finish();
     const shown = large[0..try file.readPositionalAll(io, large, 0)];
     try std.testing.expect(shown.len <= feed_window.row_capacity);
-    try std.testing.expect(std.mem.startsWith(u8, shown, "head\nxxx"));
-    try std.testing.expect(std.mem.endsWith(u8, shown, RowCapture.unkeyed_more));
+    try std.testing.expect(std.mem.startsWith(u8, shown, "head\n"));
+    try std.testing.expect(std.mem.endsWith(u8, shown, "┄ 4 more summaries; more content omitted" ++ View.Mark.reset ++ "\n"));
     try std.testing.expect(std.mem.indexOf(u8, shown, "tail") == null);
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
 }
@@ -1760,7 +1775,7 @@ test "session_reads row caps never split UTF-8 scalars or presentation controls"
             var row: RenderedRow = .{ .key = .{ .position = 1 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
             var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
             try file.setLength(io, 0);
-            try capture.feed(bytes[0 .. feed_window.row_capacity - RowCapture.more.len - remaining]);
+            try capture.feed(bytes[0 .. feed_window.row_capacity - RowCapture.notice_capacity - remaining]);
             // Presentation and Unicode sequences can straddle renderer chunks.
             for (piece) |byte| try capture.feed(&.{byte});
             try capture.feed("exceeds the cap");
@@ -1777,7 +1792,7 @@ test "session_reads row caps never split UTF-8 scalars or presentation controls"
 
 test "session_reads stopped collapsed Messages retain their exact ordered identities up to the metadata bound" {
     const text = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\nthirteen";
-    for ([_]usize{ 3, 17 }) |count| {
+    for ([_]usize{ 3, 15, 16, 17 }) |count| {
         var tail: [18]FakeHost.Tail = undefined;
         var texts: [18][]const u8 = @splat(text);
         for (tail[0..count], 1..) |*row, position| {
@@ -1792,8 +1807,13 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
         try std.testing.expectEqual(@as(usize, 1), job.result.row_count);
         const row = &job.result.rows[0];
         try std.testing.expectEqual(@min(count, 16), row.collapsed_count);
-        try std.testing.expectEqual(count, std.mem.count(u8, host.shown, "┄"));
+        try std.testing.expectEqual(@min(count, 16) + @intFromBool(count > 16), std.mem.count(u8, host.shown, "┄"));
         try std.testing.expectEqual(@as(u64, count + 1), row.key.position);
+        var document: Viewport.Sized(feed_window.row_capacity, true) = .{};
+        try document.append(host.shown);
+        try document.prepare();
+        try std.testing.expectEqual(@min(count, 16) + @intFromBool(count > 16), document.collapsed(0, document.length).count);
+        if (count > 16) try std.testing.expect(std.mem.endsWith(u8, document.text(), "┄ 1 more summary\n"));
         for (row.collapsed_targets[0..row.collapsed_count], 1..) |target, position| {
             try std.testing.expectEqual(@as(u64, position), target.position);
             try std.testing.expectEqual(View.Collapsed{ .source = .activity, .position = position, .ordinal = 0, .row = false, .content = .{ .length = text.len, .digest = protocol.contentDigest(text) } }, target);
@@ -1865,8 +1885,7 @@ test "session_reads cap target follows prior collapsed markers without mispairin
         const target: View.Collapsed = .{ .source = .activity, .position = 99, .ordinal = 7, .row = false, .content = FakeHost.content() };
         var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row, .cap_target = target };
         for (0..prior) |index| {
-            try capture.feed(View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
-            try capture.collapsed(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.content() });
+            try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.content() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
         }
         try capture.feed(large);
         try capture.finish();
@@ -1875,9 +1894,44 @@ test "session_reads cap target follows prior collapsed markers without mispairin
         try document.append(preview[0..try file.readPositionalAll(io, &preview, 0)]);
         try document.prepare();
         const keyed = prior < row.collapsed_targets.len;
-        try std.testing.expectEqual(prior + @intFromBool(keyed), document.collapsed(0, document.length).count);
+        try std.testing.expectEqual(prior + 1, document.collapsed(0, document.length).count);
         try std.testing.expectEqual(prior + @intFromBool(keyed), row.collapsed_count);
         for (row.collapsed_targets[0..prior], 1..) |value, position| try std.testing.expectEqual(@as(u64, position), value.position);
         if (keyed) try std.testing.expectEqualDeep(target, row.collapsed_targets[prior]);
+    }
+}
+
+test "session_reads summary byte overflow retains neither partial mark nor target before exact source cap" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "summary-cap", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const bytes = try std.testing.allocator.alloc(u8, feed_window.row_capacity);
+    defer std.testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    for ([_]View.Collapsed{ .{ .source = .activity, .position = 37, .ordinal = 2, .row = false, .content = FakeHost.content() }, .{ .source = .conversation, .position = 39, .ordinal = 3, .row = true, .content = FakeHost.content() } }) |source| {
+        try file.setLength(io, 0);
+        @memset(bytes, 'x');
+        var row: RenderedRow = .{ .key = .{ .position = source.position }, .offset = 0, .length = 0, .tight = false, .provisional = false };
+        var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row, .cap_target = source };
+        try capture.feed(bytes[0 .. feed_window.row_capacity - RowCapture.notice_capacity - 5]);
+        var omitted = source;
+        omitted.position = 100;
+        try View.writeCollapsed(&capture, omitted, View.Mark.summary ++ "┄ missing summary" ++ View.Mark.reset);
+        try std.testing.expect(capture.cut);
+        try std.testing.expectEqual(@as(usize, 0), row.collapsed_count);
+        try capture.finish();
+        try std.testing.expectEqual(@as(usize, 1), row.collapsed_count);
+        try std.testing.expectEqualDeep(source, row.collapsed_targets[0]);
+        const shown = bytes[0..try file.readPositionalAll(io, bytes, 0)];
+        try std.testing.expect(shown.len <= feed_window.row_capacity);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(shown));
+        try std.testing.expect(std.mem.indexOf(u8, shown, "missing summary") == null);
+        var document: Viewport.Sized(feed_window.row_capacity, true) = .{};
+        try document.append(shown);
+        try document.prepare();
+        try std.testing.expectEqual(@as(usize, 1), document.collapsed(0, document.length).count);
     }
 }
