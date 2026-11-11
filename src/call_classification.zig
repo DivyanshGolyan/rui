@@ -15,10 +15,6 @@ const Description = records.Description;
 const max_name_bytes = records.max_name_bytes;
 const record = records.record;
 const bash_record = records.bash_record;
-const find_tools_record = records.find_tools_record;
-const skill_record = records.skill_record;
-const read_transcript_record = records.read_transcript_record;
-const message_agent_record = records.message_agent_record;
 const start_agent_record = records.start_agent_record;
 
 /// One call, as `describe` needs it.
@@ -292,10 +288,11 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
-    const finding = complete and std.mem.eql(u8, name[0..length], find_tools_record.name);
-    const skill = complete and std.mem.eql(u8, name[0..length], skill_record.name);
-    const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
-    const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
+    const core = if (complete) records.coreTool(name[0..length]) else null;
+    const finding = core == .find_tools;
+    const skill = core == .skill;
+    const transcript = core == .read_transcript;
+    const messaging = core == .message_agent;
     // Provider-run tools return inside the reply, never as function calls.
     const provider = if (complete) if (records.builtIn(name[0..length])) |builtin| record(builtin).owner == .provider else false else false;
     const tool: ?Record = if (complete and !provider) if (offered.find(name[0..length])) |candidate|
