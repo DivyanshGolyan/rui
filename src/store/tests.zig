@@ -14118,7 +14118,7 @@ fn membershipCatalog(digests: *[membership_records.len][32]u8) tool_catalog.Cata
     return .{ .records = &membership_records, .digests = digests };
 }
 
-test "MCP full answer settlement is atomic and stop and stale results import neither text" {
+test "MCP full answer settlement is atomic and preserves definite answers across stop" {
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
             const Scenario = enum { saved, fitting, stopped, import_failure, commit_failure };
@@ -14172,8 +14172,9 @@ test "MCP full answer settlement is atomic and stop and stale results import nei
                 }
                 try std.testing.expectEqual(if (scenario == .stopped) ActionSettlement.session_stop else ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, excerpt, full_text, .{}));
                 const resolution_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{binding.action_id});
-                try expectContent(&storage, try testingContentReference(&storage, resolution_id), if (scenario == .stopped) @import("../mcp/action_text.zig").stop_unknown else excerpt);
-                if (scenario == .stopped or scenario == .fitting) {
+                try expectContent(&storage, try testingContentReference(&storage, resolution_id), excerpt);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE action_id=?1 AND resolution_code='succeeded'", .{binding.action_id}));
+                if (scenario == .fitting) {
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE full_content_id IS NOT NULL", .{}));
                     const digest = protocol.contentDigest(full);
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &digest }}));

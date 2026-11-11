@@ -675,11 +675,12 @@ pub fn settleActionAttempt(
     if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
     std.debug.assert(full_result == null or found.runner == .mcp);
 
-    // A stop that selected the Turn cancels whatever the Action did.
+    // Bash stop confirms local cancellation. MCP keeps the adapter's evidence:
+    // closing a sent request cannot establish that the remote work stopped.
     const settled: struct { code: ActionResolutionCode, text: []const u8 } =
-        if (found.stopped) .{ .code = .cancelled, .text = found.runner.stoppedText(code, result) } else .{ .code = code, .text = result };
+        if (found.stopped and found.runner != .mcp) .{ .code = .cancelled, .text = found.runner.stoppedText(code, result) } else .{ .code = code, .text = result };
     var content: content_domain.Import = .ofBytes(settled.text, false);
-    const full_text = if (found.stopped) null else full_result;
+    const full_text = full_result;
     var full_content: ?content_domain.Import = if (full_text) |text| .ofBytes(text, false) else null;
     var pair: content_domain.Pair = undefined;
     var completion: turn_domain.stopped_turn.Result = null;

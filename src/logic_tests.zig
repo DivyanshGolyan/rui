@@ -60,6 +60,7 @@ const cores = .{
     .{ "mcp/headers.zig", @import("mcp/headers.zig") },
     .{ "mcp/post.zig", @import("mcp/post.zig") },
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
+    .{ "mcp/result_text.zig", @import("mcp/result_text.zig") },
     .{ "mcp/shape.zig", @import("mcp/shape.zig") },
     .{ "message_admission.zig", @import("message_admission.zig") },
     .{ "message_agent_arguments.zig", @import("message_agent_arguments.zig") },

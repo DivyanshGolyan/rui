@@ -151,6 +151,7 @@ pub const Calls = struct {
                     .failed => .failed,
                     .spawn_failed => .spawn_failed,
                     .indeterminate => .indeterminate,
+                    .cancelled => .cancelled,
                 }, out.written());
                 active.destroy(host.allocator);
                 entry.* = null;
@@ -253,10 +254,16 @@ fn readContent(host: *Host, allocator: std.mem.Allocator, reference: store.Conte
 fn cancel(host: *Host, active: *Active) void {
     const sent = active.running.requestSent();
     active.running.deinit();
-    settle(host, active.binding, .cancelled, if (sent)
-        @import("mcp/action_text.zig").stop_unknown
-    else
-        @import("mcp/action_text.zig").stop_not_sent);
+    const text = @import("mcp/action_text.zig");
+    var buffer: [@max(text.stop_unknown.len, text.stop_not_sent.len)]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    // The only possible stop texts both fit this exactly derived buffer.
+    const code = @import("mcp/result_text.zig").render(&out, .{ .server_name = "", .ended = .{ .stopped = sent } }) catch unreachable;
+    settle(host, active.binding, switch (code) {
+        .cancelled => .cancelled,
+        .indeterminate => .indeterminate,
+        else => unreachable,
+    }, out.buffered());
 }
 
 test "MCP Host call bound refuses admission before touching the Store" {

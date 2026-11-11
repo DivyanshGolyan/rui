@@ -23,15 +23,7 @@ pub const Error = Request.Error || post.Error || error{
     NoRoom,
 };
 
-pub const Outcome = union(enum) {
-    waiting,
-    /// The server's result; `is_error` marks a tool that failed (D144).
-    result: reply.CallResult,
-    /// The server's JSON-RPC error, which the model sees as text (D144).
-    server_error: reply.RpcError,
-    /// An HTTP status with no JSON-RPC answer, with the start of its body.
-    refused: struct { status: u16, body: []const u8 },
-};
+pub const Outcome = reply.CallOutcome;
 
 current: Request,
 /// The call's `rui_call_description`, as written.
@@ -86,6 +78,12 @@ pub fn events(self: *const Call) i16 {
 /// "failed, not run", after it "outcome unknown" (D146).
 pub fn requestSent(self: *const Call) bool {
     return self.current.requestSent();
+}
+
+/// Borrow the JSON message prefix retained when a reply exceeded its buffer.
+/// It is valid until deinit, just like an outcome's slices.
+pub fn answerPrefix(self: *const Call) struct { bytes: []const u8, id: u64 } {
+    return .{ .bytes = self.current.answer.buffered(), .id = self.current.id };
 }
 
 pub fn advance(self: *Call) Error!Outcome {

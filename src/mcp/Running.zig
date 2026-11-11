@@ -120,7 +120,10 @@ pub fn service(self: *Running, now_ms: u64, out: *std.Io.Writer) !?result_text.C
         return try self.finish(out, .{ .timed_out = .{ .after_ms = self.timeout_ms, .sent = sent } });
     }
     const outcome = self.call.advance() catch |err| {
-        const ending: result_text.Ending = if (self.call.requestSent()) .{ .lost = err } else .{ .not_sent = err };
+        const prefix = self.call.answerPrefix();
+        const ending: result_text.Ending = if (err == error.AnswerTooLarge)
+            .{ .oversized = .{ .prefix = prefix.bytes, .id = prefix.id } }
+        else if (self.call.requestSent()) .{ .lost = err } else .{ .not_sent = err };
         return try self.finish(out, ending);
     };
     if (outcome == .waiting) return null;
@@ -171,12 +174,17 @@ fn drive(running: *Running, out: *std.Io.Writer) !result_text.Code {
 }
 
 test "Running resolves socket replies and a peer closing after the request" {
+    comptime std.debug.assert(result_text.excerpt_bytes == @import("../bash.zig").excerpt_bytes);
     const Case = struct { reply: []const u8, code: result_text.Code };
     const cases = [_]Case{
         .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}"), .code = .succeeded },
         .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[],\"isError\":true}}"), .code = .failed },
         .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"bad\"}}"), .code = .failed },
-        .{ .reply = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 4\r\n\r\ndown", .code = .failed },
+        .{ .reply = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 4\r\n\r\ndown", .code = .indeterminate },
+        .{ .reply = "HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\nnope", .code = .failed },
+        .{ .reply = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}", .code = .failed },
+        .{ .reply = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}", .code = .indeterminate },
+        .{ .reply = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: 64\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"bad\"}}", .code = .failed },
         .{ .reply = "", .code = .indeterminate },
     };
     const gpa = std.testing.allocator;
@@ -258,24 +266,40 @@ test "Running deadline cancels a sent call and the holding peer observes close" 
     try std.testing.expectEqual(@as(usize, 0), running.answer.len);
 }
 
-test "Running rejects answers exceeding the per-call buffer as failed" {
+test "Running oversized JSON and SSE answers retain evidence and release the call" {
     const gpa = std.testing.allocator;
     const running = try gpa.create(Running);
     defer gpa.destroy(running);
-    const response = try gpa.alloc(u8, max_answer_bytes + 256);
+    const response = try gpa.alloc(u8, max_answer_bytes + 1024);
     defer gpa.free(response);
-    var wire: std.Io.Writer = .fixed(response);
-    try wire.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n", .{max_answer_bytes + 1});
-    try wire.splatByteAll('x', max_answer_bytes + 1);
-    var script: Script = .{ .reply = wire.buffered() };
-    try script.start();
-    defer script.stop();
-    try running.start(gpa, testInput(script.port), 0);
-    defer running.deinit();
-    var buffer: [512]u8 = undefined;
-    var out: std.Io.Writer = .fixed(&buffer);
-    try std.testing.expectEqual(result_text.Code.failed, try drive(running, &out));
-    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "4194304") != null);
+    const Case = struct { prefix: []const u8, code: result_text.Code };
+    for ([_]bool{ false, true }) |sse| {
+        for ([_]Case{
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"isError\":false,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .succeeded },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .failed },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"", .code = .indeterminate },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"bad\",\"data\":\"", .code = .failed },
+        }) |case| {
+            var wire: std.Io.Writer = .fixed(response);
+            const body_len = max_answer_bytes + 1;
+            try wire.print("HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ if (sse) "text/event-stream" else "application/json", body_len + @as(usize, if (sse) 6 else 0) });
+            if (sse) try wire.writeAll("data: ");
+            try wire.writeAll(case.prefix);
+            try wire.splatByteAll('x', body_len - case.prefix.len);
+            var script: Script = .{ .reply = wire.buffered() };
+            try script.start();
+            defer script.stop();
+            try running.start(gpa, testInput(script.port), 0);
+            defer running.deinit();
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try std.testing.expectEqual(case.code, try drive(running, &out.writer));
+            try std.testing.expect(std.mem.indexOf(u8, out.written(), "4194304-byte limit") != null);
+            try std.testing.expect(std.mem.indexOf(u8, out.written(), case.prefix) != null);
+            try std.testing.expectEqual(@as(usize, 0), running.answer.len);
+            try std.testing.expectEqual(@as(std.posix.fd_t, -1), running.fd());
+        }
+    }
 }
 
 fn allocationFailureCase(gpa: Allocator) !void {

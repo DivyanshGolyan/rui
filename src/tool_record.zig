@@ -277,10 +277,10 @@ pub const Runner = enum {
     }
 
     /// Adapter-owned wording, not Store policy or persisted runner state.
-    pub fn stoppedText(self: Runner, code: anytype, result: []const u8) []const u8 {
+    pub fn stoppedText(self: Runner, _: anytype, result: []const u8) []const u8 {
         return switch (self) {
             .bash => @import("bash_action_text.zig").stopped,
-            .mcp => @import("mcp/action_text.zig").stopped(code, result),
+            .mcp => result,
             .core, .provider => unreachable,
         };
     }
