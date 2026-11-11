@@ -4231,12 +4231,9 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     frontend.reading.opening = false;
     frontend.poll_at = std.math.maxInt(i96);
     try app_events.send(&ctx, "chat draft", overview.root.widget(), child);
-    try rig.screen.browsing.append("earlier answer\nkept at this row\n");
-    try rig.screen.browsing.prepare();
-    rig.screen.view = .transcript;
-    rig.screen.browsing.top = .{ .offset = "earlier answer\n".len };
-    frontend.transcript.beginning = true;
-    const anchor = rig.screen.browsing.top;
+    // The reader scrolled up to an earlier row: that place is theirs to keep.
+    rig.screen.anchor.anchor = .{ .at = .{ .key = .{ .position = 7 }, .line = 1 } };
+    const anchor = rig.screen.anchor;
     try frontend.reader.start(std.testing.io, frontend, HostRecovery.lost);
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), frontend, HostRecovery.completed);
     HostRecovery.availability = .stopped;
@@ -4253,7 +4250,7 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     try std.testing.expect(overview.root.session.?.eql(child));
     try std.testing.expectEqualStrings("list draft", overview.composerDraft().bytes);
     try std.testing.expectEqualStrings("chat draft", frontend.input.composition().bytes);
-    try std.testing.expectEqual(anchor, rig.screen.browsing.top);
+    try std.testing.expectEqualDeep(anchor, rig.screen.anchor);
     try app_events.send(&ctx, "r", overview.root.widget(), child);
     try std.testing.expectEqualStrings("chat draftr", frontend.input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
@@ -4269,7 +4266,7 @@ test "Host recovery keeps the open widget drafts and scroll and starts only on a
     try std.testing.expect(HostRecovery.worker_id.? != std.Thread.getCurrentId());
     try std.testing.expect(hostNotice(overview) == null);
     try std.testing.expect(overview.root.session.?.eql(child));
-    try std.testing.expectEqual(anchor, rig.screen.browsing.top);
+    try std.testing.expectEqualDeep(anchor, rig.screen.anchor);
     try child.handleEvent(&ctx, .tick);
     try std.testing.expect(frontend.reader.thread != null); // Normal reads resume.
     try std.testing.expect(!ctx.quit);

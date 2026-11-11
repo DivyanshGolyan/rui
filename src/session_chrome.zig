@@ -286,14 +286,15 @@ pub fn halfScreen(height: usize) usize {
 }
 
 /// Bytes `marker` writes at most.
-pub const marker_bytes = "↓ ".len + 20 + " new".len;
+const newer_mark = @import("marks.zig").marks.get(.newer).unicode;
+pub const marker_bytes = newer_mark.len + 1 + 20 + " new".len;
 
 /// The chip over a scrolled-back transcript's bottom-right: `↓` when
 /// nothing arrived below, `↓ N new` once N new transcript entries did.
 /// Clicking it, or Esc, jumps to the latest.
 pub fn marker(buffer: *[marker_bytes]u8, new_entries: u64) []const u8 {
-    if (new_entries == 0) return "↓";
-    return std.fmt.bufPrint(buffer, "↓ {d} new", .{new_entries}) catch unreachable;
+    if (new_entries == 0) return newer_mark;
+    return std.fmt.bufPrint(buffer, "{s} {d} new", .{ newer_mark, new_entries }) catch unreachable;
 }
 
 // --- Terminal title ---------------------------------------------------------

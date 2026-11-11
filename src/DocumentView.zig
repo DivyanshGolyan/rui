@@ -1,5 +1,5 @@
-//! Visible rows of the retained conversation. History and reading position
-//! remain with the screen; drawing allocates cells only for this viewport.
+//! File-backed inspection, Action and Message panels. Drawing allocates
+//! cells only for this viewport; the continuous feed is owned by FeedView.
 //! With a `handler`, a drag across its rows copies their text (OSC 52) when
 //! released, and a click on a peer's name opens that Session.
 const std = @import("std");
@@ -269,7 +269,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     return surface;
 }
 
-test "Transcript user text keeps theme contrast without terminal dim" {
+test "DocumentView user text keeps theme contrast without terminal dim" {
     const widget_style = @import("widget_style.zig");
     const view = @import("overview_view.zig");
     const Check = struct {
@@ -313,7 +313,7 @@ test "Transcript user text keeps theme contrast without terminal dim" {
     };
 }
 
-test "Transcript forwards foreground roles and keeps its hint row quiet" {
+test "DocumentView forwards foreground roles and keeps its hint row quiet" {
     const document = try std.testing.allocator.create(viewport.Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
@@ -342,7 +342,7 @@ test "Transcript forwards foreground roles and keeps its hint row quiet" {
     }
 }
 
-test "Transcript draws only the requested rows and retains the first unread row" {
+test "DocumentView draws only the requested rows and retains the first unread row" {
     const document = try std.testing.allocator.create(viewport.Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
