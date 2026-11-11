@@ -2230,14 +2230,18 @@ pub const max_control_response_bytes = @max(max_mutation_response_bytes, command
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
 /// (decimal or `unlimited`), start time, slots in use, whether new Turns
 /// are paused, and each provider's Route.
-pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
-pub const host_info_mysql_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = 32 }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"innodb_doublewrite\":", Hole{ .string = 32 }, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+pub const host_info_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };
+    pub const doublewrite = .{ ",\"innodb_doublewrite\":", Hole{ .string = 32 } };
+    pub const tail = .{ ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(tail);
+};
 comptime {
     const names = @typeInfo(Provider).@"enum".field_names;
     if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
-pub const max_host_info_response_bytes: usize = @max(shapeBytes(host_info_reply), shapeBytes(host_info_mysql_reply));
+pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;
 
 /// Each served provider's models: `model_list.writeProviders` follows the
 /// head, then the tail.
