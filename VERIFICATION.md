@@ -880,3 +880,14 @@ Creation refusal tests cover both Configure and initial Message: a missing Works
 The adapter lifecycle test checks complete >10,000-byte CRLF/Unicode skill results in saved ordinary content and actual sealed provider input, metadata-only body edits, revision-one/authored-baseline preservation, idle nullable-Turn reports, frozen admitted Operations, serialized history prefixes, memo/cold reconstruction and real reopen after source deletion.
 Negative controls revert each boundary fix and must fail its owner assertion or actual Host custody boundary, not fixture setup.
 These are synthetic local evidence, not live provider, remote filesystem or power-loss qualification.
+
+### Parent creation (D178)
+
+Focused `configure parent` Store tests cover inherited Workspace/provider, no task,
+child reporting and ending delivery, every widening field, missing/archived parents,
+update refusal and idempotent replay. The Host test covers inherited in-memory Bash
+environment and replay/refusal isolation. The create path retains the ordinary
+three-round budget; run these and the unchanged `start_agent`, Store entry-point
+round-budget and Current report dependency-depth tests on SQLite and live MySQL.
+Mutating the shared tool narrowing refusal must fail both creation and start_agent.
+`openapi` focused tests cover generated examples, including the create-only relation.

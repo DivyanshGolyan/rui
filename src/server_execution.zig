@@ -1492,26 +1492,9 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
             return .admitted;
         },
     }
-    var offer: SessionEnvironments.Offer = .{};
-    defer offer.deinit(host.allocator);
-    const Install = struct {
-        environments: *SessionEnvironments,
-        offer: *SessionEnvironments.Offer,
-
-        fn call(context: *anyopaque, admission: store_module.Store.MessageAdmission) void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            self.environments.offer(admission.session, .{ .origin = .peer, .admission = admission.admission_id }, self.offer);
-        }
-    };
-    var install: Install = undefined;
-    const committed: ?store_module.Store.MessageCommitted = if (host.environments) |environments| committed: {
-        const base = environments.copy(input.session.slice(), arena) catch return .retry_later;
-        const value = base orelse break :committed null;
-        offer = SessionEnvironments.Offer.init(host.allocator, value.len) catch return .retry_later;
-        @memcpy(offer.room()[0..value.len], value);
-        install = .{ .environments = environments, .offer = &offer };
-        break :committed .{ .context = &install, .call = Install.call };
-    } else null;
+    var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, input.session.slice(), host.allocator, arena) catch return .retry_later;
+    defer inheritance.deinit(host.allocator);
+    const committed = inheritance.messageCallback();
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
     // The task binds against the catalog the new Session starts with.
     const prepared = @import("session_skills.zig").prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
