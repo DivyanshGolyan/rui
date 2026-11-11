@@ -296,11 +296,13 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     const skill = complete and std.mem.eql(u8, name[0..length], skill_record.name);
     const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
     const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
-    const tool: ?Record = if (complete) if (offered.find(name[0..length])) |candidate|
+    // Provider-run tools return inside the reply, never as function calls.
+    const provider = if (complete) if (records.builtIn(name[0..length])) |builtin| record(builtin).owner == .provider else false else false;
+    const tool: ?Record = if (complete and !provider) if (offered.find(name[0..length])) |candidate|
         if (records.builtIn(candidate)) |builtin| record(builtin).* else .{ .name = candidate, .owner = .mcp }
     else
         null else null;
-    const removed = tool == null and complete and offered.wasWithdrawn(name[0..length]);
+    const removed = tool == null and complete and !provider and offered.wasWithdrawn(name[0..length]);
     // A call's arguments are read whether or not it was offered, so a
     // rejected call keeps its description for presentation.
     var discard: Discard = .{};

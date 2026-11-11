@@ -13431,6 +13431,7 @@ const MembershipCase = struct {
     loaded: bool = true,
     // Change current Session settings only after freezing the Operation.
     change_after_admission: bool = false,
+    withdraw: bool = false,
 };
 
 fn configureMembership(storage: *Store, tools: []const []const u8, loaded: ?[]const []const u8) !protocol.Bounded(protocol.max_session_bytes) {
@@ -13484,8 +13485,8 @@ test "tool membership settlement covers builtin provider MCP withdrawn unknown a
             const cases = [_]MembershipCase{
                 .{ .name = "read_transcript" },
                 .{ .name = "bash" },
-                // D220 accepts the function name even for a provider-run tool.
-                .{ .name = "web_search" },
+                .{ .name = "web_search", .outcome = .unknown },
+                .{ .name = "web_search", .outcome = .unknown, .withdraw = true },
                 .{ .name = "fetch_page", .change_after_admission = true },
                 .{ .name = "fetch_page", .outcome = .removed },
                 .{ .name = "bash", .outcome = .removed },
@@ -13502,7 +13503,7 @@ test "tool membership settlement covers builtin provider MCP withdrawn unknown a
                 if (std.mem.lessThan(u8, offered[1], offered[0])) std.mem.swap([]const u8, &offered[0], &offered[1]);
                 const discovery_only = &.{"find_tools"};
                 const session = try configureMembership(&storage, if (test_case.offered) &offered else discovery_only, if (test_case.loaded) null else discovery_only);
-                if (test_case.outcome == .removed) {
+                if (test_case.outcome == .removed or test_case.withdraw) {
                     var update: wire_request.ConfigureCommand = .{ .session = session };
                     try update.key.set("membership-withdraw");
                     update.configuration.tools = try .of(discovery_only);
