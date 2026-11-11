@@ -203,6 +203,9 @@ pub const HistoricalView = struct {
     /// What the entry batch holds beyond its entries, on the heap for the
     /// view's life; its first read allocates it.
     page: ?*Page = null,
+    /// The settings an admission's commit already read for this view
+    /// (`Start`); `settings` then answers them without a round.
+    settled: ?*const HistoricalSettings = null,
     /// Open readers that borrow the page's bytes, which are then only
     /// added to.
     inline_readers: usize = 0,
@@ -383,6 +386,10 @@ pub const HistoricalView = struct {
     /// view once did, and reads the first page of the output check.
     pub fn settings(self: *HistoricalView, out: *HistoricalSettings) !void {
         std.debug.assert(self.active);
+        if (self.settled == out) {
+            self.settled = null;
+            return;
+        }
         try self.allocatePage();
         return readHistoricalSettings(self.store, self, out);
     }
@@ -812,6 +819,21 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     return read.settle(a.store);
 }
 
+/// Where an admission starts the request of the Attempt it admits: the
+/// preparation's view and settings, which stay where they are.
+pub const Start = struct {
+    view: *HistoricalView,
+    settings: *HistoricalSettings,
+
+    /// Opens the view for `binding` with its page; false when there is no
+    /// memory for one, and the view is then not open.
+    pub fn open(start: Start, store: *Store, binding: AttemptBinding) bool {
+        start.view.* = .{ .store = store, .binding = binding };
+        start.view.allocatePage() catch return false;
+        return true;
+    }
+};
+
 /// The settings round as a value: `queue` binds its reads on the Access
 /// whose round or message runs them, and `settle` takes their answers
 /// once they ran. `settingsOf` runs it in a round of its own; an admission
@@ -841,6 +863,24 @@ pub const SettingsRead = struct {
             a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &read.boundary);
             a.readEach(first_output_sources, .{ .operation = view.binding.operation_id }, output_source_page, &read.sources);
         }
+    }
+
+    /// This round as the reads an admission's commit carries.
+    pub fn follow(read: *SettingsRead) store_core.Follow {
+        return .{ .context = read, .queue = followQueue, .settle = followSettle };
+    }
+
+    fn followQueue(context: *anyopaque, a: *store_access.Access(.survey, error{})) void {
+        const read: *SettingsRead = @ptrCast(@alignCast(context));
+        read.queue(a);
+    }
+
+    /// A round whose answers do not settle leaves the view unsettled: its
+    /// owner's own `settings` round then answers as it always did.
+    fn followSettle(context: *anyopaque) void {
+        const read: *SettingsRead = @ptrCast(@alignCast(context));
+        read.settle(read.view.store) catch return;
+        read.view.settled = read.out;
     }
 
     pub fn settle(read: *SettingsRead, store: *Store) !void {

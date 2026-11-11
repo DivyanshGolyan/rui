@@ -8703,6 +8703,48 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
     }.run);
 }
 
+test "an admission's commit reads the request's settings where its message carries reads, as their own round does" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "config");
+            {
+                try submitTestMessage(&storage, &tmp, "one", "one", session.slice(), "one");
+                var view: HistoricalView = undefined;
+                var settings: HistoricalSettings = undefined;
+                const admitted = (try storage.admitModelAttemptInto(.message, .{}, .{ .view = &view, .settings = &settings })).?;
+                const binding = admitted.permit.binding;
+                // A lone write's COMMIT rides its message only on MySQL.
+                if (!case.rerun) try std.testing.expectEqual(case.engine == .mysql, admitted.request_started);
+                if (!admitted.request_started) storage.openHistoricalView(binding, &view);
+                defer view.close();
+                const before = storage.testing_content_work.rounds;
+                try view.settings(&settings);
+                try std.testing.expectEqual(before + @intFromBool(!admitted.request_started), storage.testing_content_work.rounds);
+                // The settings a round of their own reads.
+                var plain_view: HistoricalView = undefined;
+                var plain: HistoricalSettings = undefined;
+                storage.openHistoricalView(binding, &plain_view);
+                defer plain_view.close();
+                try plain_view.settings(&plain);
+                inline for (.{ "operation", "compaction_trigger", "output_reservation", "reasoning_effort", "starting_effort", "codec", "provider", "session_affinity", "tool_count" }) |field|
+                    try std.testing.expectEqual(@field(plain, field), @field(settings, field));
+                inline for (.{ "model", "workspace", "store", "session" }) |field|
+                    try std.testing.expectEqualStrings(@field(plain, field).slice(), @field(settings, field).slice());
+                try std.testing.expectEqual(plain.baseline_instructions.content_id, settings.baseline_instructions.content_id);
+                try std.testing.expectEqual(plain.baseline_instructions.length, settings.baseline_instructions.length);
+                try std.testing.expectEqual(plain_view.output_boundary, view.output_boundary);
+                try std.testing.expectEqual(plain_view.output_frontier, view.output_frontier);
+                try std.testing.expectEqual(plain_view.tool_set_id, view.tool_set_id);
+            }
+        }
+    }.run);
+}
+
 test "an admission weighs uncovered bytes in its write, and admits the compaction they call for" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

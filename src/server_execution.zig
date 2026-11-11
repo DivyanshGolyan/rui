@@ -1861,7 +1861,9 @@ fn admitNewAttempt(
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitModelAttempt(kind, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+    // The slot's preparation is free (`modelPreparationOpen`), so the
+    // admission starts the request in it: the settings ride its commit.
+    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
@@ -1869,7 +1871,7 @@ fn admitNewAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, admission.request_started);
 }
 
 fn admitRetryAttempt(
@@ -1892,7 +1894,7 @@ fn admitRetryAttempt(
         scanned.* = true;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, false);
 }
 
 fn beginAdmittedAttempt(
@@ -1901,15 +1903,19 @@ fn beginAdmittedAttempt(
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
+    /// The admission already opened the preparation's view and read its
+    /// settings (`Store.admitModelAttemptInto`).
+    started: bool,
 ) AdmissionProgress {
     const binding = attachSlot(host, slot, token, permit) catch |err| {
+        if (started) preparation.view.close();
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
     // The view opens where it lives for the whole preparation; it never
     // moves.
-    host.store.openHistoricalView(binding, &preparation.view);
+    if (!started) host.store.openHistoricalView(binding, &preparation.view);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
