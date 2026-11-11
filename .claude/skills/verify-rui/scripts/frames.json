@@ -116,7 +116,7 @@
           }
         },
         {
-          "wait": "⠹ 2"
+          "wait": "Run the slow tests"
         }
       ],
       "cast": [
@@ -138,6 +138,10 @@
             "Ready."
           ]
         }
+      ],
+      "expect": [
+        "Docs build",
+        "Run the slow tests"
       ]
     },
     {
@@ -162,6 +166,10 @@
         {
           "wait": "The project has a README"
         }
+      ],
+      "expect": [
+        "The project has a README",
+        "retry policy notes"
       ]
     },
     {
@@ -177,6 +185,10 @@
         {
           "wait": "What I changed"
         }
+      ],
+      "expect": [
+        "What I changed",
+        "retry.zig"
       ]
     },
     {
@@ -195,6 +207,56 @@
         {
           "wait": "Start of conversation"
         }
+      ],
+      "expect": [
+        "Start of conversation",
+        "What I changed"
+      ]
+    },
+    {
+      "name": "markdown",
+      "note": "12b-markdown-code-table-link",
+      "open": "Markdown retry",
+      "cast": [
+        {
+          "label": "Markdown retry",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "A compact rich answer."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "markdown-wrapped",
+      "note": "12c-markdown-wrapped: code continuation retains its own indent",
+      "open": "Markdown retry",
+      "sizes": [
+        "46x30"
+      ],
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "expect": [
+        "return null; //\n    expired",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
       ]
     },
     {
@@ -659,10 +721,20 @@
     {
       "name": "day-chat",
       "note": "71-light-conversation",
-      "open": "Fix retry deadline",
-      "steps": [],
+      "open": "Markdown retry",
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
       "theme": "day",
-      "expect": "Fix retry deadline"
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
     },
     {
       "name": "mist-chat-scrolled",
@@ -683,12 +755,22 @@
     {
       "name": "no-color",
       "note": "72-no-color",
-      "open": "Fix retry deadline",
-      "steps": [],
+      "open": "Markdown retry",
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
       "env": {
         "NO_COLOR": "1"
       },
-      "expect": "Fix retry deadline"
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
     },
     {
       "name": "host-stopped",

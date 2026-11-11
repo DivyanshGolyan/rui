@@ -120,6 +120,7 @@ Fixture policy, chosen by the latest user text:
 - `slow`: the answer streams for about 10 s.
 - `rate limit`: HTTP 429 with `Retry-After: 8` the first time that text arrives, then an echo. The Session retries for 8 s.
 - `invalid output`: a stream that is not JSON, so the Turn fails.
+- `compact rich answer`: a short markdown answer that fits a heading, inline code, a fenced block (including a blank and wrapped row), table and link in both frame sizes; used by `markdown`, `day-chat` and `no-color`.
 - `rich answer`: a markdown answer with a heading, list, code block, table and link, in both answer modes.
 - `long answer`: the fourteen-step Host explanation, in both answer modes.
 - Anything else: an exact echo by default, or believable prose with `--answers realistic`. Tool summaries follow the same answer-mode choice.

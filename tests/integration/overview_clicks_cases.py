@@ -20,7 +20,7 @@ from host_process import wait_for
 from overview_fixture import world
 
 MODEL = "gpt-6-luna"
-WIDTH = 100
+WIDTH = 99  # Whole-list hit targets; split-shell routing has its own owner tests.
 # A peer Message's first content part, up to its sender: the fixture keys
 # replies by that part, so every peer Message shares one reply.
 PEER_PREFIX = (pathlib.Path(__file__).resolve().parents[2] / "src" / "peer_message.txt").read_text().split("{}")[0]

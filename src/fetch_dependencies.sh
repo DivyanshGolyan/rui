@@ -2,7 +2,11 @@
 set -euo pipefail
 
 repo=$(cd -- "$(dirname -- "$0")/.." && pwd)
-packages=${ZIG_LOCAL_PKG_DIR:-$repo/zig-pkg}
+if (( $# != 0 && $# != 2 && $# != 3 )); then
+    echo "Usage: $0 [MANIFEST PACKAGE_DIR [DEPENDENCY]]" >&2
+    exit 2
+fi
+packages=${2:-${ZIG_LOCAL_PKG_DIR:-$repo/zig-pkg}}
 mkdir -p "$packages"
 packages=$(cd -- "$packages" && pwd)
 export ZIG_LOCAL_PKG_DIR="$packages"
@@ -55,6 +59,7 @@ prepare_dependencies() {
     local manifest=$1 name url expected archive actual revision remote index
     local names fetch_names=() fetch_hashes=() fetch_archives=()
     names=$(sed -n '/^    \.dependencies = /,/^    },/s/^        \.\([[:alnum:]_]*\) = .{/\1/p' "$manifest")
+    if [[ -n ${3:-} ]]; then names=$3; fi
     for name in $names; do
         url=$(sed -n "/\.$name = /,/},/s/.*\.url = \"\([^\"]*\)\".*/\1/p" "$manifest")
         expected=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$manifest")
@@ -100,11 +105,15 @@ prepare_dependencies() {
             test -d "$packages/$expected"
         fi
         prepared+="$expected "
-        if [[ -f "$packages/$expected/build.zig.zon" ]]; then
+        if (( $# == 1 )) && [[ -f "$packages/$expected/build.zig.zon" ]]; then
             prepare_dependencies "$packages/$expected/build.zig.zon"
         fi
     done
 }
+if (( $# >= 2 )); then
+    prepare_dependencies "$1" nonrecursive "${3:-}"
+    exit
+fi
 prepare_dependencies "$repo/build.zig.zon"
 
 # Keep the complete graph authoritative, including translate-c and its parser.

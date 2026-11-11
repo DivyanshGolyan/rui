@@ -3,6 +3,7 @@ test {
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");
     _ = @import("widgets/Footer.zig");
+    _ = @import("widgets/Feed.zig");
     _ = @import("AppScreen.zig");
     _ = @import("PermissionCard.zig");
     _ = @import("widget_style.zig");
@@ -63,6 +64,7 @@ test {
     _ = @import("mcp/offered.zig");
     _ = @import("mcp/Request.zig");
     _ = @import("protocol.zig");
+    _ = @import("wire_request.zig");
     _ = @import("session_skills.zig");
     _ = @import("protocol_reply.zig");
     _ = @import("protocol_reply_store_tests.zig");
