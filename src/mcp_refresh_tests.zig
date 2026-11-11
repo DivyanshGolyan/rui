@@ -33,6 +33,8 @@ fn narrowedChild(storage: *store.Store, tmp: *std.testing.TmpDir, parent: protoc
     const action = (try storage.nextCoreWork()).?.action;
     var cwd: [protocol.max_workspace_bytes]u8 = undefined;
     var spec = try testing.completeConfiguration("unused", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
+    spec.configuration.workspace = .{};
+    spec.configuration.provider = .{};
     spec.configuration.tools = try .of(&.{"fetch_a"});
     const Capture = struct {
         child: protocol.Bounded(protocol.max_session_bytes) = .{},
@@ -244,6 +246,142 @@ test "MCP intent removal return crosses explicit equal and changed tools and loa
                 try std.testing.expectEqual(@as(u64, 2), try revisions(&storage, session.slice()));
                 try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE o.operation_id=?1 AND t.name='fetch_a' AND c.digest=?2", .{ first.operation_id, testing.Blob{ .bytes = &protocol.contentDigest("old a") } }));
                 try done(&storage, &tmp, next);
+                try std.testing.expect(!storage.isFenced());
+            };
+        }
+    }.run);
+}
+
+test "MCP parent creation narrows configured intent and saves no derived offer at either door" {
+    try testing.forEachEngine(struct {
+        fn run(engine: *testing.Case) !void {
+            const Door = enum { configure, start_agent };
+            const Intent = struct {
+                tools: u64,
+                loaded: u64,
+                fn read(storage: *store.Store, session: []const u8) !@This() {
+                    return .{
+                        .tools = try testing.queryU64(storage, "SELECT tool_set_id FROM session WHERE session_ref=?1", .{session}),
+                        .loaded = try testing.queryU64(storage, "SELECT coalesce(loaded_tool_set_id,0) FROM session WHERE session_ref=?1", .{session}),
+                    };
+                }
+            };
+            for (std.enums.values(Door)) |door| for ([_]bool{ false, true }) |subset| {
+                errdefer std.debug.print("parent intent door={s} loaded_subset={}\n", .{ @tagName(door), subset });
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var rows = records();
+                var digests: [rows.len][32]u8 = undefined;
+                const full = catalog(&rows, &digests);
+                var storage: store.Store = undefined;
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &full });
+                defer storage.close() catch unreachable;
+                var cwd: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try testing.canonicalCwd(std.testing.io, &cwd);
+                var create = try testing.completeConfiguration("parent-intent-create", "", workspace, "model-a");
+                create.configuration.tools = try .of(&.{ "fetch_a", "fetch_b", "find_tools", "start_agent" });
+                create.configuration.loaded_tools = try .of(&.{ "find_tools", "start_agent" });
+                const parent = (try storage.configure(&create, .{})).accepted.session;
+                const parent_intent = try Intent.read(&storage, parent.slice());
+
+                // The parent retains a now unavailable name and an unloaded
+                // name. Neither is in its current offer. Change b's identity
+                // too: creation selects today's records, not a parent's offer.
+                var missing_rows = records();
+                missing_rows[full.find("fetch_b").?].description = "creation b";
+                const a = full.find("fetch_a").?;
+                missing_rows[a] = missing_rows[missing_rows.len - 1];
+                testing.sortCatalogRecords(missing_rows[0 .. missing_rows.len - 1]);
+                var missing_digests: [missing_rows.len - 1][32]u8 = undefined;
+                const missing = catalog(missing_rows[0 .. missing_rows.len - 1], &missing_digests);
+                try storage.saveCatalog(&missing);
+                try testing.submitTestMessage(&storage, &tmp, "parent-intent-task", "parent-intent-task", parent.slice(), "create a child");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expect(!try member(&storage, parent.slice(), "fetch_a"));
+                try std.testing.expect(!try member(&storage, parent.slice(), "fetch_b"));
+                try std.testing.expect(try intended(&storage, parent.slice(), "fetch_a", false));
+                try std.testing.expect(try intended(&storage, parent.slice(), "fetch_b", false));
+
+                var child_spec = try testing.completeConfiguration("parent-intent-child", "", workspace, "model-a");
+                child_spec.configuration.workspace = .{};
+                child_spec.configuration.provider = .{};
+                child_spec.configuration.tools = try .of(&.{ "fetch_b", "find_tools" });
+                if (subset) child_spec.configuration.loaded_tools = try .of(&.{"find_tools"});
+                const child = switch (door) {
+                    .configure => child: {
+                        child_spec.configuration.parent.state = .value;
+                        try child_spec.configuration.parent.value.set(parent.slice());
+                        // The intent ceiling permits a, but the independent
+                        // catalog validation still refuses an unavailable name.
+                        var unavailable = child_spec;
+                        try unavailable.key.set("parent-intent-unavailable");
+                        unavailable.configuration.tools = try .of(&.{"fetch_a"});
+                        const refused = try storage.configure(&unavailable, .{});
+                        try std.testing.expect(refused == .rejected);
+                        try std.testing.expectEqual(protocol.ConfigurationRejection.unknown_tool, refused.rejected.code);
+                        const reply = try storage.configure(&child_spec, .{});
+                        try std.testing.expect(reply == .accepted);
+                        try done(&storage, &tmp, model);
+                        try testing.submitTestMessage(&storage, &tmp, "child-intent-task", "child-intent-task", reply.accepted.session.slice(), "read b");
+                        break :child reply.accepted.session;
+                    },
+                    .start_agent => child: {
+                        try store.settleCallsForTesting(&storage, &tmp, model, "parent-intent-call", &.{.{ .item_id = "child", .name = "start_agent", .encoded_call_id = "child", .decoded_call_id = "child", .encoded_arguments = "{}", .decoded_arguments = "{}" }});
+                        const action = (try storage.nextCoreWork()).?.action;
+                        const Capture = struct {
+                            child: protocol.Bounded(protocol.max_session_bytes) = .{},
+                            fn call(context: *anyopaque, admission: store.Store.MessageAdmission) void {
+                                const self: *@This() = @ptrCast(@alignCast(context));
+                                self.child.set(admission.session) catch unreachable;
+                            }
+                        };
+                        var capture: Capture = .{};
+                        try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "read b", true, &child_spec.configuration, .{ .context = &capture, .call = Capture.call }, .{}) == .started);
+                        const continuation = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+                        try done(&storage, &tmp, continuation);
+                        break :child capture.child;
+                    },
+                };
+                const child_intent = try Intent.read(&storage, child.slice());
+                try std.testing.expect(try intended(&storage, child.slice(), "fetch_b", false));
+                try std.testing.expect(!try intended(&storage, child.slice(), "fetch_a", false));
+                try std.testing.expectEqual(!subset, try intended(&storage, child.slice(), "fetch_b", true));
+                try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND parent_ref=?2", .{ child.slice(), parent.slice() }));
+                const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND session_ref=?2", .{ first.operation_id, child.slice() }));
+                try std.testing.expectEqual(!subset, try member(&storage, child.slice(), "fetch_b"));
+                try done(&storage, &tmp, first);
+
+                try storage.saveCatalog(&tools.built_in);
+                try testing.submitTestMessage(&storage, &tmp, "child-intent-missing", "child-intent-missing", child.slice(), "b is missing");
+                const absent = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expect(!try member(&storage, child.slice(), "fetch_b"));
+                try std.testing.expect(try intended(&storage, child.slice(), "fetch_b", false));
+                try done(&storage, &tmp, absent);
+                rows[full.find("fetch_b").?].description = "returned b";
+                const returned = catalog(&rows, &digests);
+                try storage.close();
+                try testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &returned });
+                try testing.submitTestMessage(&storage, &tmp, "child-intent-return", "child-intent-return", child.slice(), "b returned");
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try std.testing.expectEqual(!subset, try member(&storage, child.slice(), "fetch_b"));
+                try std.testing.expect(!try member(&storage, child.slice(), "fetch_a"));
+                try done(&storage, &tmp, next);
+                // Availability changes only Operation offers, never either
+                // Session's intent, its loaded intent, or revision snapshots.
+                for ([_]struct { session: []const u8, saved: @TypeOf(child_intent) }{
+                    .{ .session = parent.slice(), .saved = parent_intent },
+                    .{ .session = child.slice(), .saved = child_intent },
+                }) |expected| {
+                    const saved = try Intent.read(&storage, expected.session);
+                    try std.testing.expectEqualDeep(expected.saved, saved);
+                    try std.testing.expectEqual(@as(u64, 1), try revisions(&storage, expected.session));
+                    try std.testing.expectEqual(@as(u64, 1), try testing.queryU64(&storage, "SELECT count(*) FROM session_revision WHERE session_ref=?1 AND tool_set_id=?2 AND coalesce(loaded_tool_set_id,0)=?3", .{ expected.session, saved.tools, saved.loaded }));
+                }
+                // The admitted request retains b's creation identity even
+                // after b returns with a new identity; loaded intent is a ceiling.
+                try std.testing.expectEqual(@as(u64, if (subset) 0 else 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE o.operation_id=?1 AND t.name='fetch_b' AND c.digest=?2", .{ first.operation_id, testing.Blob{ .bytes = &protocol.contentDigest("creation b") } }));
+                try std.testing.expectEqual(@as(u64, if (subset) 0 else 1), try testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN tool_set_member m ON m.tool_set_id=o.tool_set_id JOIN tool_record t ON t.tool_record_id=m.tool_record_id JOIN content c ON c.content_id=t.description_content_id WHERE o.operation_id=?1 AND t.name='fetch_b' AND c.digest=?2", .{ next.operation_id, testing.Blob{ .bytes = &protocol.contentDigest("returned b") } }));
                 try std.testing.expect(!storage.isFenced());
             };
         }

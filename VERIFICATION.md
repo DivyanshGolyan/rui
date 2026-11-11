@@ -897,4 +897,7 @@ environment and replay/refusal isolation. The create path retains the ordinary
 four-round budget, including selected catalog facts; run these and the unchanged `start_agent`, Store entry-point
 round-budget and Current report dependency-depth tests on SQLite and live MySQL.
 Mutating the shared tool narrowing refusal must fail both creation and start_agent.
+`MCP parent creation narrows configured intent and saves no derived offer at either door` crosses native creation and `start_agent` with full/subset loaded intent, a reduced parent offer and changed catalog identities.
+It checks unavailable-name refusal independently of the intent ceiling, removal/return through reopen, unchanged parent/child intent and revision snapshots, excluded names staying excluded, and frozen old Operation offers.
+Replacing the shared parent intent source with the latest frozen Operation offer fails native creation and the existing unloaded-MCP `start_agent` test.
 `openapi` focused tests cover generated examples, including the create-only relation.
