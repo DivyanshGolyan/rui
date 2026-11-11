@@ -158,6 +158,7 @@ test {
     _ = @import("ConversationViewport.zig");
     _ = @import("transcript_selection.zig");
     _ = @import("session_follow.zig");
+    _ = @import("session_drafts.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
     _ = @import("tools.zig");

@@ -404,6 +404,19 @@
       "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour, close key shares the facts footer"
     },
     {
+      "name": "chat-draft-kept",
+      "note": "chat draft and caret kept after Esc and reopening",
+      "open": "Fix retry deadline",
+      "steps": [
+        { "text": "Keep this chat draft" },
+        { "keys": ["Left", "Left", "Esc"] },
+        { "wait": "Type a task" },
+        { "keys": ["Enter"] },
+        { "wait": "Keep this chat draft" }
+      ],
+      "expect": "Keep this chat draft"
+    },
+    {
       "name": "chat-scrolled",
       "note": "11-conversation-scrolled",
       "open": "Fix retry deadline",
