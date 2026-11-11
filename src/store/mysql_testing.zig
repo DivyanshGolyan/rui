@@ -1356,3 +1356,72 @@ test "Linux memory observation parses all four exact KiB counters" {
     try std.testing.expectError(error.IncompleteSmapsRollup, LinuxMemory.parse("Private_Dirty: 17 kB\n"));
     try std.testing.expectError(error.InvalidSmapsRollup, LinuxMemory.parse("Private_Dirty: 17 MB\n"));
 }
+
+test "store.mysql live buffered payloads keep streamed query budgets under queue and packet pressure" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const chunk = schema.content_chunk_bytes;
+    const bytes = try std.testing.allocator.alloc(u8, 9 * chunk + 17);
+    defer std.testing.allocator.free(bytes);
+    // Reused source, never mutated until both kinds of queued borrow end.
+    for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, bytes.len }) |length| {
+        for ([_]bool{ false, true }) |buffered| {
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+            defer access.deinit();
+            errdefer access.abandon(.{}) catch {};
+            @memset(bytes, if (buffered) 'b' else 's');
+            // Distinct fixture keys even for empty content and catalog rows.
+            var key: [64]u8 = undefined;
+            const digest = protocol.contentDigest(try std.fmt.bufPrint(&key, "budget-{d}-{any}", .{ length, buffered }));
+            const id = try access.identity(.content_id);
+            const before = storage.engine.mysql.state.connection.queries;
+            access.write(live_insert, .{ .id = id, .digest = digest, .length = length });
+            if (buffered) {
+                access.writeContent(id, bytes[0..length]);
+            } else {
+                access.recordContentRow(id);
+                const sink = try access.contentSink(id, length);
+                defer sink.close();
+                try sink.write(bytes[0..length], 0);
+            }
+            // A row write after the bytes shares the last data pass.
+            access.write(live_noop, .{});
+            try access.commit();
+            const queries: u64 = if (length > 8 * chunk) 3 else 2;
+            try std.testing.expectEqual(before + queries, storage.engine.mysql.state.connection.queries);
+            const chunks: u64 = @intCast((length + chunk - 1) / chunk);
+            try std.testing.expectEqual(chunks, try queryU64(&storage, "SELECT count(*) FROM content_chunk WHERE content_id=?1", .{id}));
+        }
+    }
+    // Bound the outgoing batch below two chunks without changing the
+    // on-disk layout: one pass per chunk here, never a larger packet.
+    const connection_state = &storage.engine.mysql.state.connection;
+    const limit = connection_state.batch_limit;
+    defer connection_state.batch_limit = limit;
+    connection_state.batch_limit = 2 * chunk + 1024;
+    for ([_]bool{ false, true }) |buffered| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        errdefer access.abandon(.{}) catch {};
+        const id = try access.identity(.content_id);
+        const before = connection_state.queries;
+        access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(if (buffered) "packet-buffered" else "packet-streamed"), .length = 2 * chunk });
+        if (buffered) {
+            access.writeContent(id, bytes[0 .. 2 * chunk]);
+        } else {
+            access.recordContentRow(id);
+            const sink = try access.contentSink(id, 2 * chunk);
+            defer sink.close();
+            try sink.write(bytes[0 .. 2 * chunk], 0);
+        }
+        try access.commit();
+        try std.testing.expectEqual(before + 3, connection_state.queries);
+    }
+}

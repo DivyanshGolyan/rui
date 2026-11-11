@@ -5,7 +5,7 @@ const wire = @import("../wire/mysql_connection.zig");
 const literal = @import("../mysql_literal.zig");
 const Failure = @import("../engine.zig").Failure;
 
-pub const chunk_bytes = 128 * 1024;
+pub const chunk_bytes = @import("../schema.zig").content_chunk_bytes;
 pub const ContentSink = *SinkState;
 
 /// The core owns transaction state. Content responses report server errors
@@ -44,10 +44,7 @@ fn serverFailure(code: u16) Failure {
 /// returns the batch's writer with the text up to the payload written; the
 /// Access steps its result in order with the rest of its round. When it
 /// cannot, the Access records why and the sink fails.
-pub const Host = struct {
-    context: *anyopaque,
-    chunk: *const fn (context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer,
-};
+pub const Host = @import("../engine.zig").ContentHost;
 
 /// Opens a sink on the content row `id`, whose payload holds `length`
 /// bytes. It sends nothing: each chunk rides the Access's batch.

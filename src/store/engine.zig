@@ -4,6 +4,7 @@
 //! `stepWrite`, `endStatement`). The guards, cardinalities and passes stay
 //! in Access, written once for every engine.
 
+const std = @import("std");
 const Sqlite = @import("engine/Sqlite.zig");
 pub const Mysql = @import("engine/Mysql.zig");
 
@@ -44,12 +45,38 @@ pub const Failure = error{
     ContentNotInserted,
 };
 
+/// Where a streaming adapter queues a payload statement. Access owns the
+/// queue and steps the result; the adapter owns its representation.
+pub const ContentHost = struct {
+    context: *anyopaque,
+    chunk: *const fn (context: *anyopaque, id: u64, index: u64, n: usize) error{ContentWriteFailed}!*std.Io.Writer,
+};
+
+pub const Pass = enum { access, identity };
+
 pub const Engine = union(Kind) {
     sqlite: Sqlite,
     mysql: Mysql,
 
     // Each method only picks the variant, so it is inline: one variant
     // costs no call.
+
+    /// Whether binds construct an outgoing batch rather than statements
+    /// stepped in process. Also determines the effective `.single` mode.
+    pub inline fn batches(e: *const Engine) bool {
+        return switch (e.*) {
+            .sqlite => false,
+            .mysql => true,
+        };
+    }
+
+    /// Test-only physical pass accounting stays behind the adapter.
+    pub inline fn notePass(e: *Engine, comptime kind: Pass) void {
+        if (@import("builtin").is_test) switch (e.*) {
+            .sqlite => {},
+            .mysql => |*s| s.notePass(kind),
+        };
+    }
 
     /// Whether this statement fits the pending network batch. SQLite binds in place.
     pub inline fn fits(e: *Engine, comptime S: type, args: *const S.Args, now: i64) Failure!bool {
@@ -135,10 +162,34 @@ pub const Engine = union(Kind) {
         }
     }
 
-    pub inline fn writePayload(e: *Engine, content_id: u64, bytes: []const u8) Failure!void {
+    /// Lower while constructing the outgoing batch, never after startPass.
+    /// `host` accepts ordinary typed statements or an in-process payload.
+    pub inline fn queuePayload(e: *Engine, content_id: u64, bytes: []const u8, host: anytype) void {
+        switch (e.*) {
+            .sqlite => |*s| s.queuePayload(content_id, bytes, host),
+            .mysql => |*s| s.queuePayload(content_id, bytes, host),
+        }
+    }
+
+    pub inline fn stepPayload(e: *Engine, content_id: u64, bytes: []const u8) Failure!void {
         return switch (e.*) {
             .sqlite => |*s| s.writePayload(content_id, bytes),
-            .mysql => |*s| s.writePayload(content_id, bytes),
+            // Network payloads were lowered to statements at queue time.
+            .mysql => unreachable,
+        };
+    }
+
+    pub inline fn chunkFits(e: *Engine, id: u64, index: u64, n: usize) bool {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.chunkFits(id, index, n),
+        };
+    }
+
+    pub inline fn beginChunk(e: *Engine, id: u64, index: u64) Failure!*std.Io.Writer {
+        return switch (e.*) {
+            .sqlite => unreachable,
+            .mysql => |*s| s.beginChunk(id, index),
         };
     }
 
@@ -151,7 +202,7 @@ pub const Engine = union(Kind) {
 
     /// A sink on the payload of `content_id`, whose row holds `length`
     /// bytes. On MySQL its chunks ride `host`'s batches.
-    pub inline fn openSink(e: *Engine, content_id: u64, length: u64, host: Mysql.ContentHost) Failure!ContentSink {
+    pub inline fn openSink(e: *Engine, content_id: u64, length: u64, host: ContentHost) Failure!ContentSink {
         return switch (e.*) {
             .sqlite => |*s| .{ .sqlite = try s.openSink(content_id, length) },
             .mysql => |*s| .{ .mysql = try s.openSink(content_id, length, host) },

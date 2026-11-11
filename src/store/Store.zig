@@ -2327,14 +2327,12 @@ fn IdentityCeiling(comptime column: Identity) type {
 }
 
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
-    if (self.engine == .mysql) {
+    if (self.engine.batches()) {
         inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (@import("builtin").is_test) {
-            if (columns.count() != 0) self.engine.mysql.state.testing_shape.identity_passes += 1;
-        }
+        if (columns.count() != 0) self.engine.notePass(.identity);
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};
