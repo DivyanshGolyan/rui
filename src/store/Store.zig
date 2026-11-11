@@ -2061,7 +2061,8 @@ pub noinline fn surveyAfterCommit(self: *Store, writer: anytype) bool {
     var survey: store_access.Access(.survey, error{}) = .{ .store = self, .rides = writer.ridden() };
     defer survey.deinit();
     const work: ?DispatchWork = model_admission_domain.dispatchWork(&survey, paused) catch null;
-    writer.endRide(survey.failure, survey.rides != null);
+    survey.carry();
+    writer.endRide(survey.failure);
     if (work) |found| if (writer.failure == null) {
         self.identities().survey.core = found.core;
         self.identities().survey.mcp = found.mcp;

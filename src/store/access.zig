@@ -337,6 +337,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             _ = a.queueStatement(S, args, runEach(S, @TypeOf(visitor.*)), .{ .each = .{ .visitor = visitor, .limit = limit } });
         }
 
+        /// Sends the writer's message when this survey ended before any
+        /// pass of its own did.
+        pub fn carry(a: *Self) void {
+            comptime std.debug.assert(mode == .survey);
+            if (a.rides != null) a.pass();
+        }
+
         /// Ends the round: runs every queued statement in order, and
         /// reports the first failure of this round's passes.
         pub fn run(a: *Self) Error!void {
@@ -354,16 +361,23 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             bump(&a.passes);
             if (a.store.engine.batches() and a.failure == null)
                 for (a.queue[0..a.queued]) |*entry| entry.borrowed.check();
-            if (a.queued != 0 and a.failure == null) {
+            // The batch a carried survey binds into holds its writer's
+            // statements, so its first pass sends them whatever became of
+            // the survey: with nothing of its own queued, or failed.
+            const carries = mode == .survey and a.rides != null;
+            const sends = carries or (a.queued != 0 and a.failure == null);
+            if (sends) {
                 a.store.engine.notePass(.access);
+                var started: ?Failure = null;
                 a.store.engine.startPass() catch |err| {
-                    a.failure = err;
+                    started = err;
                 };
+                if (a.failure == null) a.failure = started;
                 if (mode == .survey) if (a.rides) |writer| {
                     a.rides = null;
                     a.spent = true;
                     // The writer's failure is its own; this survey only stops.
-                    if (!writer.step(writer.context, a.failure) and a.failure == null) a.failure = error.StatementFailed;
+                    if (!writer.step(writer.context, started) and a.failure == null) a.failure = error.StatementFailed;
                 };
             }
             for (a.queue[0..a.queued]) |*entry| {
@@ -374,7 +388,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 };
                 a.store.engine.endStatement(entry.statement);
             }
-            if (a.queued != 0) a.store.engine.finishPass() catch |err| {
+            if (sends or a.queued != 0) a.store.engine.finishPass() catch |err| {
                 // Later statements already ran on MySQL. Their ordinary
                 // errors cannot replace the first guard/decoder failure;
                 // a lost connection or ownership always fences instead.
@@ -685,12 +699,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         }
 
         /// After the survey's pass: its failure is this Access's when it
-        /// fences, or when the message was never sent (`unsent`).
-        pub fn endRide(a: *Self, survey: ?anyerror, unsent: bool) void {
+        /// fences.
+        pub fn endRide(a: *Self, survey: ?anyerror) void {
             if (survey) |err| if (fences(err)) {
                 a.failure = @errorCast(err);
             };
-            if (unsent and a.failure == null) a.failure = error.StatementFailed;
             a.resetQueued() catch |err| {
                 if (a.failure == null or fences(err)) a.failure = err;
             };
@@ -734,9 +747,6 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// queued or the queue is full. True when it queued.
         fn queueStatement(a: *Self, comptime S: type, args: *const S.Args, runner: Runner, target: @FieldType(Queued, "target")) bool {
             a.ensureOpen();
-            if (mode == .survey) if (a.spent and a.queued == 0 and a.failure == null) {
-                a.failure = error.StatementFailed;
-            };
             if (a.failure != null) return false;
             const statement = a.store.engine.statementFor(S) catch |err| {
                 a.failure = err;
@@ -782,6 +792,11 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// full; null once a failure is recorded.
         fn reserve(a: *Self) ?*Queued {
             if (a.failure == null and a.queued == a.queue.len) a.pass();
+            // A carried survey reads one round: whatever sent it, a
+            // statement that would need a second fails the survey.
+            if (mode == .survey) if (a.spent and a.failure == null) {
+                a.failure = error.StatementFailed;
+            };
             if (a.failure != null) return null;
             return &a.queue[a.queued];
         }

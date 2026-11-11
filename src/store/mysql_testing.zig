@@ -1215,6 +1215,52 @@ test "store.mysql live a lone write's message carries the dispatch survey the Ho
     try std.testing.expectEqual(before + 1, queries.*);
 }
 
+/// `insertHeld`, committing into a batch with `room` bytes left after the
+/// insert.
+fn insertWithRoom(storage: *Store, id: u64, room: usize) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
+    const wire_connection = &storage.engine.mysql.state.connection;
+    const limit = wire_connection.batch_limit;
+    defer wire_connection.batch_limit = limit;
+    wire_connection.batch_limit = limit - (wire_connection.batchRoom() - room);
+    return entry.finishTransaction(store_core.Ordinary.none, .{}, access.end(.{}, access.commit()));
+}
+
+test "store.mysql live a write saves in its one message whether or not the batch has room for the survey" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const queries = &storage.engine.mysql.state.connection.queries;
+    _ = try storage.dispatchWork(false);
+    // From room for COMMIT and none of the survey, through part of it, to
+    // all of it: the write is one message and saves, and the Host's ask
+    // is free only when the whole survey rode.
+    var id: u64 = 9000900;
+    var carried: [2]bool = .{ false, false };
+    var room: usize = 32;
+    while (room <= 32768) : (room *= 2) {
+        const before = queries.*;
+        try storage.queue().write(insertWithRoom, .{ &storage, id, room });
+        try std.testing.expectEqual(before + 1, queries.*);
+        try std.testing.expect(!storage.isFenced());
+        _ = try storage.dispatchWork(false);
+        const asked = queries.* - before - 1;
+        try std.testing.expect(asked <= 1);
+        carried[@intFromBool(asked == 0)] = true;
+        // Once the whole survey fits, more room changes nothing.
+        if (asked == 1) try std.testing.expect(!carried[1]);
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+        id += 1;
+    }
+    try std.testing.expect(carried[0] and carried[1]);
+}
+
 test "store.mysql live a lone write whose fence fails saves nothing, though COMMIT shares its message" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
