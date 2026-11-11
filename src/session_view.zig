@@ -637,6 +637,67 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
     } };
 }
 
+test "list rows share every mark and script with the chat heading table" {
+    const overview = @import("overview_view.zig");
+    const Case = struct {
+        mark: marks.Mark,
+        state: overview.WorkState,
+        colour: overview.Colour,
+        tool: ?protocol.ToolPresentation.Code,
+    };
+    const cases = [_]Case{
+        .{ .mark = .needs_you, .state = .{ .approval = .{ .since = 1 } }, .colour = .attention, .tool = .pending_permission },
+        .{ .mark = .active, .state = .{ .working = .{ .since = 1 } }, .colour = .ink, .tool = .unresolved },
+        .{ .mark = .queued, .state = .{ .pending = .{ .since = 1 } }, .colour = .quiet, .tool = null },
+        .{ .mark = .waiting, .state = .{ .idle = .{ .since = 1 } }, .colour = .normal, .tool = null },
+        .{ .mark = .finished, .state = .{ .finished = .{ .since = 1 } }, .colour = .mark, .tool = .succeeded },
+        .{ .mark = .failed, .state = .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } }, .colour = .failure, .tool = .failed },
+        .{ .mark = .stopped, .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .colour = .normal, .tool = .denied },
+    };
+    const Sink = struct {
+        bytes: [128]u8 = undefined,
+        length: usize = 0,
+
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    try std.testing.expect(overview.Mark == marks.Mark);
+    var seen: std.enums.EnumSet(marks.Mark) = .empty;
+    for (cases) |case| {
+        seen.insert(case.mark);
+        const shared = marks.marks.get(case.mark);
+        var state: overview.State = undefined;
+        try state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer state.deinit();
+        _ = try overview.step(&state, .{ .tick = 100_000 });
+        _ = try overview.step(&state, .{ .list = .{ .page = .{
+            .rows = &.{.{ .reference = "k7m2qx".*, .workspace = "/work", .label = "Work", .state = case.state }},
+            .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
+        } } });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        for ([_]bool{ true, false }) |unicode_script| {
+            const caps: overview.Caps = .{ .unicode = unicode_script };
+            try std.testing.expect(!overview.markSpins(&state, .{ .row = 0 }, caps));
+            const row = try overview.rowSegments(arena.allocator(), &state, 0, 80, caps, 4);
+            try std.testing.expectEqualStrings("  ", row[0].text);
+            try std.testing.expectEqualStrings(if (unicode_script) shared.unicode else shared.ascii, row[1].text);
+            // List colours remain their own policy, including idle and finished.
+            try std.testing.expectEqual(case.colour, row[1].style.colour);
+        }
+        // Tool headings use Unicode; queued and idle have no Tool outcome.
+        if (case.tool) |code| {
+            var heading: Sink = .{};
+            try toolHeading(.{ .description = null, .code = code, .publication_position = null }, &heading, false, false);
+            const end = std.mem.indexOfScalar(u8, heading.bytes[0..heading.length], ' ').?;
+            try std.testing.expectEqualStrings(shared.unicode, heading.bytes[0..end]);
+        }
+    }
+    try std.testing.expect(seen.eql(.full));
+}
+
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {
     return toolHeadingWith(presentation, sink, colour, separate, "");
 }
