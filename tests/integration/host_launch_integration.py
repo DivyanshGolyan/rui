@@ -9,7 +9,7 @@ import hashlib
 import os
 import pathlib
 import pty
-from terminal_process import COLUMNS, ROWS, answers_to, open_pty, spawn, terminal_process
+from terminal_process import close_pty, COLUMNS, ROWS, answers_to, open_pty, spawn, terminal_process
 from terminal_screen import ScreenCapture
 import re
 import resource
@@ -934,11 +934,11 @@ def main():
                     caller.wait(timeout=5)
             finally:
                 try:
-                    os.close(master)
+                    close_pty(master)
                 finally:
                     try:
                         if slave is not None:
-                            os.close(slave)
+                            close_pty(slave)
                     finally:
                         forced_crash_cleanup(bare_store)
 

@@ -853,6 +853,7 @@ The view's first round reads the frozen settings, checks that the Attempt bindin
 It reads history in batches of 16 entries, each batch in one round with its page: each output item with its call, the items' parts in order, the first page of the tools the request ends with, and with every row the whole bytes of each content it names of at most 16 KiB.
 The page is plain values on the heap for the view's life (under 300 KiB), because history below the admission never changes; a reader of a content the page kept copies from it without entering the Store and still checks its digest, and a larger content, or one the page had no room for, is read through its own reader.
 A batch that comes back short is the Session's last, so the end of the walk costs no round.
+The tool-group scan reads 16 source Operations and 64 of their calls a round, judging each source's item population and each call's Proposal and result as rows of one read, and a group's results come 16 a round with their small contents; a source with more calls than a round holds resumes from its next call.
 No SQLite transaction spans adapter processing or network activity.
 Historical retention must preserve referenced versions through required recovery; an expired or foreign handle is programmer misuse, while missing/corrupt content and resource/storage failures are explicit failures.
 

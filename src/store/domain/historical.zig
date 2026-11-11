@@ -13,6 +13,7 @@ const provider_name = @import("../../provider_name.zig");
 const tool_catalog = @import("../../tool_record.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
+const tool_proposal = @import("../../tool_proposal.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const historical_domain = @This();
@@ -160,7 +161,6 @@ pub const HistoricalView = struct {
     next_tool_group: ?HistoricalEntry = null,
     next_tool_group_source_id: ?u64 = null,
     active_tool_group_source_id: ?u64 = null,
-    active_tool_group_after_ordinal: ?u64 = null,
     active_tool_group_count: u64 = 0,
     outputs_validated: bool = false,
     output_frontier: ?u64 = null,
@@ -267,15 +267,17 @@ pub const HistoricalView = struct {
 
     // One population cursor, independent of group/call counts. No
     // statement, blob handle or transaction survives a step.
+    /// The tool-group scan between its rounds: the source Operation whose
+    /// calls a full page cut short, with what the page saw of it; and
+    /// whether the scan has passed the last source.
     const GroupScan = struct {
         source: u64 = 0,
-        boundary: u64 = 0,
-        admission: u64 = 0,
-        expected_items: u64 = 0,
-        previous_position: u64 = 0,
-        item: u64 = 0,
         calls: u64 = 0,
         position: u64 = 0,
+        last_item: ?u64 = null,
+        done: bool = false,
+        /// Once done, the last Operation before the view's own.
+        passed: u64 = 0,
     };
 
     /// A ready entry lives in the view until its next step.
@@ -522,6 +524,11 @@ pub const HistoricalView = struct {
         page.tools_walk = .{};
         page.tools_from = 0;
         page.tools_complete = false;
+        page.groups_end = 0;
+        page.groups_next = 0;
+        page.results_end = 0;
+        page.results_next = 0;
+        page.results_complete = true;
         page.batch.count = 0;
         page.held.count = 0;
         self.page = page;
@@ -1160,6 +1167,9 @@ fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*con
     if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
         view.entries_end = 0;
         view.tool_group_source_cursor = 0;
+        view.group_scan = .{};
+        view.page.?.groups_end = 0;
+        view.page.?.groups_next = 0;
         view.next_tool_group = null;
         view.next_tool_group_source_id = null;
         scan_tool_groups = true;
@@ -1546,6 +1556,18 @@ const Page = struct {
     tools_from: u64,
     /// Whether `tools` reaches the walk's last member.
     tools_complete: bool,
+    /// The tool groups the scan's last round read whole, in source
+    /// order, and the next one it serves.
+    groups: [group_batch]Group,
+    groups_end: usize,
+    groups_next: usize,
+    /// The active group's results from the one after the last page's, in
+    /// call order, and the next one it serves.
+    results: [result_batch]Result,
+    results_end: usize,
+    results_next: usize,
+    /// Whether `results` reaches the group's last result.
+    results_complete: bool,
     /// The contents an entry batch names, kept from the start of `bytes`
     /// until the next batch; and the contents the tools page names, kept
     /// from its end until the next tools page. Each lists its contents'
@@ -1559,9 +1581,17 @@ const Page = struct {
     const Bytes = rsql.Blob(inline_bytes);
     const part_batch = 32;
     const tool_batch = 16;
+    const group_batch = 16;
+    const call_batch = 64;
+    const result_batch = 16;
+
+    /// A source Operation's tool group as the scan's rounds build it:
+    /// how many of its `expected` calls they have `seen`, the latest
+    /// position one was accepted at, and the last one's item.
+    const Group = struct { source: u64, expected: u64, called: u64, whole: bool, seen: u64, position: u64, last_item: ?u64 };
     const arena_bytes = 128 * 1024;
 
-    const rows = .{ historical_settings.Row, historical_entries.Row, page_items.Row, page_parts.Row, ToolRow };
+    const rows = .{ historical_settings.Row, historical_entries.Row, page_items.Row, page_parts.Row, ToolRow, GroupCallRow, group_results.Row };
     const row_align = 16;
     const row_bytes = bytes: {
         var most: usize = 0;
@@ -1663,6 +1693,19 @@ const Page = struct {
         schema_private: bool,
     };
 
+    /// A result row without its contents' bytes.
+    const Result = struct {
+        call_ordinal: u64,
+        call_id_content_id: ?rsql.Positive,
+        call_id_length: ?u64,
+        call_id_digest: ?[32]u8,
+        call_id_private: ?bool,
+        output_content_id: ?rsql.Positive,
+        output_length: ?u64,
+        output_digest: ?[32]u8,
+        output_private: ?bool,
+    };
+
     /// Copies `row` without its bytes, which it keeps on `side`.
     fn store(page: *Page, comptime side: Side, row: anytype, out: anytype) void {
         const columns = @typeInfo(@TypeOf(row.*)).@"struct";
@@ -1755,6 +1798,31 @@ const Page = struct {
             return true;
         }
     };
+
+    pub const Results = struct {
+        page: *Page,
+        decoded: *group_results.Row,
+        pub fn visit(results: *Results, row: *const group_results.Row) bool {
+            const page = results.page;
+            // Beside the batch's contents, until its next batch.
+            page.store(.batch, row, &page.results[page.results_end]);
+            page.results_end += 1;
+            return true;
+        }
+    };
+
+    /// Queues the read of the active group's results after the page's
+    /// last; `results_complete` follows its round.
+    fn queueResults(page: *Page, a: *ReadAccess, view: *HistoricalView, visitor: *Results) void {
+        page.results_end = 0;
+        page.results_next = 0;
+        visitor.* = .{ .page = page, .decoded = page.decoded(group_results.Row) };
+        a.readEach(group_results, .{
+            .operation = view.binding.operation_id,
+            .source = view.active_tool_group_source_id.?,
+            .from = view.active_tool_group_count,
+        }, result_batch, visitor);
+    }
 
     /// Queues the parts read from part `part` of the item at `first`;
     /// `parts_complete` follows its round.
@@ -1856,9 +1924,11 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
 fn activateHistoricalToolGroup(view: *HistoricalView) !?*const HistoricalEntry {
     const entry = if (view.next_tool_group) |*value| value else return null;
     view.active_tool_group_source_id = view.next_tool_group_source_id orelse return error.CorruptStore;
-    view.active_tool_group_after_ordinal = null;
     view.active_tool_group_count = 0;
     view.active_tool_group_expected = view.next_tool_group_count;
+    view.page.?.results_end = 0;
+    view.page.?.results_next = 0;
+    view.page.?.results_complete = false;
     return entry;
 }
 
@@ -1868,156 +1938,274 @@ const HistoricalToolGroup = struct {
     source_operation_id: u64,
 };
 
-// Walk the immutable item population, not just surviving call rows. One
-// item/classification per step also detects wholly missing calls.
-/// The scanned Operation's item at or after ordinal ?2.
-const group_item = rsql.Read(.{
-    .sql = "SELECT item.item_ordinal,item.item_kind,item.session_ref,item.session_position," ++
-        "item.session_ref=source.session_ref AND item.attempt_ordinal=source.attempt_ordinal AS consistent " ++
-        "FROM model_output_item item JOIN model_operation source ON source.operation_id=item.operation_id " ++
-        "WHERE item.operation_id=?1 AND item.item_ordinal>=?2 ORDER BY item.item_ordinal LIMIT 1",
-    .Args = struct { operation: u64, ordinal: u64 },
-    .Row = struct { item_ordinal: u64, item_kind: u8, session_ref: Bounded(session_id.max_reference_bytes), session_position: rsql.Positive, consistent: bool },
-    .cardinality = .optional,
+/// The Session's source Operations a page of the tool-group scan reads:
+/// those from ?2 and before the view's own that proposed tools, the first
+/// `Page.group_batch` of them. An Operation the floor ?3 drops brings no
+/// tool group.
+const group_sources_from = "FROM model_operation current JOIN model_operation source @index(model_operation_session_history) " ++
+    "ON source.session_ref=current.session_ref WHERE current.operation_id=?1 AND source.operation_id>=?2 " ++
+    "AND source.operation_id<current.operation_id AND source.admission_position>?3 AND " ++
+    store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " ORDER BY source.operation_id LIMIT " ++
+    std.fmt.comptimePrint("{d}", .{Page.group_batch});
+
+/// Each of those sources, in order, with whether its items are the whole
+/// immutable population its Operation counted, between its admission and
+/// the view's (`outputSourceColumns`), how many of them are calls, and how
+/// many calls the Operation has.
+const group_sources = rsql.Read(.{
+    .sql = "SELECT " ++ outputSourceColumns("current.admission_position") ++ "," ++ reads_domain.expectedCallsSql("source.operation_id") ++ "," ++
+        "(SELECT count(*) FROM model_tool_call called WHERE called.operation_id=source.operation_id) AS called " ++ group_sources_from,
+    .Args = struct { operation: u64, from: u64, floor: u64 },
+    .Row = struct { operation_id: rsql.Positive, admission_position: rsql.Positive, output_item_count: u64, purpose: u8, complete: bool, expected: u64, called: u64 },
+    .cardinality = .each,
 });
 
-/// A call past the scanned Operation's call items: there must be none.
-const extra_call = rsql.Read(.{
-    .sql = "SELECT call_ordinal FROM model_tool_call WHERE operation_id=?1 AND call_ordinal>=?2 ORDER BY call_ordinal LIMIT 1",
-    .Args = struct { operation: u64, ordinal: u64 },
-    .Row = struct { call_ordinal: u64 },
-    .cardinality = .optional,
-});
-
-/// A call's accepted result, and whether its rejection or Action agrees.
-/// It shares its round with the call's Proposal, which main read first,
-/// so a missing row or column is checked after the Proposal is.
-pub const call_outcome = rsql.Read(.{
-    .sql = "SELECT coalesce(tool_call.acceptance_position,action.acceptance_position) AS accepted_position," ++
-        "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS content_id," ++
+/// Those sources' calls in source and call order, the first
+/// `Page.call_batch` of them from call ?4 of source ?2: each with its
+/// item, its Proposal as `reads.proposal_row` reads it, where it was
+/// accepted, and whether its result is there, public and its rejection's
+/// or its Action's own.
+const group_calls = rsql.Read(.{
+    .sql = "WITH sources AS (SELECT source.operation_id " ++ group_sources_from ++ ") " ++
+        "SELECT sources.operation_id AS source,proposed.call_ordinal AS ordinal,item.item_ordinal,item.item_kind," ++
+        "coalesce(tool_call.acceptance_position,action.acceptance_position) AS accepted_position," ++
         "CASE WHEN tool_call.rejection_code IS NOT NULL OR (action.resolution_code IS NOT NULL AND " ++
-        "action.session_ref=source.session_ref AND action.tool_kind=tool_call.action_kind) THEN 1 ELSE 0 END AS consistent " ++
-        "FROM model_tool_call tool_call JOIN model_operation source ON source.operation_id=tool_call.operation_id " ++
-        "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-        "WHERE tool_call.operation_id=?1 AND tool_call.call_ordinal=?2",
-    .Args = struct { operation: u64, ordinal: u64 },
-    .Row = struct { accepted_position: ?rsql.Positive, content_id: ?rsql.Positive, consistent: bool },
-    .cardinality = .optional,
+        "action.session_ref=op.session_ref AND action.tool_kind=tool_call.action_kind) THEN 1 ELSE 0 END AS outcome_consistent," ++
+        "result.private AS result_private," ++ reads_domain.proposal_columns ++ " " ++
+        "FROM sources JOIN model_tool_call proposed ON proposed.operation_id=sources.operation_id " ++
+        "LEFT JOIN model_output_item item ON item.operation_id=proposed.operation_id AND item.item_ordinal=proposed.item_ordinal " ++
+        reads_domain.proposal_joins ++
+        "LEFT JOIN content result ON result.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "WHERE sources.operation_id>?2 OR proposed.call_ordinal>=?4 " ++
+        // Ordered by the page's sources, so MySQL reads the calls from
+        // them and never walks every Session's calls in key order.
+        "ORDER BY sources.operation_id,proposed.call_ordinal LIMIT " ++ std.fmt.comptimePrint("{d}", .{Page.call_batch}),
+    .Args = struct { operation: u64, from: u64, floor: u64, call: u64 },
+    .Row = GroupCallRow,
+    .cardinality = .each,
 });
 
-/// The scanned call `call` of Operation `source`, from the Proposal and
-/// outcome its round read together, decided in main's order: the
-/// Proposal first, so a missing one is `ContentNotFound` whatever the
-/// outcome holds. Returns where the call was accepted and its result.
-pub fn scannedCall(proposal: *const reads_domain.ProposalRead, found_outcome: call_outcome.Result, source: u64, call: u64) error{ ContentNotFound, CorruptStore }!struct { accepted_position: u64, content_id: u64 } {
-    try proposal.found();
-    const metadata = proposal.metadata.?;
-    if (metadata.operation != source or metadata.call_ordinal != call) return error.CorruptStore;
-    const outcome = found_outcome orelse return error.CorruptStore;
-    if (!outcome.consistent) return error.CorruptStore;
-    return .{
-        .accepted_position = (outcome.accepted_position orelse return error.CorruptStore).get(),
-        .content_id = (outcome.content_id orelse return error.CorruptStore).get(),
-    };
-}
+/// A `group_calls` row. Past `result_private` it is `proposal_row`'s, each
+/// column NULL where a missing item, call or row leaves it so.
+const GroupCallRow = struct {
+    source: rsql.Positive,
+    ordinal: u64,
+    item_ordinal: ?u64,
+    item_kind: ?u64,
+    accepted_position: ?rsql.Positive,
+    outcome_consistent: bool,
+    result_private: ?bool,
+    operation_id: ?rsql.Positive,
+    turn_id: ?rsql.Positive,
+    call_ordinal: ?u64,
+    action_id: ?rsql.Positive,
+    rejection_code: ?tool_proposal.Rejection,
+    name_content_id: ?rsql.Positive,
+    call_id_content_id: ?rsql.Positive,
+    arguments_content_id: ?rsql.Positive,
+    consistent: bool,
+    field_metadata: ?[120]u8,
+    length0: ?u64,
+    digest0: ?[32]u8,
+    private0: ?bool,
+    length1: ?u64,
+    digest1: ?[32]u8,
+    private1: ?bool,
+    length2: ?u64,
+    digest2: ?[32]u8,
+    private2: ?bool,
+};
 
-/// The Session's next Operation after the scan cursor ?2 and before the
-/// view's own that proposed tools, if any, and the last Operation before
-/// the view's own, which a scan that finds none has passed. An Operation
-/// the floor ?3 drops brings no tool group.
-const next_group_source = rsql.Read(.{
-    .sql = "SELECT source.operation_id,current.admission_position AS boundary,source.admission_position,source.output_item_count," ++
+/// The view's own admission position, the bound of every group, and the
+/// last Operation before the view's own, which a scan that reaches its
+/// end has passed.
+const group_bounds = rsql.Read(.{
+    .sql = "SELECT current.admission_position AS boundary," ++
         "(SELECT max(last.operation_id) FROM model_operation last @index(model_operation_session_history) " ++
         "WHERE last.session_ref=current.session_ref AND last.operation_id<current.operation_id) AS last_source " ++
-        "FROM model_operation current LEFT JOIN model_operation source ON source.operation_id=(" ++
-        "SELECT next.operation_id FROM model_operation next @index(model_operation_session_history) " ++
-        "WHERE next.session_ref=current.session_ref AND next.operation_id>?2 AND next.operation_id<current.operation_id AND next.admission_position>?3 " ++
-        "AND " ++ store_schema.resolutionIs("next.resolution_code", .tool_proposals) ++ " ORDER BY next.operation_id LIMIT 1) " ++
-        "WHERE current.operation_id=?1",
-    .Args = struct { operation: u64, after: u64, floor: u64 },
-    .Row = struct { operation_id: ?rsql.Positive, boundary: rsql.Positive, admission_position: ?u64, output_item_count: ?u64, last_source: ?rsql.Positive },
+        "FROM model_operation current WHERE current.operation_id=?1",
+    .Args = struct { operation: u64 },
+    .Row = struct { boundary: rsql.Positive, last_source: ?rsql.Positive },
     .cardinality = .optional,
 });
 
-/// One step of the tool-group scan, each read in rounds that depend on
-/// the one before: an item, then its Proposal and call outcome together,
-/// then the result's metadata; or, past the last item, the extra call
-/// check; or the next source Operation, whose round also reads the entry
-/// batch after `after_position` when the view lacks it. A failed step is
-/// main's name: `CorruptStore` for the item, call and metadata reads, the
-/// Proposal read's own, and `HistoricalEntryReadFailed` for the source.
-fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?HistoricalToolGroup {
-    const scan = &view.group_scan;
-    if (scan.source != 0) {
-        var found: group_item.Result = undefined;
-        a.read(group_item, .{ .operation = scan.source, .ordinal = scan.item }, &found);
-        try store_access.runAs(a, error.CorruptStore);
-        const item = found orelse {
-            var extra: extra_call.Result = undefined;
-            a.read(extra_call, .{ .operation = scan.source, .ordinal = scan.calls }, &extra);
-            try store_access.runAs(a, error.CorruptStore);
-            if (scan.item != scan.expected_items or scan.calls == 0 or scan.position == 0 or scan.position >= scan.boundary or extra != null)
-                return error.CorruptStore;
-            const group = HistoricalToolGroup{ .position = scan.position, .source_operation_id = scan.source };
-            view.next_tool_group_count = scan.calls;
-            scan.source = 0;
-            return group;
-        };
-        if (item.item_ordinal != scan.item) return error.CorruptStore;
-        const position = item.session_position.get();
-        if (scan.item >= scan.expected_items or !item.consistent or
-            position <= scan.admission or position >= scan.boundary or
-            (scan.item != 0 and position != scan.previous_position + 1)) return error.CorruptStore;
-        scan.previous_position = position;
-        scan.item += 1;
-        if (item.item_kind != 3) return error.HistoricalPending;
-        var metadata: activity_read.ProposalMetadata = undefined;
-        var proposal: reads_domain.ProposalRead = .{ .position = position, .metadata = &metadata };
-        var found_outcome: call_outcome.Result = undefined;
-        reads_domain.readProposal(a, item.session_ref.slice(), &proposal);
-        a.read(call_outcome, .{ .operation = scan.source, .ordinal = scan.calls }, &found_outcome);
-        a.run() catch |err| return if (err == error.StatementFailed and a.failedOn(call_outcome)) error.CorruptStore else err;
-        const call = try scannedCall(&proposal, found_outcome, scan.source, scan.calls);
-        var result: content_metadata.Row = undefined;
-        a.read(content_metadata, .{ .content_id = call.content_id }, &result);
-        try store_access.runAs(a, error.CorruptStore);
-        _ = try content_domain.publicMetadata(&result);
-        scan.position = @max(scan.position, call.accepted_position);
-        // The call's bytes are authenticated when its entry is served.
-        scan.calls += 1;
-        return error.HistoricalPending;
+/// One round of the tool-group scan: a page of source Operations and a
+/// page of their calls, judged as main judged each item and call in
+/// rounds of their own. A source's items are its whole population
+/// (`group_sources`). It has as many calls as call items, and the calls
+/// read run from ordinal zero with none missing, each on a call item later
+/// than the one before, up to that count: so every call item has its
+/// call, in order, and no call lies past them, whichever page ends it. Each call's Proposal is consistent and its
+/// fields certified; its result is accepted, public and its own. The
+/// group lies where its last result was accepted, below the view's
+/// admission. Every failure is `CorruptStore`.
+const GroupRead = struct {
+    bounds: group_bounds.Result,
+    sources: Sources,
+    calls: Calls,
+
+    const Sources = struct {
+        view: *HistoricalView,
+        rows: usize = 0,
+
+        pub fn visit(sources: *Sources, row: *const group_sources.Row) bool {
+            const page = sources.view.page.?;
+            const scan = &sources.view.group_scan;
+            const source = row.operation_id.get();
+            const resumed = source == scan.source;
+            page.groups[page.groups_end] = .{
+                .source = source,
+                .expected = row.expected,
+                .called = row.called,
+                .whole = row.complete and row.output_item_count != 0,
+                .seen = if (resumed) scan.calls else 0,
+                .position = if (resumed) scan.position else 0,
+                .last_item = if (resumed) scan.last_item else null,
+            };
+            page.groups_end += 1;
+            sources.rows += 1;
+            return true;
+        }
+    };
+
+    const Calls = struct {
+        view: *HistoricalView,
+        decoded: *GroupCallRow,
+        index: usize = 0,
+        rows: usize = 0,
+        failed: bool = false,
+
+        pub fn visit(calls: *Calls, row: *const GroupCallRow) bool {
+            calls.take(row) catch {
+                calls.failed = true;
+                return false;
+            };
+            return true;
+        }
+
+        fn take(calls: *Calls, row: *const GroupCallRow) error{CorruptStore}!void {
+            const page = calls.view.page.?;
+            calls.rows += 1;
+            const source = row.source.get();
+            // A source's calls end before the next one's begin.
+            while (calls.index < page.groups_end and page.groups[calls.index].source != source) {
+                if (page.groups[calls.index].seen != page.groups[calls.index].expected) return error.CorruptStore;
+                calls.index += 1;
+            }
+            if (calls.index == page.groups_end) return error.CorruptStore;
+            const group = &page.groups[calls.index];
+            const item = row.item_ordinal orelse return error.CorruptStore;
+            if (row.ordinal != group.seen or group.seen == group.expected or row.item_kind != 3) return error.CorruptStore;
+            if (group.last_item) |last| if (item <= last) return error.CorruptStore;
+            try reads_domain.certifyCall(row);
+            if ((row.operation_id orelse return error.CorruptStore).get() != source or row.call_ordinal != row.ordinal) return error.CorruptStore;
+            if (!row.outcome_consistent or (row.result_private orelse return error.CorruptStore)) return error.CorruptStore;
+            group.position = @max(group.position, (row.accepted_position orelse return error.CorruptStore).get());
+            group.last_item = item;
+            group.seen += 1;
+        }
+    };
+
+    /// The statements a failed step of which is `CorruptStore`, main's
+    /// answer for an item's and a call's reads; the bounds' is the entry
+    /// read's `HistoricalEntryReadFailed`.
+    const corrupt = .{
+        .{ group_sources, error.CorruptStore },
+        .{ group_calls, error.CorruptStore },
+    };
+
+    /// Queues the round's reads. `read` stays where it is until `finish`.
+    fn queue(read: *GroupRead, a: *ReadAccess, view: *HistoricalView) void {
+        const page = view.page.?;
+        const scan = &view.group_scan;
+        page.groups_end = 0;
+        page.groups_next = 0;
+        const operation = view.binding.operation_id;
+        // Every group the page held was served, so the cursor is its last.
+        const from = if (scan.source != 0) scan.source else view.tool_group_source_cursor + 1;
+        read.sources = .{ .view = view };
+        read.calls = .{ .view = view, .decoded = page.decoded(GroupCallRow) };
+        a.read(group_bounds, .{ .operation = operation }, &read.bounds);
+        a.readEach(group_sources, .{ .operation = operation, .from = from, .floor = view.floor.position }, Page.group_batch, &read.sources);
+        a.readEach(group_calls, .{ .operation = operation, .from = from, .floor = view.floor.position, .call = scan.calls }, Page.call_batch, &read.calls);
     }
-    var found: next_group_source.Result = undefined;
-    a.read(next_group_source, .{ .operation = view.binding.operation_id, .after = view.tool_group_source_cursor, .floor = view.floor.position }, &found);
-    var read: BatchRead = undefined;
-    const rides = needsBatch(view, after_position);
-    if (rides) read.queue(a, view, after_position);
-    store_access.runNamed(a, BatchRead.corrupt, error.HistoricalEntryReadFailed) catch |err| {
-        if (rides) read.discard(view);
-        return err;
-    };
-    // The scan's answer comes first, as its round once did; a batch that
-    // failed is discarded, and its next read fails again.
-    const batch: error{CorruptStore}!void = if (rides) read.finish(view, after_position) else {};
-    const row = found orelse {
+
+    /// The round failed: the page holds no group of it.
+    fn discard(view: *HistoricalView) void {
+        view.page.?.groups_end = 0;
+    }
+
+    /// After the round: the page holds the sources whose calls it read
+    /// whole, in order; the scan holds the one a full page cut short, or
+    /// that the sources ended.
+    fn finish(read: *const GroupRead, view: *HistoricalView) error{CorruptStore}!void {
+        errdefer discard(view);
+        const page = view.page.?;
+        const scan = &view.group_scan;
+        scan.* = .{};
+        const bounds = read.bounds orelse {
+            if (page.groups_end != 0) return error.CorruptStore;
+            scan.done = true;
+            return;
+        };
+        if (read.calls.failed) return error.CorruptStore;
+        const cut = read.calls.rows == Page.call_batch;
+        for (page.groups[0..page.groups_end], 0..) |*group, index| {
+            if (group.called != group.expected) return error.CorruptStore;
+            if (group.seen != group.expected) {
+                // Only the source the page's last call belongs to, or the
+                // one after it, can lack calls the page had no room for.
+                if (!cut or index < read.calls.index) return error.CorruptStore;
+                scan.* = .{ .source = group.source, .calls = group.seen, .position = group.position, .last_item = group.last_item };
+                page.groups_end = index;
+                return;
+            }
+            if (!group.whole or group.expected == 0 or group.position == 0 or group.position >= bounds.boundary.get()) return error.CorruptStore;
+        }
+        if (read.sources.rows < Page.group_batch) {
+            scan.done = true;
+            scan.passed = if (bounds.last_source) |last| last.get() else 0;
+        }
+    }
+};
+
+/// The next tool group of the scan, from the page; a page that holds no
+/// more is read in one round (`GroupRead`), which also reads the entry
+/// batch after `after_position` when the view lacks it. A round that
+/// completes no group, its first source's calls outrunning the page, is
+/// `HistoricalPending`. A failed step is main's name: `CorruptStore` for
+/// the sources' and calls' reads and `HistoricalEntryReadFailed` for the
+/// bounds'.
+fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?HistoricalToolGroup {
+    const page = view.page.?;
+    const scan = &view.group_scan;
+    if (page.groups_next == page.groups_end and !scan.done) {
+        var groups: GroupRead = undefined;
+        groups.queue(a, view);
+        var read: BatchRead = undefined;
+        const rides = needsBatch(view, after_position);
+        if (rides) read.queue(a, view, after_position);
+        store_access.runNamed(a, BatchRead.corrupt ++ GroupRead.corrupt, error.HistoricalEntryReadFailed) catch |err| {
+            GroupRead.discard(view);
+            if (rides) read.discard(view);
+            return err;
+        };
+        // The scan's answer comes first, as its round once did; a batch that
+        // failed is discarded, and its next read fails again.
+        const batch: error{CorruptStore}!void = if (rides) read.finish(view, after_position) else {};
+        try groups.finish(view);
         try batch;
+        if (page.groups_end == 0 and !scan.done) return error.HistoricalPending;
+    }
+    if (page.groups_next == page.groups_end) {
+        // The scan has passed every earlier Operation.
+        view.tool_group_source_cursor = @max(view.tool_group_source_cursor, scan.passed);
         return null;
-    };
-    const source = row.operation_id orelse {
-        try batch;
-        if (row.last_source) |last| view.tool_group_source_cursor = @max(view.tool_group_source_cursor, last.get());
-        return null;
-    };
-    scan.source = source.get();
-    scan.boundary = row.boundary.get();
-    scan.admission = row.admission_position orelse return error.CorruptStore;
-    scan.expected_items = row.output_item_count orelse return error.CorruptStore;
-    if (scan.admission == 0 or scan.expected_items == 0) return error.CorruptStore;
-    scan.previous_position = 0;
-    scan.item = 0;
-    scan.calls = 0;
-    scan.position = 0;
-    return error.HistoricalPending;
+    }
+    const group = &page.groups[page.groups_next];
+    page.groups_next += 1;
+    view.next_tool_group_count = group.expected;
+    return .{ .position = group.position, .source_operation_id = group.source };
 }
 
 /// A page row's content metadata; a missing content row left it NULL.
@@ -2187,57 +2375,65 @@ fn readHistoricalToolResultHeld(
     return entry.finish(Ordinary.none, nextGroupResult(&access, view));
 }
 
-/// The active group's next call accepted before the Operation's admission:
-/// its first, or the one after ordinal ?3 when `after`.
-fn NextCall(comptime after: bool) type {
-    return rsql.Read(.{
-        .sql = "SELECT tool_call.call_ordinal,tool_call.call_id_content_id," ++
-            "coalesce(tool_call.rejection_content_id,action.resolution_content_id) AS output_content_id,current.admission_position " ++
-            "FROM model_operation current " ++
-            "CROSS JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
-            "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
-            "ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
-            "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
-            "AND coalesce(tool_call.acceptance_position,action.acceptance_position)<current.admission_position " ++
-            (if (after) "AND tool_call.call_ordinal>?3 " else "AND tool_call.call_ordinal>=0 ") ++ "ORDER BY tool_call.call_ordinal LIMIT 1",
-        .Args = if (after) struct { operation: u64, source: u64, after: u64 } else struct { operation: u64, source: u64 },
-        .Row = NextCallRow,
-        .cardinality = .optional,
-    });
-}
-const NextCallRow = struct { call_ordinal: u64, call_id_content_id: rsql.Positive, output_content_id: rsql.Positive, admission_position: rsql.Positive };
-const first_call = NextCall(false);
-const later_call = NextCall(true);
+/// The active group's calls accepted before the Operation's admission,
+/// from ordinal ?3, a page of them in order: each with its call id's and
+/// output's content rows, and the bytes of a small one.
+const group_results = rsql.Read(.{
+    .sql = "SELECT tool_call.call_ordinal,tool_call.call_id_content_id,call_id.byte_length AS call_id_length,call_id.digest AS call_id_digest," ++
+        "call_id.private AS call_id_private," ++ pageBytesSql("call_id", "call_id_bytes") ++ "," ++
+        "output.content_id AS output_content_id,output.byte_length AS output_length,output.digest AS output_digest," ++
+        "output.private AS output_private," ++ pageBytesSql("output", "output_bytes") ++ " " ++
+        "FROM model_operation current " ++
+        "CROSS JOIN model_operation source ON source.operation_id=?2 AND source.session_ref=current.session_ref " ++
+        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=source.operation_id LEFT JOIN action_operation action " ++
+        "ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
+        "LEFT JOIN content call_id ON call_id.content_id=tool_call.call_id_content_id " ++
+        "LEFT JOIN content output ON output.content_id=coalesce(tool_call.rejection_content_id,action.resolution_content_id) " ++
+        "WHERE current.operation_id=?1 AND " ++ store_schema.resolutionIs("source.resolution_code", .tool_proposals) ++ " " ++
+        "AND coalesce(tool_call.acceptance_position,action.acceptance_position)<current.admission_position " ++
+        "AND tool_call.call_ordinal>=?3 ORDER BY tool_call.call_ordinal LIMIT " ++ std.fmt.comptimePrint("{d}", .{Page.result_batch}),
+    .Args = struct { operation: u64, source: u64, from: u64 },
+    .Row = struct {
+        call_ordinal: u64,
+        call_id_content_id: ?rsql.Positive,
+        call_id_length: ?u64,
+        call_id_digest: ?[32]u8,
+        call_id_private: ?bool,
+        call_id_bytes: ?Page.Bytes,
+        output_content_id: ?rsql.Positive,
+        output_length: ?u64,
+        output_digest: ?[32]u8,
+        output_private: ?bool,
+        output_bytes: ?Page.Bytes,
+    },
+    .cardinality = .each,
+});
 
-/// Round 1 reads the next call; round 2 its call id's and output's
-/// metadata together. A failed step is main's name:
-/// `HistoricalEntryReadFailed` for the call, `CorruptStore` for the
-/// metadata.
+/// The active group's next result, from the page; a page that holds no
+/// more is read in one round, from the call after the last one served. A
+/// failed step is `HistoricalEntryReadFailed`, main's name for the call's
+/// read; a result that lacks a content row is `CorruptStore`.
 fn nextGroupResult(a: *ReadAccess, view: *HistoricalView) !?HistoricalToolResult {
-    const source_operation_id = view.active_tool_group_source_id orelse unreachable;
-    var found: ?NextCallRow = undefined;
-    if (view.active_tool_group_after_ordinal) |ordinal|
-        a.read(later_call, .{ .operation = view.binding.operation_id, .source = source_operation_id, .after = ordinal }, &found)
-    else
-        a.read(first_call, .{ .operation = view.binding.operation_id, .source = source_operation_id }, &found);
-    try store_access.runAs(a, error.HistoricalEntryReadFailed);
-    const row = found orelse {
+    std.debug.assert(view.active_tool_group_source_id != null);
+    const page = view.page.?;
+    if (page.results_next == page.results_end and !page.results_complete) {
+        var results: Page.Results = undefined;
+        page.queueResults(a, view, &results);
+        try store_access.runAs(a, error.HistoricalEntryReadFailed);
+        page.results_complete = page.results_end < Page.result_batch;
+    }
+    if (page.results_next == page.results_end) {
         if (view.active_tool_group_count != view.active_tool_group_expected) return error.CorruptStore;
         view.active_tool_group_source_id = null;
-        view.active_tool_group_after_ordinal = null;
         view.active_tool_group_count = 0;
         return null;
-    };
+    }
+    const row = &page.results[page.results_next];
     if (row.call_ordinal != view.active_tool_group_count or view.active_tool_group_count >= view.active_tool_group_expected)
         return error.CorruptStore;
-    var call_id_row: content_metadata.Row = undefined;
-    var output_row: content_metadata.Row = undefined;
-    a.read(content_metadata, .{ .content_id = row.call_id_content_id.get() }, &call_id_row);
-    a.read(content_metadata, .{ .content_id = row.output_content_id.get() }, &output_row);
-    try store_access.runAs(a, error.CorruptStore);
-    const call_id = try viewContent(view, row.call_id_content_id.get(), &call_id_row, false);
-    const output = try viewContent(view, row.output_content_id.get(), &output_row, false);
-    view.active_tool_group_after_ordinal = row.call_ordinal;
+    const call_id = try viewContent(view, (row.call_id_content_id orelse return error.CorruptStore).get(), &try pageMetadata(row.call_id_length, row.call_id_digest, row.call_id_private), false);
+    const output = try viewContent(view, (row.output_content_id orelse return error.CorruptStore).get(), &try pageMetadata(row.output_length, row.output_digest, row.output_private), false);
+    page.results_next += 1;
     view.active_tool_group_count += 1;
     return .{ .call_id = call_id, .output = output };
 }

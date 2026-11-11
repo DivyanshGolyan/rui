@@ -43,7 +43,23 @@ fn restoreSignals(self: *Self, which: enum { all, keep_hangup }) void {
 }
 
 pub fn run(self: *Self, root: vaxis.vxfw.Widget) !void {
-    try self.app.run(root, .{});
+    self.app.run(root, .{}) catch |err| if (!hungUp(err, self.app.tty.tty_writer.err)) return err;
+}
+
+/// A terminal can close while a frame is on its way. That frame's write
+/// fails before App reads the end of input, and it is the same ending: the
+/// terminal is gone, so App stops as it does at the end of input.
+fn hungUp(ended: anyerror, write: ?anyerror) bool {
+    return ended == error.WriteFailed and write != null and write.? == error.InputOutput;
+}
+
+test "a frame the closed terminal refused ends App as the end of input does; any other failure stays one" {
+    try std.testing.expect(hungUp(error.WriteFailed, error.InputOutput));
+    // A write that failed for another reason, and a failure that was no write.
+    try std.testing.expect(!hungUp(error.WriteFailed, error.NoSpaceLeft));
+    try std.testing.expect(!hungUp(error.WriteFailed, null));
+    try std.testing.expect(!hungUp(error.OutOfMemory, error.InputOutput));
+    try std.testing.expect(!hungUp(error.InputOutput, null));
 }
 
 /// Guidance after App has released the terminal. The shared nonblocking
