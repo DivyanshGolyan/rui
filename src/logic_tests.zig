@@ -40,6 +40,7 @@ const cores = .{
     .{ "conversation_read.zig", @import("conversation_read.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
+    .{ "display_text.zig", @import("display_text.zig") },
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },

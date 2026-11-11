@@ -12,6 +12,7 @@
 //! hold a marker type (see `Optional`, `ListOf`, `State`, `Content`) for the parts the
 //! Host and client write in code rather than as one shape.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -1432,7 +1433,7 @@ test "replies the Host renders conform to their schemas" {
     // The model list is written in code, not as a shape.
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
-    try model_list.writeProviders(&out.writer, &.{
+    try model_list.writeProviders(&out.writer, model_catalog.shipped, &.{
         .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = ids } } },
     });

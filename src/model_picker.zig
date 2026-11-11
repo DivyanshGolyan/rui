@@ -191,7 +191,7 @@ pub const Query = struct {
     pub fn row(self: Query, entry: Entry, defaults: Defaults) ?Row {
         var efforts: catalog.Efforts = .empty;
         for (std.enums.values(ReasoningEffort)) |effort| {
-            if (model_capability.supportsReasoningEffort(entry.id, effort)) efforts.insert(effort);
+            if (model_capability.supportsReasoningEffort(catalog.shipped, entry.id, effort)) efforts.insert(effort);
         }
         var each = std.mem.tokenizeScalar(u8, self.words, ' ');
         while (each.next()) |word| {
@@ -207,7 +207,7 @@ pub const Query = struct {
             if (entry.providers.contains(one)) break one;
         } else unreachable;
         return .{
-            .effort = model_capability.startEffort(self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
+            .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
             .provider = provider,
             .efforts = efforts,
             .providers = entry.providers,
@@ -284,7 +284,7 @@ pub fn read(gpa: std.mem.Allocator, providers: []const u8) error{ OutOfMemory, I
                     const model = id orelse return error.InvalidModelList;
                     if (!model_capability.validModelSyntax(model)) return error.InvalidModelList;
                     if (count == offered.len) return error.InvalidModelList;
-                    offered[count] = .{ .id = model, .known = known orelse return error.InvalidModelList, .catalogued = model_capability.supportsModel(model), .providers = .empty };
+                    offered[count] = .{ .id = model, .known = known orelse return error.InvalidModelList, .catalogued = model_capability.supportsModel(catalog.shipped, model), .providers = .empty };
                     count += 1;
                 }
                 models = .{ start, count };
@@ -357,7 +357,7 @@ fn objectKey(scanner: *std.json.Scanner, scratch: std.mem.Allocator) error{ OutO
 pub fn testMenu(lists: []const model_list.Entry) !Menu {
     var bytes: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer bytes.deinit();
-    try model_list.writeProviders(&bytes.writer, lists);
+    try model_list.writeProviders(&bytes.writer, catalog.shipped, lists);
     return read(std.testing.allocator, bytes.written());
 }
 

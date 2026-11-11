@@ -44,6 +44,15 @@ pub fn parse(uri: []const u8) ?Reference {
     return .{ .source = if (std.mem.eql(u8, source, "a")) .activity else if (std.mem.eql(u8, source, "c")) .conversation else return null, .position = position, .ordinal = ordinal, .content = .{ .length = length, .digest = digest } };
 }
 
+/// A minimum retained heading's hidden reference plus its newline. Bounds
+/// the possible heading population without retaining display offsets.
+pub const minimum_reference_bytes = prefix.len + "a:0:0:0:".len + 64 + 1;
+
+pub fn referenceIndex(references: []const Reference, reference: Reference) ?usize {
+    for (references, 0..) |held, index| if (std.meta.eql(held, reference)) return index;
+    return null;
+}
+
 /// One toggle's temporary display owner. The reader still authenticates the
 /// entire immutable content. Bash stores a model-facing envelope (bash.zig's
 /// formatResult); only this display read removes its status, stream labels,

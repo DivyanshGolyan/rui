@@ -210,6 +210,9 @@ transcript: struct {
     // The Messages of collapsed blocks in the transcript.
     blocks: View.Blocks = .{},
 } = .{},
+/// Open intent belongs to this frontend, not the current text window. Only
+/// bounded References survive a rebuild; display rows are read again on demand.
+open_tools: OpenTools(viewport.capacity) = .{},
 // One collapsed Message shown in full.
 expansion: struct {
     // Ctrl-O waits for the frame it names a block in; the read then waits for
@@ -268,10 +271,27 @@ const notice_capacity = @max(
     protocol.max_model_bytes + " · ".len + unknown_sign_in.len + model_tail.len,
 );
 
+test "a read freezes its viewport width method for live and historical answers" {
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    var environment = try std.testing.environ.createMap(std.testing.allocator);
+    defer environment.deinit();
+    try screen.init(std.testing.io, &environment, false);
+    defer screen.deinit();
+    var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
+    for (std.enums.values(@import("ConversationViewport.zig").Method)) |method| {
+        screen.setWidth(method);
+        for ([_]ReadPhase{ .activity, .history }) |phase| {
+            const job = self.freeze(phase);
+            try std.testing.expectEqual(method, job.width_method);
+        }
+    }
+}
+
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .older = self.transcript.older, .target = if (phase == .history) if (self.transcript.plan.next()) |listing| .{ .listing = listing } else .older else .older, .messages = self.live.messages, .queued = self.live.queued, .drawn = self.live.drawn, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .transcript = self.transcript.id, .held = self.live.work.state.holdsQueue(), .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -287,11 +307,17 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
 }
 
 test "reader freezes borrowed HOME independently of process initialization" {
+    const screen = try std.testing.allocator.create(Screen);
+    defer std.testing.allocator.destroy(screen);
+    var environment = try std.testing.environ.createMap(std.testing.allocator);
+    defer environment.deinit();
+    try screen.init(std.testing.io, &environment, false);
+    defer screen.deinit();
     const self = try std.testing.allocator.create(Self);
     defer std.testing.allocator.destroy(self);
     for ([_][]const u8{ "", "/home/a b" }) |home| {
         for (std.enums.values(ReadPhase)) |phase| {
-            self.* = .{ .init = undefined, .home = home, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false };
+            self.* = .{ .init = undefined, .home = home, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
             const job = self.freeze(phase);
             self.home = "/changed-after-freeze";
             try std.testing.expectEqualStrings(home, job.home);
@@ -717,8 +743,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .user = style.of(self.app_caps, .{ .colour = .ink }).fg,
         .attention = attention.fg,
         .failure = failure.fg,
-        .tool_output = style.of(self.app_caps, .{ .background = .bar }).bg,
-        .tool_selection = style.of(self.app_caps, .{ .background = .selection }).bg,
+        .band = style.of(self.app_caps, .{ .background = .bar }).bg,
+        .selection = style.of(self.app_caps, .{ .background = .selection }).bg,
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
@@ -1329,6 +1355,7 @@ pub fn stop(self: *Self) void {
 }
 
 fn settle(self: *Self, restored: anyerror!void) Settled {
+    if (self.openToolReferences().len != 0) self.open_tools.deinit(self.init.gpa);
     const skills_error = self.dropSkills();
     const reader = self.joinReader();
     var admission = self.submission.join();
@@ -2364,20 +2391,92 @@ const ToolText = viewport.Sized(64 * 1024, true);
 fn toggleTool(self: *Self, reference: tool_fold.Reference) !void {
     const screen = self.screen;
     const document = if (screen.view == .live) &screen.live else &screen.browsing;
-    const row = document.findTool(reference) orelse return;
-    if (document.toolIsOpen(row)) {
+    _ = document.findTool(reference) orelse return;
+    if (self.open_tools.contains(reference)) {
         var empty: viewport.Sized(0, true) = .{};
         try self.setToolOpen(reference, &empty, false);
+        self.open_tools.remove(self.init.gpa, reference);
+        if (self.expansion.queued == .tool and std.meta.eql(self.expansion.queued.tool.target, reference)) self.expansion.queued = .none;
     } else {
+        try self.open_tools.add(self.init.gpa, reference);
         document.top = screen.drawn.first;
-        self.expansion.queued = .{ .tool = .{ .target = reference, .asked = self.pageAsked() } };
-        self.notice = "Opening tool output…";
+        self.askTool(reference);
     }
+    self.dirty = true;
+}
+
+// The imperative owner allocates only open identities. The tool-fold core
+// compares immutable Reference values; no allocator crosses its boundary.
+fn OpenTools(comptime view_bytes: usize) type {
+    return struct {
+        const Open = @This();
+        const maximum = view_bytes / tool_fold.minimum_reference_bytes;
+        refs: std.ArrayList(tool_fold.Reference) = .empty,
+
+        /// Borrowed until the next toggle or deinit. Identity never includes
+        /// a document byte offset, row number or the heading's display text.
+        pub fn references(self: *const Open) []const tool_fold.Reference {
+            return self.refs.items;
+        }
+
+        pub fn contains(self: *const Open, reference: tool_fold.Reference) bool {
+            return tool_fold.referenceIndex(self.refs.items, reference) != null;
+        }
+
+        pub fn add(self: *Open, gpa: std.mem.Allocator, reference: tool_fold.Reference) !void {
+            if (self.contains(reference)) return;
+            if (self.refs.items.len == maximum) return error.ToolFoldViewFull;
+            if (self.refs.items.len == self.refs.capacity) try self.refs.ensureTotalCapacityPrecise(gpa, @min(maximum, @max(4, 2 * self.refs.capacity)));
+            self.refs.appendAssumeCapacity(reference);
+        }
+
+        pub fn remove(self: *Open, gpa: std.mem.Allocator, reference: tool_fold.Reference) void {
+            if (tool_fold.referenceIndex(self.refs.items, reference)) |index| {
+                _ = self.refs.swapRemove(index);
+                // No resident fold allocation remains once all are closed.
+                if (self.refs.items.len == 0) self.deinit(gpa);
+            }
+        }
+
+        pub fn deinit(self: *Open, gpa: std.mem.Allocator) void {
+            self.refs.deinit(gpa);
+            self.* = .{};
+        }
+    };
+}
+
+/// Borrowed until the next toggle or conversation exit. A rebuilt feed window
+/// can reapply these identities without retaining its old rows or byte offsets.
+pub fn openToolReferences(self: *const Self) []const tool_fold.Reference {
+    return self.open_tools.references();
+}
+
+/// Reapply one still-open identity after rebuilding text. Uses the existing
+/// authenticated reader, without superseding a person's pending expansion.
+pub fn restoreTool(self: *Self, reference: tool_fold.Reference) bool {
+    if (!self.open_tools.contains(reference) or self.expansion.queued != .none or self.expansion.tool_reading != null) return false;
+    const document = switch (self.screen.view) {
+        .live => &self.screen.live,
+        .transcript => &self.screen.browsing,
+        else => return false,
+    };
+    const row = document.findTool(reference) orelse return false;
+    if (document.toolIsOpen(row)) return false;
+    self.askTool(reference);
+    return true;
+}
+
+fn askTool(self: *Self, reference: tool_fold.Reference) void {
+    self.expansion.queued = .{ .tool = .{ .target = reference, .asked = self.pageAsked() } };
+    self.notice = "Opening tool output…";
     self.dirty = true;
 }
 
 /// Reads only the bounded, escaped rows prepared by the existing reader.
 fn showTool(self: *Self, reference: tool_fold.Reference) !void {
+    // Closing while a read is in flight also closes the intent; its later
+    // authenticated completion must not resurrect the old row.
+    if (!self.open_tools.contains(reference)) return;
     const rows = try self.init.gpa.create(ToolText);
     defer self.init.gpa.destroy(rows);
     rows.* = .{ .width_method = self.screen.live.width_method };
@@ -4913,6 +5012,7 @@ const ChromeFixture = struct {
     }
 
     fn deinit(fixture: *ChromeFixture) void {
+        if (fixture.self.openToolReferences().len != 0) fixture.self.open_tools.deinit(std.testing.allocator);
         fixture.arena.deinit();
         std.testing.allocator.destroy(fixture.self);
         fixture.page.close(std.testing.io);
@@ -5535,7 +5635,7 @@ test "tool folds share key and click ownership across live output, bounds, failu
             if (std.mem.eql(u8, cell.char.grapheme, "R") and col + 1 < 80 and std.mem.eql(u8, screen.readCell(@intCast(col + 1), @intCast(row)).?.char.grapheme, "E")) {
                 saw_body = true;
                 try std.testing.expectEqual(@as(usize, 4), col);
-                try std.testing.expectEqual(if (colour) self.app_content.colours.tool_output else self.app_content.style.bg, cell.style.bg);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
                 try std.testing.expectEqual(self.app_content.style.fg, cell.style.fg);
             }
             try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "▸"));
@@ -5543,12 +5643,12 @@ test "tool folds share key and click ownership across live output, bounds, failu
                 saw_heading = true;
                 try std.testing.expectEqual(@as(usize, 0), col);
                 try std.testing.expectEqualStrings("L", screen.readCell(2, @intCast(row)).?.char.grapheme);
-                try std.testing.expectEqual(if (colour) self.app_content.colours.tool_selection else self.app_content.style.bg, cell.style.bg);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.selection else self.app_content.style.bg, cell.style.bg);
             }
             if (col == 4 and std.mem.eql(u8, cell.char.grapheme, "e") and std.mem.eql(u8, screen.readCell(5, @intCast(row)).?.char.grapheme, "r")) {
                 saw_stderr = true;
                 try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
-                try std.testing.expectEqual(if (colour) self.app_content.colours.tool_output else self.app_content.style.bg, cell.style.bg);
+                try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
             }
             if (std.mem.eql(u8, cell.char.grapheme, "‹")) {
                 saw_footer = true;
@@ -5608,6 +5708,28 @@ test "tool folds share key and click ownership across live output, bounds, failu
         const copied = (try document.shownText(std.testing.allocator, 0, document.text().len, viewport.capacity)).?;
         defer std.testing.allocator.free(copied);
         try std.testing.expect(std.mem.indexOf(u8, copied, "rui-tool") == null);
+        // Rebuilding a row at another byte position cannot reset intent.
+        // The later feed window can reapply exactly these References.
+        const old_heading = document.findTool(first).?;
+        try std.testing.expectEqualDeep(first, self.openToolReferences()[0]);
+        document.clear();
+        try document.append("Rebuilt prefix\n");
+        try Harness.append(&fixture, first, false);
+        try std.testing.expect(document.findTool(first).? != old_heading);
+        try std.testing.expect(!document.toolIsOpen(document.findTool(first).?));
+        try std.testing.expect(self.restoreTool(self.openToolReferences()[0]));
+        try Harness.complete(&fixture, "Restored output\n");
+        try std.testing.expect(document.toolIsOpen(document.findTool(first).?));
+        try std.testing.expect(std.mem.indexOf(u8, document.text(), "    Restored output\n") != null);
+        // Same location and same text, but a different identity is not open.
+        var other = first;
+        other.content.digest[0] ^= 1;
+        document.clear();
+        try document.append("Rebuilt prefix\n");
+        try Harness.append(&fixture, other, false);
+        try std.testing.expect(!self.restoreTool(other));
+        try std.testing.expect(self.open_tools.contains(first));
+        try std.testing.expect(!document.toolIsOpen(document.findTool(other).?));
     }
 }
 
@@ -5623,4 +5745,28 @@ test "App Session drag-copy notices follow the notice rule" {
     try std.testing.expect(self.shown_notice.expire(ChromeFixture.now() + 5_000));
     _ = try fixture.draw();
     try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
+}
+
+test "open tool intent uses the complete Reference, with bounded allocation and no row positions" {
+    const first: tool_fold.Reference = .{ .source = .activity, .position = 7, .ordinal = 2, .content = .{ .length = 8, .digest = protocol.contentDigest("printed\n") } };
+    var open: OpenTools(2 * tool_fold.minimum_reference_bytes) = .{};
+    defer open.deinit(std.testing.allocator);
+    try open.add(std.testing.allocator, first);
+    try open.add(std.testing.allocator, first);
+    try std.testing.expectEqual(@as(usize, 1), open.references().len);
+    var changed: [5]tool_fold.Reference = @splat(first);
+    changed[0].source = .conversation;
+    changed[1].position += 1;
+    changed[2].ordinal += 1;
+    changed[3].content.length += 1;
+    changed[4].content.digest[0] ^= 1;
+    for (changed) |reference| try std.testing.expect(!open.contains(reference));
+    try open.add(std.testing.allocator, changed[0]);
+    try std.testing.expectError(error.ToolFoldViewFull, open.add(std.testing.allocator, changed[1]));
+    try std.testing.expectEqual(@as(usize, 2), open.references().len);
+    open.remove(std.testing.allocator, changed[1]);
+    open.remove(std.testing.allocator, first);
+    try std.testing.expect(!open.contains(first) and open.contains(changed[0]));
+    open.remove(std.testing.allocator, changed[0]);
+    try std.testing.expectEqual(@as(usize, 0), open.refs.capacity);
 }

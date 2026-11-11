@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const TerminalEditor = @import("TerminalEditor.zig");
 const TerminalText = @import("TerminalText.zig");
 const stderr = @import("stderr.zig");
@@ -1580,7 +1581,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         selected_store = destination.path;
         try preflightNewSession(init.io, selected_store, destination.saved);
         // Check the prospective pin's syntax before credential lookup or
-        // login. A model Rui does not list runs with default limits.
+        // login. Client defaults use the shipped catalog, not Host facts.
         const usable: provider_selection.Readinesses = .initFill(.configured);
         _ = snapshot.resolve(&usable) catch |err| {
             if (after_choice) {
@@ -1863,18 +1864,18 @@ test "a Label argument sets, clears or refuses before capture" {
     try std.testing.expectEqual(@as(usize, 100), (try labelArgument(&longest)).value.?.len);
 }
 
-/// Admits a typed model ID with valid syntax. One Rui does not list runs
-/// with default limits, and one line says so.
+/// Admits a typed model ID with valid syntax. Missing shipped facts only
+/// select estimated client defaults; the Host owns runtime fact admission.
 fn admitModel(model: []const u8) error{InvalidModel}!void {
-    if (model_capability.supportsModel(model)) return;
+    if (model_capability.supportsModel(model_catalog.shipped, model)) return;
     // Optional diagnostics stay bounded and cannot retain a restored terminal
     // on stderr credit. Spell arbitrary bytes safely, without changing input.
     var bytes: [4 * protocol.max_model_bytes + model_capability.model_help.len + 256]u8 = undefined;
     var out = std.Io.Writer.fixed(&bytes);
     if (model_capability.validModelSyntax(model)) {
-        out.writeAll("rui: Rui does not list ") catch unreachable;
+        out.writeAll("rui: this client's catalog does not list ") catch unreachable;
         writeSafeTextTo(&out, model) catch unreachable;
-        out.writeAll("; it uses default limits.\n") catch unreachable;
+        out.writeAll("; client defaults use estimated limits.\n") catch unreachable;
         _ = @import("stderr.zig").write(out.buffered());
         return;
     }
@@ -3329,7 +3330,7 @@ const StartConfiguration = struct {
             .reasoning_effort = input.reasoning_effort.value,
             // A client may materialize its product default into input. Only
             // the saved preference snapshot establishes saved provenance.
-            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(saved_effort, model) != null) .saved else .model_default,
+            .effort_source = if (effort_flag) .flag else if (model_capability.startEffort(model_catalog.shipped, saved_effort, model) != null) .saved else .model_default,
         };
     }
 };
@@ -3737,7 +3738,8 @@ fn showResult(init: std.process.Init, requester: client.Requests, saved: *const 
     var read_buffer: client.ReplyBuffer = .{};
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var output = std.Io.File.stdout().writerStreaming(init.io, &output_buffer);
-    var renderer: AnswerRenderer = .{ .out = &output.interface, .home = init.environ_map.get("HOME") orelse "" };
+    const no_colour: []const u8 = init.environ_map.get("NO_COLOR") orelse "";
+    var renderer: AnswerRenderer = .{ .out = &output.interface, .home = init.environ_map.get("HOME") orelse "", .colour = no_colour.len == 0 };
     const answer = blk: {
         // Abandon retained text and pending writer bytes on failure. A renderer
         // transition may be buffered, so tracked style cannot prove terminal state.

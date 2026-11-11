@@ -2,6 +2,7 @@
 //! name, argument shape and one-line description. The screen's parser, the
 //! list typing "/" shows, Tab and /help all read it.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const cli_args = @import("cli_args.zig");
 const model_capability = @import("model_capability.zig");
@@ -448,7 +449,7 @@ pub const List = struct {
     /// `default`, which clears the choice.
     fn offerEfforts(self: *List, context: Context) void {
         const model = context.model orelse return;
-        for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
+        for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model_catalog.shipped, model, effort)) {
             self.offer(@tagName(effort), @tagName(effort), if (context.effort == effort) "current" else "");
         };
         self.offer("default", "default", "the model's own");
@@ -845,7 +846,7 @@ test "/effort lists the efforts the screen's model offers, the one in force mark
     const model = "gpt-5.5";
     const list = conversation.suggest("/effort ", .{ .model = model, .effort = .high }).?;
     var expected: usize = 0;
-    for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
+    for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model_catalog.shipped, model, effort)) {
         const entry = list.shown()[expected];
         try std.testing.expectEqualStrings(@tagName(effort), entry.word);
         try std.testing.expectEqualStrings(if (effort == .high) "current" else "", entry.description);
