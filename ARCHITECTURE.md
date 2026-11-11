@@ -2849,8 +2849,7 @@ Each request has a distinct receipt; a stale completion cannot reopen a closed r
 The owner keeps only requested/shown References, bounded by the retained view's maximum heading population, and releases the allocation when the last intent leaves or the frontend exits.
 Production history rebuilds reapply shown intent by matching Reference through the same authenticated reader; missing or changed References never open another row.
 Output leaves with the retained row or when closed (including hidden retained copies); neither intent nor output is saved, and the owner holds no output cache.
-The facts footer offers `ctrl+o close` in its right slot while a tool row is open and no work can be stopped, on the same line as `‹` and the Session name; it creates no separate status row.
-`ctrl+x stop` keeps its place while work runs.
+An open row is marked by its heading's selection background alone; the footer names no close key, because Ctrl-O acts on the lowest openable row in view, which need not be the open one.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
 Rui does not enable alternate scroll mode 1007.

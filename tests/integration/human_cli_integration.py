@@ -1535,7 +1535,7 @@ def renderer_cases():
             shown = tty.send("show invisible output\r", "output survived")
             assert all(value in shown for value in escaped), shown
             joined(tty)
-            shown = tty.send("\x0f", "ctrl+o close")
+            shown = tty.send("\x0f", "    Bash ")
             # Both the saved Tool Result and answer use the same display sink.
             assert all(value in shown for value in escaped), shown
             tty.caller.send_signal(signal.SIGINT)

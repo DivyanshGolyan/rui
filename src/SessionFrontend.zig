@@ -475,14 +475,13 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = "shift+↓" };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
-    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.right), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status) });
+    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status) });
     return self.widget();
 }
 
 /// What a click on the chrome runs: what its key runs.
 const Click = union(enum) {
     action: ConversationAction,
-    right,
     /// `+N more running · /status`.
     status,
     /// The key that ends what needs the person: Ctrl-R's retry, or the
@@ -500,7 +499,6 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             self.shown_notice.dismiss();
             switch (click) {
                 .action => |action| try self.perform(action),
-                .right => try self.perform(if (self.chrome.status.bar.close_tool) .expand else .stop),
                 .status => try self.clickCommand("/status"),
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
                     .retry => try self.perform(.recover),
@@ -858,7 +856,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         // A conversation reading itself again says so until Host requests go on.
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
-        .tool_open = (screen.view == .live or screen.view == .transcript) and self.app_content.document.hasOpenTools(),
         .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| FactsRow.text_column, self.app_caps.width),
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
@@ -5971,7 +5968,6 @@ test "tool folds share key and click ownership across live output, bounds, failu
         var saw_output = false;
         var saw_heading = false;
         var saw_second_line = false;
-        var saw_footer = false;
         for (0..24) |row| for (0..80) |col| {
             const cell = screen.readCell(@intCast(col), @intCast(row)).?;
             if (std.mem.eql(u8, cell.char.grapheme, "R") and col + 1 < 80 and std.mem.eql(u8, screen.readCell(@intCast(col + 1), @intCast(row)).?.char.grapheme, "E")) {
@@ -5992,13 +5988,8 @@ test "tool folds share key and click ownership across live output, bounds, failu
                 try std.testing.expectEqual(if (colour) self.app_content.colours.quiet else self.app_content.style.fg, cell.style.fg);
                 try std.testing.expectEqual(if (colour) self.app_content.colours.band else self.app_content.style.bg, cell.style.bg);
             }
-            if (std.mem.eql(u8, cell.char.grapheme, "‹")) {
-                saw_footer = true;
-                for ("ctrl+o close", 0..) |byte, index| try std.testing.expectEqualStrings(&.{byte}, screen.readCell(@intCast(67 + index), @intCast(row)).?.char.grapheme);
-            }
         };
-        try std.testing.expect(saw_output and saw_heading and saw_second_line and saw_footer);
-        try std.testing.expectEqualStrings("ctrl+o close", self.chrome.status.bar.right_key);
+        try std.testing.expect(saw_output and saw_heading and saw_second_line);
         // Close by click, then the twenty-row bound and exact omitted count.
         try Harness.click(&fixture, second);
         try Harness.click(&fixture, second);
