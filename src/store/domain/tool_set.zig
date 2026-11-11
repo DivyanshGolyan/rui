@@ -21,15 +21,15 @@ const lookup_set = rsql.Read(.{
 });
 
 const lookup_record = rsql.Read(.{
-    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND owner=?2 AND server=?3 AND description_content_id=?4 AND input_schema_content_id=?5",
-    .Args = struct { name: []const u8, owner: tool_catalog.Owner, server: []const u8, description: u64, input_schema: u64 },
+    .sql = "SELECT tool_record_id FROM tool_record WHERE name=?1 AND owner=?2 AND server=?3 AND read_only=?4 AND description_content_id=?5 AND input_schema_content_id=?6",
+    .Args = struct { name: []const u8, owner: tool_catalog.Owner, server: []const u8, read_only: bool, description: u64, input_schema: u64 },
     .Row = struct { tool_record_id: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_record = rsql.Write(.{
-    .sql = "INSERT INTO tool_record(tool_record_id,name,owner,server,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6)",
-    .Args = struct { id: u64, name: []const u8, owner: tool_catalog.Owner, server: []const u8, description: u64, input_schema: u64 },
+    .sql = "INSERT INTO tool_record(tool_record_id,name,owner,server,read_only,description_content_id,input_schema_content_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+    .Args = struct { id: u64, name: []const u8, owner: tool_catalog.Owner, server: []const u8, read_only: bool, description: u64, input_schema: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
@@ -78,14 +78,15 @@ const insert_catalog_member = rsql.Write(.{
     .sql = "INSERT INTO tool_set_member(tool_set_id,ordinal,tool_record_id) SELECT ?1,?2,tool.tool_record_id FROM tool_record tool " ++
         "JOIN content description ON description.content_id=tool.description_content_id " ++
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id " ++
-        "WHERE tool.name=?3 AND tool.owner=?4 AND tool.server=?5 AND description.digest=?6 AND description.byte_length=?7 AND description.private=0 " ++
-        "AND input_schema.digest=?8 AND input_schema.byte_length=?9 AND input_schema.private=0",
+        "WHERE tool.name=?3 AND tool.owner=?4 AND tool.server=?5 AND tool.read_only=?6 AND description.digest=?7 AND description.byte_length=?8 AND description.private=0 " ++
+        "AND input_schema.digest=?9 AND input_schema.byte_length=?10 AND input_schema.private=0",
     .Args = struct {
         set: u64,
         ordinal: u64,
         name: []const u8,
         owner: tool_catalog.Owner,
         server: []const u8,
+        read_only: bool,
         description: [32]u8,
         description_bytes: u64,
         input_schema: [32]u8,
@@ -136,13 +137,13 @@ pub fn ensureRecords(a: anytype, records: []const tool_catalog.Record, reads: *R
         reads.existing[index] = null;
         if (both) {
             known = true;
-            a.read(lookup_record, .{ .name = each.name, .owner = each.owner, .server = each.server, .description = content_ids[index][0], .input_schema = content_ids[index][1] }, &reads.existing[index]);
+            a.read(lookup_record, .{ .name = each.name, .owner = each.owner, .server = each.server, .read_only = each.read_only, .description = content_ids[index][0], .input_schema = content_ids[index][1] }, &reads.existing[index]);
         }
     }
     if (known) try a.run();
     for (records, 0..) |*each, index| if (reads.existing[index] == null) {
         const id = try a.identity(.tool_record_id);
-        a.write(insert_record, .{ .id = id, .name = each.name, .owner = each.owner, .server = each.server, .description = content_ids[index][0], .input_schema = content_ids[index][1] });
+        a.write(insert_record, .{ .id = id, .name = each.name, .owner = each.owner, .server = each.server, .read_only = each.read_only, .description = content_ids[index][0], .input_schema = content_ids[index][1] });
     };
 }
 
@@ -224,7 +225,7 @@ const RecordBatch = struct {
 /// A catalog set's members from ordinal ?2 on: each record and where
 /// its texts are.
 pub const catalog_records = rsql.Read(.{
-    .sql = "SELECT member.ordinal,tool.name,tool.owner,tool.server,description.content_id AS description_id,description.byte_length AS description_length," ++
+    .sql = "SELECT member.ordinal,tool.name,tool.owner,tool.server,tool.read_only,description.content_id AS description_id,description.byte_length AS description_length," ++
         "description.digest AS description_digest,description.private AS description_private,input_schema.content_id AS schema_id," ++
         "input_schema.byte_length AS schema_length,input_schema.digest AS schema_digest,input_schema.private AS schema_private " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
@@ -237,6 +238,7 @@ pub const catalog_records = rsql.Read(.{
         name: Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
         server: Bounded(tool_catalog.max_server_bytes),
+        read_only: bool,
         description_id: rsql.Positive,
         description_length: u64,
         description_digest: [32]u8,
@@ -261,6 +263,7 @@ pub fn insertCatalog(a: anytype, catalog: *const tool_catalog.Catalog, digest: *
         .name = each.name,
         .owner = each.owner,
         .server = each.server,
+        .read_only = each.read_only,
         .description = content_string.digest(each.description),
         .description_bytes = each.description.len,
         .input_schema = content_string.digest(each.input_schema),
@@ -295,7 +298,7 @@ pub const Selection = struct {
 };
 
 const selection_records = rsql.Read(.{
-    .sql = "SELECT tool.name,tool.owner,tool.server,description.digest AS description,input_schema.digest AS input_schema " ++
+    .sql = "SELECT tool.name,tool.owner,tool.server,tool.read_only,description.digest AS description,input_schema.digest AS input_schema " ++
         "FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "JOIN content description ON description.content_id=tool.description_content_id " ++
         "JOIN content input_schema ON input_schema.content_id=tool.input_schema_content_id WHERE member.tool_set_id=?1 ORDER BY tool.name",
@@ -304,6 +307,7 @@ const selection_records = rsql.Read(.{
         name: Bounded(tool_catalog.max_name_bytes),
         owner: tool_catalog.Owner,
         server: Bounded(tool_catalog.max_server_bytes),
+        read_only: bool,
         description: [32]u8,
         input_schema: [32]u8,
     },
@@ -322,6 +326,7 @@ const SavedSelection = struct {
                 .name = row.name.slice(),
                 .owner = row.owner,
                 .server = row.server.slice(),
+                .read_only = row.read_only,
                 .description = row.description,
                 .input_schema = row.input_schema,
             };
