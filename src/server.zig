@@ -4335,8 +4335,10 @@ test "MySQL Host readiness reports doublewrite OFF while SQLite stays unchanged"
     info.doublewrite = null;
     try response.render(host_reply.renderHostInfo, .{info});
     try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
-    // MySQL's bounded opaque id fits within SQLite's existing reply budget.
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), protocol.max_host_info_response_bytes);
+    // The common public bound includes the optional diagnostic even beside
+    // a maximum-width selector; SQLite omits that entire fragment.
+    const shape = protocol.host_info_reply;
+    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.doublewrite) + protocol.shapeBytes(shape.tail), protocol.max_host_info_response_bytes);
 }
 
 test "MCP socket capacity is reserved beside model and Bash descriptors" {

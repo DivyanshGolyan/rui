@@ -5,6 +5,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const gwidth = @import("terminal_width");
 const unicode = @import("terminal_unicode");
+const state_marks = @import("marks.zig");
 const draft_layout = @import("draft_layout.zig");
 const TerminalText = @import("TerminalText.zig");
 pub const Document = Sized(capacity, true);
@@ -76,7 +77,15 @@ fn hanging(line: []const u8, width: u16, user: bool) struct { bytes: usize, cell
     while (bytes < line.len and line[bytes] == ' ') bytes += 1;
     var cells: usize = bytes;
     var quoted = false;
-    for ([_][]const u8{ "›", "•", "◦", "✓", "!", "?", "-", "*", "$", "│" }) |glyph| {
+    const state_glyphs = comptime glyphs: {
+        var all: [state_marks.marks.values.len * 2][]const u8 = undefined;
+        for (state_marks.marks.values, 0..) |mark, index| {
+            all[index * 2] = mark.unicode;
+            all[index * 2 + 1] = mark.ascii;
+        }
+        break :glyphs all;
+    };
+    for ([_][]const u8{ "›", "•", "◦", "!", "-", "$", "│" } ++ state_glyphs) |glyph| {
         if (std.mem.startsWith(u8, line[bytes..], glyph) and std.mem.startsWith(u8, line[bytes + glyph.len ..], " ")) {
             bytes += glyph.len + 1;
             cells += 2;
@@ -807,9 +816,22 @@ test "an Action's wrapped description, command and stdin rows carry a wrap mark,
     }
 }
 
+test "every state mark hangs continuation text in both scripts" {
+    for (state_marks.marks.values) |mark| {
+        for ([_][]const u8{ mark.unicode, mark.ascii }) |glyph| {
+            var buffer: [64]u8 = undefined;
+            const line = try std.fmt.bufPrint(&buffer, "{s} long description", .{glyph});
+            const split = hanging(line, 16, false);
+            try std.testing.expectEqual(glyph.len + 1, split.bytes);
+            try std.testing.expectEqual(@as(u16, 2), split.cells);
+            try std.testing.expectEqualStrings("long description", line[split.bytes..]);
+        }
+    }
+}
+
 test "vaxis wraps reading text at words with hanging indentation" {
     var view: Sized(256, false) = .{};
-    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n• one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
+    try view.append("  The plain rui command isn't on PATH\n0123456789abcdef next\n› a longword\n  supercalifragilistic x\n⠹ one two three four\n中中中中中中中中Z\n  │ alpha beta gamma");
     try view.prepare();
     const layout: Layout = .{ .width = 16, .method = .unicode };
     var test_screen: TestScreen = undefined;
@@ -819,7 +841,7 @@ test "vaxis wraps reading text at words with hanging indentation" {
         "0123456789abcdef", "next",
         "› a longword",
         "  supercalifragi", "  listic x",
-        "• one two three",
+        "⠹ one two three",
         "  four",
         "中中中中中中中中",
         "Z",

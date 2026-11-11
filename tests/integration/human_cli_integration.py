@@ -37,10 +37,10 @@ def untimed(row):
     return match.group(1) if match else row
 
 
-# What work under way says: the running call's row, "• Run tests · 42s", or
-# the conversation's last line, "• Waiting · 12s",
-# "! Rate limited · retry 2 in 18s", "Stopping…".
-LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
+# What work under way says: the running call's row, "⠹ Run tests · 42s", or
+# the conversation's last line, "⠹ Waiting · 12s",
+# "⠹ Rate limited · retry 2 in 18s", "Stopping…".
+LIVE_LINE = re.compile(r"^(?:[⠹◌?] .+ · (?:\d|retry )|Stopping…)", re.M)
 # What the line under a draft beside an Action says once Enter there denies
 # the Action and sends the draft as the reason.
 REASON = "enter denies the call and sends this"
@@ -57,7 +57,7 @@ def send_reason(master, ready, description):
     beside the Action; return the frames up to the Action's denial."""
     shown = action_ready(ready, master, shows=reason_shown)
     os.write(master, b"\r")
-    return shown + read_terminal(master, f"• {description} — Denied")
+    return shown + read_terminal(master, f"■ {description} — Denied")
 
 
 def time_limit(milliseconds):
@@ -1146,7 +1146,7 @@ def silent_read_edit_cases():
 def wait_for_listed_call(tty):
     # A matching Bash projection supplies the unresolved row's clock. The
     # command stays held until after traversal; a bare heading can precede claim.
-    running = re.compile(r"• Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
 
 
@@ -1158,16 +1158,16 @@ def listed_call_readiness_cases():
         def __init__(self, elapsed):
             self.capture = ScreenCapture(80, 24)
             self.frames = (
-                "• Held call\n• Queued · 0s",
+                "⠹ Held call\n◌ Queued · 0s",
                 "✓ Held call · 42s",
-                "• Other call · 42s",
-                "prefix • Held call · 42s",
-                "• Held call · 42s extra",
-                "• Held call · " + elapsed,
+                "⠹ Other call · 42s",
+                "prefix ⠹ Held call · 42s",
+                "⠹ Held call · 42s extra",
+                "⠹ Held call · " + elapsed,
             )
             self.offered = None
             # Accumulated output already contains a timed row: it is not current.
-            self.frame("• Held call · 99s")
+            self.frame("⠹ Held call · 99s")
             self.frame(self.frames[0])
 
         def frame(self, text):
