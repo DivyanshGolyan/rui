@@ -20,8 +20,8 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-// Unit 4: main format 61 + 1.
-pub const schema_version: u32 = 62;
+// Unit 4: main format 62 + 1.
+pub const schema_version: u32 = 63;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -49,7 +49,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
-    .{ .schema_version = 62, .digest = 0x3310b650e3928cb8 },
+    .{ .schema_version = 62, .digest = 0x3d68029b9bcbfdd0 },
+    .{ .schema_version = 63, .digest = 0x78d6690bc35c51b5 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -352,21 +353,39 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_tool_call DROP CHECK model_tool_call_chk_3, ADD CHECK(description IS NULL OR OCTET_LENGTH(description) BETWEEN 1 AND 200)",
         },
     },
-    // Schema 62 (base 61 + 1): immutable effort-refusal facts and wire 12.
+    // Schema 62 (D184): the frozen MCP ordering hint is record identity.
+    // Existing records remain read_only=0 with their original digests.
+    // MySQL's original CHECK names run through 5 after the step to 52;
+    // append the read_only CHECK as 6, leaving existing names untouched.
     .{
         .from = 61,
         .sqlite = &.{
-            "ALTER TABLE session_change RENAME TO session_change_before_62",
+            "ALTER TABLE tool_record RENAME TO tool_record_61",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n read_only INTEGER NOT NULL DEFAULT 0 CHECK(read_only IN (0,1) AND (read_only=0 OR owner='mcp')),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,owner,server,read_only,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,owner,server,read_only,description_content_id,input_schema_content_id) SELECT tool_record_id,name,owner,server,0,description_content_id,input_schema_content_id FROM tool_record_61",
+            "DROP TABLE tool_record_61",
+        },
+        .mysql = &.{
+            "ALTER TABLE tool_record ADD COLUMN read_only TINYINT NOT NULL DEFAULT 0 AFTER server",
+            "ALTER TABLE tool_record DROP INDEX name, ADD UNIQUE(name,owner,server,read_only,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record ADD CHECK(read_only IN (0,1) AND (read_only=0 OR owner='mcp'))",
+        },
+    },
+    // Schema 63 (base 62 + 1): immutable effort-refusal facts and wire 12.
+    .{
+        .from = 62,
+        .sqlite = &.{
+            "ALTER TABLE session_change RENAME TO session_change_before_63",
             "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n provider_text TEXT CHECK(provider_text IS NULL OR length(CAST(provider_text AS BLOB))<=520),\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) STRICT, WITHOUT ROWID",
-            "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change_before_62",
-            "DROP TABLE session_change_before_62",
+            "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change_before_63",
+            "DROP TABLE session_change_before_63",
             "UPDATE store_meta SET meta_value='12' WHERE meta_key='wire_version' AND meta_value='11'",
         },
         .mysql = &.{
-            "CREATE TABLE session_change_62(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n revision BIGINT NOT NULL,\n field VARCHAR(24) NOT NULL,\n changed_at BIGINT NOT NULL,\n provider_text TEXT,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK(position>0),\n CHECK(ordinal>=0),\n CHECK(revision>1),\n CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused')),\n CHECK(changed_at>0),\n CHECK(provider_text IS NULL OR OCTET_LENGTH(provider_text)<=520),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
-            "INSERT INTO session_change_62(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change",
+            "CREATE TABLE session_change_63(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n revision BIGINT NOT NULL,\n field VARCHAR(24) NOT NULL,\n changed_at BIGINT NOT NULL,\n provider_text TEXT,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK(position>0),\n CHECK(ordinal>=0),\n CHECK(revision>1),\n CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused')),\n CHECK(changed_at>0),\n CHECK(provider_text IS NULL OR OCTET_LENGTH(provider_text)<=520),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "INSERT INTO session_change_63(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change",
             "DROP TABLE session_change",
-            "RENAME TABLE session_change_62 TO session_change",
+            "RENAME TABLE session_change_63 TO session_change",
             "UPDATE store_meta SET meta_value='12' WHERE meta_key='wire_version' AND meta_value='11'",
         },
     },
@@ -589,7 +608,63 @@ const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1,
 /// store_meta's keys, as bootstrap writes them: a closed set, so a key is
 /// a tag, which MySQL can key. `store_id` is the Store's own random id,
 /// drawn once when it is created and never changed (D204, format 54).
-const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format", "store_id" };
+pub const MetaKey = enum { wire_version, store_selector, format, store_id };
+const meta_keys = blk: {
+    var names: [std.enums.values(MetaKey).len][]const u8 = undefined;
+    for (std.enums.values(MetaKey), 0..) |key, index| names[index] = @tagName(key);
+    break :blk names;
+};
+pub const MetaPresence = std.EnumSet(MetaKey);
+
+const MetaSeed = struct {
+    key: MetaKey,
+    value: union(enum) { binding: u8, literal: []const u8, random_id },
+};
+
+/// One seed policy, with engine-owned bindings/randomness. Both engines
+/// bind the canonical selector independently of the durable random id.
+pub fn metaSeed(comptime dialect: rsql.Dialect) []const MetaSeed {
+    return comptime blk: {
+        var seed: []const MetaSeed = &.{};
+        for (std.enums.values(MetaKey)) |key| {
+            const value: @FieldType(MetaSeed, "value") = switch (key) {
+                .wire_version => if (dialect == .sqlite) .{ .binding = 1 } else .{ .literal = wire_version },
+                .store_selector => .{ .binding = 2 },
+                .format => .{ .literal = format_text },
+                .store_id => if (dialect == .sqlite) .random_id else .{ .binding = 1 },
+            };
+            seed = seed ++ .{MetaSeed{ .key = key, .value = value }};
+        }
+        break :blk seed;
+    };
+}
+
+/// Draw only when a missing id will be inserted. No additional id cache.
+pub fn drawStoreId(io: std.Io) [2 * store_id_bytes]u8 {
+    var random: [store_id_bytes]u8 = undefined;
+    io.random(&random);
+    return std.fmt.bytesToHex(random, .lower);
+}
+
+/// MySQL's missing-key repair; transaction and ownership stay with admission.
+pub fn writeMissingMeta(w: *std.Io.Writer, seen: MetaPresence, id: *const [2 * store_id_bytes]u8, selector: []const u8) !void {
+    for (comptime metaSeed(.mysql)) |entry| {
+        if (seen.contains(entry.key)) continue;
+        const value = switch (entry.value) {
+            .literal => |value| value,
+            .binding => |binding| if (binding == 2) selector else id,
+            .random_id => unreachable,
+        };
+        if (entry.key == .store_selector) {
+            try w.writeAll("INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',_utf8mb4 X'");
+            try @import("mysql_literal.zig").writeHex(w, value);
+            try w.writeAll("' COLLATE utf8mb4_0900_bin);");
+            continue;
+        }
+        // Other values are schema literals or a lower-case hexadecimal id.
+        try w.print("INSERT INTO store_meta(meta_key,meta_value) VALUES('{s}','{s}');", .{ @tagName(entry.key), value });
+    }
+}
 
 /// The bytes of one MySQL `content_chunk` row; the last of a content's
 /// chunks holds the rest. Under 16 MiB, so a chunk is one packet.
@@ -660,11 +735,12 @@ pub const tables = [_]Table{
                 .type = .{ .text = .{ .min = 0, .max = tool_catalog.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
+            .{ .name = "read_only", .type = .flag, .default = "0", .check = "(read_only=0 OR owner='mcp')" },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "owner", "server", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "owner", "server", "read_only", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),
@@ -2072,8 +2148,21 @@ const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// a wire bump is no schema change.
 /// The Store id is 16 bytes from SQLite's randomness, which it seeds from
 /// the OS, in lower-case hex, as `migrations` writes it too.
-const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('" ++ meta_keys[0] ++ "',?1),('" ++ meta_keys[1] ++ "',?2),('" ++ meta_keys[2] ++ "','" ++ format_text ++
-    "'),('" ++ meta_keys[3] ++ "',lower(hex(randomblob(" ++ std.fmt.comptimePrint("{d}", .{store_id_bytes}) ++ "))))";
+pub fn sqliteMetaSeedSql() [:0]const u8 {
+    return comptime blk: {
+        var sql: []const u8 = "INSERT INTO store_meta(meta_key,meta_value) VALUES";
+        for (metaSeed(.sqlite), 0..) |entry, index| {
+            sql = sql ++ (if (index == 0) "" else ",") ++ "('" ++ @tagName(entry.key) ++ "',";
+            sql = sql ++ switch (entry.value) {
+                .binding => |slot| std.fmt.comptimePrint("?{d}", .{slot}),
+                .literal => |value| "'" ++ value ++ "'",
+                .random_id => std.fmt.comptimePrint("lower(hex(randomblob({d})))", .{store_id_bytes}),
+            } ++ ")";
+        }
+        break :blk sql ++ "";
+    };
+}
+const store_meta_sql = sqliteMetaSeedSql();
 /// The bytes of a Store id; store_meta holds them as twice as many hex digits.
 pub const store_id_bytes = 16;
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };

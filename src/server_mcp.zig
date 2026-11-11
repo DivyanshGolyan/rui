@@ -215,6 +215,11 @@ noinline fn prepare(host: *Host, active: *Active) !void {
         .id = 1,
         .server_name = config.name,
         .timeout_ms = input.timeout_ms,
+        .retention = .{
+            .queue = host.retention,
+            .action_id = active.binding.action_id,
+            .attempt_ordinal = @import("attempt.zig").action_attempt_ordinal,
+        },
     }, nowMs(host));
     active.started = true;
 }

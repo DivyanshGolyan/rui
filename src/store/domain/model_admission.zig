@@ -679,8 +679,14 @@ const IdleChecks = struct {
     }
 
     fn settle(checks: *const IdleChecks, reader: anytype) !void {
+        if (!try checks.settled()) try validateBlockedToolCalls(reader);
+    }
+
+    /// Whether the checks end here; false when a blocked Operation's
+    /// calls are still to be read, in rounds of their own.
+    fn settled(checks: *const IdleChecks) error{CorruptStore}!bool {
         if (checks.disagreeing != null) return error.CorruptStore;
-        if (checks.blocked.row != null) try validateBlockedToolCalls(reader);
+        return checks.blocked.row == null;
     }
 };
 
@@ -827,28 +833,59 @@ pub const DispatchWork = struct {
     pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true };
 };
 
-/// Reads `DispatchWork` in one round: the selections the slot-free, Bash,
-/// message and tool-continuation scans each open with, queued by those
-/// scans' own owners, and the `IdleChecks` a model admission that selects
-/// nothing would run, settled here when either has no work.
+/// The reads `DispatchWork` takes, as one round's statements: the
+/// selections the slot-free, Bash, message and tool-continuation scans
+/// each open with, queued by those scans' own owners, and the
+/// `IdleChecks` a model admission that selects nothing would run.
+pub const DispatchSurvey = struct {
+    actions: action_domain.WorkProbe = .{},
+    message: runnable_selection.Result = undefined,
+    continuation: runnable_selection.Result = undefined,
+    idle: IdleChecks = .{},
+
+    /// The statement whose failed step names the read's failure.
+    pub const named = .{.{ blocked_operation, error.CallReadFailed }};
+
+    pub fn queue(survey: *DispatchSurvey, reader: anytype, paused: bool) void {
+        survey.actions.queue(reader);
+        queueSelection(reader, if (paused) .open_turn_message else .message, &survey.message);
+        queueSelection(reader, .tool_continuation, &survey.continuation);
+        survey.idle.queue(reader);
+    }
+
+    /// Whether the idle checks, which run when either selection found
+    /// nothing, still have a blocked Operation's calls to read.
+    fn unsettled(survey: *const DispatchSurvey) error{CorruptStore}!bool {
+        if (survey.message != null and survey.continuation != null) return false;
+        return !try survey.idle.settled();
+    }
+
+    /// The round's answer once its statements stepped; null when the
+    /// idle checks need rounds of their own (`dispatchWork` takes them).
+    pub fn work(survey: *const DispatchSurvey) error{CorruptStore}!?DispatchWork {
+        if (try survey.unsettled()) return null;
+        return survey.found();
+    }
+
+    fn found(survey: *const DispatchSurvey) DispatchWork {
+        return .{
+            .core = survey.actions.core(),
+            .mcp = survey.actions.mcp(),
+            .bash = survey.actions.bash(),
+            .message = survey.message != null,
+            .tool_continuation = survey.continuation != null,
+        };
+    }
+};
+
+/// Reads `DispatchWork`: `DispatchSurvey`'s round, then the blocked
+/// calls' outcomes when the idle checks ask for them.
 pub fn dispatchWork(reader: anytype, paused: bool) !DispatchWork {
-    var actions: action_domain.WorkProbe = .{};
-    var message: runnable_selection.Result = undefined;
-    var continuation: runnable_selection.Result = undefined;
-    var idle: IdleChecks = .{};
-    actions.queue(reader);
-    queueSelection(reader, if (paused) .open_turn_message else .message, &message);
-    queueSelection(reader, .tool_continuation, &continuation);
-    idle.queue(reader);
-    try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
-    if (message == null or continuation == null) try idle.settle(reader);
-    return .{
-        .core = actions.core(),
-        .mcp = actions.mcp(),
-        .bash = actions.bash(),
-        .message = message != null,
-        .tool_continuation = continuation != null,
-    };
+    var survey: DispatchSurvey = .{};
+    survey.queue(reader, paused);
+    try store_access.runNamed(reader, DispatchSurvey.named, error.TurnReadFailed);
+    if (try survey.unsettled()) try validateBlockedToolCalls(reader);
+    return survey.found();
 }
 
 /// Due retries in id order after `after`, with their Session: one page.
