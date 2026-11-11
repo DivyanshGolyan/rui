@@ -69,7 +69,7 @@ jobs:
           CANDIDATE_REF: ${{ github.sha }}
           # A PR's base.sha can trail the main its merge commit was built on.
           BASE: ${{ github.event_name == 'pull_request' && 'HEAD^1' || inputs.base }}
-          DRAFT_RUN: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft || false }}
+          DRAFT: ${{ github.event.pull_request.draft || false }}
           EVENT_NAME: ${{ github.event_name }}
           PROMOTION: ${{ inputs.promotion || false }}
         run: |
@@ -82,81 +82,19 @@ jobs:
           python3 - <<'PY'
           import json, os, sys
           sys.path.insert(0, 'tests/ci')
-          from docs_only import ChangeKind, classify
-          from qualification import shards, split_build
-          from select_tests import CHECK_COVERS, live_mysql_suites
-          p = json.load(open('selection.json'))
-          kind = (classify(p['base'], p['head']) if os.environ['EVENT_NAME'] == 'pull_request'
-                  else ChangeKind.NORMAL)
-          # Future selector obligations must not be erased by the path allowlist.
-          if any(p[key] for key in ('targets', 'native_targets', 'native_required', 'mac_required', 'upgrade_required',
-                                    'server_targets', 'cache_execution_checks', 'typecheck_macos', 'linux_memory_checks',
-                                    'manual_checks')):
-              kind = ChangeKind.NORMAL
-          p['change_kind'] = kind.value
-          draft_run = os.environ['DRAFT_RUN'] == 'true'
-          p['draft_run'] = draft_run
-          ready_pr = os.environ['EVENT_NAME'] == 'pull_request' and not draft_run
-          # Listed flakes (quarantine.json) never excuse a strict change; promotion
-          # still blocks on a listed flake's second consecutive failure.
-          quarantine = ('promotion' if os.environ['PROMOTION'] == 'true'
-                        else 'admission' if p['retry'] else 'off')
-          if draft_run or kind == ChangeKind.DOCUMENTATION:
-              p['targets'] = []
-              p['native_targets'] = []
-              p['server_targets'] = []
-              p['cache_execution_checks'] = False
-              p['typecheck_macos'] = False
-              p['linux_memory_checks'] = False
-              p['retry'] = False
-              quarantine = 'off' if draft_run else quarantine
-          elif os.environ['PROMOTION'] == 'true':
-              # The batch's full suite on both systems, plus the selected
-              # standalone targets. check-full omits the portable logic root,
-              # the frame gate and the Debug recovery, so they run beside it.
-              core = {'check-full', 'test-logic', 'admission-debug-integration'}
-              p['targets'] = sorted((set(p['targets']) - CHECK_COVERS - {'check'}) | core | {'stack-frames'})
-              p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets'], p['mysql_suites']))
-              p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS - {'check'}) | core)
-              p['retry'] = False
-          elif ready_pr:
-              # Qualify the tested source tree, not the later final squash SHA.
-              # Linux predicts Mac except where code may differ by platform;
-              # promotion runs Mac for every batch.
-              p['native_targets'] = (p['native_targets'] or ['check']) if p['mac_required'] else []
-              p['retry'] = False
-          else:
-              # Manual non-promotion runs retain Linux-only feedback.
-              p['native_targets'] = []
-          # PR integration codegen is fast; the LLVM stack oracle remains a
-          # required, independent job rather than a dependency of every shard.
-          p['linux_codegen'] = (os.environ['EVENT_NAME'] == 'pull_request'
-                                  and bool({'check', 'stack-frames'} & set(p['targets'])))
-          if p['linux_codegen']:
-              p['targets'] = [t for t in p['targets'] if t != 'stack-frames']
-          p['native_required'] = bool(p['native_targets'])
-          p['upgrade_required'] = ready_pr and kind == ChangeKind.NORMAL and p['upgrade_required']
+          from docs_only import classify
+          from ci_plan import plan
+          selection = json.load(open('selection.json'))
+          kind = classify(selection['base'], selection['head'])
+          result = plan(selection, event_name=os.environ['EVENT_NAME'],
+                        draft=os.environ['DRAFT'] == 'true', promotion=os.environ['PROMOTION'] == 'true',
+                        change_kind=kind)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-              print('change_kind=' + kind.value, file=f)
-              print('draft_run=' + str(draft_run).lower(), file=f)
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
-              print('targets=' + json.dumps(p['targets']), file=f)
-              print('native_targets=' + json.dumps(p['native_targets']), file=f)
-              print('linux_matrix=' + json.dumps(shards(p['targets'], mysql_suites=p['mysql_suites'])), file=f)
-              print('linux_split=' + str(split_build(p['targets'])).lower(), file=f)
-              print('macos_split=' + str(split_build(p['native_targets'])).lower(), file=f)
-              print('linux_codegen=' + str(p['linux_codegen']).lower(), file=f)
-              print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites'])), file=f)
-              print('native=' + str(p['native_required']).lower(), file=f)
-              print('upgrade=' + str(p['upgrade_required']).lower(), file=f)
-              print('retry=' + str(p['retry']).lower(), file=f)
-              print('quarantine=' + quarantine, file=f)
-              print('linux_memory=' + str(p['linux_memory_checks']).lower(), file=f)
-              print('cache_execution=' + str(p['cache_execution_checks']).lower(), file=f)
-              print('typecheck_macos=' + str(p['typecheck_macos']).lower(), file=f)
-              print('policy_skips=' + json.dumps(p['policy_skips']), file=f)
+              for key, value in result.outputs.items():
+                  print(key + '=' + (value if isinstance(value, str) else json.dumps(value)), file=f)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-              print('Selection (not acceptance):\n```json\n' + json.dumps(p, indent=2) + '\n```', file=f)
+              print('Selection (not acceptance):\n```json\n' + json.dumps(result.selection, indent=2) + '\n```', file=f)
           PY
   policy:
     needs: plan

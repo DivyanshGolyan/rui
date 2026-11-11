@@ -13,8 +13,8 @@ Draft CI runs only the plan (candidate, whitespace and selection checks) and che
 The opener comments `@codex review`; Codex reviews drafts only on request.
 Push fixes to the draft and comment `@codex review` after every push.
 Once Codex is clean on the current head, run `python3 tests/ci/open_pr.py ready` to start the full selected suite; it refuses while the PR's head on GitHub differs from the committed checkout or changes are uncommitted.
-After readiness, a fix whose diff since Codex's clean review changes only test code (files under `tests/`, test-only Zig files, or only `test "..."` blocks in a source file) merges once `admission` is green, without another Codex review.
-Any non-test change needs Codex clean on the new head again.
+After readiness, a fix whose diff since Codex's clean review changes only test files or blocks (`tests/**/test_*.py`, integration fixtures and their data, `*_test.zig`/test-only Zig roots, or `test "..."` blocks in source) merges once `admission` is green, without another Codex review.
+Any non-test change, including CI, build, release or other operational scripts (the rest of `tests/ci/`, workflows and `build.zig`), needs Codex clean on the new head again.
 Performance changes include A/B numbers, and TUI changes include a plain-PTY capture using [verify-rui](../../.claude/skills/verify-rui/SKILL.md).
 Keep published commits unchanged so their CI evidence retains its SHA.
 
