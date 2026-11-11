@@ -2608,6 +2608,7 @@ fn showStaged(self: *Self) !void {
     defer self.init.gpa.destroy(document);
     const backward = page.direction == .backward;
     var complete = true;
+    var inserted: usize = 0;
     for (0..result.row_count) |step| {
         const row = &result.rows[if (backward) result.row_count - step - 1 else step];
         document.* = .{ .sidenotes = true, .quotes = true, .width_method = self.screen.vx.caps.unicode };
@@ -2635,7 +2636,11 @@ fn showStaged(self: *Self) !void {
             complete = false;
             break;
         }
+        inserted += 1;
     }
+    // A fill the window had no room for waits like a failed one: asking for
+    // the same page again would read it again and place nothing.
+    if (!complete and inserted == 0) self.reading.fills = self.reading.fills.failed(read, page);
     if (backward) {
         window.low = if (complete) result.low else if (window.count != 0) window.entries[0].key else window.low;
         window.at_start = complete and result.at_start;
@@ -2655,18 +2660,23 @@ fn showStaged(self: *Self) !void {
     self.dirty = true;
 }
 
-/// Evict only outside the visible rows and their three-screen margins. A
-/// page larger than the bound stops at its last inserted key; need() resumes
-/// there later instead of discarding an anchor or silently skipping history.
+/// Makes room on the side away from the insertion only, so the window stays
+/// one contiguous run. A fill evicts only outside the view and its loading
+/// margins and otherwise stops at its last inserted key. A row arriving at
+/// the end being followed always goes in: capacity outranks the margin, and
+/// the oldest rows leave even from the view the new row is about to replace.
 fn insertFeed(self: *Self, entry: feed_window.Entry, backward: bool) bool {
     const window = &self.screen.feed;
     while (true) {
         const inserted = if (backward) window.prepend(&.{entry}) else window.append(&.{entry});
-        if (inserted) |_| return true else |_| {
-            const trim = self.screen.anchor.trim(window.heights(self.screen.textLayout()), self.screen.height, window.count -| 1);
-            if (trim.drop_front == 0 and trim.drop_back == 0) return false;
-            window.trim(trim.drop_front, trim.drop_back);
+        if (inserted) |_| return true else |_| {}
+        var trim = self.screen.anchor.trim(window.heights(self.screen.textLayout()), self.screen.height, window.count -| 1);
+        if (backward) trim.drop_front = 0 else trim.drop_back = 0;
+        if (trim.drop_front == 0 and trim.drop_back == 0) {
+            if (backward or window.count == 0 or !self.screen.anchor.following()) return false;
+            trim.drop_front = 1;
         }
+        window.trim(trim.drop_front, trim.drop_back);
     }
 }
 
@@ -5491,6 +5501,43 @@ fn firstRows(text: []const u8, count: usize) []const u8 {
     var end: usize = 0;
     for (0..count) |_| end = 1 + (std.mem.indexOfScalarPos(u8, text, end, '\n') orelse return text);
     return text[0..end];
+}
+
+test "SessionFrontend feed keeps following when full rows leave no room inside the margins" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const window = &held.screen.feed;
+    const dense = try std.testing.allocator.alloc(u8, 3 * 30_000);
+    defer std.testing.allocator.free(dense);
+    for (dense, 0..) |*byte, index| byte.* = if (index % 100 == 99) '\n' else "abc"[index / 30_000];
+    try fixture.page(.opening, &.{ .{ .key = 10, .text = dense[0..30_000] }, .{ .key = 11, .text = "between\n" }, .{ .key = 12, .text = dense[30_000..60_000] } }, true, true);
+    try std.testing.expectEqual(@as(usize, 3), window.count);
+    // On a pane so tall that every row is inside its loading margin, a row
+    // as large as the two before it arrives: the oldest leaves, it goes in.
+    _ = try held.shown();
+    held.screen.height = 500;
+    try fixture.page(.scan, &.{.{ .key = 13, .text = dense[60_000..] }}, false, true);
+    try std.testing.expect(held.screen.anchor.following() and window.at_end and !window.at_start);
+    try std.testing.expectEqual(@as(u64, 11), window.entries[0].key.position);
+    try std.testing.expectEqual(@as(u64, 13), window.entries[window.count - 1].key.position);
+    // The margin wants the row above back, and it no longer fits. Its fill
+    // places nothing, then waits for a scroll instead of being read again
+    // and again.
+    try std.testing.expectEqual(@as(?feed_reads.Read, .fill_above), idleRead(&held.self));
+    try fixture.page(.fill_above, &.{.{ .key = 10, .text = dense[0..30_000] }}, true, false);
+    try std.testing.expectEqual(@as(u64, 11), window.entries[0].key.position);
+    try std.testing.expectEqual(@as(?feed_reads.Read, null), idleRead(&held.self));
+    try held.self.scroll(false, 1);
+    try std.testing.expectEqual(@as(?feed_reads.Read, .fill_above), idleRead(&held.self));
+}
+
+/// The read the policy picks with no scan due.
+fn idleRead(self: *Self) ?feed_reads.Read {
+    var state = self.feedState();
+    state.now_ns = 0;
+    state.scan_due_ns = 1;
+    return FeedPolicy.nextRead(state);
 }
 
 test "SessionFrontend feed opens full bottom aligned and page round trip is an identical frame" {
