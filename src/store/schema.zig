@@ -368,7 +368,8 @@ pub const migrations = [_]Migration{
             "CREATE INDEX action_operation_indeterminate ON action_operation(session_ref,parent_operation_id,call_ordinal) WHERE resolution_code='indeterminate'",
         },
         .mysql = &.{
-            "ALTER TABLE action_operation ADD COLUMN full_content_id BIGINT NULL, ADD FOREIGN KEY(full_content_id) REFERENCES content(content_id)",
+            // Fresh MySQL DDL places generated index columns after stored columns.
+            "ALTER TABLE action_operation ADD COLUMN full_content_id BIGINT NULL AFTER approval_position, ADD FOREIGN KEY(full_content_id) REFERENCES content(content_id)",
         },
     },
 };
