@@ -18,6 +18,7 @@ const Chip = @import("Chip.zig");
 const Footer = @import("widgets/Footer.zig");
 const session_line = @import("session_line.zig");
 const Self = @This();
+const empty_marker: vxfw.Text = .{ .text = "" };
 
 /// The screen's actions a click runs.
 pub const Actions = struct {
@@ -57,7 +58,7 @@ pub const Identity = struct {
 
 /// What the screen read for this frame.
 pub const View = struct {
-    /// Scrolled back from the latest: no activity tail, the marker shows.
+    /// Anchor held away from the end: the reserved marker row shows its chip.
     browsing: bool = false,
     /// Transcript entries that arrived below while browsing.
     new_entries: u64 = 0,
@@ -134,9 +135,10 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
     screen.input.facts = .{ .userdata = self, .drawFn = drawFooter };
     screen.input.status = self.state.widget();
-    screen.tail = if (view.browsing) null else self.activity.widget();
+    // Activity is the Feed's last entry, not a separate shell row.
+    screen.tail = null;
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
-    screen.marker = if (view.browsing) self.marker.widget() else null;
+    screen.marker = if (view.browsing) self.marker.widget() else empty_marker.widget();
     screen.overlay = if (view.shortcuts) self.shortcuts.widget() else view.overlay;
 }
 
@@ -242,8 +244,9 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     defer std.testing.allocator.destroy(document);
     document.* = .{};
     try document.append("› Port the overview\nI'll start.\n");
-    var transcript: @import("Transcript.zig") = .{ .document = document };
-    var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
+    var transcript: @import("DocumentView.zig") = .{ .document = document };
+    var facade: AppScreen.Content = .{ .shown = transcript.widget() };
+    var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     self.activity.work = .{ .mark = "⠹", .tone = .normal, .words = "Waiting", .clock = .{ .elapsed = 12 } };
     self.activity.live.count = 0;
     self.activity.live.total = 5;
@@ -254,15 +257,12 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     const view: View = .{ .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries", .stoppable = true, .facts = .{ .current = .{ .name = "Fix flaky store test", .model = "gpt-6.1-sol", .effort = .high, .left = 62 } }, .width = 80 };
 
     self.place(&screen, view);
-    try std.testing.expect(screen.tail != null and screen.marker == null);
+    try std.testing.expect(screen.tail == null and screen.marker != null);
     const live = try screen.widget().draw(draw);
-    // Tail: `+5 more running · /status` then the work line, right above the input at 19.
-    try std.testing.expectEqual(@as(i17, 17), live.children[0].surface.children[0].surface.children[0].surface.children[1].origin.row);
-    try clickAt(live, arena.allocator(), &ctx, 17, 4);
     try clickAt(live, arena.allocator(), &ctx, 22, 1);
     try clickAt(live, arena.allocator(), &ctx, 22, 55);
     try clickAt(live, arena.allocator(), &ctx, 22, 70);
-    try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.status_page));
+    try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.status_page));
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.back));
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.key));
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.stop));
@@ -287,8 +287,9 @@ test "the status row shows the notice under what needs the person, and the ? sho
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    var transcript: @import("Transcript.zig") = .{ .document = document };
-    var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
+    var transcript: @import("DocumentView.zig") = .{ .document = document };
+    var facade: AppScreen.Content = .{ .shown = transcript.widget() };
+    var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     const palette: vxfw.Text = .{ .text = "/model" };
 
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
@@ -313,8 +314,9 @@ test "SessionChrome footer keeps identity left and active keys right, with back 
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    var transcript: @import("Transcript.zig") = .{ .document = document };
-    var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
+    var transcript: @import("DocumentView.zig") = .{ .document = document };
+    var facade: AppScreen.Content = .{ .shown = transcript.widget() };
+    var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };

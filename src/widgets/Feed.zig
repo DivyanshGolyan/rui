@@ -2,8 +2,8 @@
 const std = @import("std");
 
 /// Key is an integer, or a value with `pub fn order(Key, Key) std.math.Order`.
-/// Entries have unique, strictly increasing keys. Each entry has at least one
-/// logical line, with positive wrapped-row counts at the current width.
+/// Entries have unique, strictly increasing keys. An empty line slice is a hidden keyed entry; visible logical lines
+/// have positive wrapped-row counts at the current width.
 /// Slices are borrowed only during calls. Work is O(total logical lines), with
 /// constant scratch space, no allocations and no cached layout to invalidate.
 pub fn Feed(comptime Key: type) type {
@@ -152,7 +152,7 @@ pub fn Feed(comptime Key: type) type {
             const true_edge = if (up) edges.start else edges.end;
             const extra: i64 = @intCast(if (true_edge) 0 else @min(amount - moved, bank_screens * @as(u64, height)));
             self.banked_rows = if (up) -extra else extra;
-            if (entries.len == 0) return; // Keep a missing keyed anchor, never silently follow.
+            if (layout.total == 0) return; // Hidden entries cannot become a visual anchor.
             if (!up and target >= bottom and edges.end) {
                 self.follow();
             } else {
@@ -165,14 +165,14 @@ pub fn Feed(comptime Key: type) type {
         const Point = struct { line: u32, row: u32 };
 
         fn clamp(lines: []const u32, line: u32, row: u32) Point {
-            std.debug.assert(lines.len > 0 and lines.len <= std.math.maxInt(u32));
+            if (lines.len == 0) return .{ .line = 0, .row = 0 };
+            std.debug.assert(lines.len <= std.math.maxInt(u32));
             const selected: u32 = @intCast(@min(line, lines.len - 1));
             std.debug.assert(lines[selected] > 0);
             return .{ .line = selected, .row = @min(row, lines[selected] - 1) };
         }
 
         fn entryRows(entry: Entry) u64 {
-            std.debug.assert(entry.lines.len > 0);
             var total: u64 = 0;
             for (entry.lines) |rows| {
                 std.debug.assert(rows > 0);
@@ -194,13 +194,15 @@ pub fn Feed(comptime Key: type) type {
             var total: u64 = 0;
             var top: ?u64 = null;
             for (entries) |entry| {
-                if (self.anchor == .at and top == null and order(entry.key, self.anchor.at.key) != .lt)
+                if (entry.lines.len != 0 and self.anchor == .at and top == null and order(entry.key, self.anchor.at.key) != .lt)
                     top = total + offset(entry, self.anchor.at.line, self.anchor.at.row);
                 total += entryRows(entry);
             }
             if (self.following()) return .{ .top = total -| height, .total = total };
-            if (entries.len == 0) return .{ .top = 0, .total = 0 };
-            const last = entries[entries.len - 1];
+            if (total == 0) return .{ .top = 0, .total = 0 };
+            var last_index = entries.len - 1;
+            while (entries[last_index].lines.len == 0) last_index -= 1;
+            const last = entries[last_index];
             return .{
                 .top = top orelse (total - entryRows(last) + offset(last, self.anchor.at.line, self.anchor.at.row)),
                 .total = total,
@@ -449,4 +451,16 @@ test "Feed supports ordered compound keys and wide row totals" {
     try std.testing.expectEqualDeep(F.Visible{ .first = 2, .row = 6 }, feed.visible(entries, 4));
     feed.scroll(entries, 4, -30, .{ .start = false, .end = true });
     try std.testing.expectEqualDeep(F.Visible{ .first = 1, .row = std.math.maxInt(u32) - 14 }, feed.visible(entries, 4));
+}
+
+test "Feed hidden keyed entries have no height and never become scroll anchors" {
+    const F = Feed(u64);
+    const entries: []const F.Entry = &.{ .{ .key = 1, .lines = &.{} }, .{ .key = 2, .lines = &.{4} }, .{ .key = 3, .lines = &.{} } };
+    var view: F = .{};
+    try std.testing.expectEqual(@as(usize, 1), view.visible(entries, 2).first);
+    view.scroll(entries, 2, -1, .{ .start = false, .end = true });
+    try std.testing.expectEqual(@as(u64, 2), view.anchor.at.key);
+    view.scroll(entries[0..1], 2, -8, .{ .start = false, .end = false });
+    try std.testing.expectEqual(@as(i64, -8), view.banked_rows);
+    try std.testing.expectEqual(@as(usize, 1), view.visible(entries[0..1], 2).first);
 }

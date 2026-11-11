@@ -10,7 +10,6 @@ Enter these at the `›` prompt.
 | Command | What it does |
 | --- | --- |
 | `/help` | Lists available commands. |
-| `/history` | Shows older conversation. |
 | `/status` | Shows settings, including the Bash permission mode, and current work. |
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
@@ -64,7 +63,8 @@ The conversation uses the full terminal screen.
 When you exit, your shell's screen returns as it was, and conversation text does not stay in your terminal's scrollback.
 
 Scroll with PgUp, PgDn, the arrow keys or the mouse wheel.
-Keep scrolling up to read older conversation.
+Keep scrolling up to read older conversation in the same feed.
+While you are scrolled up, `↓ N new` counts arriving rows; click it to return to the end.
 Esc or Ctrl-G returns to the latest messages, and from there to the overview.
 Ctrl-End, or End on an empty draft, returns to the latest messages and stays in the conversation.
 

@@ -836,7 +836,7 @@ def persistent_copy_case():
             terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
             saved = here / name
             assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
-            terminal_step(master, "Large request", "Large done.", composer=True)
+            terminal_step(master, "Large request", "More — Ctrl-O for whole message", composer=True)
             before = len(capture.clipboard)
             terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
             assert len(capture.clipboard) == before, "an answer over the limit is never sent"
@@ -1736,39 +1736,37 @@ def renderer_cases():
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/history\r")
+            os.write(tty.master, b"/help\r")
             time.sleep(0.3)
             released[1].set()
-            tty.wait("Start of conversation", timeout=20)
+            tty.wait("in your shell.", timeout=20)
             time.sleep(1.5)
-            assert "Start of conversation" in tty.capture.completed, tty.capture.completed
+            assert "in your shell." in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a later /history replaces a /status not yet shown", flush=True)
+        print("renderer: a later /help replaces a /status not yet shown", flush=True)
 
-        # A fresh Session's live page begins with an Admission row, which is
-        # no conversation cursor: its start is the start of the conversation.
+        # A short fresh feed clamps at its first saved row; scrolling does
+        # not add a start label or duplicate the admitted Message and reply.
         session = configure()
         marker = answer("fresh start")
         with terminal(session) as tty:
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
-            tty.send("/history\r", "Start of conversation")
             for _ in range(3):
-                os.write(tty.master, b"\x1b[5~")
-                time.sleep(0.3)
-            time.sleep(1)
-            shown = tty.capture.completed
-            assert shown.index("Start of conversation") < shown.index("› fresh start") < shown.index(marker), shown
+                shown = tty.send("\x1b[5~", predicate=lambda screen: "› fresh start" in screen and marker in screen)
+                assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
+                assert shown.index("› fresh start") < shown.index(marker), shown
+                assert "Start of conversation" not in shown, shown
             for frame in frames:
-                assert "Earlier messages unavailable" not in frame, frame
+                assert "Earlier messages unavailable" not in frame and "Start of conversation" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        print("renderer: a fresh Session scrolls to its start", flush=True)
+        print("renderer: a fresh Session scrolls to its first row without labels or duplicate Messages", flush=True)
 
         completed = True
     finally:
@@ -2588,9 +2586,9 @@ def main(selected="all"):
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
             assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/inspect-action", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
+            for command in ("/status", "/inspect-action", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
-            assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
+            assert "/history" not in help_text and "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
             # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
             assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
