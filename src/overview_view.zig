@@ -22,8 +22,8 @@ const command_value = @import("command_value.zig");
 const shortPath = @import("home_path.zig").shortPath;
 const draft_layout = @import("draft_layout.zig");
 const failure_class = @import("failure_class.zig");
-const keymap = @import("keymap.zig");
 const state_marks = @import("marks.zig");
+const keymap = @import("keymap.zig");
 const model_capability = @import("model_capability.zig");
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
@@ -3932,7 +3932,7 @@ fn toneColour(tone: work_line.Tone, neutral: Colour) Colour {
 }
 
 /// Bytes the row's word takes at most: work's words and its clock, or a
-/// failure's cause or saved code.
+/// failure's shared cause words.
 const max_word_bytes = @max(work_line.max_words_bytes + work_line.max_clock_bytes, session_work.max_code_bytes);
 
 /// What the row says in its detail column, only where the mark and the
@@ -3957,21 +3957,33 @@ fn word(buffer: *[max_word_bytes]u8, state: *const State, row: *const Row, rule:
     };
 }
 
-/// A failure's cause in a few words, else its saved code.
+/// The shared cause words only: destinations remain chat-only.
 fn causeOf(code: []const u8) []const u8 {
-    return switch (failure_class.of(code)) {
-        .policy => "Refused by the provider",
-        .quota => "Out of quota",
-        .plan => "Model not in plan",
-        .model => "Model not served",
-        .sign_in => "Sign-in expired",
-        .api_key => "API key rejected",
-        .overflow => "Context full",
-        .unreachable_provider => "Provider unreachable",
-        .retries_exhausted => "Retries ran out",
-        .interrupted => "Interrupted",
-        .refused, .other => code,
+    return state_marks.cause(code).words;
+}
+
+test "overview failure causes share plain words without chat destinations" {
+    const cases = .{
+        .{ "provider_policy", "Refused by the provider" },
+        .{ "provider_quota", "Out of quota" },
+        .{ "provider_plan", "Model not in plan" },
+        .{ "provider_model_unavailable", "Model not served" },
+        .{ "provider_http_401", "Sign-in expired" },
+        .{ "provider_api_key_rejected", "API key rejected" },
+        .{ "ResourceExceeded", "Context full" },
+        .{ "provider_tls_verification_failed", "Provider unreachable" },
+        .{ "retry_exhausted", "Retries ran out" },
+        .{ "cancelled", "Stopped" },
+        .{ "provider_http_500", "Provider refused the request" },
+        .{ "unknown_code", "Something went wrong" },
+        .{ "malformed_provider_output", "Model reply unreadable" },
     };
+    var seen: std.enums.EnumSet(failure_class.Class) = .empty;
+    inline for (cases) |case| {
+        seen.insert(failure_class.of(case[0]));
+        try std.testing.expectEqualStrings(case[1], causeOf(case[0]));
+    }
+    try std.testing.expect(seen.eql(.full));
 }
 
 /// Compact age: 42s, 7m, 3h, 12d.
@@ -4348,7 +4360,7 @@ const kind_cases = [_]struct { state: WorkState, heading: []const u8, unicode: [
     .{ .state = .{ .approval = ago(3 * 60) }, .heading = " Needs you", .unicode = "  ? Write the notes                                                          3m", .ascii = "  ? Write the notes                                                          3m", .colour = .attention, .stoppable = true },
     .{ .state = .{ .stopping = ago(8) }, .heading = " Active", .unicode = "  ⠹ Write the notes                                  Stopping…               8s", .ascii = "  * Write the notes                                  Stopping.               8s", .colour = .quiet, .stoppable = false },
     .{ .state = .{ .finished = ago(12 * 60) }, .heading = " Finished", .unicode = "  ✓ Write the notes                                                         12m", .ascii = "  + Write the notes                                                         12m", .colour = .mark, .stoppable = false },
-    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                provider_output_invalid   3h", .ascii = "  x Write the notes                                provider_output_invalid   3h", .colour = .failure, .stoppable = false },
+    .{ .state = .{ .failed = .{ .since = test_now_s - 3 * 3600, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .heading = " Stopped or failed", .unicode = "  × Write the notes                                  Something went wrong    3h", .ascii = "  x Write the notes                                  Something went wrong    3h", .colour = .failure, .stoppable = false },
     .{ .state = .{ .stopped = .{ .since = test_now_s - 2 * 86400, .cause = .interruption } }, .heading = " Stopped or failed", .unicode = "  ■ Write the notes                                                          2d", .ascii = "  # Write the notes                                                          2d", .colour = .normal, .stoppable = false },
 };
 
@@ -4576,11 +4588,11 @@ test "row segments say each state with its mark, and words only for a cause or a
     try expectRow(try rowOf(a, &state, "Check install script", 100, .{}), 100, &.{ .{ "◌", .quiet }, .{ "Check install script", .ink }, .{ "10s", .quiet } });
     // A rate limit counts down without the attempt number.
     try expectRow(try rowOf(a, &state, "Investigate retry storm", 100, .{}), 100, &.{ .{ "⠹", .attention }, .{ "Investigate retry storm", .ink }, .{ "Rate limited · retry in 18s", .attention }, .{ "30s", .quiet } });
-    // A failure names its cause in the failure colour, else its saved
-    // code; a stop says nothing beyond its mark, and neither names the
+    // A failure names its shared cause in the failure colour;
+    // a stop says nothing beyond its mark, and neither names the
     // Session that started it.
     try expectRow(try rowOf(a, &state, "Benchmark memory", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Benchmark memory", .quiet }, .{ "Sign-in expired", .failure }, .{ "20m", .quiet } });
-    try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .quiet }, .{ "provider_output_invalid", .failure }, .{ "1m", .quiet } });
+    try expectRow(try rowOf(a, &state, "Odd failure", 100, .{}), 100, &.{ .{ "×", .failure }, .{ "Odd failure", .quiet }, .{ "Something went wrong", .failure }, .{ "1m", .quiet } });
     try expectRow(try rowOf(a, &state, "Stopped by me", 100, .{}), 100, &.{ .{ "■", .normal }, .{ "Stopped by me", .quiet }, .{ "1m", .quiet } });
 }
 
@@ -6213,9 +6225,9 @@ test "the overview's rows draw twenty mixed rows" {
         \\   2 more
         \\
         \\ Stopped or failed · 3
-        \\  × Bisect the WAL regression                      provider_output_invalid  15m
+        \\  × Bisect the WAL regression                        Something went wrong   15m
         \\  ■ Rename the session tables                                               30m
-        \\  × Retry the flaky upload                           provider_http_500      50m
+        \\  × Retry the flaky upload                    Provider refused the request  50m
         \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
     ,
@@ -6247,9 +6259,9 @@ test "the overview's rows draw twenty mixed rows" {
         \\...qqqqqq
         \\
         \\.IIIIIIIIIIIIIIIIIqqqq
-        \\..f.qqqqqqqqqqqqqqqqqqqqqqqqq......................fffffffffffffffffffffff..qqq
+        \\..f.qqqqqqqqqqqqqqqqqqqqqqqqq........................ffffffffffffffffffff...qqq
         \\..n.qqqqqqqqqqqqqqqqqqqqqqqqq...............................................qqq
-        \\..f.qqqqqqqqqqqqqqqqqqqqqq...........................fffffffffffffffff......qqq
+        \\..f.qqqqqqqqqqqqqqqqqqqqqq....................ffffffffffffffffffffffffffff..qqq
         \\qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\.qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq
         \\
@@ -6282,9 +6294,9 @@ test "the overview's rows draw twenty mixed rows" {
         \\   2 more
         \\
         \\ Stopped or failed · 3
-        \\  × Bisect the WAL regression                                                                                                                        provider_output_invalid                        15m
+        \\  × Bisect the WAL regression                                                                                                                        Something went wrong                           15m
         \\  ■ Rename the session tables                                                                                                                                                                       30m
-        \\  × Retry the flaky upload                                                                                                                           provider_http_500                              50m
+        \\  × Retry the flaky upload                                                                                                                           Provider refused the request                   50m
         \\ new Session · no model · ~/code/rui
         \\ ↑↓ select · enter open · ctrl+x stop
     );
@@ -6324,9 +6336,9 @@ test "the overview's rows draw ASCII without colour" {
         \\   2 more
         \\
         \\ Stopped or failed - 3
-        \\  x Bisect the WAL regression                      provider_output_invalid  15m
+        \\  x Bisect the WAL regression                        Something went wrong   15m
         \\  # Rename the session tables                                               30m
-        \\  x Retry the flaky upload                           provider_http_500      50m
+        \\  x Retry the flaky upload                    Provider refused the request  50m
         \\ new Session - no model - ~/code/rui
         \\ ^v select - enter open - ctrl+x stop
     ,
@@ -6358,9 +6370,9 @@ test "the overview's rows draw ASCII without colour" {
         \\...nnnnnn
         \\
         \\.NNNNNNNNNNNNNNNNNnnnn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn......................nnnnnnnnnnnnnnnnnnnnnnn..nnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn........................nnnnnnnnnnnnnnnnnnnn...nnn
         \\..n.nnnnnnnnnnnnnnnnnnnnnnnnn...............................................nnn
-        \\..n.nnnnnnnnnnnnnnnnnnnnnn...........................nnnnnnnnnnnnnnnnn......nnn
+        \\..n.nnnnnnnnnnnnnnnnnnnnnn....................nnnnnnnnnnnnnnnnnnnnnnnnnnnn..nnn
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\.nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
         \\
@@ -6393,9 +6405,9 @@ test "the overview's rows draw ASCII without colour" {
         \\   2 more
         \\
         \\ Stopped or failed - 3
-        \\  x Bisect the WAL regression                                                                                                                        provider_output_invalid                        15m
+        \\  x Bisect the WAL regression                                                                                                                        Something went wrong                           15m
         \\  # Rename the session tables                                                                                                                                                                       30m
-        \\  x Retry the flaky upload                                                                                                                           provider_http_500                              50m
+        \\  x Retry the flaky upload                                                                                                                           Provider refused the request                   50m
         \\ new Session - no model - ~/code/rui
         \\ ^v select - enter open - ctrl+x stop
     );
@@ -6576,7 +6588,7 @@ test "overview top stays compact through completion failure Host changes and inp
     _ = try respond(&state, .changed, testToken(3), &.{session("b2c3d4", .{ .failed = .{ .since = test_now_s + 120, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = "Fail later" })});
     try Check.screen(&state, " रुई rui  × 1", " Finished · 1");
     try expectScreenLine(&state, 4, " Stopped or failed · 1");
-    try expectScreenLine(&state, 5, "  × Fail later                                     provider_output_invalid   0s");
+    try expectScreenLine(&state, 5, "  × Fail later                                       Something went wrong    0s");
 
     _ = try step(&state, .{ .host = null });
     try Check.screen(&state, " रुई rui  × 1", " Finished · 1");

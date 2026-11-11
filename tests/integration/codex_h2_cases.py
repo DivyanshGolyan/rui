@@ -411,7 +411,13 @@ def saved_catalog_run():
             already_held = before > len(endpoint.catalog_responses)
         listed()
         if not already_held:
-            fixture.wait_for(lambda: len(catalog_requests()) > before, "held catalog refresh", timeout=20)
+            def requested():
+                # A prior fetch can still be in flight when the first hint is
+                # consumed. Keep requesting through the public operation until
+                # that fetch retires and a new controlled GET is observed.
+                listed()
+                return len(catalog_requests()) > before
+            fixture.wait_for(requested, "held catalog refresh", timeout=20)
 
     try:
         host, ready = start_ready_process(arguments, env=env)

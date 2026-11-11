@@ -21,6 +21,16 @@ pub const Style = enum {
     failure,
     normal,
 
+    fn fromTone(tone: marks.Tone) Style {
+        return switch (tone) {
+            .ink => .user,
+            .normal => .normal,
+            .quiet => .quiet,
+            .attention => .attention,
+            .failure => .failure,
+        };
+    }
+
     pub fn code(self: Style, colour: bool) []const u8 {
         if (!colour) return "";
         return switch (self) {
@@ -109,7 +119,7 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
     try sendFailed(&failed, peer, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "! Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ " — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "× Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", failed.bytes[0..failed.length]);
     try std.testing.expect(!compact);
     // A named peer shows by its name, escaped as a label is, and rows in a
     // row share one group with no blank line between them.
@@ -141,9 +151,9 @@ test "failed peer Messages distinguish absent targets and reset grouping without
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
     const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
-        .{ .target = null, .line = "! Message rejected — No valid target reference" },
-        .{ .target = peer, .line = "! Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") ++ " — Failed" },
-        .{ .target = named, .line = "! Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") ++ " — Failed" },
+        .{ .target = null, .line = "× Message not delivered" },
+        .{ .target = peer, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") },
+        .{ .target = named, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") },
     };
     for (cases) |case| {
         for ([_]bool{ false, true }) |grouped| {
@@ -190,10 +200,9 @@ pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, compact: *bool) !v
     compact.* = false;
     try sink.feed("\n" ++ Mark.summary);
     if (target) |peer| {
-        try sink.feed("! Messaged ");
+        try sink.feed("× Messaged ");
         try peerName(sink, peer);
-        try sink.feed(" — Failed");
-    } else try sink.feed("! Message rejected — No valid target reference");
+    } else try sink.feed("× Message not delivered");
     try sink.feed(Mark.reset ++ "\n");
 }
 
@@ -616,25 +625,19 @@ fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, s
         .unresolved => .{ .mark = .active, .suffix = "" },
         .pending_permission => .{ .mark = .needs_you, .suffix = "" },
         .succeeded => .{ .mark = .finished, .suffix = "" },
-        .denied => .{ .mark = .stopped, .suffix = " — Denied" },
-        .unknown_tool => .{ .mark = .failed, .suffix = " — Rejected: unknown tool" },
-        .invalid_arguments => .{ .mark = .failed, .suffix = " — Rejected: invalid arguments" },
-        .failed => .{ .mark = .failed, .suffix = " — Failed" },
-        .timed_out => .{ .mark = .failed, .suffix = " — Timed out" },
-        .indeterminate => .{ .mark = .failed, .suffix = " — Outcome unknown; may have run" },
-        .storage_failed => .{ .mark = .failed, .suffix = " — Output capture failed" },
-        .spawn_failed => .{ .mark = .failed, .suffix = " — Could not start" },
-        .cancelled => .{ .mark = .stopped, .suffix = " — Cancelled" },
-        .infrastructure_shutdown => .{ .mark = .failed, .suffix = " — Host stopped; outcome unknown" },
+        .denied => .{ .mark = .stopped, .suffix = " · denied" },
+        .unknown_tool => .{ .mark = .failed, .suffix = " · rejected" },
+        .invalid_arguments => .{ .mark = .failed, .suffix = " · rejected" },
+        .failed => .{ .mark = .failed, .suffix = "" },
+        .timed_out => .{ .mark = .failed, .suffix = " · timed out" },
+        .indeterminate => .{ .mark = .failed, .suffix = " · may have run" },
+        .storage_failed => .{ .mark = .failed, .suffix = " · output lost" },
+        .spawn_failed => .{ .mark = .failed, .suffix = " · could not start" },
+        .cancelled => .{ .mark = .stopped, .suffix = "" },
+        .infrastructure_shutdown => .{ .mark = .failed, .suffix = " · may have run" },
     };
     const shown = marks.marks.get(state.mark);
-    return .{ .glyph = shown.unicode, .suffix = state.suffix, .style = switch (shown.tone) {
-        .ink => .user,
-        .quiet => .quiet,
-        .attention => .attention,
-        .failure => .failure,
-        .normal => .normal,
-    } };
+    return .{ .glyph = shown.unicode, .suffix = state.suffix, .style = Style.fromTone(shown.tone) };
 }
 
 test "list rows share every mark and script with the chat heading table" {
@@ -702,7 +705,7 @@ pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colou
     return toolHeadingWith(presentation, sink, colour, separate, "");
 }
 
-/// `exit` is a digits-only exit status, shown after the failure suffix.
+/// `exit` is a digits-only exit status, shown only for a failed call.
 fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8) !void {
     const state = toolState(presentation.code);
     if (separate) try sink.feed("\n");
@@ -715,10 +718,9 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
     try indented.feed(state.suffix);
-    if (exit.len != 0) {
-        try indented.feed(" (exit ");
+    if (presentation.code == .failed and exit.len != 0) {
+        try indented.feed(" · exit ");
         try indented.feed(exit);
-        try indented.feed(")");
     }
     try indented.finish();
     try sink.feed("\n");
@@ -1240,14 +1242,13 @@ pub const Labels = enum {
     }
 };
 
-/// What a Message's state was when read. Only a stop's exclusion asks
-/// something of the person, so only it carries the mark.
+/// What a Message's state was when read; an excluded Message was not sent.
 pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?[]const u8 {
     if (labels == .none) return null;
     return switch (state) {
         .applied => null,
         .queued => if (labels == .excluded_and_queued) "Queued" else null,
-        .excluded => "! Stopped before it ran · send it again to run it",
+        .excluded => "◌ not sent",
     };
 }
 
@@ -1259,7 +1260,7 @@ test "a queued Message is labelled only while work under way holds it" {
     try std.testing.expect(messageLabel(.queued, .lasting(starting.holdsQueue())) == null);
     try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?);
     // A stop's exclusion asks the person to act whatever the work is doing.
-    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, .lasting(false)).?);
+    try std.testing.expectEqualStrings("◌ not sent", messageLabel(.excluded, .lasting(false)).?);
     try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
     // Live output's next pages say what became of each Message.
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
@@ -1270,7 +1271,7 @@ test "a queued Message is labelled only while work under way holds it" {
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool) !void {
     if (messageLabel(value.state, labels)) |text| {
         compact.* = false;
-        try print(sink, "\n{s}", .{text});
+        try print(sink, "\n{s}{s}{s}", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at, compact);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
@@ -1349,16 +1350,16 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
-        .{ protocol.ToolPresentation.Code.failed, "× Tool call — Failed (exit 7)" },
-        .{ protocol.ToolPresentation.Code.timed_out, "× Tool call — Timed out" },
-        .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call — Outcome unknown; may have run" },
-        .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call — Output capture failed" },
-        .{ protocol.ToolPresentation.Code.spawn_failed, "× Tool call — Could not start" },
-        .{ protocol.ToolPresentation.Code.cancelled, "■ Tool call — Cancelled" },
-        .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "× Tool call — Host stopped; outcome unknown" },
-        .{ protocol.ToolPresentation.Code.denied, "■ Tool call — Denied" },
-        .{ protocol.ToolPresentation.Code.unknown_tool, "× Tool call — Rejected: unknown tool" },
-        .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call — Rejected: invalid arguments" },
+        .{ protocol.ToolPresentation.Code.failed, "× Tool call · exit 7" },
+        .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
+        .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
+        .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
+        .{ protocol.ToolPresentation.Code.spawn_failed, "× Tool call · could not start" },
+        .{ protocol.ToolPresentation.Code.cancelled, "■ Tool call" },
+        .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "× Tool call · may have run" },
+        .{ protocol.ToolPresentation.Code.denied, "■ Tool call · denied" },
+        .{ protocol.ToolPresentation.Code.unknown_tool, "× Tool call · rejected" },
+        .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call · rejected" },
     };
     try std.testing.expectEqual(std.enums.values(protocol.ToolPresentation.Code).len, cases.len);
     inline for (cases) |case| {
@@ -1391,6 +1392,23 @@ test "tool header hides all body lines for every outcome and first-line split" {
     }
 }
 
+test "failed tool exit status is named rather than read as a count" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    for ([_][]const u8{ "1", "7", "127" }) |exit| {
+        var buffer: [128]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        var sink: Sink = .{ .out = &out };
+        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit);
+        var expected: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n× Tool call · exit {s}\n", .{exit}), out.buffered());
+    }
+}
+
 test "tool header numeric exit accepts only a complete canonical first line" {
     for (std.enums.values(protocol.ToolPresentation.Code)) |code| {
         if (toolState(code).style != .failure) continue;
@@ -1418,154 +1436,141 @@ test "tool header numeric exit accepts only a complete canonical first line" {
     }
 }
 
-/// Why a Turn ended, in the person's terms, and the one step that helps.
-/// A reason of null shows the saved code itself.
-const Ending = struct { reason: ?[]const u8, next: []const u8 };
+/// One state line. Optional tails are quiet destinations or future key hints.
+const Ending = struct {
+    mark: marks.Mark,
+    words: []const u8,
+    place: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+    agent: ?[]const u8 = null,
+};
 
-comptime {
-    // `ending`'s buffers hold its longest words for every provider.
-    for (std.enums.values(protocol.Provider)) |provider| {
-        std.debug.assert("the  plan does not include this Session's model".len + provider.shown().len <= 128);
-        std.debug.assert("Save a new one with , run rui host pause, then send a message to continue on a new Host.".len + provider.login().len <= 192);
+fn ending(sink: anytype, end: Ending, colour: bool) !void {
+    const mark = marks.marks.get(end.mark);
+    const style = Style.fromTone(mark.tone);
+    try sink.feed("\n");
+    try sink.feed(style.code(colour));
+    try sink.feed(mark.unicode);
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed(" ");
+    if (end.agent) |agent| {
+        try sink.feed("Agent ");
+        var name: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
+        try name.feed(agent);
+        try name.finish();
+        try sink.feed(if (end.mark == .stopped) " " else " · ");
     }
-}
-
-/// `provider` is the Session's, null until its settings are read; its
-/// buffers hold the provider's name and login when the words need them.
-fn ending(provider: ?protocol.Provider, code: []const u8, reason: *[128]u8, next: *[192]u8) Ending {
-    const again = "Send a message to continue.";
-    const name = if (provider) |known| known.shown() else "the provider";
-    const owner = if (provider) |known| known.shown() else "provider";
-    const words = struct {
-        fn of(buffer: []u8, comptime format: []const u8, args: anytype) []const u8 {
-            return std.fmt.bufPrint(buffer, format, args) catch unreachable;
+    try sink.feed(end.words);
+    for ([_]?[]const u8{ end.place, end.key }) |tail| {
+        if (tail) |words| {
+            try sink.feed(Style.quiet.code(colour));
+            try sink.feed(" · ");
+            try sink.feed(words);
+            try sink.feed(Style.normal.code(colour));
         }
-    }.of;
-    return switch (failure_class.of(code)) {
-        .policy => .{ .reason = words(reason, "{s} refused this request", .{name}), .next = "Rephrase it, or start a new Session; sending more here will likely be refused again." },
-        .quota => .{ .reason = words(reason, "the {s} account is out of quota", .{owner}), .next = "Add credit or wait for the limit to reset, then send a message to continue." },
-        .plan => .{ .reason = words(reason, "the {s} plan does not include this Session's model", .{owner}), .next = "Use /model in the overview to start a new Session." },
-        .model => .{ .reason = words(reason, "{s} cannot serve this Session's model", .{name}), .next = "Use /model in the overview to start a new Session." },
-        .sign_in => .{ .reason = "sign-in expired", .next = words(next, "Run {s}, then send a message to continue.", .{(provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()}) },
-        // A running Host keeps the key it started with.
-        .api_key => .{ .reason = words(reason, "the {s} API key was rejected", .{(provider orelse comptime protocol.Provider.onlyWith(.api_key)).shown()}), .next = words(next, "Save a new one with {s}, run rui host pause, then send a message to continue on a new Host.", .{(provider orelse comptime protocol.Provider.onlyWith(.api_key)).login()}) },
-        .overflow => .{ .reason = "the conversation no longer fits the model's context", .next = "Start a new Session; more here will not fit either." },
-        .refused => .{ .reason = null, .next = "Sending this again will likely fail the same way; change what the error names, or start a new Session." },
-        .unreachable_provider => .{ .reason = words(reason, "{s} could not be reached", .{name}), .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
-        .retries_exhausted => .{ .reason = "retries ran out", .next = again },
-        .interrupted => .{ .reason = "it was interrupted", .next = again },
-        .other => .{ .reason = null, .next = again },
-    };
-}
-
-/// `report` is the provider's own words, escaped: never trusted as
-/// terminal text.
-fn workEnded(sink: anytype, provider: ?protocol.Provider, code: []const u8, report: ?[]const u8) !void {
-    var reason: [128]u8 = undefined;
-    var next: [192]u8 = undefined;
-    const end = ending(provider, code, &reason, &next);
-    try sink.feed("\n! Work ended: ");
-    try sink.feed(end.reason orelse code);
-    if (report) |words| {
-        try sink.feed(" (");
-        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
-        try escaped.feed(words);
-        try escaped.finish();
-        try sink.feed(")");
     }
-    try sink.feed(".\n  ");
-    try sink.feed(end.next);
     try sink.feed("\n");
 }
 
-/// A descendant agent's failed or stopped Turn, as one line in an ancestor.
-fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, report: ?[]const u8) !void {
-    try sink.feed("\n! Agent ");
-    var name: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
-    try name.feed(agent);
-    try name.finish();
-    try sink.feed(" ended: ");
-    try sink.feed(code);
-    if (report) |words| {
-        try sink.feed(" (");
-        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
-        try escaped.feed(words);
-        try escaped.finish();
-        try sink.feed(")");
-    }
-    try sink.feed(".\n");
+fn workEnded(sink: anytype, code: []const u8, colour: bool) !void {
+    const cause = marks.cause(code);
+    try ending(sink, .{ .mark = if (failure_class.of(code) == .interrupted) .stopped else .failed, .words = cause.words, .place = cause.place }, colour);
 }
 
-test "a descendant's ending names the agent and gives no advice for this Session" {
-    const Sink = struct {
-        bytes: [256]u8 = undefined,
-        length: usize = 0,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    var failed: Sink = .{};
-    try agentEnded(&failed, "9f8e7d", "provider_http_401", "expired\x1b[2J");
-    try std.testing.expectEqualStrings("\n! Agent 9f8e7d ended: provider_http_401 (expired\\x1b[2J).\n", failed.bytes[0..failed.length]);
-    var stopped: Sink = .{};
-    try agentEnded(&stopped, "9f8e7d", "cancelled", null);
-    try std.testing.expectEqualStrings("\n! Agent 9f8e7d ended: cancelled.\n", stopped.bytes[0..stopped.length]);
+/// A descendant's outcome names that agent, never a saved code or report.
+fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, colour: bool) !void {
+    const stopped = failure_class.of(code) == .interrupted;
+    try ending(sink, .{ .mark = if (stopped) .stopped else .failed, .words = if (stopped) "stopped" else marks.cause(code).words, .agent = agent }, colour);
 }
 
-/// A failed outcome's report, read whole before its line is drawn. A
-/// longer one than the Store keeps shows its prefix.
-const ReportBytes = struct {
-    bytes: [protocol.max_report_bytes]u8,
-    len: usize,
-
-    pub fn feed(self: *ReportBytes, bytes: []const u8) !void {
-        const kept = @min(bytes.len, self.bytes.len - self.len);
-        @memcpy(self.bytes[self.len..][0..kept], bytes[0..kept]);
-        self.len += kept;
-    }
-};
-
-test "an ended Turn says why and the one next step that helps, where it ended" {
+test "a descendant's ending names the agent without codes or advice" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
     };
-    const cases = [_]struct { provider: ?protocol.Provider = .openai, code: []const u8, report: ?[]const u8, shown: []const u8 }{
-        // The captured cyber_policy refusal: resending is no next step.
-        .{ .code = "provider_policy", .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity.", .shown = "\n! Work ended: OpenAI refused this request (cyber_policy: This request has been flagged for potentially high-risk cyber activity.).\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
-        .{ .code = "provider_policy", .report = null, .shown = "\n! Work ended: OpenAI refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
-        .{ .code = "provider_quota", .report = "insufficient_quota: You exceeded your current quota.", .shown = "\n! Work ended: the OpenAI account is out of quota (insufficient_quota: You exceeded your current quota.).\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
-        .{ .code = "provider_model_unavailable", .report = "model_not_found: The model `gpt-x` does not exist.", .shown = "\n! Work ended: OpenAI cannot serve this Session's model (model_not_found: The model `gpt-x` does not exist.).\n  Use /model in the overview to start a new Session.\n" },
-        .{ .provider = .codex, .code = "provider_http_401", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
-        // Each names the Session's provider, or the provider before its
-        // settings are read; a sign-in then names the one that signs in.
-        .{ .provider = .codex, .code = "provider_quota", .report = null, .shown = "\n! Work ended: the ChatGPT account is out of quota.\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
-        .{ .provider = null, .code = "provider_policy", .report = null, .shown = "\n! Work ended: the provider refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
-        .{ .provider = null, .code = "provider_sign_in_required", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
-        .{ .provider = null, .code = "provider_api_key_rejected", .report = null, .shown = "\n! Work ended: the OpenAI API key was rejected.\n  Save a new one with rui auth login openai, run rui host pause, then send a message to continue on a new Host.\n" },
-        .{ .code = "provider_api_key_rejected", .report = "Incorrect API key provided", .shown = "\n! Work ended: the OpenAI API key was rejected (Incorrect API key provided).\n  Save a new one with rui auth login openai, run rui host pause, then send a message to continue on a new Host.\n" },
-        .{ .code = "ResourceExceeded", .report = null, .shown = "\n! Work ended: the conversation no longer fits the model's context.\n  Start a new Session; more here will not fit either.\n" },
-        // Retries keep the last Attempt's words.
-        .{ .code = "retry_exhausted", .report = "server_is_overloaded: Try again later.", .shown = "\n! Work ended: retries ran out (server_is_overloaded: Try again later.).\n  Send a message to continue.\n" },
-        .{ .code = "cancelled", .report = null, .shown = "\n! Work ended: it was interrupted.\n  Send a message to continue.\n" },
-        // Any other code shows itself, beside whatever the provider said.
-        .{ .code = "provider_http_400", .report = "invalid_request_error: Unsupported \"x\"\x1b[2J", .shown = "\n! Work ended: provider_http_400 (invalid_request_error: Unsupported \"x\"\\x1b[2J).\n  Sending this again will likely fail the same way; change what the error names, or start a new Session.\n" },
-        .{ .code = "provider_plan", .report = null, .shown = "\n! Work ended: the OpenAI plan does not include this Session's model.\n  Use /model in the overview to start a new Session.\n" },
-        .{ .code = "provider_tls_verification_failed", .report = null, .shown = "\n! Work ended: OpenAI could not be reached.\n  Check the network, proxy or provider endpoint, then send a message to continue.\n" },
-        // The provider's words for an overflow say how far over it went.
-        .{ .code = "ResourceExceeded", .report = "context_length_exceeded: Your input exceeds the context window.", .shown = "\n! Work ended: the conversation no longer fits the model's context (context_length_exceeded: Your input exceeds the context window.).\n  Start a new Session; more here will not fit either.\n" },
-        .{ .code = "malformed_provider_output", .report = null, .shown = "\n! Work ended: malformed_provider_output.\n  Send a message to continue.\n" },
+    var buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
+    try agentEnded(&sink, "9f8e7d", "cancelled", false);
+    try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
+    try std.testing.expectEqualStrings("\n× Agent 9f8e7d · Sign-in expired\n\n■ Agent 9f8e7d stopped\n\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+}
+
+test "an ended Turn shows one plain cause line for every failure class" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
     };
-    for (cases) |case| {
+    const cases = .{
+        .{ "provider_policy", "× Refused by the provider" },
+        .{ "provider_quota", "× Out of quota · Settings" },
+        .{ "provider_plan", "× Model not in plan · Settings" },
+        .{ "provider_model_unavailable", "× Model not served" },
+        .{ "provider_http_401", "× Sign-in expired · Settings" },
+        .{ "provider_api_key_rejected", "× API key rejected · Settings" },
+        .{ "ResourceExceeded", "× Context full" },
+        .{ "provider_tls_verification_failed", "× Provider unreachable" },
+        .{ "retry_exhausted", "× Retries ran out" },
+        .{ "cancelled", "■ Stopped" },
+        .{ "provider_http_400", "× Provider refused the request" },
+        .{ "unknown\x1b[2J", "× Something went wrong" },
+        .{ "malformed_provider_output", "× Model reply unreadable" },
+    };
+    var seen: std.enums.EnumSet(failure_class.Class) = .empty;
+    inline for (cases) |case| {
+        seen.insert(failure_class.of(case[0]));
         var buffer: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try workEnded(&sink, case.provider, case.code, case.report);
-        try std.testing.expectEqualStrings(case.shown, out.buffered());
+        try workEnded(&sink, case[0], false);
+        try std.testing.expectEqualStrings("\n" ++ case[1] ++ "\n", out.buffered());
     }
+    try std.testing.expect(seen.eql(.full));
+}
+
+test "turn and agent ending marks use their table tones" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    var buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    try workEnded(&sink, "malformed_provider_output", true);
+    try workEnded(&sink, "cancelled", true);
+    try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
+    try agentEnded(&sink, "9f8e7d", "cancelled", true);
+    try std.testing.expectEqualStrings("\n\x1b[91m×\x1b[39m Model reply unreadable\n" ++
+        "\n\x1b[39m■\x1b[39m Stopped\n" ++
+        "\n\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
+        "\n\x1b[39m■\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
+}
+
+test "ending tails are quiet and joined in destination then key order" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    try workEnded(&sink, "provider_http_401", true);
+    try std.testing.expectEqualStrings("\n\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
+    out.end = 0;
+    try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
+    try std.testing.expectEqualStrings("\n× Cause · Place · Key\n", out.buffered());
+    out.end = 0;
+    try ending(&sink, .{ .mark = .failed, .words = "Cause", .key = "Key" }, false);
+    try std.testing.expectEqualStrings("\n× Cause · Key\n", out.buffered());
 }
 
 /// What a live page needs to show the Messages people and scripts sent as
@@ -1611,9 +1616,9 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
 /// Writes a page and returns the newest Message a person or script sent
 /// that it or an earlier read showed while it waited (`Taking.drawn`). The
 /// sink learns each one as it shows (`drew`).
-/// `provider` is the Session's, for the words of a failed Turn; null until
-/// its settings are read.
+/// `provider` remains accepted for callers; cause words are provider-neutral.
 pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking, home: []const u8) !queued_line.Drawn {
+    _ = provider;
     const historical = page.facts.direction == .backward;
     var from = taking.from;
     var drawn = taking.drawn;
@@ -1674,21 +1679,16 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // A done Turn's answer is its final assistant row, never a second answer.
                 if (ended.ending == .done) continue;
                 compact_tools.* = false;
-                // A failed Turn's content is its report.
-                var report: ReportBytes = undefined;
-                report.len = 0;
-                if (ended.content) |reference| try content(requests, store, session, item, reference, &report);
-                const words = if (ended.content != null) report.bytes[0..report.len] else null;
-                // A descendant's ending reaches every ancestor's feed: it is
-                // that agent's outcome, never this Session's, so it names the
-                // agent and gives no advice meant for this Session.
+                // The report is deliberately not read: the shared cause owns the words.
                 if (!std.mem.eql(u8, ended.session.slice(), session)) {
-                    try agentEnded(sink, ended.session.slice(), ended.code.slice(), words);
-                } else try workEnded(sink, provider, ended.code.slice(), words);
+                    try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
+                } else try workEnded(sink, ended.code.slice(), colour);
             },
-            .stop => {
+            .stop => |stop| {
                 compact_tools.* = false;
-                try sink.feed("\n! Session stopped.\n");
+                // A selected Turn owns its terminal line, even across page boundaries.
+                // Without a Turn, the stop itself is the completed outcome.
+                if (stop.turn == null) try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
             },
             .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
             .send_failed => |failed| {
@@ -1702,10 +1702,9 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
 }
 
 /// Shows the Messages a person or script sent that a live page's stop
-/// excluded, oldest first and labelled, before the stop's own line: those
+/// excluded, oldest first and labelled, at the stop: those
 /// waiting just before it, at or below its cutoff and admitted after `from`.
-/// One shown while it waited is labelled here too: the stop is what asks the
-/// person to send it again. Their bytes belong to no item.
+/// One shown while it waited is labelled here too. Their bytes belong to no item.
 fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool) !void {
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from, .kinds = .initOne(.admission) };
     var first = true;
@@ -1749,7 +1748,7 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, .{}, &sink, false, &compact);
     }
     try std.testing.expectEqualStrings(
-        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n× Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
+        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n× Find “Io” in ziglang.org/x\n\n✓ Search the web\n",
         sink.bytes[0..sink.length],
     );
 }

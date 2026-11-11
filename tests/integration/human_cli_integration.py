@@ -57,7 +57,7 @@ def send_reason(master, ready, description):
     beside the Action; return the frames up to the Action's denial."""
     shown = action_ready(ready, master, shows=reason_shown)
     os.write(master, b"\r")
-    return shown + read_terminal(master, f"■ {description} — Denied")
+    return shown + read_terminal(master, f"■ {description} · denied")
 
 
 def time_limit(milliseconds):
