@@ -670,7 +670,7 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try answered.feed("✓ done\n");
     try std.testing.expectEqual(@as(usize, 0), answered.boundaries.count);
     answered.item(stop);
-    try answered.feed("! Session stopped.\n");
+    try answered.feed("■ Stopped\n");
     try std.testing.expectEqualDeep(@as([]const Boundary, &.{.{ .output = 9, .cursor = .{ .end = 19 }, .admitted = 20 }}), answered.boundaries.slice());
     try std.testing.expect(answered.finish().settled());
     try std.testing.expectEqual(@as(u64, 2), answered.entries);
@@ -682,12 +682,12 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try shown.feed("✓ done\n");
     try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
     shown.excluding(12);
-    try shown.feed("! Stopped before it ran · send it again to run it\n› later\n");
+    try shown.feed("◌ not sent\n› later\n");
     try std.testing.expectEqual(@as(usize, 0), shown.boundaries.count);
     try std.testing.expectEqual(@as(usize, 0), shown.echoes.count);
     try std.testing.expectEqual(@as(?u64, 12), shown.lowest);
     shown.item(stop);
-    try shown.feed("! Session stopped.\n");
+    try shown.feed("■ Stopped\n");
     try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
     try std.testing.expectEqual(@as(u64, 20), shown.boundaries.items[0].admitted);
     // Entries are the items that showed bytes: an item that writes nothing
@@ -1487,6 +1487,62 @@ test "a stop labels a Message that showed while it waited at the opening" {
     host.end = 22;
     var live: Job = .{ .session = "k7m2qx", .cursor = opening.result.cursor, .messages = opening.result.messages, .queued = opening.result.queued, .drawn = opening.drawn, .line_read = .{ .revision = 1, .end = 22 } };
     try host.read(&live);
-    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Stopped before it ran · send it again to run it") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Session stopped.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "◌ not sent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "■ Stopped") != null);
+}
+
+// This golden exercises the public renderer, including reports that must never
+// be fetched, and stop/ending pairs split over live or historical pages.
+test "activity golden stop with interrupted ending draws one line across pages" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+        pub fn item(_: *@This(), _: protocol.ActivityItem) void {}
+        pub fn drew(_: *@This(), _: u64) void {}
+        pub fn excluding(_: *@This(), _: u64) void {}
+        pub fn collapsed(_: *@This(), _: View.Collapsed) !void {}
+    };
+    var session: protocol.Bounded(6) = .{};
+    try session.set("a1b2c3");
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("cancelled");
+    const stop: protocol.ActivityItem = .{ .position = 1, .at = 1, .value = .{ .stop = .{ .key = .{}, .turn = 2, .cutoff = 0, .completion = .completed } } };
+    // A non-null report also proves the renderer does not request its content:
+    // the Requests value is undefined and must remain unused.
+    const ended: protocol.ActivityItem = .{ .position = 2, .at = 2, .value = .{ .turn_ended = .{ .session = session, .turn = 2, .operation = 3, .ending = .stopped, .code = code, .content = .{ .length = 99, .digest = @splat(0) } } } };
+    const page = try std.testing.allocator.create(protocol_reply.ActivityPage);
+    defer std.testing.allocator.destroy(page);
+    for ([_]bool{ false, true }) |colour| {
+        for ([_]bool{ false, true }) |historical| {
+            for ([_]bool{ false, true }) |split| {
+                var buffer: [256]u8 = undefined;
+                var out = std.Io.Writer.fixed(&buffer);
+                var sink: Sink = .{ .out = &out };
+                var compact = true;
+                page.* = .{ .facts = .{ .end = 2, .count = if (split) 1 else 2, .direction = if (historical) .backward else .forward } };
+                page.facts.items[0] = if (historical and !split) ended else stop;
+                if (!split) page.facts.items[1] = if (historical) stop else ended;
+                _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, colour, &compact, .{ .drawn = .{}, .from = null }, "");
+                if (split) {
+                    try std.testing.expectEqualStrings("", out.buffered());
+                    page.facts.items[0] = ended;
+                    _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, colour, &compact, .{ .drawn = .{}, .from = null }, "");
+                }
+                try std.testing.expectEqualStrings(if (colour) "\n\x1b[39m■\x1b[39m Stopped\n" else "\n■ Stopped\n", out.buffered());
+                try std.testing.expect(!compact);
+            }
+        }
+    }
+    // An idle stop has no terminal Turn to follow it and owns its own line.
+    page.* = .{ .facts = .{ .end = 1, .count = 1 } };
+    page.facts.items[0] = stop;
+    page.facts.items[0].value.stop.turn = null;
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    var compact = false;
+    _ = try View.render(undefined, "unused", session.slice(), page, null, &sink, true, &compact, .{ .drawn = .{}, .from = null }, "");
+    try std.testing.expectEqualStrings("\n\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }

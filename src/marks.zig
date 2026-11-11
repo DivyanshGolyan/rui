@@ -1,5 +1,6 @@
 //! State marks shared by terminal surfaces; each tone names a role, not a style.
 const std = @import("std");
+const failure_class = @import("failure_class.zig");
 
 pub const Mark = enum { needs_you, active, queued, waiting, finished, failed, stopped };
 pub const Tone = enum { ink, normal, quiet, attention, failure };
@@ -13,6 +14,27 @@ pub const marks = std.enums.EnumArray(Mark, struct { unicode: []const u8, ascii:
     .failed = .{ .unicode = "×", .ascii = "x", .tone = .failure },
     .stopped = .{ .unicode = "■", .ascii = "#", .tone = .normal },
 });
+
+pub const Cause = struct { words: []const u8, place: ?[]const u8 = null };
+
+/// Plain words shared by chat and list surfaces, never a saved code or report.
+pub fn cause(code: []const u8) Cause {
+    if (std.mem.eql(u8, code, "malformed_provider_output")) return .{ .words = "Model reply unreadable" };
+    return switch (failure_class.of(code)) {
+        .policy => .{ .words = "Refused by the provider" },
+        .quota => .{ .words = "Out of quota", .place = "Settings" },
+        .plan => .{ .words = "Model not in plan", .place = "Settings" },
+        .model => .{ .words = "Model not served" },
+        .sign_in => .{ .words = "Sign-in expired", .place = "Settings" },
+        .api_key => .{ .words = "API key rejected", .place = "Settings" },
+        .overflow => .{ .words = "Context full" },
+        .unreachable_provider => .{ .words = "Provider unreachable" },
+        .retries_exhausted => .{ .words = "Retries ran out" },
+        .interrupted => .{ .words = "Stopped" },
+        .refused => .{ .words = "Provider refused the request" },
+        .other => .{ .words = "Something went wrong" },
+    };
+}
 
 /// Frames for work under way. `active`'s still glyph is one of these frames.
 pub const spinner = [_][]const u8{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
