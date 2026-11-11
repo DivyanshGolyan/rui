@@ -3785,6 +3785,9 @@ This preserves waitable child identities until their signaling owners retire.
 Host startup then owns lease acquisition, recovery and readiness.
 Competing launchers may create candidates, but one holds the lease.
 All probe the winning Host for up to ten seconds from readiness-check start, without killing an unconfirmed owner.
+A Host that migrates its Store announces the migration's start and end on its startup channel, and the launcher that started it runs no deadline between the two, because the backup takes time proportional to the Store's size; ten seconds follow the end (`HostStartupWait`).
+The interactive launcher shows the start announcement as it arrives.
+A launcher that still has no readiness reports `host_starting`, a wait, never an internal fault.
 Each Host-info probe uses the lesser of remaining readiness time and its one-second response deadline, including connection.
 These readiness deadlines are separate from [ordinary transport inactivity](#client-transport-and-observations).
 Credentials are not required for managed readiness.

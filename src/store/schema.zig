@@ -2249,14 +2249,27 @@ pub fn bootstrap(database: *c.sqlite3, selector: []const u8) !void {
     try sqlite.exec(database, "COMMIT");
 }
 
+/// Told when `openExisting` begins migrating a Store, with the format it
+/// moves from, and when the migration commits. The backup a migration
+/// writes first is as large as the Store, so a caller waiting on the open
+/// can learn why it takes long.
+pub const MigrationNotice = struct {
+    context: *anyopaque,
+    notify: *const fn (context: *anyopaque, event: Event) void,
+
+    pub const Event = union(enum) { begin: u32, end };
+};
+
 /// Opens a Store of this application at schema_version, or moves one at a
 /// format from migration_baseline on to it first (`migrate`).
-pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
+pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch, notice: ?MigrationNotice) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
     if (found == schema_version) return validateCurrent(database, selector, identity_mismatch);
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
-    return migrate(io, database, selector, found, migrations[found - migration_baseline ..], identity_mismatch);
+    if (notice) |told| told.notify(told.context, .{ .begin = found });
+    try migrate(io, database, selector, found, migrations[found - migration_baseline ..], identity_mismatch);
+    if (notice) |told| told.notify(told.context, .end);
 }
 
 /// First writes `migrationBackup`; a Store whose backup fails is refused
@@ -2647,6 +2660,29 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
     }
 }
 
+const MigrationRecorder = struct {
+    begun: ?u32 = null,
+    ended: bool = false,
+
+    fn notice(self: *@This()) MigrationNotice {
+        return .{ .context = self, .notify = notify };
+    }
+
+    fn notify(context: *anyopaque, event: MigrationNotice.Event) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        switch (event) {
+            .begin => |from| {
+                std.debug.assert(self.begun == null and !self.ended);
+                self.begun = from;
+            },
+            .end => {
+                std.debug.assert(self.begun != null and !self.ended);
+                self.ended = true;
+            },
+        }
+    }
+};
+
 test "schema 57 preserves Commands and stop references while adding nullable archive intent" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -2706,7 +2742,15 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
-    try openExisting(std.testing.io, database, root, null);
+    var told: MigrationRecorder = .{};
+    try openExisting(std.testing.io, database, root, null, told.notice());
+    try std.testing.expectEqual(@as(?u32, 56), told.begun);
+    try std.testing.expect(told.ended);
+    // A Store already at schema_version opens without a migration to announce.
+    var reopened: MigrationRecorder = .{};
+    try openExisting(std.testing.io, database, root, null, reopened.notice());
+    try std.testing.expectEqual(@as(?u32, null), reopened.begun);
+    try std.testing.expect(!reopened.ended);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
@@ -2765,7 +2809,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
-    try openExisting(std.testing.io, database, root, null);
+    try openExisting(std.testing.io, database, root, null, null);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
 }
 
@@ -2820,7 +2864,7 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     inline for (.{ "model_output_item", "model_tool_call", "model_output_part", "action_operation", "conversation_entry" }) |name| {
         try sqlite.exec(database, "CREATE TEMP TABLE original_" ++ name ++ " AS SELECT * FROM " ++ name);
     }
-    try openExisting(std.testing.io, database, root, null);
+    try openExisting(std.testing.io, database, root, null, null);
     try std.testing.expectEqual(schema_version, try sqlite.pragmaInt(database, "PRAGMA user_version"));
     try std.testing.expect(try metaEquals(database, "format", format_text));
     try std.testing.expect(try metaEquals(database, "wire_version", wire_version));
@@ -2847,7 +2891,7 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_output_item WHERE operation_id=2 AND item_ordinal=2 AND length(CAST(description AS BLOB))=200 AND description='" ++ utf8_line ++ "'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     // The widened lines and canonical table/index shapes survive reopening.
-    try openExisting(std.testing.io, database, root, null);
+    try openExisting(std.testing.io, database, root, null, null);
 }
 
 test "MySQL index hints require a named real-column index on that engine" {
