@@ -6,7 +6,7 @@ import errno
 import json
 import os
 import pty
-from terminal_process import COLUMNS, ROWS, open_pty, spawn
+from terminal_process import close_pty, COLUMNS, ROWS, open_pty, spawn
 from terminal_screen import ScreenCapture, shown
 import select
 import shutil
@@ -371,7 +371,7 @@ def interactive_cases(state, binding=False, null_code=False):
                     while True:
                         os.write(master, b"/status\r")
                         status = human.read_terminal(master, f" Status · {session}",
-                            timeout=deadline - time.monotonic(), composer=True)
+                            timeout=deadline - time.monotonic(), composer=True, fresh=True)
                         # /status exposes unresolved frontend custody, independently
                         # of the accepted backend reply and canonical database.
                         if "Original reserved request:" not in status:
@@ -512,8 +512,8 @@ def interactive_cases(state, binding=False, null_code=False):
                     caller.wait(timeout=5)
                 if caller is not None:
                     caller.stderr.close()
-                os.close(master)
-                os.close(slave)
+                close_pty(master)
+                close_pty(slave)
                 os.close(ready_read)
                 os.close(ready_write)
     finally:
@@ -600,8 +600,8 @@ def permission_read_cases(state):
                     caller.wait(timeout=5)
                 if caller is not None:
                     caller.stderr.close()
-                os.close(master)
-                os.close(slave)
+                close_pty(master)
+                close_pty(slave)
         # An ordinary details preparation failure stays live and is delivered
         # before the next Activity borrower can reset its diagnostic storage.
         configured = invoke(home, "session", "configure", "--store", store,
@@ -643,8 +643,8 @@ def permission_read_cases(state):
                 caller.wait(timeout=5)
             if caller is not None:
                 caller.stderr.close()
-            os.close(master)
-            os.close(slave)
+            close_pty(master)
+            close_pty(slave)
     finally:
         if host is not None:
             fixture.stop_host(host)

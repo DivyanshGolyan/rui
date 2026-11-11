@@ -81,6 +81,7 @@ import json
 import mmap
 import pathlib
 import re
+import select
 import selectors
 import socket
 import socketserver
@@ -609,8 +610,13 @@ class WaitTimeout(AssertionError):
     pass
 
 
-def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool):
-    """The one place a test sleeps to wait (CODING_STANDARDS.md#evidence).
+# Each hook pairs bounded drainage with a fresh snapshot of the descriptors
+# this thread drains. wait_for owns pacing; hooks own reads and registration.
+WAIT_HOOKS = []
+
+
+def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, ready=bool, drain=True):
+    """The one place a test pauses to wait (CODING_STANDARDS.md#evidence).
 
     Returns the first observation `ready` accepts that finished before the
     deadline. An inspection can block past its caller's budget, and a clean
@@ -620,12 +626,23 @@ def wait_for(observe, description, timeout=8, interval=0.025, *, deadline=None, 
         deadline = time.monotonic() + timeout
     value = None
     while time.monotonic() < deadline:
+        if drain:
+            for hook, _readers in WAIT_HOOKS:
+                hook()
         value = observe()
         if time.monotonic() >= deadline:
             break
         if ready(value):
             return value
-        time.sleep(interval)
+        # Query after observing: the observation may register or close a PTY.
+        # A small PTY can refill just after a drain batch ends; readability
+        # wakes the next bounded drain/observation instead of costing a poll.
+        readers = [fd for _hook, descriptors in WAIT_HOOKS for fd in descriptors()] if drain else []
+        pause = min(interval, max(0, deadline - time.monotonic()))
+        if readers:
+            select.select(readers, [], [], pause)
+        else:
+            time.sleep(pause)
     raise WaitTimeout(f"timed out waiting for {description}; last observed {value!r}")
 
 

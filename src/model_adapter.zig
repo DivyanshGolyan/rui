@@ -3403,10 +3403,11 @@ test "request preparation cancellation yields inside history discovery" {
         try preparation.checkIntegrity(binding);
         if (preparation.state.stage == .history and preparation.state.piece == null and preparation.writer.offset == before) {
             pending_turns += 1;
-            if (pending_turns == 5) break;
+            // A step that reads without writing: the tool-group scan's.
+            break;
         }
     }
-    try std.testing.expectEqual(@as(usize, 5), pending_turns);
+    try std.testing.expectEqual(@as(usize, 1), pending_turns);
     preparation.cancel();
     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), preparation.view.outstandingReaders());

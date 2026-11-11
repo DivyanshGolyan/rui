@@ -8,7 +8,7 @@ import io
 import json
 import os
 import pty
-from terminal_process import open_pty, spawn
+from terminal_process import close_pty, open_pty, spawn
 import select
 import shutil
 import subprocess
@@ -168,10 +168,10 @@ def child_pty(source):
                 caller.wait(timeout=5)
         finally:
             try:
-                os.close(master)
+                close_pty(master)
             finally:
                 if slave is not None:
-                    os.close(slave)
+                    close_pty(slave)
 
 
 @contextmanager
@@ -368,7 +368,7 @@ os.read(release, 1)
             caller.kill()
             caller.communicate(timeout=5)
         for fd in (master, slave, ready_read, ready_write, held_read, held_write, release_read, release_write):
-            os.close(fd)
+            close_pty(fd)
 
     owner = sys.modules[action_ready.__module__]
     # Original deadline, not a fresh budget after each credited output window.
