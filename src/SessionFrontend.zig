@@ -241,6 +241,7 @@ test "a read freezes its viewport width method for live and historical answers" 
     defer screen.deinit();
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
     self.init.io = std.testing.io;
+    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor };
     self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &self.input, .environment = .empty };
     for (std.enums.values(@import("ConversationViewport.zig").Method)) |method| {
         screen.setWidth(method);
@@ -285,6 +286,7 @@ test "reader freezes borrowed HOME independently of process initialization" {
         for (std.enums.values(ReadPhase)) |phase| {
             self.* = .{ .init = undefined, .home = home, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .screen = screen, .colour = false };
             self.init.io = std.testing.io;
+            self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor };
             self.submission = .{ .io = std.testing.io, .store = "unused", .session = "unused", .directory = "unused", .input = &self.input, .environment = .empty };
             const job = self.freeze(phase);
             self.home = "/changed-after-freeze";
