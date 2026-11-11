@@ -645,7 +645,8 @@
       "sizes": [
         "46x30",
         "140x40"
-      ]
+      ],
+      "expect": "Batch job"
     },
     {
       "name": "day-start",
@@ -702,12 +703,16 @@
         },
         {
           "wait": "The Host stopped."
+        },
+        {
+          "wait": "Pane is dead (status 6"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
-      ]
+      ],
+      "expect": "Pane is dead (status 6"
     },
     {
       "name": "host-back",
@@ -738,12 +743,16 @@
         },
         {
           "wait": "Detached. Host work continues."
+        },
+        {
+          "wait": "Pane is dead (status 0"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
-      ]
+      ],
+      "expect": "Pane is dead (status 0"
     }
   ]
 }
