@@ -26,6 +26,8 @@ const OutputItemKind = historical_domain.OutputItemKind;
 const ValidatedOutput = model_settlement_domain.ValidatedOutput;
 
 pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
+/// The domain's offered-set expression for portable fixture queries.
+pub const offeredSetSql = @import("domain/tool_set.zig").offeredSetSql;
 
 /// Compose fixture records with the canonical required runners.
 pub fn catalogRecordsWith(comptime extra: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record {
