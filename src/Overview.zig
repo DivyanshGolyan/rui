@@ -882,7 +882,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 const words = view.pickerWords(self.composerDraft().bytes);
                 const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
                 const rows = try ctx.arena.create(PickerRows);
-                rows.* = .{ .models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read) };
+                rows.* = .{ .models = try model_picker_view.rowsIn(ctx.arena, &self.state.menu, words, defaults, choice, size.width, view.layout(&self.state).list.len(), self.caps.width, self.caps.unicode, self.state.menu_read) };
                 self.app_picker.selected = rows.models.selected;
                 self.app_picker.rows = .{ .userdata = rows, .count = @intCast(rows.models.count), .rowFn = PickerRows.row };
                 break :picker &self.app_picker;
@@ -2262,22 +2262,31 @@ test "/model filters choices as the composer is edited" {
     }
 }
 
-test "/model shows loading and Host read failure in the list" {
+test "/model keeps unread and unanswered lists empty without shell instructions" {
+    const Check = struct {
+        fn screen(rig: *Rig, read: model_picker_view.Read) !void {
+            const state = &rig.overview.state;
+            try std.testing.expectEqual(read, state.menu_read);
+            var shown = try rig.shown(80, 24);
+            defer shown.deinit();
+            const rows = try model_picker_view.rows(shown.arena.allocator(), &state.menu, "", view.pickerDefaults(state), state.picker.?.choice, 80, .unicode, true, read);
+            try std.testing.expectEqual(@as(usize, 0), rows.count);
+            try std.testing.expect(rows.selected == null);
+            const text = try shown.text();
+            try std.testing.expect(std.mem.indexOf(u8, text, "/model") != null);
+            for ([_][]const u8{ "Loading models", "Models unavailable", "Known to Rui", "From your API key" }) |prose|
+                try std.testing.expect(std.mem.indexOf(u8, text, prose) == null);
+            for (std.enums.values(model_picker.Provider)) |provider|
+                try std.testing.expect(std.mem.indexOf(u8, text, provider.login()) == null);
+        }
+    };
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
     try std.testing.expect(try rig.press("/model ") == null);
-    {
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        try std.testing.expectEqual(true, std.mem.indexOf(u8, try shown.text(), "Loading models") != null);
-    }
+    try Check.screen(rig, .unread);
     _ = try view.step(&rig.overview.state, .{ .models = .unanswered });
-    {
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        try std.testing.expectEqual(true, std.mem.indexOf(u8, try shown.text(), "Models unavailable: the Host did not answer") != null);
-    }
+    try Check.screen(rig, .unanswered);
 }
 
 test "/model opens while typing its filter without submitting" {
