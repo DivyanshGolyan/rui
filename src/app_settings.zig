@@ -30,7 +30,7 @@ pub const Backend = struct {
 };
 
 /// The page's rows, in drawn order: the Panel's field index of each.
-pub const Row = enum { model, effort, notifications, sign_in, version };
+pub const Row = enum { model, effort, permissions, notifications, sign_in, version };
 const row_count = std.enums.values(Row).len;
 
 backend: ?Backend = null,
@@ -103,12 +103,24 @@ fn model(self: *const Self) []const u8 {
     return if (self.values.model.len == 0) defaults.recommended_model else self.values.model.slice();
 }
 
+fn permissionMode(self: *const Self) protocol.PermissionMode {
+    return self.values.permission_mode orelse std.meta.stringToEnum(protocol.PermissionMode, defaults.permission_mode).?;
+}
+
+fn permissionText(mode: protocol.PermissionMode) []const u8 {
+    return switch (mode) {
+        .bypass => "run without asking",
+        .ask => "ask first",
+    };
+}
+
 fn value(self: *const Self, row: Row) []const u8 {
     if (row == .version) return self.version;
     if (self.read_failed) return "unavailable";
     return switch (row) {
         .model => self.model(),
         .effort => if (self.values.reasoning_effort) |effort| @tagName(effort) else "model default",
+        .permissions => permissionText(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
         .sign_in => if (self.provider()) |saved| saved.signIn() else "unavailable",
         .version => unreachable,
@@ -132,6 +144,7 @@ fn bind(self: *Self) void {
         .label = switch (row) {
             .model => "Model",
             .effort => "Effort",
+            .permissions => "Permissions",
             .notifications => "Notifications",
             .sign_in => "Sign-in",
             .version => "Version",
@@ -160,7 +173,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         },
         // Sign-in stays selectable until its screen exists.
         .sign_in => return,
-        .model, .effort, .notifications => {
+        .model, .effort, .permissions, .notifications => {
             try self.refresh();
             if (self.read_failed) return;
         },
@@ -192,6 +205,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             }
             self.panel.openChoice(self.effort_choices[0..self.effort_count], current);
         },
+        .permissions => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.permissionMode() == .bypass) 0 else 1),
         .notifications => try self.save(ctx, row, .{ .notifications = !self.values.notifications }),
         .sign_in, .version => {},
     }
@@ -211,7 +225,8 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
                 .set = std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_choices[choice]).?,
             },
         },
-        // Only Model and Effort open a choice.
+        .permissions => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
+        // Only Model, Effort and Permissions open a choice.
         .notifications, .sign_in, .version => unreachable,
     });
 }
@@ -275,6 +290,7 @@ const Fixture = struct {
     save_status: SaveState = .idle,
     fail_read: bool = false,
     fail_save: bool = false,
+    home: ?[]const u8 = null,
     upgrades: usize = 0,
     last_edit: ?preferences.Edit = null,
     status: ?upgrade_status.Run = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } },
@@ -291,7 +307,10 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         if (self.fail_save) return error.AccessDenied;
         self.last_edit = edit;
-        self.save_status = .pending;
+        if (self.home) |home| {
+            self.values = try preferences.update(home, edit, &.initFill(.configured));
+            self.save_status = .saved;
+        } else self.save_status = .pending;
     }
     fn saveState(raw: *anyopaque) SaveState {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -487,6 +506,7 @@ test "App settings page text and ground at 99x20 and 46x20" {
         const model_row = try std.fmt.allocPrint(arena.allocator(), "   Model           {s}", .{defaults.recommended_model});
         try std.testing.expect(std.mem.indexOf(u8, text, model_row) != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
@@ -556,4 +576,38 @@ test "App settings refresh invalidates choices tied to the old saved snapshot" {
     try std.testing.expect(!page.hasChoice());
     try std.testing.expect(page.read_failed);
     try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
+}
+
+test "App settings Permissions choices save both modes and display the saved words" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var fixture: Fixture = .{ .home = home };
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.refresh();
+    page.bind();
+    try std.testing.expectEqualStrings("Permissions", page.fields[@backingInt(Row.permissions)].label);
+    try std.testing.expectEqualStrings(permissionText(std.meta.stringToEnum(protocol.PermissionMode, defaults.permission_mode).?), page.fields[@backingInt(Row.permissions)].value);
+    page.select(.permissions);
+    for ([_]protocol.PermissionMode{ .ask, .bypass }) |mode| {
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.hasChoice());
+        try std.testing.expectEqual(@as(?usize, if (page.permissionMode() == .bypass) 0 else 1), page.panel.choice.?.current);
+        try std.testing.expectEqualStrings("run without asking", page.panel.choice.?.labels[0]);
+        try std.testing.expectEqualStrings("ask first", page.panel.choice.?.labels[1]);
+        page.panel.choice.?.selected = if (mode == .bypass) 0 else 1;
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(!page.hasChoice());
+        try std.testing.expectEqual(mode, fixture.last_edit.?.permission_mode.set);
+        try std.testing.expectEqual(.keep, fixture.last_edit.?.model);
+        try std.testing.expectEqual(.keep, fixture.last_edit.?.reasoning_effort);
+        try std.testing.expectEqual(mode, (try preferences.load(home)).permission_mode.?);
+        page.bind();
+        try std.testing.expectEqualStrings(if (mode == .bypass) "run without asking" else "ask first", page.fields[@backingInt(Row.permissions)].value);
+        try std.testing.expectEqual(@as(?Row, null), page.saving_row);
+    }
 }
