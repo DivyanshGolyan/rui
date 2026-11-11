@@ -1617,6 +1617,18 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
 /// include their canonical names: statements depend on those names, not
 /// just equivalent definitions. This admission digest is not stored or
 /// pinned by Store format; `digest()` covers bootstrap SQL separately.
+/// MySQL 8.4 STATISTICS plan domain: TABLE_NAME and forceable INDEX_NAME identify
+/// the key; NON_UNIQUE, ordered COLUMN_NAME (SEQ_IN_INDEX), COLLATION,
+/// SUB_PART, INDEX_TYPE, PACKED and IS_VISIBLE describe its usable shape.
+/// Visibility applies to every index: canonical DDL makes all visible, and
+/// hiding even an unhinted key weakens a Store plan. NULLABLE is derived
+/// from the checked COLUMNS; functional parts are nullable. EXPRESSION's
+/// presence is the `*` part; its server-normalized text is not a forced-plan
+/// dependency, since mysqlCanForceIndex excludes every functional key.
+/// TABLE_CATALOG is always def; TABLE_SCHEMA/INDEX_SCHEMA only locate the
+/// database. Only CARDINALITY (estimates), COMMENT (server status prose)
+/// and INDEX_COMMENT (DBA prose) are ignored mutable index metadata: none
+/// changes the key's definition or availability to a statement.
 /// Each value is cast to binary, so the lines compare as bytes whatever
 /// information_schema's collations.
 pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
@@ -1633,7 +1645,9 @@ pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
             ",' '," ++ binary("COALESCE(COLLATION_NAME,'-')") ++ ",IF(EXTRA IN ('STORED GENERATED','VIRTUAL GENERATED'),' generated','')) FROM " ++ in ++
             "COLUMNS WHERE TABLE_SCHEMA=" ++ database ++
             " UNION ALL SELECT CONCAT('i '," ++ binary("TABLE_NAME") ++ ",IF(MAX(NON_UNIQUE)=0,' u ',' n '),GROUP_CONCAT(" ++ binary("COALESCE(COLUMN_NAME,'*')") ++
-            ",IF(COLLATION='D',' desc','') ORDER BY SEQ_IN_INDEX SEPARATOR ','),IF(" ++ forced ++ ",CONCAT(' '," ++ binary("INDEX_NAME") ++ "),'')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
+            ",IF(SUB_PART IS NULL,'',CONCAT('(',SUB_PART,')')),CASE COLLATION WHEN 'A' THEN '' WHEN 'D' THEN ' desc' ELSE ' unordered' END," ++
+            "IF(PACKED IS NULL,'',CONCAT(' packed='," ++ binary("PACKED") ++ ")) ORDER BY SEQ_IN_INDEX SEPARATOR ','),' '," ++ binary("MAX(INDEX_TYPE)") ++
+            ",' '," ++ binary("MAX(IS_VISIBLE)") ++ ",IF(" ++ forced ++ ",CONCAT(' '," ++ binary("INDEX_NAME") ++ "),'')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
             " UNION ALL SELECT CONCAT('f '," ++ binary("TABLE_NAME") ++ ",' ',GROUP_CONCAT(" ++ binary("COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ','),' '," ++
             binary("MAX(REFERENCED_TABLE_NAME)") ++ ",' ',GROUP_CONCAT(" ++ binary("REFERENCED_COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ',')) FROM " ++ in ++
             "KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=" ++ database ++ " AND REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_NAME,CONSTRAINT_NAME" ++
@@ -1733,7 +1747,7 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 const covered = position >= parts.len - added and for (implicit) |other| {
                     if (other.len > index_parts.len and eqlList(other[0..index_parts.len], index_parts)) break true;
                 } else false;
-                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts) ++ forced_name};
+                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts) ++ " BTREE YES" ++ forced_name};
             }
         }
         return lines;
@@ -2395,11 +2409,11 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "k turn 1",
         "c turn open_lead varchar(8) YES utf8mb4_0900_bin generated",
         "f turn code content label",
-        "i turn u turn_id",
-        "i turn n open_lead,turn_id desc",
-        "i turn u *",
-        "i turn n live by_live",
-        "i turn n code",
+        "i turn u turn_id BTREE YES",
+        "i turn n open_lead,turn_id desc BTREE YES",
+        "i turn u * BTREE YES",
+        "i turn n live BTREE YES by_live",
+        "i turn n code BTREE YES",
         "t content InnoDB utf8mb4_0900_bin",
         "c content label varchar(8) NO utf8mb4_0900_bin",
         "c content note text YES utf8mb4_0900_bin",
@@ -2407,9 +2421,9 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "c content first_turn bigint NO -",
         "k content 3",
         "f content first_turn turn turn_id",
-        "i content u label",
-        "i content u label by_note",
-        "i content n first_turn",
+        "i content u label BTREE YES",
+        "i content u label BTREE YES by_note",
+        "i content n first_turn BTREE YES",
     };
     try std.testing.expectEqual(expected.len, lines.len);
     for (expected, lines) |want, line| try std.testing.expectEqualStrings(want, line);
