@@ -115,6 +115,22 @@ class PlanTest(unittest.TestCase):
                 self.assertFalse(output['retry'])
                 self.assertFalse(output['linux_codegen'])
 
+    def test_macos_matrix_and_split_use_the_final_native_selection(self):
+        for native, mac_required, expected, split in (
+                ([], True, ['check'], True),
+                (['test'], True, ['test'], False),
+                (['check-full'], True, ['check-full'], True),
+                (['test-logic'], True, ['test-logic'], False),
+                (['check'], False, [], False)):
+            with self.subTest(native=native, mac_required=mac_required):
+                output = plan(dict(selection(), targets=[], native_targets=native, mac_required=mac_required),
+                              event_name='pull_request', draft=False, promotion=False,
+                              change_kind=ChangeKind.NORMAL).outputs
+                self.assertEqual(output['native_targets'], expected)
+                self.assertEqual(output['macos_split'], split)
+                self.assertEqual(output['macos_matrix'], shards(expected, 'macos', mysql_suites=[]))
+                self.assertFalse(output['linux_split'])
+
     def test_pr_codegen_selects_check_or_stack_or_both_without_changing_other_targets(self):
         for targets in (['check'], ['stack-frames'], ['check', 'stack-frames'], ['test-logic'], []):
             with self.subTest(targets=targets):

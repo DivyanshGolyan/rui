@@ -1,10 +1,7 @@
-from contextlib import contextmanager
-import json
 from pathlib import Path
 import os
 import re
 import socket
-import subprocess
 import sys
 import tempfile
 import textwrap
@@ -15,37 +12,9 @@ from platform_boundary import (bind_sites, build_violations, flag_violations, ma
                                unlistened_binds, violations, zig_sites)
 import build_files  # noqa: E402
 from select_tests import select  # noqa: E402
-from qualification import split_build  # noqa: E402
 
 
 AVAILABLE = set(build_files.steps())
-
-
-@contextmanager
-def committed_selection(path):
-    with tempfile.TemporaryDirectory() as scratch:
-        root = Path(scratch)
-
-        def git(*args):
-            return subprocess.check_output(["git", *args], cwd=root, text=True, stderr=subprocess.PIPE).strip()
-
-        def commit():
-            git("-c", "user.name=fixture", "-c", "user.email=fixture@example.test",
-                "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "fixture")
-            return git("rev-parse", "HEAD")
-
-        git("init", "-q")
-        base = commit()
-        changed = root / path
-        changed.parent.mkdir(parents=True, exist_ok=True)
-        changed.write_text("Changed fixture.\n")
-        git("add", "--", path)
-        head = commit()
-        paths = git("diff", "--name-only", base, head, "--").splitlines()
-        selection = select(paths, "review", AVAILABLE)
-        selection.update(base=base, head=head)
-        (root / "tests").symlink_to((Path(__file__).parents[1]).resolve(), target_is_directory=True)
-        yield root, selection
 
 
 class PlatformBoundaryTest(unittest.TestCase):
@@ -241,7 +210,7 @@ class PlatformBoundaryTest(unittest.TestCase):
         self.assertTrue(select(["tests/integration/terminal_restoration_cases.py"], "review", AVAILABLE)["mac_required"])
         self.assertFalse(select(["src/turn_policy.zig"], "review", AVAILABLE)["mac_required"])
         self.assertTrue(select(["tests/integration/terminal_leader.py"], "review", AVAILABLE)["mac_required"])
-        # Drafts get development feedback only.
+        # Local prepush development feedback does not require native Mac.
         self.assertFalse(select(["src/os/socket.zig"], "development", AVAILABLE)["mac_required"])
 
     def test_linux_gate_requires_the_macos_type_check(self):
@@ -254,62 +223,6 @@ class PlatformBoundaryTest(unittest.TestCase):
         needs = re.search(r"(?m)^    needs: \[(.*?)\]$", gate)[1]
         self.assertIn("macos_typecheck", [name.strip() for name in needs.split(",")])
         self.assertIn('test "$TYPECHECK_RESULT" = success', gate)
-
-    def test_executed_plan_runs_mac_on_every_normal_ready_pr_and_retains_platform_mapping(self):
-        workflow = (Path(__file__).parents[2] / ".github/workflows/check.yml").read_text()
-        script = textwrap.dedent(re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)[1])
-        # Ready PRs run Mac only for Mac paths; promotion runs it for every batch.
-        cases = (("src/turn_policy.zig", "pull_request", False), ("src/os/socket.zig", "push", False),
-                 ("src/os/socket.zig", "pull_request", True), (".github/workflows/qualify-macos.yml", "pull_request", True),
-                 ("README.md", "pull_request", False), ("README.md", "workflow_dispatch", False))
-        for path, event, mac in cases:
-            with self.subTest(path=path, event=event):
-                with committed_selection(path) as (root, selection):
-                    (root / "selection.json").write_text(json.dumps(selection))
-                    (root / "output").write_text("")
-                    subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
-                                   env=dict(os.environ, DRAFT_RUN="false", PROMOTION="false", EVENT_NAME=event, GITHUB_REF_NAME="branch",
-                                            CANDIDATE_REF=selection["head"],
-                                            GITHUB_OUTPUT=str(root / "output"), GITHUB_STEP_SUMMARY=str(root / "summary")))
-                    outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
-                    kind = "documentation" if path == "README.md" and event == "pull_request" else "normal"
-                    self.assertEqual(outputs["change_kind"], kind)
-                    native = json.loads(outputs["native_targets"])
-                    self.assertEqual(outputs["native"], str(mac).lower())
-                    self.assertEqual(outputs["macos_split"], str(split_build(native)).lower())
-                    self.assertEqual(outputs["linux_split"], str(split_build(selection["targets"])).lower())
-                    if mac:
-                        self.assertEqual(native, selection["native_targets"] or ["check"])
-                        self.assertTrue(json.loads(outputs["macos_matrix"])["include"])
-                    else:
-                        self.assertEqual(native, [])
-
-    def test_executed_plan_splits_the_final_native_selection(self):
-        workflow = (Path(__file__).parents[2] / ".github/workflows/check.yml").read_text()
-        script = textwrap.dedent(re.search(r"(?ms)^          python3 - <<'PY'\n(.*?)^          PY$", workflow)[1])
-        for native, mac_required, expected, split in (
-                ([], True, ["check"], True),
-                (["test"], True, ["test"], False),
-                (["check-full"], True, ["check-full"], True),
-                (["test-logic"], True, ["test-logic"], False),
-                (["check"], False, [], False)):
-            with self.subTest(native=native, mac_required=mac_required):
-                with committed_selection(".github/workflows/check.yml") as (root, selection):
-                    selection.update(native_targets=native, mac_required=mac_required)
-                    (root / "selection.json").write_text(json.dumps(selection))
-                    (root / "output").write_text("")
-                    subprocess.run([sys.executable, "-B", "-c", script], cwd=root, check=True,
-                                   env=dict(os.environ, DRAFT_RUN="false", EVENT_NAME="pull_request", PROMOTION="false",
-                                            GITHUB_REF_NAME="main", CANDIDATE_REF=selection["head"],
-                                            GITHUB_OUTPUT=str(root / "output"),
-                                            GITHUB_STEP_SUMMARY=str(root / "summary")))
-                    outputs = dict(line.split("=", 1) for line in (root / "output").read_text().splitlines())
-                    self.assertEqual(outputs["change_kind"], "normal")
-                    self.assertEqual(outputs["macos_split"], str(split).lower())
-                    self.assertEqual(outputs["linux_split"], "false")
-                    self.assertEqual(json.loads(outputs["native_targets"]), expected)
-                    self.assertEqual(outputs["retry"], "false")
-
 
 
 if __name__ == "__main__":
