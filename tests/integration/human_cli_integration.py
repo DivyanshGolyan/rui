@@ -1535,7 +1535,7 @@ def renderer_cases():
             shown = tty.send("show invisible output\r", "output survived")
             assert all(value in shown for value in escaped), shown
             joined(tty)
-            shown = tty.send("/details\r", "joined é")
+            shown = tty.send("\x0f", "    Bash ")
             # Both the saved Tool Result and answer use the same display sink.
             assert all(value in shown for value in escaped), shown
             tty.caller.send_signal(signal.SIGINT)
@@ -1736,19 +1736,19 @@ def renderer_cases():
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/details\r")
+            os.write(tty.master, b"/help\r")
             time.sleep(0.3)
             released[1].set()
-            tty.wait("Recent conversation — tool details", timeout=20)
+            tty.wait("in your shell.", timeout=20)
             time.sleep(1.5)
-            assert "Recent conversation — tool details" in tty.capture.completed, tty.capture.completed
+            assert "in your shell." in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a later /details replaces a /status not yet shown", flush=True)
+        print("renderer: a later /help replaces a /status not yet shown", flush=True)
 
         # A short fresh feed clamps at its first saved row; scrolling does
         # not add a start label or duplicate the admitted Message and reply.
@@ -2586,7 +2586,7 @@ def main(selected="all"):
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
             assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/inspect-action", "/details", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
+            for command in ("/status", "/inspect-action", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
             assert "/history" not in help_text and "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
             # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).

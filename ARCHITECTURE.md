@@ -1457,7 +1457,7 @@ Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
 With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
 The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
-The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
+The step to 52 lets tool records name an MCP server and keeps the Host tool set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
@@ -1469,6 +1469,7 @@ The step to 59 adds immutable skill catalog metadata and its ordinary turnless i
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
 The step to 63 drops `model_operation.usage_content_id`, rebuilding `model_operation` on SQLite, and deletes each saved raw usage report no other row references; the four counts are unchanged, and the file keeps the freed pages until it is vacuumed.
+The step to 64 renames `host_catalog` to `host_tool_set` and `action_operation.bash_timeout_ms` to `attempt_timeout_ms`, without changing their contents.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2522,7 +2523,8 @@ Each edit, clear or send of the draft makes it an ordinary one and drops the pre
 On a typed draft Ctrl-P says to empty the draft first, even while a step is read.
 Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds the input, Ctrl-P and Ctrl-N do nothing and presses not yet read are dropped; a step already read still lands on the draft.
 Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
-Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is dropped as it arrives, with a notice, and the draft stays: ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
+Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is ignored without a notice as it arrives, leaving the draft unchanged (Divyansh’s decision): ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
+If the conversation shortcuts overlay is open, the key closes it first; the unbound chord otherwise does nothing.
 ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
 Alt-Enter adds a line like Shift-Enter and Ctrl-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
 A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
@@ -2729,7 +2731,7 @@ Explicit `request read-result` reads the Message's saved answer after completion
 Guidance preserves its exact handle and selectors.
 A current unresolved original takes precedence over that accepted fallback.
 Joined read borrowers transfer structured HTTP status, type and code into one bounded frontend owner, independent of worker reuse.
-Recoverable fill/details preparation presents terminal-safe diagnostics without losing the draft or advancing the failed edge.
+Recoverable fill/tool-output preparation presents terminal-safe diagnostics without losing the draft or advancing the failed edge.
 The frontend retains the diagnostic until successful presentation; fatal fallback runs only after quiescence.
 Read errors grant no admission or absence certainty.
 Optional stderr diagnostics are bounded and nonblocking; reporting failure never replaces restoration or the original error.
@@ -2745,7 +2747,7 @@ The conversation frontend is one full-screen libvaxis interface with a composer;
 Interactive entry requires a terminal and refuses `TERM=dumb` with guidance before changing any Host or Session state.
 A User Message is a block: `›` at the margin, dim body text, and its Host-written admission time as `HH:MM` in a right sidenote margin at 60 columns and wider.
 Assistant prose starts at column 0 without speaker labels.
-A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; `/details` shows it whole.
+A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; Ctrl-O or a click on its summary opens it whole.
 Tool activity follows the conversation's last line as the activity tail, whose rows `ActivityBlock` alone decides.
 It shows at most the three oldest calls awaiting permanent presentation, oldest first and fewer on short terminals, then `+N more running · /status`, `+N · /status` on a narrow row, counting every call not drawn; a click on that row opens `/status`.
 Each call takes one row, so a retry or the next call replaces a row in place rather than stacking: words that do not fit end in `…` and a running call's clock stays.
@@ -2826,6 +2828,25 @@ Esc, Ctrl-G or Ctrl-O returns to the same view and rows.
 Ctrl-O targets and selection use `(row key, offset)`, not offsets counted from the end; a row reloaded after eviction keeps the same identity.
 A page asked for before a send, Esc, Ctrl-G or a newer Ctrl-O never opens.
 A Message page never shows or decides an Action.
+A click on a tool heading toggles its output directly below it; Ctrl-O toggles the lowest openable tool heading under the same lowest-in-view rule.
+Several tool rows may be open together, and new live output leaves them open.
+The row is replaced in place under the feed anchor: a held view stays on its line, and a view following the end still follows.
+When opened output does not fit the window, rows outside the view and its loading margins leave, as for any arriving row; output that still has no room is refused and changes nothing.
+A toggle reads that one Activity row again; the row renderer shows the saved content under the heading when the row is open, checking its length and digest, and keeps only a bounded display prefix, never closed outputs.
+At most 20 indented rows show, with long logical lines ending in `…` rather than wrapping past that bound, then a quiet `… N more lines` row; a byte-bound cut counts incomplete lines among those not shown.
+The printed prefix keeps at most 8,192 raw bytes and at most 8,192 bytes after terminal-control escaping, before the document escapes invisible clusters.
+Opened headings keep the canonical mark and text in their folded columns; only the selection background changes.
+Code and tool output share one line-level selvedge band owner in `ConversationViewport`: the trusted line marker selects the band, quiet output or heading selection; all blank cells and wrapped rows use that same paint path.
+The entire folded Tool Result uses quiet foreground; NO_COLOR removes the colours and backgrounds, not the indent.
+The fold shows the stored Tool Result literally, including status, stream labels, warnings and capture pointers. No envelope or stdout/stderr parsing changes, omits or styles any of its lines.
+The same display path handles every tool kind and preserves printed text that resembles envelope headers or delimiters, across read-window boundaries.
+Terminal escaping and the row/byte bounds still apply; an empty result opens a blank indented row.
+Opening changes neither the Store nor model-facing text or the wire protocol.
+Internal tool line markers reuse the document's hidden address representation without adding per-byte styling storage, and never become terminal hyperlinks or clipboard text.
+Whether a row is open is one fact with one owner, the window's bounded set of open row keys; a row's text is a function of its Activity row and that fact, so trimming, reloading and replaying a row all draw it the same.
+The set changes only when a toggle's read lands: a failed, cancelled or superseded read (a send, Esc, Ctrl-G or a newer Ctrl-O) leaves the row as it was, and the next toggle retries.
+Neither the set nor any output is saved.
+An open row is marked by its heading's selection background alone; the footer names no close key, because Ctrl-O acts on the lowest openable row in view, which need not be the open one.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
 Rui does not enable alternate scroll mode 1007.
@@ -2849,11 +2870,11 @@ Standalone zero-width output clusters, clusters wider than eight cells and clust
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
 
-`/status`, `/requests`, `/help` and `/details` render selected inspections without changing the draft.
+`/status`, `/requests` and `/help` render selected inspections without changing the draft.
 `/status` is rendered by the next settled live read from that read's own Current capture, and shows in the same step as that read's history and composer status, so the page never disagrees with them.
 While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
 A live read's failure is the same failure with or without `/status`.
-A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later `/details` or inspection request replaces it.
+A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later inspection request replaces it.
 `/status` is also where settings change.
 Divyansh approved the page on 2026-11-02 (mock at 12:44Z, changes through #814's list at 13:23Z).
 Its title names the Session and its ID; a row for each of this Session's settings follows (effort, permissions, tools, name, Folder, compaction trigger, headroom, and the fixed model, Store and instructions, `none` or `set from a shell`), then a row for each default new Sessions start from (model, effort, notifications, Store), then the work: its state and Actions awaiting approval, its current message, every Action awaiting approval by ID, any indeterminate Action, and the recent messages with their outcomes, whose answers `/result KEY` shows.
@@ -2923,7 +2944,7 @@ They have the same checks and the same messages, except that a line that does no
 Once the Session accepts `/effort LEVEL`, LEVEL is also saved as the effort new Sessions start at, as `rui defaults configure --reasoning-effort` saves it.
 
 `/copy` sends the last answer, as its Markdown, to the terminal's clipboard through OSC 52 and `/copy code` sends that answer's last complete fenced block without its final line ending, both streamed with no extra memory; `/copy file` is the fallback, and `Sent to clipboard` shows under the input until the next key (Divyansh approved this on 2026-10-31, front-end plan PR 6a).
-Each reads the newest assistant answer after the current read, like `/details`.
+Each reads the newest assistant answer after the current read.
 The reader stages its exact bytes, bound to their length and digest, in the frontend's unlinked scratch file; the UI then writes `ESC ] 52 ; c ;`, the base64 of those bytes a 3 KiB window at a time, and `ESC \`, between frames, so no frame splits the sequence and neither the answer nor its base64 is ever whole in memory.
 The terminal owns the open sequence.
 A write asked for while it is open, such as enabling alternate scroll when a pumped key brings the terminal's report, waits for it to end.
@@ -2970,17 +2991,17 @@ Each call receives one permanent contextual outcome, with its unchanged label wh
 Settled calls retain their observed outcome in the live region until permanent presentation succeeds.
 Full-group Tool Result publication and original call order remain unchanged, so a settled sibling can remain visible while another is unresolved.
 Reopening reconstructs presentation from saved facts; call identity, not matching description text, correlates updates.
-Redraw preserves the draft and cursor, exact Workspace and command consent, canonical outcomes, uncertainty, and `/details` access.
+Redraw preserves the draft and cursor, exact Workspace and command consent, canonical outcomes, uncertainty, and inline tool output access.
 
 Consecutive successful tool outcomes occupy adjacent rows in normal conversation, including across Activity reads.
 Other visible messages, failures and detailed inspection retain block separation.
-Normal opening, live and historical Tool Results show only their saved description, canonical outcome and optional numeric failed exit in the heading.
-They show no stdout/stderr snippets, warning body lines, omission/export notices or automatic `/details` hints, including after success, timeout or failure.
-Capture and cleanup warnings remain in the unchanged saved result, available in the retained details suffix or full raw export.
+Folded opening, live and historical Tool Results show only their saved description, canonical outcome and optional numeric failed exit in the heading.
+They show no stdout/stderr snippets, warning body lines, omission/export notices or automatic inspection-command hints, including after success, timeout or failure.
+Capture and cleanup warnings remain in the unchanged saved result, available in the opened tool row or full raw Conversation export.
 
 Live and historical content share streaming hanging indentation for multiline fields; libvaxis wraps at draw time, so resize reflows without rereading.
 Intentional permission denial is a neutral settled outcome, not a failed Bash execution or a reason to inspect nonexistent output.
-Explicit details label saved Tool Results independently of whether a command executed.
+Opened tool rows show saved Tool Results independently of whether a command executed.
 
 A read in progress never suppresses draft and status redraw, because nothing it renders shows before it joins.
 This presentation fact grants no permission authority.
@@ -3007,7 +3028,7 @@ It shows while Ctrl-X would ask to stop the work the conversation shows, so not 
 The name is the Label, else the first line of the first Message, else the reference, as in overview rows.
 `N% left` is how far Current's `context_estimate` is from the compaction trigger, rounded up, so `0% left` means the next model call compacts; without a trigger it is omitted.
 A narrow line drops effort first, then shortens the name with `…`, then drops it, then drops `ctrl+x stop` whole, then cuts the end.
-A notice takes that row, and any further rows its text wraps to, until the next key, in the failure colour when it starts with `!`; under a conversation's input the overview's stop prompt comes first, then the overview's notice, then the conversation's own; overview notices fit 40 columns, except Host codes and setting lists they quote.
+A notice takes that row and any further rows its text wraps to until the next key; it uses the failure colour when it starts with `!`; under a conversation's input the overview's stop prompt comes first, then the overview's notice, then the conversation's own; overview notices fit 40 columns, except Host codes and setting lists they quote.
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
 The status sits directly above the rule; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
@@ -3039,9 +3060,7 @@ The full stream still drains and authenticates before the heading is shown.
 Tool Result streams validate even when their bytes are not displayed; label-only observation uses admission-certified metadata under the public Session activity contract.
 Fresh Action inspection authenticates all three complete proposal fields.
 Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
-`/details` shows the latest Conversation page in its own bounded inspection, without moving the feed anchor or live scan cursor.
-Each Tool Result shows its last min(raw length, 8,192) raw bytes through terminal-safe escaping, with `Earlier output omitted` before a shortened suffix and a full canonical raw export command.
-The raw suffix boundary is not adjusted for UTF-8 or lines.
+Opening tool output reads just that row again without moving the feed anchor or live scan cursor.
 Older outcome headings remain available by scrolling the feed; capped rows retain access to their full saved content.
 Stream framing, expected length, domain digest and physical EOF must validate before the final content window is delivered.
 A late content, integrity or rendering failure after visible opening/live output is fatal after terminal restoration, without retry or rollback.
@@ -3101,8 +3120,7 @@ The Host revalidates that exact Action at admission, even if an external decisio
 Observation continues while a choice is shown: once Current no longer names that Action, because another client decided it or its Turn ended, the choice leaves without a key and the outcome follows in the conversation.
 A definite stale-target rejection remains the original until explicit `/discard`; a subsequent distinct Action receives its own fresh presentation.
 The next draft and cursor survive choice and recovery.
-`/details` returns to the same choice without moving its target.
-All normal tool outcomes remain header-only; explicit `/details` retains bounded raw tool suffixes and full raw export.
+Tool outcomes start folded; opening a row shows bounded escaped saved output in place, and raw Conversation export remains unchanged.
 
 `/inspect-action` freshly inspects the first actionable exact Action through the existing CLI diagnostics path, shown as an inspection page.
 It sends no decision.
@@ -3115,7 +3133,7 @@ Inspection does not reserve an Action.
 A pending command or inspection waits for the current observation.
 A read that has delivered no output is cancelled and later repeated; once the UI owns a nonempty window, that read completes first, so output is never replayed.
 Only a successful joined observation advances Current and the activity cursor.
-This shared boundary covers opening, live Activity, permission presentation, feed fills and details; it changes no saved work or intent.
+This shared boundary covers opening, live Activity, permission presentation, feed fills and tool folds; it changes no saved work or intent.
 
 A feed fill is eligible only after successful joined opening establishes its edge; pre-output cancellation for a command or inspection restarts opening without treating an unset edge as exhausted.
 A null cursor before that join is not evidence of exhaustion.
@@ -3123,7 +3141,7 @@ A null cursor before that join is not evidence of exhaustion.
 Exit ends input consumption before terminal restoration discards queued suffix bytes.
 Cleanup collects independent reader and Admission outcomes after restoration, cancellation, both joins and output-loan retirement, then selects error precedence.
 An already-consumed substantive failure is not replaced by an external interruption.
-Ordinary feed/details preparation failure remains recoverable while active, but reportable on final exit; rendering failure remains fatal.
+Ordinary feed/tool-output preparation failure remains recoverable while active, but reportable on final exit; rendering failure remains fatal.
 Deliberate exit retires cancelled output without resuming or replaying it.
 An already-started synchronous command is not preemptible; interruption takes effect when it returns.
 
