@@ -244,117 +244,6 @@ pub const Collapsed = struct {
     row: bool,
 };
 
-/// The Messages of one Document's collapsed blocks in order. Each block
-/// draws exactly one summary run starting `┄`, so the Document's k-th such
-/// run from its end is the k-th entry from the end. Live output appends and
-/// evicts from the front; a transcript also gains older pages at the front
-/// and loses newer rows from the end. Beyond capacity the oldest entries
-/// are only counted.
-pub const Blocks = struct {
-    pub const capacity = 1024;
-    items: [capacity]?Collapsed = undefined,
-    start: usize = 0,
-    count: usize = 0,
-    // Blocks before `items`, oldest first, whose Messages are not kept.
-    unknown: u64 = 0,
-
-    fn at(self: *const Blocks, index: usize) usize {
-        return (self.start + index) % capacity;
-    }
-
-    pub fn append(self: *Blocks, value: ?Collapsed) void {
-        if (self.count == capacity) {
-            self.start = self.at(1);
-            self.count -= 1;
-            self.unknown += 1;
-        }
-        self.items[self.at(self.count)] = value;
-        self.count += 1;
-    }
-
-    /// Places an older page's blocks, oldest first, before every other.
-    /// Behind blocks already unknown they are unknown too: placing them
-    /// next to the kept ones would shift every older index.
-    pub fn prepend(self: *Blocks, older: []const ?Collapsed) void {
-        if (self.unknown != 0) {
-            self.unknown += older.len;
-            return;
-        }
-        var index = older.len;
-        while (index > 0) : (index -= 1) {
-            if (self.count == capacity) {
-                self.unknown += index;
-                return;
-            }
-            self.start = (self.start + capacity - 1) % capacity;
-            self.items[self.start] = older[index - 1];
-            self.count += 1;
-        }
-    }
-
-    /// Forgets the newest `count` blocks, which left the Document's end.
-    pub fn dropNewest(self: *Blocks, count: u64) void {
-        const kept: usize = @intCast(@min(count, self.count));
-        self.count -= kept;
-        self.unknown -|= count - kept;
-    }
-
-    /// The block `index` from the end (0 is the newest), if kept.
-    pub fn fromEnd(self: *const Blocks, index: u64) ?Collapsed {
-        if (index >= self.count) return null;
-        return self.items[self.at(self.count - 1 - @as(usize, @intCast(index)))];
-    }
-
-    /// A copy holding only the newest `count` blocks.
-    pub fn newest(self: *const Blocks, count: u64) Blocks {
-        var copy = self.*;
-        const kept: usize = @intCast(@min(count, self.count));
-        copy.start = self.at(self.count - kept);
-        copy.count = kept;
-        copy.unknown = count - kept;
-        return copy;
-    }
-};
-
-test "collapsed blocks keep their order from the end as pages join and leave" {
-    var blocks: Blocks = .{};
-    const body_ref: protocol.ActivityItem.Content = .{ .length = 0, .digest = @splat(0) };
-    const at = struct {
-        fn f(position: u64, c: protocol.ActivityItem.Content) ?Collapsed {
-            return .{ .source = .activity, .position = position, .ordinal = 0, .content = c, .row = false };
-        }
-    }.f;
-    for (0..Blocks.capacity + 3) |index| blocks.append(at(index + 10, body_ref));
-    try std.testing.expectEqual(@as(u64, 3), blocks.unknown);
-    try std.testing.expectEqual(@as(u64, Blocks.capacity + 12), blocks.fromEnd(0).?.position);
-    try std.testing.expectEqual(@as(u64, 13), blocks.fromEnd(Blocks.capacity - 1).?.position);
-    try std.testing.expect(blocks.fromEnd(Blocks.capacity) == null);
-    var copy = blocks.newest(5);
-    try std.testing.expectEqual(@as(u64, Blocks.capacity + 8), copy.fromEnd(4).?.position);
-    copy.prepend(&.{ at(1, body_ref), null, at(3, body_ref) });
-    try std.testing.expectEqual(@as(u64, 3), copy.fromEnd(5).?.position);
-    try std.testing.expect(copy.fromEnd(6) == null);
-    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(7).?.position);
-    copy.dropNewest(6);
-    try std.testing.expect(copy.fromEnd(0) == null and copy.fromEnd(2) == null);
-    try std.testing.expectEqual(@as(u64, 1), copy.fromEnd(1).?.position);
-    // An older page beyond capacity counts its oldest blocks only.
-    var full = blocks.newest(Blocks.capacity - 1);
-    full.prepend(&.{ at(1, body_ref), at(2, body_ref) });
-    try std.testing.expectEqual(@as(u64, 2), full.fromEnd(Blocks.capacity - 1).?.position);
-    try std.testing.expectEqual(@as(u64, 1), full.unknown);
-    // Behind an unknown block, slots freed at the end never let an older
-    // page's Message take a kept index: the oldest kept block stays 13 and
-    // every index past it stays unknown.
-    var gap = blocks.newest(Blocks.capacity + 1);
-    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 1).?.position);
-    gap.prepend(&.{at(2, body_ref)});
-    gap.dropNewest(1);
-    gap.prepend(&.{at(1, body_ref)});
-    try std.testing.expectEqual(@as(u64, 13), gap.fromEnd(Blocks.capacity - 2).?.position);
-    for (Blocks.capacity - 1..Blocks.capacity + 3) |index| try std.testing.expect(gap.fromEnd(index) == null);
-}
-
 /// Tells a sink that records collapsed blocks which Message the one just
 /// written shows.
 pub fn noteCollapsed(sink: anytype, value: Collapsed) !void {
@@ -698,7 +587,9 @@ test "list rows share every mark and script with the chat heading table" {
             try std.testing.expectEqualStrings(shared.unicode, heading.bytes[0..end]);
         }
     }
-    try std.testing.expect(seen.eql(.full));
+    var states: std.enums.EnumSet(marks.Mark) = .full;
+    states.remove(.newer); // The navigation chip is not a Session work state.
+    try std.testing.expect(seen.eql(states));
 }
 
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {

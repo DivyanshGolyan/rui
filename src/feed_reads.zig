@@ -39,6 +39,8 @@ pub fn Policy(comptime Cursor: type) type {
             window_provisional: ?Cursor = null,
             /// Scan replay survives eviction from the resident window.
             scan_provisional: ?Cursor = null,
+            scan_continuing: bool = false,
+            window_continuing: bool = false,
             action_named: bool = false,
             choice_open: bool = false,
             submission: bool = false,
@@ -74,6 +76,9 @@ pub fn Policy(comptime Cursor: type) type {
             /// suffix with feed_window.replaceFrom, not append duplicates.
             /// Null means the ordinary exclusive continuation at `from`.
             replace_from: ?Cursor = null,
+            /// Continuation appends the rest of an already-replaced suffix.
+            /// replace_from still names its attachment boundary.
+            continuing: bool = false,
         };
 
         /// The scan owns its cursor and replay key, independent of the window.
@@ -83,19 +88,20 @@ pub fn Policy(comptime Cursor: type) type {
             return switch (read) {
                 .opening => .{ .direction = .backward, .kinds = .all, .started_from = null, .from = null },
                 .fill_above => .{ .direction = .backward, .kinds = .visible, .started_from = state.low, .from = state.low },
-                .scan => forward(state.scan_cursor, state.scan_provisional, .all),
-                .fill_below => forward(state.high, state.window_provisional, .visible),
+                .scan => forward(state.scan_cursor, state.scan_provisional, .all, state.scan_continuing),
+                .fill_below => forward(state.high, state.window_provisional, .visible, state.window_continuing),
                 .permission => null,
             };
         }
 
-        fn forward(edge: ?Cursor, first_provisional: ?Cursor, kinds: @FieldType(Page, "kinds")) Page {
+        fn forward(edge: ?Cursor, first_provisional: ?Cursor, kinds: @FieldType(Page, "kinds"), continuing: bool) Page {
             return .{
                 .direction = .forward,
                 .kinds = kinds,
                 .started_from = edge,
-                .from = first_provisional orelse edge,
+                .from = if (continuing) edge else first_provisional orelse edge,
                 .replace_from = first_provisional,
+                .continuing = continuing,
             };
         }
 
@@ -341,5 +347,22 @@ test "feed_reads forward attachment domain for scan and fill_below" {
         // Backward fills depend only on the low edge, not replay state.
         try std.testing.expect(P.applies(.fill_above, 10, case.replace_from, 10, case.current));
         try std.testing.expect(!P.applies(.fill_above, 10, case.replace_from, 11, case.current));
+    }
+}
+
+test "feed_reads continues a paginated provisional replay without restarting or replacing twice" {
+    const P = Policy(u64);
+    for ([_]Read{ .scan, .fill_below }) |read| {
+        var state: P.State = .{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .at_end = false, .high = 30, .scan_cursor = 30, .window_provisional = 10, .scan_provisional = 10 };
+        const first = P.request(read, state).?;
+        try std.testing.expectEqual(@as(?u64, 10), first.from);
+        try std.testing.expect(!first.continuing);
+        state.window_continuing = true;
+        state.scan_continuing = true;
+        const next = P.request(read, state).?;
+        try std.testing.expectEqual(@as(?u64, 30), next.from);
+        try std.testing.expectEqual(@as(?u64, 10), next.replace_from);
+        try std.testing.expect(next.continuing);
+        try std.testing.expect(P.forwardAttaches(next.started_from, next.replace_from, state.high, state.window_provisional));
     }
 }
