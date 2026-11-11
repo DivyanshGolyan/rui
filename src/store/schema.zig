@@ -553,13 +553,12 @@ const MetaSeed = struct {
     value: union(enum) { binding: u8, literal: []const u8, random_id },
 };
 
-/// One seed policy, with engine-owned bindings/randomness. The legacy
-/// selector remains an admitted key on MySQL, but is not seeded there.
+/// One seed policy, with engine-owned bindings/randomness. Both engines
+/// bind the canonical selector independently of the durable random id.
 pub fn metaSeed(comptime dialect: rsql.Dialect) []const MetaSeed {
     return comptime blk: {
         var seed: []const MetaSeed = &.{};
         for (std.enums.values(MetaKey)) |key| {
-            if (dialect == .mysql and key == .store_selector) continue;
             const value: @FieldType(MetaSeed, "value") = switch (key) {
                 .wire_version => if (dialect == .sqlite) .{ .binding = 1 } else .{ .literal = wire_version },
                 .store_selector => .{ .binding = 2 },
@@ -580,15 +579,21 @@ pub fn drawStoreId(io: std.Io) [2 * store_id_bytes]u8 {
 }
 
 /// MySQL's missing-key repair; transaction and ownership stay with admission.
-pub fn writeMissingMeta(w: *std.Io.Writer, seen: MetaPresence, id: *const [2 * store_id_bytes]u8) !void {
+pub fn writeMissingMeta(w: *std.Io.Writer, seen: MetaPresence, id: *const [2 * store_id_bytes]u8, selector: []const u8) !void {
     for (comptime metaSeed(.mysql)) |entry| {
         if (seen.contains(entry.key)) continue;
         const value = switch (entry.value) {
             .literal => |value| value,
-            .binding => id,
+            .binding => |binding| if (binding == 2) selector else id,
             .random_id => unreachable,
         };
-        // Values are schema literals or a lower-case hexadecimal id.
+        if (entry.key == .store_selector) {
+            try w.writeAll("INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',_utf8mb4 X'");
+            try @import("mysql_literal.zig").writeHex(w, value);
+            try w.writeAll("' COLLATE utf8mb4_0900_bin);");
+            continue;
+        }
+        // Other values are schema literals or a lower-case hexadecimal id.
         try w.print("INSERT INTO store_meta(meta_key,meta_value) VALUES('{s}','{s}');", .{ @tagName(entry.key), value });
     }
 }

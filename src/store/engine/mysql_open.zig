@@ -49,7 +49,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     // The database name is also MySQL's connection-owned lock name.
     // GET_LOCK accepts at most 64 characters; do not truncate and collide.
     if (options.database.len == 0 or options.database.len > 64) return error.WrongStoreIdentity;
-    if (selector.len > store_path.max_bytes) return error.WrongStoreIdentity;
+    if (selector.len > store_path.max_bytes or !std.unicode.utf8ValidateSlice(selector)) return error.WrongStoreIdentity;
     // Every message carries the settings, so none relies on the server
     // connection a proxy sent the last one on.
     conn.useSettings(session_settings, schema.mysql_session.len);
@@ -67,9 +67,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     conn.limitBatch(facts.max_allowed_packet);
     if (refusal(&facts)) |failure| return failure;
 
-    // Never decode the obsolete selector's value: even its old path bound
-    // has no authority over admission after a restore under another name.
-    try conn.query("SELECT meta_key,CASE WHEN meta_key='store_selector' THEN '' ELSE meta_value END FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
+    try conn.query("SELECT meta_key,meta_value FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
     const Meta = struct { key: Bounded(32), value: Bounded(store_path.max_bytes) };
     var meta_columns = try columns(Meta, conn);
     var store_id: [2 * schema.store_id_bytes]u8 = undefined;
@@ -85,7 +83,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
                 .format => error.MalformedStoreFormat,
                 .wire_version => error.WrongStoreVersion,
                 .store_id => error.WrongStoreIdentity,
-                .store_selector => error.WrongStoreSchema, // CASE supplies empty text.
+                .store_selector => error.WrongStoreIdentity,
             },
             else => return err,
         };
@@ -100,8 +98,8 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
                 if (found > schema.schema_version) return error.StoreSchemaAhead;
             },
             .wire_version => if (!std.mem.eql(u8, value, wire_version)) return error.WrongStoreVersion,
-            // A legacy database name is not this Store's durable identity.
-            .store_selector => {},
+            // The canonical selector is checked independently of the durable id.
+            .store_selector => if (!std.mem.eql(u8, value, selector)) return error.WrongStoreIdentity,
             .store_id => {
                 if (!schema.isStoreId(value)) return error.WrongStoreIdentity;
                 store_id = value[0..store_id.len].*;
@@ -124,7 +122,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     const batch = conn.batch();
     try batch.writeAll("START TRANSACTION;");
     if (!seen.contains(.store_id)) store_id = schema.drawStoreId(io);
-    try schema.writeMissingMeta(batch, seen, &store_id);
+    try schema.writeMissingMeta(batch, seen, &store_id, selector);
     try batch.writeAll("INSERT INTO store_owner(owner_key,epoch,commit_seq) SELECT 1,0,0 WHERE NOT EXISTS(SELECT 1 FROM store_owner WHERE owner_key=1);UPDATE store_owner SET epoch=epoch+1 WHERE owner_key=1;UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL;SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1;COMMIT");
     try conn.sendBatch();
     try expectOk(conn); // START TRANSACTION
