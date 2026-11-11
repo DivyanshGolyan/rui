@@ -290,6 +290,37 @@ const Job = union(enum) {
     }
 };
 
+/// What a job leaves, as one value in its job's shape. The job that runs
+/// is its only writer and `deliver`, for that job, its only reader, so no
+/// job reads what another left. A job that fails partway leaves the part
+/// it wrote.
+const Answer = union(enum) {
+    /// No job has run since the last answer was taken, or the job leaves
+    /// only its outcome.
+    none,
+    host: HostRead,
+    page: protocol_reply.SessionListPage,
+    lines: [view.max_first_line_reads]Line,
+    /// Each command read's leading bytes, null when it has none to show.
+    commands: [view.max_first_line_reads]Command,
+    /// A start's, stop's or archive's.
+    reply: Reply,
+    menu: model_picker.Menu,
+    skills: skill_suggestions.Page,
+    /// What a command printed, as far as the core takes it.
+    output: Output,
+
+    /// Frees an answer no one took.
+    fn deinit(self: *Answer, gpa: std.mem.Allocator) void {
+        switch (self.*) {
+            .menu => |*menu| menu.deinit(gpa),
+            .skills => |*page| page.deinit(gpa),
+            else => {},
+        }
+        self.* = .none;
+    }
+};
+
 /// One host read and list page, at most one first-line batch, one
 /// command-read batch, one model-list read, one skills read, one save, one
 /// command and the requests the core's ledger allows can wait at once.
@@ -365,26 +396,15 @@ conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
 title: session_chrome.Title = .{},
 jobs: [max_jobs]Job = undefined,
 job_count: usize = 0,
-/// The job the worker runs or last ran, and its output.
+/// The job the worker runs or last ran, and what it left.
 job: Job = .list,
+answer: Answer = .none,
 traversal: protocol_reply.SessionTraversal = .init(null),
 traversal_archive: protocol.SessionArchiveFilter = .active,
-host: HostRead = .{},
-page: protocol_reply.SessionListPage = undefined,
-lines: [view.max_first_line_reads]Line = @splat(.{}),
-/// Each command read's leading bytes, null when it has none to show.
-commands: [view.max_first_line_reads]Command = @splat(.{}),
-reply: Reply = .{},
-/// The skills read's page, until the core takes it.
-skill_page: ?skill_suggestions.Page = null,
-/// The menu a model-list read built, until the core takes it.
-menu: model_picker.Menu = .{},
 /// Unlinked scratch for list pages.
 scratch: ?std.Io.File = null,
 /// Unlinked scratch a command's output goes to, made for the first command.
 command_page: ?std.Io.File = null,
-/// What the last command printed, as far as the core takes it.
-output: Output = .{},
 
 /// The Session a conversation borrows, in stable storage.
 opened: view.Reference = undefined,
@@ -902,8 +922,7 @@ fn destroy(self: *Self) void {
     if (self.scratch) |file| file.close(self.init.io);
     if (self.command_page) |file| file.close(self.init.io);
     self.state.deinit();
-    self.menu.deinit(self.init.gpa);
-    if (self.skill_page) |*page| page.deinit(self.init.gpa);
+    self.answer.deinit(self.init.gpa);
     self.init.gpa.destroy(self);
 }
 
@@ -1026,7 +1045,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     try self.worker.start(self.init.io, self, work);
 }
 
-/// The worker: runs one job and writes only its own output fields. Its
+/// The worker: runs one job and writes only that job's answer. Its
 /// result is the job's outcome, which `complete` settles.
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -1034,15 +1053,18 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
 }
 
 /// Runs `job`, on the worker's thread or, for a save on the way out, the
-/// loop's.
+/// loop's, and leaves its answer.
 fn runJob(self: *Self, requests: client.Requests) !void {
+    std.debug.assert(self.answer == .none);
     switch (self.job) {
-        .host => self.host = self.ops.host(self),
-        .list => if (try self.ops.list(self, requests, self.traversal.cursor, &self.page)) |failure| return failure.err(),
+        .host => self.answer = .{ .host = self.ops.host(self) },
+        .list => {
+            self.answer = .{ .page = undefined };
+            if (try self.ops.list(self, requests, self.traversal.cursor, &self.answer.page)) |failure| return failure.err();
+        },
         .lines => |reads| {
-            const lines = self.lines[0..reads.len];
-            for (lines) |*line| line.result = .unanswered;
-            for (reads.slice(), lines) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes)) {
+            self.answer = .{ .lines = @splat(.{}) };
+            for (reads.slice(), self.answer.lines[0..reads.len]) |read, *line| switch (try self.ops.first_line(self, requests, &read.reference, read.position, &line.bytes)) {
                 .line => |text| {
                     line.result = .line;
                     line.len = text.len;
@@ -1056,9 +1078,8 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             };
         },
         .commands => |reads| {
-            const commands = self.commands[0..reads.len];
-            for (commands) |*command| command.* = .{};
-            for (reads.slice(), commands) |read, *command| {
+            self.answer = .{ .commands = @splat(.{}) };
+            for (reads.slice(), self.answer.commands[0..reads.len]) |read, *command| {
                 command.text = try self.ops.action_command(self, requests, &read.reference, read.action, &command.bytes);
                 command.answered = true;
             }
@@ -1067,26 +1088,30 @@ fn runJob(self: *Self, requests: client.Requests) !void {
             // An unreadable saved effort sends nothing, as a failed capture does.
             var compaction_buffer: [20]u8 = undefined;
             const input = self.startInput(start, &compaction_buffer) catch |err| {
-                self.reply = .refused(@errorName(err));
+                self.answer = .{ .reply = .refused(@errorName(err)) };
                 return;
             };
-            try self.ops.start(self, requests, input, &self.reply);
+            self.answer = .{ .reply = .refused("start_request_failed") };
+            try self.ops.start(self, requests, input, &self.answer.reply);
         },
-        .stop => |*reference| try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.reply),
+        .stop => |*reference| {
+            self.answer = .{ .reply = .refused("stop_request_failed") };
+            try self.ops.stop(self, requests, .{ .store = self.options.store, .session = reference }, &self.answer.reply);
+        },
         .archive => |*request| {
-            self.reply = .refused("archive_request_failed");
-            try self.ops.archive(self, requests, .{ .store = self.options.store, .session = &request.reference, .archived = request.archived }, &self.reply);
+            self.answer = .{ .reply = .refused("archive_request_failed") };
+            try self.ops.archive(self, requests, .{ .store = self.options.store, .session = &request.reference, .archived = request.archived }, &self.answer.reply);
         },
         .models => {
             const gpa = self.init.gpa;
             const body = try self.ops.models(self, requests, gpa);
             defer gpa.free(body);
-            self.menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body));
+            self.answer = .{ .menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body)) };
         },
-        .skills => |*read| self.skill_page = try self.ops.skills(self, requests, self.init.gpa, read.workspace.slice(), read.prefix.slice()),
+        .skills => |*read| self.answer = .{ .skills = try self.ops.skills(self, requests, self.init.gpa, read.workspace.slice(), read.prefix.slice()) },
         .save => |binding| try self.ops.save_default(self, binding),
         .command => |*command| {
-            self.output = .{};
+            self.answer = .{ .output = .{} };
             try self.ops.command(self, requests, if (command.session) |*session| session else "", command.line);
         },
     }
@@ -1119,45 +1144,52 @@ fn complete(self: *Self) !?Next {
     return next;
 }
 
+/// Steps the core with the job's answer, which it takes: a job the core
+/// hears of leaves nothing behind for the next.
 fn deliver(self: *Self, outcome: anyerror!void) !?Next {
+    var answer = self.answer;
+    self.answer = .none;
+    defer answer.deinit(self.init.gpa);
     switch (self.job) {
         .host => {
-            if (self.host.memory) |memory| _ = try self.event(.{ .memory = memory });
-            return self.event(.{ .host = self.host.facts });
+            if (answer.host.memory) |memory| _ = try self.event(.{ .memory = memory });
+            return self.event(.{ .host = answer.host.facts });
         },
         .list => {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
-            const page: view.Page = .of(&self.traversal, &self.page, &rows);
+            const page: view.Page = .of(&self.traversal, &answer.page, &rows);
             // The next page goes before anything this page's result queues.
             if (page.answer == null) self.queue(.list);
             return self.event(.{ .list = .{ .page = page } });
         },
-        .lines => |reads| for (reads.slice(), self.lines[0..reads.len]) |read, *line| {
+        .lines => |reads| for (reads.slice(), answer.lines[0..reads.len]) |read, *line| {
             const result: view.FirstLine = .{ .reference = read.reference, .admission = read.admission, .line = if (line.result == .line) line.bytes[0..line.len] else null, .unanswered = line.result == .unanswered };
             if (try self.event(.{ .first_line = result })) |next| return next;
         },
         // A batch that failed partway leaves the rest unanswered.
-        .commands => |reads| for (reads.slice(), self.commands[0..reads.len]) |read, *command| {
+        .commands => |reads| for (reads.slice(), answer.commands[0..reads.len]) |read, *command| {
             if (try self.event(.{ .command = .{ .reference = read.reference, .action = read.action, .text = command.text, .unanswered = !command.answered } })) |next| return next;
         },
         .start => {
-            if (self.reply.outcome == .accepted) self.started = self.reply.session;
-            return self.event(.{ .start = self.reply.start() });
+            if (answer.reply.outcome == .accepted) self.started = answer.reply.session;
+            return self.event(.{ .start = answer.reply.start() });
         },
-        .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = self.reply.stop() } }),
-        .archive => |request| return self.event(.{ .archive = self.reply.archive(request) }),
+        .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = answer.reply.stop() } }),
+        .archive => |request| return self.event(.{ .archive = answer.reply.archive(request) }),
         .skills => |read| {
-            const page = self.skill_page;
-            self.skill_page = null;
-            view.skillsRead(&self.state, read.read, if (outcome) |_| page else |_| null, self.composerDraft());
+            // The core owns the page it is given.
+            const page: ?skill_suggestions.Page = if (outcome) |_| answer.skills else |_| null;
+            answer = .none;
+            view.skillsRead(&self.state, read.read, page, self.composerDraft());
             self.askSkills();
             return null;
         },
         .models => {
             outcome catch |err| return self.event(.{ .models = .failed(err) });
-            const menu = self.menu;
-            self.menu = .{};
+            // The core owns the menu it is given.
+            const menu = answer.menu;
+            answer = .none;
             return self.event(.{ .models = .{ .menu = menu } });
         },
         .save => |binding| return self.event(.{
@@ -1170,7 +1202,7 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             },
         }),
         .command => |command| {
-            const output = &self.output;
+            const output = &answer.output;
             // As a conversation drops an inspection that could not start,
             // the overview says only that it did not run.
             var ran: view.Ran = .of(&output.bytes, output.len, if (outcome) |_| true else |_| false, output.kept);
@@ -1279,12 +1311,13 @@ fn runCommand(self: *Self, requests: client.Requests, session: []const u8, line:
     };
     const command: session_reads.CommandRun = .{ .command = self.hooks.command, .init = self.init, .requests = requests, .store = self.options.store, .session = session, .line = line };
     const ended = command.into(page);
-    self.output.kept = ended.rendering;
+    const output = &self.answer.output;
+    output.kept = ended.rendering;
     // Failed restoration may leave fd 2 on the page, so, as a conversation
     // does, keep nothing for the way out to write there.
     if (!ended.rendering or !ended.stderr_restored) return ended.outcome;
     // What it printed shows whether it ran to the end or not.
-    self.output.len = page.readPositionalAll(self.init.io, &self.output.bytes, 0) catch |err| {
+    output.len = page.readPositionalAll(self.init.io, &output.bytes, 0) catch |err| {
         try ended.outcome;
         return err;
     };
@@ -4307,6 +4340,27 @@ test "Alt-A overview archives at once and preserves draft bytes caret and revisi
         try std.testing.expectEqual(before.edits, after.edits);
         try std.testing.expectEqual(rejected, overview.composer.rejected != null);
     };
+}
+
+test "a stop that ends with no answer reads as failed, whatever the job before it left" {
+    const rig = try openListed();
+    defer rig.close();
+    const overview = rig.overview;
+    // The Host accepts an archive: the job before the stop left an accepted reply.
+    try std.testing.expect(try rig.press("\x1ba") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+    overview.ops.stop = struct {
+        fn stop(_: *Self, _: client.Requests, _: client.SessionStopInput, _: *Reply) !void {
+            Seen.now.stops += 1;
+            return error.ConnectionRefused;
+        }
+    }.stop;
+    overview.state.notice = null;
+    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
+    try std.testing.expectEqualStrings("! k7m2qx not stopped: stop_request_failed", overview.state.notice.?.text());
 }
 
 test "conversation archive and restore use the exact unlisted opened reference through the existing worker" {
