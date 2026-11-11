@@ -670,7 +670,7 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try answered.feed("✓ done\n");
     try std.testing.expectEqual(@as(usize, 0), answered.boundaries.count);
     answered.item(stop);
-    try answered.feed("! Session stopped.\n");
+    try answered.feed("■ Stopped\n");
     try std.testing.expectEqualDeep(@as([]const Boundary, &.{.{ .output = 9, .cursor = .{ .end = 19 }, .admitted = 20 }}), answered.boundaries.slice());
     try std.testing.expect(answered.finish().settled());
     try std.testing.expectEqual(@as(u64, 2), answered.entries);
@@ -682,12 +682,12 @@ test "a stop answers every Message up to its cutoff, and no boundary precedes qu
     try shown.feed("✓ done\n");
     try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
     shown.excluding(12);
-    try shown.feed("! Stopped before it ran · send it again to run it\n› later\n");
+    try shown.feed("◌ not sent\n› later\n");
     try std.testing.expectEqual(@as(usize, 0), shown.boundaries.count);
     try std.testing.expectEqual(@as(usize, 0), shown.echoes.count);
     try std.testing.expectEqual(@as(?u64, 12), shown.lowest);
     shown.item(stop);
-    try shown.feed("! Session stopped.\n");
+    try shown.feed("■ Stopped\n");
     try std.testing.expectEqual(@as(usize, 1), shown.boundaries.count);
     try std.testing.expectEqual(@as(u64, 20), shown.boundaries.items[0].admitted);
     // Entries are the items that showed bytes: an item that writes nothing
@@ -1487,6 +1487,6 @@ test "a stop labels a Message that showed while it waited at the opening" {
     host.end = 22;
     var live: Job = .{ .session = "k7m2qx", .cursor = opening.result.cursor, .messages = opening.result.messages, .queued = opening.result.queued, .drawn = opening.drawn, .line_read = .{ .revision = 1, .end = 22 } };
     try host.read(&live);
-    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Stopped before it ran · send it again to run it") != null);
-    try std.testing.expect(std.mem.indexOf(u8, host.shown, "! Session stopped.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "◌ not sent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, host.shown, "■ Stopped") != null);
 }
