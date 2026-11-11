@@ -4360,7 +4360,7 @@ test "presets seed configure before Store validation and idempotency" {
     defer memory.deinit();
     const arena = memory.allocator();
     const spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
-        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":"{\"type\":\"object\"}","label":"Preset label"}
+        \\{"model":"gpt-6.1-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
     const presets = [_]core_tools.Preset{.{ .name = "review", .spec = spec }};
     var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage, .presets = &presets };
@@ -4435,7 +4435,7 @@ test "presets seed configure before Store validation and idempotency" {
     // An edited preset is not saved or looked up by name in the Store. A
     // request overriding its edited field still has the same resolved digest.
     const edited_spec = (try std.json.parseFromSliceLeaky(std.json.Value, arena,
-        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":"{\"type\":\"object\"}","label":"Preset label"}
+        \\{"model":"gpt-6-sol","effort":"low","compactAt":10000,"tools":[],"permissionMode":"ask","provider":"openai","instructions":"Preset instructions","outputSchema":{"type":"object"},"label":"Preset label"}
     , .{})).object;
     const edited_presets = [_]core_tools.Preset{.{ .name = "review", .spec = edited_spec }};
     host.presets = &edited_presets;
