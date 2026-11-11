@@ -13,9 +13,9 @@ MAIN = "a" * 40
 class FakeGitHub:
     """PRs as number -> (head, mergeable, test-merge base); stale reads give an old clean answer."""
 
-    def __init__(self, prs, comments=None, stale=0, failing=(), failing_after=1):
+    def __init__(self, prs, comments=None, stale=0, failing=(), failing_after=0):
         self.prs, self.comments, self.failing = prs, comments or {}, set(failing)
-        self.failing_after = failing_after  # Reads of a failing PR that succeed first; 1 = the warm-up read.
+        self.failing_after = failing_after  # Reads of a failing PR that succeed first.
         self.stale = dict.fromkeys(prs, stale)
         self.posted, self.listed, self.reads = [], [], dict.fromkeys(prs, 0)
 
@@ -88,9 +88,27 @@ class ConflictAlertTest(unittest.TestCase):
         github = FakeGitHub({1: ("h1", False, MAIN), 2: ("h2", False, MAIN)}, failing=[1])
         self.assertEqual(run(github), ([2], [], [1]))
 
-    def test_a_failing_warm_up_read_does_not_stop_the_rest(self):
-        github = FakeGitHub({1: ("h1", False, MAIN), 2: ("h2", False, MAIN)}, failing=[1], failing_after=0)
+    def test_a_read_that_fails_in_a_later_round_does_not_stop_the_rest(self):
+        github = FakeGitHub({1: ("h1", False, MAIN), 2: ("h2", False, MAIN)}, stale=2, failing=[1], failing_after=1)
         self.assertEqual(run(github), ([2], [], [1]))
+        self.assertEqual(github.reads[1], 2, "a failed PR is not read again")
+
+    def test_unjudged_prs_share_one_deadline(self):
+        # GitHub leaves a clean PR's test merge on an older main: such PRs
+        # wait together, not ten sleeps each in turn.
+        prs = {number: (f"h{number}", True, "old") for number in range(1, 6)}
+        github = FakeGitHub({**prs, 6: ("h6", False, MAIN)}, stale=0)
+        github.stale[6] = 4
+        sleeps = []
+        self.assertEqual(alert(github, "o/r", MAIN, sleep=sleeps.append), ([6], [1, 2, 3, 4, 5], []))
+        self.assertEqual(sleeps, [6] * 9)
+        self.assertEqual(github.reads[6], 5, "a judged PR is not read again")
+
+    def test_no_wait_once_every_pr_is_judged(self):
+        github = FakeGitHub({1: ("h1", True, MAIN), 2: ("h2", False, MAIN)})
+        sleeps = []
+        alert(github, "o/r", MAIN, sleep=sleeps.append)
+        self.assertEqual(sleeps, [])
 
 
 class GitHubCommandTest(unittest.TestCase):

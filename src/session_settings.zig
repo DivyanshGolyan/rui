@@ -40,6 +40,12 @@ pub const entries = [_]Entry{
     .{ .field = "label", .spec = "label", .kind = .{ .text = 100 }, .nullable = true, .cli = .{ .name = "label" }, .column = "label" },
 };
 
+/// Create-only relations share the spec grammar, not settings/revision tags.
+pub const relations = [_]Entry{
+    .{ .field = "parent", .spec = "parent", .kind = .{ .text = 6 }, .changeable = false, .cli = null, .digest = .unless_omitted, .column = "parent_ref" },
+};
+pub const spec_entries = entries ++ relations;
+
 /// Workspace is not revisioned. Provider remains in the persisted tag domain
 /// even though changing it is refused; removing it would change Store format.
 pub const revision_fields = blk: {
