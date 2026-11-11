@@ -67,32 +67,47 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     conn.limitBatch(facts.max_allowed_packet);
     if (refusal(&facts)) |failure| return failure;
 
-    try conn.query("SELECT meta_key,meta_value FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
+    // Never decode the obsolete selector's value: even its old path bound
+    // has no authority over admission after a restore under another name.
+    try conn.query("SELECT meta_key,CASE WHEN meta_key='store_selector' THEN '' ELSE meta_value END FROM store_meta;" ++ comptime schema.catalogSql("DATABASE()"));
     const Meta = struct { key: Bounded(32), value: Bounded(store_path.max_bytes) };
     var meta_columns = try columns(Meta, conn);
     var store_id: [2 * schema.store_id_bytes]u8 = undefined;
-    var seen: packed struct { format: bool = false, wire_version: bool = false, selector: bool = false, store_id: bool = false } = .{};
+    var seen: schema.MetaPresence = .empty;
     while (try nextRow(conn)) {
         var meta: Meta = undefined;
-        try rows.decodeRow(Meta, &meta_columns, conn, &meta);
+        // The decoder fills fields in order. Preserve the key if its value
+        // exceeds the bound (or is otherwise malformed), so that refusal is
+        // still attributed to that metadata, not an unclassified row error.
+        meta.key.len = 0;
+        rows.decodeRow(Meta, &meta_columns, conn, &meta) catch |err| switch (err) {
+            error.CorruptStore => return switch (std.meta.stringToEnum(schema.MetaKey, meta.key.slice()) orelse return error.WrongStoreSchema) {
+                .format => error.MalformedStoreFormat,
+                .wire_version => error.WrongStoreVersion,
+                .store_id => error.WrongStoreIdentity,
+                .store_selector => error.WrongStoreSchema, // CASE supplies empty text.
+            },
+            else => return err,
+        };
         const key = meta.key.slice();
         const value = meta.value.slice();
-        if (std.mem.eql(u8, key, "format")) {
-            const found = std.fmt.parseInt(u32, value, 10) catch return error.WrongStoreVersion;
-            if (options.found_schema_version) |out| out.* = found;
-            if (found != schema.schema_version) return error.StoreSchemaBehind;
-            seen.format = true;
-        } else if (std.mem.eql(u8, key, "wire_version")) {
-            if (!std.mem.eql(u8, value, wire_version)) return error.WrongStoreVersion;
-            seen.wire_version = true;
-        } else if (std.mem.eql(u8, key, "store_selector")) {
-            if (!std.mem.eql(u8, value, selector)) return error.WrongStoreIdentity;
-            seen.selector = true;
-        } else if (std.mem.eql(u8, key, "store_id")) {
-            if (!schema.isStoreId(value)) return error.WrongStoreIdentity;
-            store_id = value[0..store_id.len].*;
-            seen.store_id = true;
-        } else return error.WrongStoreSchema;
+        const meta_key = std.meta.stringToEnum(schema.MetaKey, key) orelse return error.WrongStoreSchema;
+        switch (meta_key) {
+            .format => {
+                const found = std.fmt.parseInt(u32, value, 10) catch return error.MalformedStoreFormat;
+                if (options.found_schema_version) |out| out.* = found;
+                if (found < schema.schema_version) return error.StoreSchemaBehind;
+                if (found > schema.schema_version) return error.StoreSchemaAhead;
+            },
+            .wire_version => if (!std.mem.eql(u8, value, wire_version)) return error.WrongStoreVersion,
+            // A legacy database name is not this Store's durable identity.
+            .store_selector => {},
+            .store_id => {
+                if (!schema.isStoreId(value)) return error.WrongStoreIdentity;
+                store_id = value[0..store_id.len].*;
+            },
+        }
+        seen.insert(meta_key);
     }
     const Catalog = struct { line: Bounded(2048) };
     var catalog_columns = try columns(Catalog, conn);
@@ -102,34 +117,20 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
         try rows.decodeRow(Catalog, &catalog_columns, conn, &entry);
         digest +%= schema.catalogLineDigest(entry.line.slice());
     }
-    if (digest != comptime schema.catalogDigest()) return error.StoreSchemaBehind;
+    if (digest != comptime schema.catalogDigest()) return error.StoreCatalogMismatch;
 
     // All existing identity and schema state is validated before any write.
     // Repair missing metadata atomically with ownership and the sender sweep.
     const batch = conn.batch();
     try batch.writeAll("START TRANSACTION;");
-    if (!seen.format) try insertMeta(batch, "format", std.fmt.comptimePrint("{d}", .{schema.schema_version}));
-    if (!seen.wire_version) try insertMeta(batch, "wire_version", wire_version);
-    if (!seen.selector) try insertMeta(batch, "store_selector", selector);
-    if (!seen.store_id) {
-        var random: [schema.store_id_bytes]u8 = undefined;
-        io.random(&random);
-        var id: [2 * schema.store_id_bytes]u8 = undefined;
-        const digits = "0123456789abcdef";
-        for (random, 0..) |byte, i| {
-            id[2 * i] = digits[byte >> 4];
-            id[2 * i + 1] = digits[byte & 15];
-        }
-        store_id = id;
-        try insertMeta(batch, "store_id", &id);
-    }
+    if (!seen.contains(.store_id)) store_id = schema.drawStoreId(io);
+    try schema.writeMissingMeta(batch, seen, &store_id);
     try batch.writeAll("INSERT INTO store_owner(owner_key,epoch,commit_seq) SELECT 1,0,0 WHERE NOT EXISTS(SELECT 1 FROM store_owner WHERE owner_key=1);UPDATE store_owner SET epoch=epoch+1 WHERE owner_key=1;UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL;SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1;COMMIT");
     try conn.sendBatch();
     try expectOk(conn); // START TRANSACTION
-    if (!seen.format) try expectOk(conn);
-    if (!seen.wire_version) try expectOk(conn);
-    if (!seen.selector) try expectOk(conn);
-    if (!seen.store_id) try expectOk(conn);
+    for (comptime schema.metaSeed(.mysql)) |entry| {
+        if (!seen.contains(entry.key)) try expectOk(conn);
+    }
     try expectOk(conn); // missing owner row
     const updated = try expectOkCount(conn);
     if (updated != 1) return error.OwnershipLost;
@@ -229,14 +230,6 @@ fn text(w: *std.Io.Writer, value: []const u8) !void {
     try w.writeAll("_utf8mb4 X'");
     try literal.writeHex(w, value);
     try w.writeAll("' COLLATE utf8mb4_0900_bin");
-}
-
-fn insertMeta(w: *std.Io.Writer, key: []const u8, value: []const u8) !void {
-    try w.writeAll("INSERT INTO store_meta(meta_key,meta_value) VALUES(");
-    try text(w, key);
-    try w.writeByte(',');
-    try text(w, value);
-    try w.writeAll(");");
 }
 
 fn serverError(code: u16) anyerror {
