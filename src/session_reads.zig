@@ -508,9 +508,8 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             if (conversationItem(item.value)) mark = .{ .end = page.facts.end, .before_position = item.position, .before_ordinal = item.ordinal };
         };
         // Nothing showed before the opening, so its start is a boundary even
-        // when it shows nothing. Every Message it shows is at or after its
-        // page's lowest item, a row included; one admitted before that page
-        // and not applied is listed there, unless it waits above the input.
+        // when it shows nothing. Start at the page's lowest item; a stop's
+        // search may render older Admissions and lower it below.
         const lowest = if (page.facts.count != 0) page.facts.items[page.facts.count - 1].position else page.facts.end + 1;
         job.result.boundaries.add(.{ .output = 0, .cursor = mark, .admitted = lowest });
     }
@@ -540,7 +539,10 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     job.result.messages = output.finish();
     job.result.echoes = output.echoes;
     job.result.entries = output.entries;
-    if (output.lowest) |lowest| job.result.lowest = lowest;
+    if (output.lowest) |lowest| {
+        job.result.lowest = lowest;
+        if (job.opening) job.result.boundaries.items[0].admitted = @min(job.result.boundaries.items[0].admitted, lowest);
+    }
     const queued = page.facts.queued;
     job.result.queued = queued;
     if (queued_line.unshown(queued.count, queued.oldest_position, job.drawn) != 0 and queued.newest_admission != job.queued_line) {
@@ -1593,6 +1595,89 @@ test "session_view Message placement is identical in either direction at every p
         }
     };
     var host: FakeHost = .{ .history = 0, .tail = &.{}, .end = 0 };
+    var domain: Domain = .{};
+    try host.withHost(&domain);
+}
+
+test "session_reads transcript lists stopped Messages once across opening and live seams" {
+    const Domain = struct {
+        const earlier = 20;
+        const bodies = [_][]const u8{ "first excluded Message", "second excluded Message" };
+
+        fn run(_: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const file = try dir.createFile(io, "inspection", .{ .read = true });
+            defer file.close(io);
+            const files: Files = .{ .scratch = file, .action = file, .inspection = file, .status = file, .actions = .{ file, file } };
+            var task: Task = .{ .io = io };
+            for ([_]bool{ false, true }) |opening| for ([_]bool{ false, true }) |before_page| {
+                // Both Admissions are either in the stop's page or just before
+                // it. Older history keeps the opening's transcript seam open.
+                var tail: [protocol.ActivityPage.items + 3]FakeHost.Tail = @splat(.{ .value = .{ .session_changed = .{ .revision = 1, .field = .label } } });
+                const count = 3 + @as(usize, if (before_page) protocol.ActivityPage.items else 0);
+                const end = host.history + count;
+                var texts: [earlier + tail.len][]const u8 = @splat("");
+                for (bodies, 0..) |body, index| {
+                    var value = FakeHost.message(index + 1).admission;
+                    value.content = .{ .length = body.len, .digest = protocol.contentDigest(body) };
+                    tail[index] = .{ .value = .{ .admission = value }, .excluded_at = end };
+                    texts[earlier + index] = body;
+                }
+                tail[count - 1] = .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 2, .completion = .completed } } };
+                host.tail = tail[0..count];
+                host.end = end;
+                host.content_texts = &texts;
+                var job: Job = .{ .store = root, .session = "k7m2qx", .files = files, .opening = opening, .cursor = .{ .position = if (opening) 0 else end - protocol.ActivityPage.items }, .line_read = .{ .revision = 1, .end = end } };
+                try scan(&job, &task);
+                var rendered: [4096]u8 = undefined;
+                const shown = rendered[0..try file.readPositionalAll(io, &rendered, 0)];
+                for (bodies) |body| {
+                    const occurrences = std.mem.count(u8, shown, body);
+                    if (occurrences != 1) std.debug.print("scan opening={} before_page={} body={s} shown={s}\n", .{ opening, before_page, body, shown });
+                    try std.testing.expectEqual(@as(usize, 1), occurrences);
+                }
+                var marks: Marks = .{};
+                for (job.result.boundaries.slice()) |boundary| marks.record(.{ .offset = boundary.output, .cursor = boundary.cursor, .admitted = boundary.admitted });
+                const lowest = job.result.lowest;
+
+                // A subsequent empty live read supplies a boundary after the
+                // stop, including when the stop was in the opening page.
+                job.opening = false;
+                job.cursor = job.result.cursor;
+                job.messages = job.result.messages;
+                job.result = .{};
+                try scan(&job, &task);
+                try std.testing.expectEqual(@as(u64, 0), job.result.output_length);
+                for (job.result.boundaries.slice()) |boundary| marks.record(.{ .offset = shown.len + boundary.output, .cursor = boundary.cursor, .admitted = boundary.admitted });
+
+                for ([_]bool{ false, true }) |after_stop| {
+                    const front = if (after_stop) shown.len else 0;
+                    var transcript = plan(&marks, &.{}, front, lowest);
+                    try std.testing.expect(!transcript.gap);
+                    try std.testing.expectEqual(front, transcript.start);
+                    var occurrences: [bodies.len]usize = @splat(0);
+                    for (bodies, 0..) |body, index| occurrences[index] = std.mem.count(u8, shown[@intCast(transcript.start)..], body);
+                    // Exercise the owner's actual seam listing, not a second
+                    // implementation of its Admission-range predicate.
+                    while (transcript.next()) |step| {
+                        job.result = .{};
+                        try list(&job, &task, step);
+                        var buffer: [4096]u8 = undefined;
+                        const listed_text = buffer[0..try file.readPositionalAll(io, &buffer, 0)];
+                        for (bodies, 0..) |body, index| occurrences[index] += std.mem.count(u8, listed_text, body);
+                        transcript.listed(step, job.result.listing);
+                    }
+                    // Before the stop the retained copy owns both Messages;
+                    // after it the seam owns both. Neither duplicates or loses.
+                    for (occurrences) |occurrence| {
+                        if (occurrence != 1) std.debug.print("seam opening={} before_page={} after_stop={} count={d}\n", .{ opening, before_page, after_stop, occurrence });
+                        try std.testing.expectEqual(@as(usize, 1), occurrence);
+                    }
+                }
+            };
+        }
+    };
+    var host: FakeHost = .{ .history = Domain.earlier, .tail = &.{}, .end = Domain.earlier };
     var domain: Domain = .{};
     try host.withHost(&domain);
 }
