@@ -1,4 +1,6 @@
 test {
+    _ = @import("widgets/Panel.zig");
+    _ = @import("app_settings.zig");
     _ = @import("widgets/Split.zig");
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");

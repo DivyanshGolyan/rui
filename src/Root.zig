@@ -4,6 +4,8 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Split = @import("widgets/Split.zig");
+const Layer = @import("widgets/Layer.zig");
+const AppSettings = @import("app_settings.zig");
 const TerminalApp = @import("TerminalApp.zig");
 const Self = @This();
 
@@ -15,6 +17,9 @@ list: vxfw.Widget,
 compose: vxfw.Widget,
 divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
+settings_page: AppSettings = .{},
+/// Presentation is independent of the Session's retained worker custody.
+occupant: enum { main, settings, list } = .main,
 pasting: bool = false,
 frames: u64 = 0,
 size: vxfw.Size = .{},
@@ -26,30 +31,100 @@ pub fn widget(self: *Self) vxfw.Widget {
 /// Visibility follows the current viewport and screen selection, not the last
 /// time the list happened to draw. Opening a Session can hide it before drawing.
 pub fn listVisible(self: *const Self) bool {
-    return self.size.width > 0 and self.size.height > 0 and self.chooseLayout() != .session;
+    return self.size.width > 0 and self.size.height > 0 and self.chooseLayout() != .session and self.chooseLayout() != .settings;
 }
 
-const Layout = enum { overview, session, split };
+const Layout = enum { overview, session, settings, split };
 
 /// One layout decision drives both drawing and off-frame visibility queries.
 fn chooseLayout(self: *const Self) Layout {
     if (self.size.width >= split_at) return .split;
-    return if (self.session != null) .session else .overview;
+    return switch (self.occupant) {
+        .settings => .settings,
+        .main => if (self.session != null) .session else .overview,
+        .list => .overview,
+    };
 }
 
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
     std.debug.assert(self.session == null);
+    self.occupant = .main;
+    self.settings_page.cancelChoice();
     self.session = session;
     try ctx.requestFocus(session);
     try session.handleEvent(ctx, .init);
     ctx.redraw = true;
 }
 
+/// Settings is a right-pane occupant, not content in the conversation feed.
+pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.settings_page.narrow = self.size.width < split_at;
+    try self.settings_page.refresh();
+    self.occupant = .settings;
+    try ctx.requestFocus(self.settings_page.widget());
+    ctx.redraw = true;
+}
+
+pub fn closeSettings(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.settings_page.cancelChoice();
+    self.occupant = .list;
+    try ctx.requestFocus(self.listWidget());
+    ctx.redraw = true;
+}
+
+/// The existing list renderer has no keyboard handler. Give the list a stable
+/// focus identity in both layouts without forwarding focus_in to the composer.
+fn listWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .eventHandler = listEvent, .drawFn = drawList };
+}
+
+fn listEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    switch (input) {
+        .key_press, .paste_start, .paste_end, .invalid_key => try self.overview.handleEvent(ctx, input),
+        else => {},
+    }
+}
+
+fn drawList(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.size.width < split_at) {
+        // Narrow mode keeps the overview's existing screen identity (including
+        // its composer focus path). Its list shares that renderer, so attach a
+        // zero-cell keyboard focus anchor rather than drawing the list twice.
+        var surface = try self.overview.draw(ctx);
+        const children = try ctx.arena.alloc(vxfw.SubSurface, surface.children.len + 1);
+        @memcpy(children[0..surface.children.len], surface.children);
+        children[surface.children.len] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = .empty(self.listWidget()) };
+        surface.children = children;
+        return surface;
+    }
+    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.list.draw(ctx) };
+    return .{ .widget = self.listWidget(), .size = ctx.max.size(), .buffer = &.{}, .children = children };
+}
+
+fn closePanel(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.settings_page.hasChoice()) {
+        self.settings_page.cancelChoice();
+    } else try self.closeSettings(ctx);
+}
+
+fn settingsLayer(self: *Self, ctx: vxfw.DrawContext, base: vxfw.Widget) std.mem.Allocator.Error!vxfw.Widget {
+    const layer = try ctx.arena.create(Layer);
+    const panels = try ctx.arena.alloc(Layer.Panel, 1);
+    panels[0] = .{ .child = self.settings_page.widget(), .bottom = ctx.max.size().height, .userdata = self, .on_close = closePanel };
+    layer.* = .{ .base = base, .panels = panels };
+    return layer.widget();
+}
+
 /// The Session has settled its borrowers before calling this. No terminal
 /// leaves raw mode and no input stream is transferred between screens.
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.session = null;
-    try ctx.requestFocus(self.overview);
+    if (self.occupant == .main) self.occupant = .list;
+    if (self.occupant != .settings) try ctx.requestFocus(self.overview);
     ctx.redraw = true;
 }
 
@@ -81,8 +156,23 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.quit = true;
                 return;
             }
+            const first_command = ctx.cmds.items.len;
             try self.overview.handleEvent(ctx, .tick);
             if (self.session) |session| try session.handleEvent(ctx, .tick);
+            if (self.occupant != .main) {
+                // Hidden screens still settle their workers and consent state,
+                // but their presentation targets aren't in this focus tree.
+                // Retain every other command; a real openSession transition
+                // selects the Session occupant and keeps its own focus request.
+                var kept = first_command;
+                for (ctx.cmds.items[first_command..]) |command| {
+                    if (command == .request_focus) continue;
+                    ctx.cmds.items[kept] = command;
+                    kept += 1;
+                }
+                ctx.cmds.items.len = kept;
+                if (self.occupant == .settings) try self.settings_page.widget().handleEvent(ctx, .tick);
+            }
             try ctx.tick(16, self.widget());
         },
         else => {},
@@ -93,15 +183,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
     self.size = size;
+    self.settings_page.narrow = size.width < split_at;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     const child = switch (self.chooseLayout()) {
-        .overview => try self.overview.draw(ctx),
+        .overview => try self.listWidget().draw(ctx),
         .session => try self.session.?.draw(ctx),
+        .settings => try (try self.settingsLayer(ctx, self.listWidget())).draw(ctx),
         .split => wide: {
             const split = try ctx.arena.create(Split);
+            const right = if (self.occupant == .settings) try self.settingsLayer(ctx, self.compose) else self.session orelse self.compose;
             split.* = .{
-                .left = self.list,
-                .right = self.session orelse self.compose,
+                .left = self.listWidget(),
+                .right = right,
                 .left_width = list_width,
                 // Root already chose the layout; Split only places the panes.
                 .min_width = 0,
@@ -164,6 +257,7 @@ test "App root places list and compose or the open child at desktop and phone wi
     defer arena.deinit();
     for ([_]bool{ false, true }) |active| {
         root.session = if (active) opened.widget() else null;
+        root.occupant = .main;
         for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 26 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 41, .height = 1 }, .{ .width = 99, .height = 1 }, .{ .width = 100, .height = 1 }, .{ .width = 100, .height = 0 } }) |size| {
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
             const surface = try root.widget().draw(ctx);
@@ -171,7 +265,7 @@ test "App root places list and compose or the open child at desktop and phone wi
             const layout = surface.children[0].surface;
             if (size.width >= 100 and size.height > 0) {
                 try std.testing.expectEqual(@as(usize, 3), layout.children.len);
-                try std.testing.expect(layout.children[0].surface.widget.eql(list.widget()));
+                try std.testing.expect(layout.children[0].surface.widget.eql(root.listWidget()));
                 try std.testing.expectEqual(vxfw.RelativePoint{ .row = 0, .col = 0 }, layout.children[0].origin);
                 try std.testing.expectEqual(@as(u16, 40), layout.children[0].surface.size.width);
                 try std.testing.expectEqual(@as(i17, 40), layout.children[1].origin.col);
@@ -236,4 +330,154 @@ test "App root resizing keeps the open child's draft scroll and focus without an
     try root.closeSession(&events);
     try std.testing.expect(root.session == null);
     try std.testing.expect(events.cmds.items[1].request_focus.eql(whole.widget()));
+}
+
+fn containsWidget(surface: vxfw.Surface, target: vxfw.Widget) bool {
+    if (surface.widget.eql(target)) return true;
+    for (surface.children) |child| if (containsWidget(child.surface, target)) return true;
+    return false;
+}
+
+test "App root opens settings in both layouts and Escape closes only the topmost choice" {
+    const Backend = struct {
+        fn read(_: *anyopaque) !@import("preferences.zig").Values {
+            return .{};
+        }
+        fn save(_: *anyopaque, _: @import("preferences.zig").Edit) !void {}
+        fn saveState(_: *anyopaque) AppSettings.SaveState {
+            return .idle;
+        }
+        fn upgrade(_: *anyopaque) !void {}
+        fn run(_: *anyopaque) ?@import("upgrade_status.zig").Run {
+            return null;
+        }
+        fn caps(_: *anyopaque) @import("overview_view.zig").Caps {
+            return .{};
+        }
+    };
+    const Pane = struct {
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = @This().draw };
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+    };
+    var whole: Pane = .{};
+    var list: Pane = .{};
+    var compose: Pane = .{};
+    var session: Pane = .{};
+    var data: u8 = 0;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 140, 46 }) |width| {
+        var root: Self = .{ .overview = whole.widget(), .list = list.widget(), .compose = compose.widget(), .settings_page = .{ .backend = .{
+            .context = &data,
+            .read = Backend.read,
+            .save = Backend.save,
+            .save_state = Backend.saveState,
+            .upgrade = Backend.upgrade,
+            .run = Backend.run,
+            .caps = Backend.caps,
+        } } };
+        const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        _ = try root.widget().draw(draw_context);
+        try root.openSettings(&ctx);
+        try std.testing.expect(root.occupant == .settings);
+        try std.testing.expectEqual(width < split_at, root.settings_page.narrow);
+        try std.testing.expect(ctx.cmds.items[0].request_focus.eql(root.settings_page.widget()));
+        try std.testing.expectEqual(width >= split_at, root.listVisible());
+        const opened = try root.widget().draw(draw_context);
+        const layout = opened.children[0].surface;
+        const layer = if (width >= split_at) layout.children[2].surface else layout;
+        try std.testing.expectEqual(@as(u16, if (width >= split_at) 99 else 46), layer.size.width);
+        try std.testing.expect(layer.children[1].surface.children[0].surface.widget.eql(root.settings_page.widget()));
+        if (width >= split_at) try std.testing.expect(layout.children[0].surface.widget.eql(root.listWidget()));
+
+        // Escape is routed by the actual Layer in the drawn focus ancestry.
+        try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(root.settings_page.hasChoice());
+        ctx.phase = .capturing;
+        try layer.widget.captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+        try std.testing.expect(root.occupant == .settings);
+        try std.testing.expect(!root.settings_page.hasChoice());
+        try std.testing.expect(ctx.consume_event);
+        ctx.consume_event = false;
+        try layer.widget.captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+        try std.testing.expect(root.occupant != .settings);
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(root.listWidget()));
+        const closed = try root.widget().draw(draw_context);
+        const closed_layout = closed.children[0].surface;
+        const focus = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
+        try std.testing.expect(focus.eventHandler != null);
+        const list_surface = if (width >= split_at) closed_layout.children[0].surface else closed_layout;
+        try std.testing.expect(containsWidget(list_surface, focus));
+        const commands = ctx.cmds.items.len;
+        try focus.handleEvent(&ctx, .focus_in);
+        try std.testing.expectEqual(commands, ctx.cmds.items.len);
+        try std.testing.expect((if (width >= split_at) closed_layout.children[2].surface.widget else closed_layout.widget).eql(if (width >= split_at) compose.widget() else whole.widget()));
+
+        try root.openSettings(&ctx);
+        try root.openSession(&ctx, session.widget());
+        try std.testing.expect(root.occupant != .settings);
+        try std.testing.expect(root.session.?.eql(session.widget()));
+        // A retained Session must not replace the list when Escape closes
+        // settings at phone width. Worker custody is unchanged.
+        try root.openSettings(&ctx);
+        try root.closeSettings(&ctx);
+        const returned = try root.widget().draw(draw_context);
+        const returned_layout = returned.children[0].surface;
+        const returned_list = if (width >= split_at) returned_layout.children[0].surface else returned_layout;
+        try std.testing.expect(containsWidget(returned_list, root.listWidget()));
+        try std.testing.expect(root.session.?.eql(session.widget()));
+        try std.testing.expect(root.listVisible());
+    }
+}
+
+test "App root keeps settings focus while a hidden Session ticks and retains other commands" {
+    const Hidden = struct {
+        ticks: usize = 0,
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = @This().event, .drawFn = @This().draw };
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+        fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (input != .tick) return;
+            self.ticks += 1;
+            try ctx.requestFocus(self.widget());
+            try ctx.tick(7, self.widget());
+            ctx.redraw = true;
+        }
+    };
+    const whole: vxfw.Text = .{ .text = "Overview" };
+    var hidden: Hidden = .{};
+    var root: Self = .{ .overview = whole.widget(), .list = whole.widget(), .compose = whole.widget(), .session = hidden.widget(), .occupant = .settings };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try ctx.requestFocus(root.settings_page.widget());
+    try root.widget().handleEvent(&ctx, .tick);
+    try std.testing.expectEqual(@as(usize, 1), hidden.ticks);
+    try std.testing.expect(root.session.?.eql(hidden.widget()));
+    try std.testing.expect(root.occupant == .settings);
+    try std.testing.expect(ctx.redraw);
+    try std.testing.expectEqual(@as(usize, 3), ctx.cmds.items.len);
+    try std.testing.expect(ctx.cmds.items[0].request_focus.eql(root.settings_page.widget()));
+    try std.testing.expect(ctx.cmds.items[1] == .tick);
+    try std.testing.expect(ctx.cmds.items[2] == .tick);
+    try root.closeSettings(&ctx);
+    try std.testing.expect(root.occupant != .settings);
+    try std.testing.expect(root.session.?.eql(hidden.widget()));
+    try std.testing.expect(ctx.cmds.items[3].request_focus.eql(root.listWidget()));
+    // Once the Session occupant is selected, it owns normal focus effects.
+    root.occupant = .main;
+    ctx.cmds.clearRetainingCapacity();
+    try root.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(ctx.cmds.items[0].request_focus.eql(hidden.widget()));
 }

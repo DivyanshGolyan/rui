@@ -15,6 +15,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const TerminalApp = @import("TerminalApp.zig");
 const Root = @import("Root.zig");
+const AppSettings = @import("app_settings.zig");
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
@@ -249,6 +250,39 @@ pub const Reply = struct {
     }
 };
 
+/// A queued edit owns only its set strings in one allocation. One settings
+/// save may be outstanding; keeping this out of the fixed queue avoids a
+/// full preference snapshot (and Store path) in every job slot.
+const DefaultsEdit = struct {
+    edit: preferences.Edit,
+    bytes: []u8,
+
+    fn init(gpa: std.mem.Allocator, edit: preferences.Edit) !DefaultsEdit {
+        var length: usize = 0;
+        inline for (.{ "store", "provider", "model" }) |field| {
+            const change = @field(edit, field);
+            if (change == .set) length = std.math.add(usize, length, change.set.len) catch return error.OutOfMemory;
+        }
+        const bytes = try gpa.alloc(u8, length);
+        var owned = edit;
+        var offset: usize = 0;
+        inline for (.{ "store", "provider", "model" }) |field| {
+            const change = @field(edit, field);
+            if (change == .set) {
+                const text = bytes[offset..][0..change.set.len];
+                @memcpy(text, change.set);
+                @field(owned, field) = .{ .set = text };
+                offset += text.len;
+            }
+        }
+        return .{ .edit = owned, .bytes = bytes };
+    }
+
+    fn deinit(self: DefaultsEdit, gpa: std.mem.Allocator) void {
+        gpa.free(self.bytes);
+    }
+};
+
 const Job = union(enum) {
     /// host-info, read as each listing starts.
     host,
@@ -266,6 +300,7 @@ const Job = union(enum) {
     /// the Workspace and the name.
     skills: struct { read: u64, workspace: protocol.Bounded(protocol.max_workspace_bytes), prefix: protocol.Bounded(skill_completion.max_prefix_bytes) },
     save: view.Default,
+    defaults: DefaultsEdit,
     /// Owns its line, as a start owns its text.
     command: struct { name: view.commands.Name, session: ?view.Reference, line: []u8 },
 
@@ -276,7 +311,7 @@ const Job = union(enum) {
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .commands, .models, .skills => .cancel_read,
-            .start, .stop, .archive, .save, .command => .settle_effect,
+            .start, .stop, .archive, .save, .defaults, .command => .settle_effect,
         };
     }
 
@@ -285,6 +320,7 @@ const Job = union(enum) {
     fn deinit(self: Job, gpa: std.mem.Allocator) void {
         switch (self) {
             .start => |start| start.deinit(gpa),
+            .defaults => |edit| edit.deinit(gpa),
             .command => |command| gpa.free(command.line),
             else => {},
         }
@@ -323,9 +359,9 @@ const Answer = union(enum) {
 };
 
 /// One host read and list page, at most one first-line batch, one
-/// command-read batch, one model-list read, one skills read, one save, one
-/// command and the requests the core's ledger allows can wait at once.
-const max_jobs = 8 + view.max_requests;
+/// command-read batch, one model-list read, one skills read, one picker save,
+/// one settings save, one command and the requests the core's ledger allows can wait at once.
+const max_jobs = 9 + view.max_requests;
 
 /// The longest the first frame waits for the terminal's background.
 const background_wait_ms = 200;
@@ -353,6 +389,8 @@ options: Options,
 hooks: Hooks,
 ops: Operations,
 state: view.State,
+/// The typed save owns this outcome from acceptance through its worker answer.
+defaults_save: union(enum) { idle, pending, saved, failed: anyerror } = .idle,
 caps: view.Caps,
 app: ?*TerminalApp = null,
 /// Program status records beside App's frames.
@@ -977,7 +1015,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget() };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend() } };
     self.paintDivider();
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
@@ -987,6 +1025,60 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
     return self;
+}
+
+/// Accept one typed preference edit. Only this owner writes its worker queue;
+/// the page borrows the saved values and the answered status, never the job.
+pub fn saveDefaults(self: *Self, edit: preferences.Edit) !void {
+    if (self.state.left or self.state.upgrade.held() or self.defaults_save == .pending or self.job_count == max_jobs) return error.DefaultsUnavailable;
+    const owned = try DefaultsEdit.init(self.init.gpa, edit);
+    self.queue(.{ .defaults = owned });
+    self.defaults_save = .pending;
+}
+
+/// Use the same Upgrade transition and worker lifecycle as the other screens.
+pub fn startUpgrade(self: *Self) !void {
+    if (self.state.left) return error.UpgradeUnavailable;
+    const next = try self.event(.{ .conversed = .{
+        .reference = self.state.conversing orelse @splat(0),
+        .work = .idle,
+        .input = .upgrade,
+    } });
+    std.debug.assert(next == null);
+}
+
+/// The bridge stays with its concrete owner, avoiding both an import back into
+/// Overview and a generic adapter with access to this owner's representation.
+fn settingsBackend(self: *Self) AppSettings.Backend {
+    const Callbacks = struct {
+        fn owner(raw: *anyopaque) *Self {
+            return @ptrCast(@alignCast(raw));
+        }
+        fn read(raw: *anyopaque) !preferences.Values {
+            return preferences.load(owner(raw).options.home);
+        }
+        fn save(raw: *anyopaque, edit: preferences.Edit) !void {
+            return owner(raw).saveDefaults(edit);
+        }
+        fn saveState(raw: *anyopaque) AppSettings.SaveState {
+            return switch (owner(raw).defaults_save) {
+                .idle => .idle,
+                .pending => .pending,
+                .saved => .saved,
+                .failed => .failed,
+            };
+        }
+        fn upgrade(raw: *anyopaque) !void {
+            return owner(raw).startUpgrade();
+        }
+        fn run(raw: *anyopaque) ?upgrade_status.Run {
+            return owner(raw).state.upgrade.run;
+        }
+        fn caps(raw: *anyopaque) view.Caps {
+            return owner(raw).caps;
+        }
+    };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps };
 }
 
 fn destroy(self: *Self) void {
@@ -1118,7 +1210,13 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     const next = self.take(at);
     self.job.deinit(self.init.gpa);
     self.job = next;
-    try self.worker.start(self.init.io, self, work);
+    self.worker.start(self.init.io, self, work) catch |err| {
+        if (self.job == .defaults) {
+            _ = try self.deliver(err);
+            return;
+        }
+        return err;
+    };
 }
 
 /// The worker: runs one job and writes only that job's answer. Its
@@ -1186,6 +1284,12 @@ fn runJob(self: *Self, requests: client.Requests) !void {
         },
         .skills => |*read| self.answer = .{ .skills = try self.ops.skills(self, requests, self.init.gpa, read.workspace.slice(), read.prefix.slice()) },
         .save => |binding| try self.ops.save_default(self, binding),
+        .defaults => |edit| {
+            // These are explicit field choices, not recommendations inferred
+            // from credential readiness. Validation/publication has one owner.
+            const readiness: preferences.Readinesses = .initFill(.configured);
+            _ = try preferences.update(self.options.home, edit.edit, &readiness);
+        },
         .command => |*command| {
             self.answer = .{ .output = .{} };
             try self.ops.command(self, requests, if (command.session) |*session| session else "", command.line);
@@ -1199,13 +1303,18 @@ fn runJob(self: *Self, requests: client.Requests) !void {
 /// it ended. No other queued job runs.
 fn flushSaves(self: *Self) !void {
     const requests: client.Requests = .{ .io = self.init.io };
+    var failure: ?anyerror = null;
     while (for (self.jobs[0..self.job_count], 0..) |job, index| {
-        if (job == .save) break index;
+        if (job == .save or job == .defaults) break index;
     } else null) |index| {
         self.job.deinit(self.init.gpa);
         self.job = self.take(index);
-        _ = try self.deliver(self.runJob(requests));
+        _ = self.deliver(self.runJob(requests)) catch |err| {
+            // Settle every accepted save, keeping the first failure primary.
+            if (failure == null) failure = err;
+        };
     }
+    if (failure) |err| return err;
 }
 
 /// Joins the finished job and steps the core with what it left: a failed
@@ -1277,6 +1386,21 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
                 .saved_effort = self.savedEffort() catch null,
             },
         }),
+        .defaults => {
+            const saved = if (outcome) |_| true else |err| preferences.failure(err).saved;
+            if (saved) if (self.savedDefault()) |binding| {
+                // As setup does, respect launch selectors and leave any local
+                // Configure override to nextBinding's existing precedence.
+                self.state.default = binding;
+            };
+            if (outcome) |_| {
+                self.defaults_save = .saved;
+            } else |err| {
+                self.defaults_save = .{ .failed = err };
+                // With no page left to show the answer, the departure owns it.
+                if (self.state.left) return err;
+            }
+        },
         .command => |command| {
             const output = &answer.output;
             // As a conversation drops an inspection that could not start,
@@ -5316,5 +5440,150 @@ test "App list clicks validate present and removed targets with open and closed 
                 if (previous) |widget_| try std.testing.expect(overview.root.session.?.eql(widget_)) else try std.testing.expect(overview.root.session == null);
             }
         }
+    }
+}
+
+test "App settings typed saves own their strings and settle through the Overview worker" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    const backend = overview.root.settings_page.backend.?;
+    try std.testing.expectEqual(AppSettings.SaveState.idle, backend.save_state(backend.context));
+    try std.testing.expect(try rig.press("kept draft") == null);
+    var provider = "codex".*;
+    var model = "gpt-5.5".*;
+    try overview.saveDefaults(.{ .provider = .{ .set = &provider }, .model = .{ .set = &model }, .reasoning_effort = .{ .set = .low }, .notifications = false });
+    @memset(&provider, 'x');
+    @memset(&model, 'x');
+    try std.testing.expectEqual(AppSettings.SaveState.pending, backend.save_state(backend.context));
+    try std.testing.expect((try preferences.load(home)).notifications);
+    try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = true }));
+    try std.testing.expect(try rig.settle() == null);
+    const saved = try preferences.load(home);
+    try std.testing.expectEqualStrings("codex", saved.provider.slice());
+    try std.testing.expectEqualStrings("gpt-5.5", saved.model.slice());
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), saved.reasoning_effort);
+    try std.testing.expect(!saved.notifications);
+    try std.testing.expectEqual(AppSettings.SaveState.saved, backend.save_state(backend.context));
+    try std.testing.expectEqualStrings("gpt-5.5", overview.state.default.?.model.slice());
+    try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
+    try std.testing.expect(overview.state.command == null and overview.state.panel == null);
+
+    // Exercise the wired page, not a manually installed adapter. Its Enter
+    // queues the same typed job and its tick reads the completed saved value.
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try overview.root.openSettings(&ctx);
+    const page = &overview.root.settings_page;
+    page.panel.selected = 2;
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try std.testing.expectEqual(AppSettings.SaveState.pending, backend.save_state(backend.context));
+    try std.testing.expect(!page.values.notifications);
+    try std.testing.expect(try rig.settle() == null);
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(page.values.notifications);
+    try std.testing.expect(page.failures[2] == null);
+    try std.testing.expect(overview.state.command == null and overview.state.panel == null);
+    try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
+}
+
+test "App settings typed worker failure reaches its row and a later save recovers" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try overview.root.openSettings(&ctx);
+    const page = &overview.root.settings_page;
+    page.panel.selected = 2;
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    // Refuse the real preference writer only after the page's edit is accepted.
+    const obstruction = try tmp.dir.createFile(std.testing.io, ".config", .{});
+    obstruction.close(std.testing.io);
+    try std.testing.expect(try rig.settle() == null);
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(overview.defaults_save == .failed);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expect(!overview.state.left);
+    try tmp.dir.deleteFile(std.testing.io, ".config");
+    try std.testing.expect((try preferences.load(home)).notifications);
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+    try std.testing.expect(try rig.settle() == null);
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(!page.values.notifications);
+    try std.testing.expect(page.failures[2] == null);
+    try std.testing.expect(overview.defaults_save == .saved);
+}
+
+test "App settings typed admission and Upgrade stay within the Overview owner" {
+    const rig = try openComposer();
+    defer rig.close();
+    const overview = rig.overview;
+    const backend = overview.root.settings_page.backend.?;
+    const gpa = overview.init.gpa;
+    var failing: std.testing.FailingAllocator = .init(gpa, .{ .fail_index = 0 });
+    overview.init.gpa = failing.allocator();
+    const refused = overview.saveDefaults(.{ .model = .{ .set = "example-chat" } });
+    overview.init.gpa = gpa;
+    try std.testing.expectError(error.OutOfMemory, refused);
+    try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    try std.testing.expectEqual(AppSettings.SaveState.idle, backend.save_state(backend.context));
+    @memset(&overview.jobs, .host);
+    overview.job_count = overview.jobs.len;
+    try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
+    overview.job_count = 0;
+    try overview.startUpgrade();
+    try std.testing.expectEqual(@as(?upgrade_status.Run, .checking), backend.run(backend.context));
+    try std.testing.expect(!overview.upgrade_job.started);
+    try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
+    try overview.startUpgrade();
+    try std.testing.expectEqual(@as(?upgrade_status.Run, .checking), backend.run(backend.context));
+    _ = try overview.event(.leave);
+    try std.testing.expectError(error.UpgradeUnavailable, overview.startUpgrade());
+    try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
+}
+
+test "App settings typed queued saves settle on departure and retain failures" {
+    for ([_]bool{ false, true }) |fail| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        if (fail) {
+            // Admit a picker save through its real core transition as well:
+            // failure of the typed save must not strand that accepted effect.
+            try std.testing.expect(try rig.press("/model ") == null);
+            try std.testing.expect(try rig.settle() == null);
+            try overview.saveDefaults(.{ .provider = .{ .set = "not-a-provider" } });
+            try std.testing.expect(try rig.press("luna max\r") == null);
+            try std.testing.expect(overview.state.save.running != null);
+        } else try overview.saveDefaults(.{ .notifications = false });
+        _ = try overview.event(.leave);
+        const saves = Seen.now.saves;
+        if (fail) {
+            try std.testing.expectError(error.UnsupportedPreferenceProvider, overview.flushSaves());
+            try std.testing.expectEqual(saves + 1, Seen.now.saves);
+            try std.testing.expect(overview.defaults_save == .failed);
+        } else {
+            try overview.flushSaves();
+            try std.testing.expect(!(try preferences.load(home)).notifications);
+            try std.testing.expect(overview.defaults_save == .saved);
+        }
+        try std.testing.expectEqual(@as(usize, 0), overview.job_count);
     }
 }
