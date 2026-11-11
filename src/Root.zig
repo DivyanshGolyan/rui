@@ -50,17 +50,17 @@ fn chooseLayout(self: *const Self) Layout {
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
     std.debug.assert(self.session == null);
     self.session = session;
-    try self.revealSession(ctx);
+    try self.showMain(ctx);
     try session.handleEvent(ctx, .init);
     ctx.redraw = true;
 }
 
-/// Reveal the retained Session without reopening it or initializing it again.
-pub fn revealSession(self: *Self, ctx: *vxfw.EventContext) !void {
-    const session = self.session orelse unreachable;
+/// Select the main pane before attempting navigation. Session departure may
+/// stay here with a notice; presentation never depends on its outcome.
+pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
     self.settings_open = false;
     self.settings_page.cancelChoice();
-    try ctx.requestFocus(session);
+    try ctx.requestFocus(self.session orelse self.overview);
     ctx.redraw = true;
 }
 
@@ -336,7 +336,7 @@ test "App root resizing keeps the open child's draft scroll and focus without an
         try std.testing.expect(screen.cursor_vis);
         try std.testing.expectEqual(@as(u16, if (width >= 100) 41 else 0), screen.cursor.col);
     }
-    try root.revealSession(&events);
+    try root.showMain(&events);
     try std.testing.expectEqual(@as(usize, 1), opened.inits);
     try std.testing.expectEqualStrings("kept draft", opened.draft);
     try std.testing.expectEqual(@as(u16, 7), opened.scroll);
