@@ -7388,6 +7388,27 @@ test "a list page whose page read fails answers main's SessionReadFailed" {
     try expectListStepFailure(listStatementForTesting(error.SessionReadFailed, "FROM session WHERE created_seq>?1"), error.SessionReadFailed);
 }
 
+test "an observed pending Message whose work read fails answers the work reads' names" {
+    inline for (.{
+        .{ "SELECT t.turn_id,t.operation_id", error.TurnReadFailed },
+        .{ "count(*) AS total", error.ActionReadFailed },
+    }) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStore(&storage, &tmp, std.testing.io);
+        defer storage.close() catch unreachable;
+        const session = try configureTestSession(&storage, "observe-names-config");
+        try submitTestMessage(&storage, &tmp, "observe-names-input", "observe-names-message", session.slice(), "q");
+        _ = (try storage.admitNextModelAttempt(.{})).?;
+        var fault: TestingStatementFault = .{ .sql = namedStatementForTesting(report_domain.pending_failures, case[1], case[0]) };
+        fault.arm(storage.sqliteDatabase());
+        defer fault.disarm(storage.sqliteDatabase());
+        try std.testing.expectError(case[1], store_testing.observeCommandForTesting(&storage, "observe-names-message"));
+        try std.testing.expect(fault.failed > 0);
+    }
+}
+
 test "a list row whose latest Turn read fails answers main's TurnReadFailed" {
     try expectListStepFailure(listStatementForTesting(error.TurnReadFailed, "SELECT t.turn_id,t.operation_id"), error.TurnReadFailed);
 }

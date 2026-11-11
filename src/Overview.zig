@@ -1015,6 +1015,7 @@ fn event(self: *Self, value: view.Event) !?Next {
     var next: ?Next = null;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
+        .open_settings => {},
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -2227,7 +2228,7 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expectEqualStrings("n3w5es", &overview.started.?);
 
     // Ctrl-X twice stops the selected Session.
-    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("k7m2qx", &Seen.now.stopped);
@@ -2663,7 +2664,7 @@ test "/model takes the list area at every usable height" {
     Seen.now.listed = listed_references.len;
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    rig.overview.state.selected = shownRow(rig, 4);
+    rig.overview.state.selected = .{ .session = shownRow(rig, 4) };
     try std.testing.expect(try rig.press("/model ") == null);
     try std.testing.expect(try rig.settle() == null);
     for (10..25) |height| {
@@ -2679,12 +2680,12 @@ test "/model takes the list area at every usable height" {
 test "/model does not act on hidden Session rows" {
     const rig = try openListed();
     defer rig.close();
-    const selected = rig.overview.state.selected.?;
+    const selected = rig.overview.state.selected.session;
     try std.testing.expect(try rig.press("/model ") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[1;2B\x18\x1ba") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualSlices(u8, &selected, &rig.overview.state.selected.?);
+    try std.testing.expectEqualSlices(u8, &selected, &rig.overview.state.selected.session);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
 }
@@ -3017,7 +3018,7 @@ test "the overview asks for frames only while a spinning mark is on screen" {
     try std.testing.expect(try Frames.after(rig, 24));
     // With the last row selected on a short screen, the spinning row is
     // above it and needs no frames.
-    _ = try rig.press("\x1b[F");
+    _ = try rig.press("\x1b[F\x1b[A");
     try std.testing.expect(!try Frames.after(rig, 9));
     try std.testing.expect(try Frames.after(rig, 24));
     // A panel over the list shows no marks.
@@ -3161,7 +3162,7 @@ test "a stop whose reply was lost names its request on departure" {
     defer rig.close();
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
     const guidance = "rui: Not sure k7m2qx stopped. Check with: rui request recover stop-handle\n";
@@ -3173,7 +3174,7 @@ test "a stop whose reply was lost names its request on departure" {
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
     try std.testing.expect(try rig.settle() == null);
     rig.overview.state.notice = null;
-    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
@@ -3182,7 +3183,7 @@ test "a stop whose reply was lost names its request on departure" {
     defer running.close();
     try std.testing.expect(try running.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try running.settle() == null);
-    try std.testing.expect(try running.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try running.press("\x1b[H\x1b[B\x18\x18") == null);
     try running.overview.dispatch(.all);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(running.overview.job));
     var buffer: [1024]u8 = undefined;
@@ -3577,7 +3578,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     defer finished.close();
     try std.testing.expect(try finished.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try finished.settle() == null);
-    try std.testing.expect(try finished.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try finished.press("\x1b[H\x1b[B\x18\x18") == null);
     try finished.overview.dispatch(.all);
     try finished.answered();
     try std.testing.expect(try finished.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
@@ -3593,7 +3594,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try std.testing.expect(try queued.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try queued.settle() == null);
     try std.testing.expect(try queued.overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms }) == null);
-    try std.testing.expect(try queued.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try queued.press("\x1b[H\x1b[B\x18\x18") == null);
     queued.overview.opened = "k7m2qx".*;
     _ = try service(queued.overview);
     try std.testing.expectEqual(Job.stop, std.meta.activeTag(queued.overview.job));
@@ -3644,7 +3645,7 @@ test "a conversation ended by its Host stopping says how to start it again" {
         }.scratch;
         try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
         try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(@as(?Ending, .overview), try rig.press("\x1b[H\r"));
+        try std.testing.expectEqual(@as(?Ending, .overview), try rig.press("\x1b[H\x1b[B\r"));
         const resume_line = "\nResume: rui session resume --store $'/store' k7m2qx\n";
         if (stopped) {
             const written = try finishedWith(rig, {}, error.HostStopped, &buffer);
@@ -3676,7 +3677,7 @@ test "a conversation that fails to open still names the unconfirmed start on dep
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("hello\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(?Ending, .overview), try rig.press("\x1b[H\r"));
+    try std.testing.expectEqual(@as(?Ending, .overview), try rig.press("\x1b[H\x1b[B\r"));
     try std.testing.expect(rig.overview.app_session.?.frontend == null);
     // App's exit path stops what opened; nothing did.
     rig.overview.stopApp();
@@ -3790,7 +3791,7 @@ test "a stop captured and then not sent keeps its handle, here and on departure"
     defer rig.close();
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings("! k7m2qx stop unsure; details on exit", rig.overview.state.notice.?.text());
     var buffer: [1024]u8 = undefined;
@@ -3804,7 +3805,7 @@ test "leaving with a stop still queued says it was not sent" {
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     // Ctrl-X twice and Ctrl-C in one read: the stop is queued and never sent.
-    try std.testing.expect((try rig.press("\x1b[H\x18\x18\x03")).? == .overview);
+    try std.testing.expect((try rig.press("\x1b[H\x1b[B\x18\x18\x03")).? == .overview);
     var buffer: [1024]u8 = undefined;
     try std.testing.expectEqualStrings("rui: k7m2qx was not stopped.\n", try finishedGuidance(rig, &buffer));
     try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
@@ -3957,10 +3958,10 @@ test "a start freezes the composer until its answer, and the overview's keys sti
     try std.testing.expect(try rig.press("\x7f\x7fXY\x1b[D\x15\r") == null);
     try std.testing.expectEqualStrings("hello", rig.overview.draft[0..rig.overview.composer.length]);
     // Up, Down, Home and End select rows, whatever the draft holds.
-    for ([_][]const u8{ "\x1b[A", "\x1b[B", "\x1b[H", "\x1b[F" }) |key| {
-        rig.overview.state.selected = null;
+    for ([_][]const u8{ "\x1b[A", "\x1b[B", "\x1b[H", "\x1b[F" }, [_]view.Selection{ .new_session, .{ .session = "k7m2qx".* }, .new_session, .settings }) |key, expected| {
+        rig.overview.state.selected = .new_session;
         try std.testing.expect(try rig.press(key) == null);
-        try std.testing.expectEqualStrings("k7m2qx", &(rig.overview.state.selected orelse return error.TestExpectedSelection));
+        try std.testing.expectEqual(expected, rig.overview.state.selected);
     }
     // Esc clears the draft; the start still sends what Enter captured.
     try std.testing.expect(try rig.press("\x1b[27u") == null);
@@ -3980,7 +3981,7 @@ fn openListed() !*Rig {
     try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(listed_references.len, rig.overview.state.order.items.len);
-    rig.overview.state.selected = shownRow(rig, 2);
+    rig.overview.state.selected = .{ .session = shownRow(rig, 2) };
     return rig;
 }
 
@@ -4015,9 +4016,9 @@ test "Shift-Up and Shift-Down select the row above and below, whatever the draft
             errdefer std.debug.print("draft={s} key={s}\n", .{ draft, case.bytes[1..] });
             rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
             try std.testing.expect(try rig.press(draft) == null);
-            rig.overview.state.selected = shownRow(rig, 2);
+            rig.overview.state.selected = .{ .session = shownRow(rig, 2) };
             try std.testing.expect(try rig.press(case.bytes) == null);
-            try std.testing.expectEqualStrings(&shownRow(rig, case.row), &(rig.overview.state.selected orelse return error.TestExpectedSelection));
+            try std.testing.expectEqualStrings(&shownRow(rig, case.row), &(if (rig.overview.state.selected == .session) rig.overview.state.selected.session else return error.TestExpectedSelection));
         }
     }
 }
@@ -4079,11 +4080,11 @@ test "every key does what the overview's table says, through the editor, in ever
         try std.testing.expect(try rig.press(draft) == null);
         const ending = try rig.press(bytes);
         const state = &rig.overview.state;
-        const selected = state.selected orelse return error.TestExpectedSelection;
+        const selected = state.selected;
         const action = view.keys.get(key) orelse {
             // Nothing happens, and the line is not rejected by it.
             try std.testing.expect(ending == null);
-            try std.testing.expectEqualStrings(&shownRow(rig, 2), &selected);
+            try std.testing.expectEqualStrings(&shownRow(rig, 2), &selected.session);
             try std.testing.expect(state.request_count == 0 and !state.settings.empty());
             if (draft.len == 0) try expectStarted(rig, "ok\r", "ok");
             continue;
@@ -4094,15 +4095,15 @@ test "every key does what the overview's table says, through the editor, in ever
         }
         try std.testing.expect(ending == null);
         switch (action) {
-            .previous, .next, .select_previous, .select_next, .first, .last => {
+            .first => try std.testing.expectEqual(view.Selection.new_session, selected),
+            .last => try std.testing.expectEqual(view.Selection.settings, selected),
+            .previous, .next, .select_previous, .select_next => {
                 const row: usize = switch (action) {
                     .previous, .select_previous => 1,
                     .next, .select_next => 3,
-                    .first => 0,
-                    .last => listed_references.len - 1,
                     else => unreachable,
                 };
-                try std.testing.expectEqualStrings(&shownRow(rig, row), &selected);
+                try std.testing.expectEqualStrings(&shownRow(rig, row), &selected.session);
             },
             .clear => try std.testing.expect(state.settings.empty()),
             // Both act at once on the selected row, asking nothing.
@@ -4421,7 +4422,7 @@ test "Alt-A overview archives at once and preserves draft bytes caret and revisi
         try std.testing.expect(try rig.press("/rename unfinished\x1b[D\x1b[D") == null);
         if (rejected) try std.testing.expect(try rig.press("\xff") == null);
         const before = overview.composerDraft();
-        const target = overview.state.selected.?;
+        const target = overview.state.selected.session;
         try std.testing.expect(try rig.press(chord) == null);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
@@ -4466,7 +4467,7 @@ test "a stop that ends with no answer reads as failed, whatever the job before i
         }
     }.stop;
     overview.state.notice = null;
-    try std.testing.expect(try rig.press("\x1b[H\x18\x18") == null);
+    try std.testing.expect(try rig.press("\x1b[H\x1b[B\x18\x18") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqualStrings("! k7m2qx not stopped: stop_request_failed", overview.state.notice.?.text());
@@ -4476,7 +4477,7 @@ test "conversation archive and restore use the exact unlisted opened reference t
     const rig = try openListed();
     defer rig.close();
     rig.overview.opened = "x9y8z7".*;
-    const selected = rig.overview.state.selected.?;
+    const selected = rig.overview.state.selected.session;
     try conversed(rig.overview, .idle, .{ .archive = .active });
     try rig.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
@@ -4487,7 +4488,7 @@ test "conversation archive and restore use the exact unlisted opened reference t
     try std.testing.expectEqual(@as(usize, 2), Seen.now.archives);
     try std.testing.expect(!Seen.now.archive_requested);
     try std.testing.expectEqualStrings("x9y8z7", &Seen.now.archive_session);
-    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
+    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.session);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
 }
 
@@ -4796,7 +4797,7 @@ test "a click on a Session row, as a terminal sends it, opens the row under it a
     defer rig.close();
     // A short terminal with the last Session selected scrolls the list: the
     // header holds row 0, and the list's last three rows fill rows 1 to 3.
-    rig.overview.state.selected = shownRow(rig, 4);
+    rig.overview.state.selected = .{ .session = shownRow(rig, 4) };
     var shown = try rig.shown(60, 9);
     defer shown.deinit();
     try std.testing.expectEqualStrings("  ⠹ Fix the flaky test                                  13s", try shown.line(2));
@@ -4810,19 +4811,17 @@ test "a click on a Session row, as a terminal sends it, opens the row under it a
     try std.testing.expectEqualStrings(&shownRow(rig, 3), &Seen.now.conversed);
 }
 
-test "a click on a group heading, as a terminal sends it, opens nothing" {
+test "a click on New Session, as a terminal sends it, selects the composer" {
     const rig = try openListed();
     defer rig.close();
     var shown = try rig.shown(60, 16);
     defer shown.deinit();
-    const heading: u16 = for (1..16) |row| {
-        const text = try shown.line(@intCast(row));
-        if (text.len > 0 and !std.mem.startsWith(u8, text, " ") and std.mem.indexOf(u8, text, "flaky") == null) break @intCast(row);
+    const row: u16 = for (1..16) |at| {
+        if (std.mem.indexOf(u8, try shown.line(@intCast(at)), "+ New Session") != null) break @intCast(at);
     } else return error.TestUnexpectedResult;
-    const selected = rig.overview.state.selected.?;
-    try std.testing.expect(try rig.click(3, heading, 60, 16) == null);
+    try std.testing.expect(try rig.click(3, row, 60, 16) == null);
     try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
+    try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
 }
 
 test "a click on a panel's or the model picker's lines, as a terminal sends it, opens no Session: only the Sessions hear a press" {
@@ -4831,12 +4830,12 @@ test "a click on a panel's or the model picker's lines, as a terminal sends it, 
         defer rig.close();
         try std.testing.expect(try rig.press(typed) == null);
         try std.testing.expect(rig.overview.state.listArea() != .sessions);
-        const selected = rig.overview.state.selected.?;
+        const selected = rig.overview.state.selected.session;
         // Every row the list's place holds, the ones Sessions showed on
         // included.
         for (1..20) |row| try std.testing.expect(try rig.click(10, @intCast(row), 80, 24) == null);
         try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-        try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.?);
+        try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.session);
         try std.testing.expect(rig.overview.state.listArea() != .sessions);
     }
 }
@@ -5065,7 +5064,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     var peer: Peer = .{};
     overview.root.session = peer.widget();
     overview.state.conversing = "k7m2qx".*;
-    overview.state.selected = "b4n8wd".*;
+    overview.state.selected = .{ .session = "b4n8wd".* };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
@@ -5073,7 +5072,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     const selected = overview.app_sessions.selected.?;
     const target = view.clickOf(&overview.state, view.listItem(&overview.state, selected).?).?;
     try std.testing.expectEqualStrings("k7m2qx", &target.open);
-    try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.?);
+    try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
     const before = overview.app_sessions.list.scroll;
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
@@ -5308,7 +5307,7 @@ test "App list clicks validate present and removed targets with open and closed 
             try std.testing.expect(!ctx.quit);
             if (present) {
                 try std.testing.expectEqualStrings("b4n8wd", &Seen.now.conversed);
-                try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.?);
+                try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.session);
                 try std.testing.expectEqual(@as(usize, @intFromBool(open)), overview.retired.items.len);
             } else {
                 try std.testing.expectEqual(selected, overview.state.selected);
