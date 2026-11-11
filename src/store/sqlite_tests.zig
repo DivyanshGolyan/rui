@@ -7579,8 +7579,8 @@ test "a Current report's presentation reads answer their list's name" {
 
 test "a failed context read answers its reader's name and fences" {
     // The report's `admission_context` names a failed step CorruptStore,
-    // as main named the estimate's. Admission reads the context within
-    // `admission_facts`, whose failed step is SessionReadFailed. The second
+    // as main named the estimate's. Admission reads the context with its
+    // facts in selection's round, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
     // weighs the context, and the report estimates it. Both readers name a
     // failed uncovered-byte read CorruptStore, after selecting the recipe.
@@ -7612,7 +7612,7 @@ test "a failed context read answers its reader's name and fences" {
         else if (report)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
         else
-            model_admission_domain.admission_facts_sql };
+            model_admission_domain.selected_context_sql };
         fault.arm(storage.sqliteDatabase());
         defer fault.disarm(storage.sqliteDatabase());
         if (report)
