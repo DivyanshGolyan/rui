@@ -5,6 +5,7 @@ test {
     _ = @import("widgets/Footer.zig");
     _ = @import("widgets/Feed.zig");
     _ = @import("feed_window.zig");
+    _ = @import("feed_reads.zig");
     _ = @import("AppScreen.zig");
     _ = @import("PermissionCard.zig");
     _ = @import("widget_style.zig");

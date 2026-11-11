@@ -414,7 +414,7 @@ jobs:
     timeout-minutes: ${{ inputs.promotion && 300 || 35 }}
     strategy:
       # qualification.py packs Selected suites into at most ten shards, so
-      # every shard starts at once.
+      # every shard starts at once; beside a long gate the short suites share three.
       fail-fast: false
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
