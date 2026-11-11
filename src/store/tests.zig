@@ -15062,27 +15062,33 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
         }
 
         fn run(case: *store_testing.Case) !void {
-            const offered = @import("../mcp/offered.zig");
-            const listing = @import("../mcp/Listing.zig");
             for (0..5) |mode| {
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
+                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer memory.deinit();
                 var storage: Store = undefined;
                 try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
                 defer storage.close() catch unreachable;
-                var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
-                defer memory.deinit();
-                var collision: offered.Collision = .{};
-                const entries = [_]listing.Entry{.{ .name = "kept", .description = "Saved tool", .input_schema = "{\"type\":\"object\"}", .read_only = false }};
-                const saved = try offered.merge(memory.allocator(), null, &.{.{ .server = "notes", .listed = &entries }}, &collision);
-                const sources: []const offered.Source = switch (mode) {
-                    0 => &.{.{ .server = "notes", .listed = null }},
-                    1 => &.{ .{ .server = "notes", .listed = null }, .{ .server = "other", .listed = null } },
-                    2 => &.{.{ .server = "notes", .listed = &entries }},
-                    3 => &.{.{ .server = "notes", .listed = null }},
+                // Host listing/fallback belongs to mcp/offered's tests. The
+                // Store consumes only catalog records and configured names.
+                const records = comptime testingCatalogRecords(&.{.{ .name = "kept", .owner = .mcp, .server = "notes", .description = "Saved tool", .input_schema = "{\"type\":\"object\"}" }});
+                var digests: [records.len][32]u8 = undefined;
+                for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                var catalog = tool_catalog.built_in;
+                if (mode == 2 or mode == 3) catalog = .{ .records = &records, .digests = &digests };
+                if (mode == 3) {
+                    // Admit the unavailable server's copies through the same
+                    // saved-catalog interface a restarted Host reads.
+                    try storage.saveCatalog(&catalog);
+                    const saved = (try storage.readCatalog(memory.allocator())).?;
+                    catalog = saved.catalog();
+                }
+                catalog.configured_servers = switch (mode) {
+                    0, 2, 3 => &.{"notes"},
+                    1 => &.{ "notes", "other" },
                     else => &.{},
                 };
-                const catalog = try offered.merge(memory.allocator(), if (mode == 3) &saved else null, sources, &collision);
                 try storage.saveCatalog(&catalog);
                 const unavailable = mode < 2;
                 const detail = if (mode == 1)
