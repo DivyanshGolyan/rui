@@ -1287,9 +1287,11 @@ const StartupMigration = struct {
                 store_module.schema_version,
             },
         };
-        // Best effort, as for other startup notices: a closed channel leaves
-        // the launcher to its ordinary readiness wait.
-        _ = rui_write_readiness(2, text.ptr, text.len);
+        // Optional output: one nonblocking try, so a foreground Host whose
+        // stderr nobody drains never stalls holding the Store. A launcher
+        // drains the channel, so its notices arrive; a dropped one leaves it
+        // to the ordinary wait, and readiness or exit still ends the wait.
+        _ = stderr.write(text);
         if (self.diagnostics) |writer| writer.record(phase, std.fmt.bufPrint(&detail, "format_{d}", .{format}) catch unreachable);
     }
 };
