@@ -11,7 +11,6 @@ Enter these at the `›` prompt.
 | --- | --- |
 | `/help` | Lists available commands. |
 | `/history` | Shows older conversation. |
-| `/details` | Shows recent conversation with each tool result's last 8,192 raw bytes and a full raw export command. |
 | `/status` | Shows settings, including the Bash permission mode, and current work. |
 | `/requests` | Lists saved requests for recovery. |
 | `/configure` | Changes settings for the current Session only. |
@@ -20,9 +19,14 @@ Enter these at the `›` prompt.
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 | `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
-Tool outcomes in normal conversation show only their description and outcome, with a numeric failed exit when available.
-`/details` escapes the retained tool bytes safely and marks shortened results with `Earlier output omitted`.
-Its raw export command reads the full unchanged saved result.
+Tool outcomes start folded, showing their description and outcome, with a numeric failed exit when available.
+Click a tool heading to open or close its saved output in place.
+Ctrl-O toggles the lowest tool heading or opens the lowest collapsed Message or Session name in view, whichever is lower.
+Several tools can stay open; new live output does not close them and the view keeps following it.
+Output is safely escaped and indented, with at most 20 rows followed by `… N more lines` when needed.
+Long lines end in `…`; the display prefix is also bounded to 8,192 bytes before invisible-cluster escaping.
+Opened output uses the selvedge band; with NO_COLOR it keeps its indent without a band.
+Folds belong only to the open conversation and are not saved.
 
 Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
 Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.

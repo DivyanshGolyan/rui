@@ -1,6 +1,7 @@
 //! Bounded public Activity presentation with one forward-only content pass.
 //! A failed stream may leave a visible prefix; the terminal owner must not retry it.
 const std = @import("std");
+const tool_fold = @import("tool_fold.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
@@ -375,7 +376,7 @@ fn blank(byte: u8) bool {
 /// A user Message's body, fed its exact bytes after `userPrefix`. The view
 /// draws it dim; a long one keeps its first two non-blank lines and a
 /// `┄ N more lines` row, and trailing blank lines never show. `whole`
-/// (/details) shows every byte. Initialize in final storage.
+/// shows every byte in a Message page. Initialize in final storage.
 pub fn UserBody(comptime Sink: type) type {
     return struct {
         const Self = @This();
@@ -702,13 +703,14 @@ test "list rows share every mark and script with the chat heading table" {
 }
 
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {
-    return toolHeadingWith(presentation, sink, colour, separate, "");
+    return toolHeadingWith(presentation, sink, colour, separate, "", null);
 }
 
 /// `exit` is a digits-only exit status, shown only for a failed call.
-fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8) !void {
+fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8, reference: ?tool_fold.Reference) !void {
     const state = toolState(presentation.code);
     if (separate) try sink.feed("\n");
+    if (reference) |ref| if (comptime std.meta.hasMethod(@TypeOf(sink), "tool")) try sink.tool(ref);
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
     try sink.feed(Style.normal.code(colour));
@@ -1398,10 +1400,14 @@ pub const ToolHeaderScan = struct {
 };
 
 pub fn toolResult(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, sink: anytype, colour: bool, compact: *bool) !void {
+    return toolResultRow(presentation, facts, null, sink, colour, compact);
+}
+
+pub fn toolResultRow(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, reference: ?tool_fold.Reference, sink: anytype, colour: bool, compact: *bool) !void {
     const succeeded = presentation.code == .succeeded;
     var buffer: [3]u8 = undefined;
     const exit = if (facts.exit) |value| try std.fmt.bufPrint(&buffer, "{d}", .{value}) else "";
-    try toolHeadingWith(presentation, sink, colour, !compact.* or !succeeded, exit);
+    try toolHeadingWith(presentation, sink, colour, !compact.* or !succeeded, exit, reference);
     compact.* = succeeded;
 }
 
@@ -1416,7 +1422,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
     };
     const body = "Bash failed. Exit code: 7.\nProcess-group signaling reported a failure.\n" ++
         "Capture may be incomplete.\nstdout tail:\nhidden\nstderr tail:\n\x1b[2Jhidden\n" ++
-        "[earlier output omitted]\nFull stdout: /secret\n/details for full output.\n";
+        "[earlier output omitted]\nFull stdout: /secret\nOpen the tool row for saved output.\n";
     const cases = .{
         .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
@@ -1474,7 +1480,7 @@ test "failed tool exit status is named rather than read as a count" {
         var buffer: [128]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit);
+        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit, null);
         var expected: [128]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n× Tool call · exit {s}\n", .{exit}), out.buffered());
     }
@@ -1697,7 +1703,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         .tool_result => |result| {
             var scan: ToolHeaderScan = .{};
             try content(requests, store, session, item, result.content, &scan);
-            try toolResult(result.presentation, scan.facts(result.presentation.code), sink, colour, compact_tools);
+            try toolResultRow(result.presentation, scan.facts(result.presentation.code), .{ .position = item.position, .ordinal = item.ordinal, .content = result.content }, sink, colour, compact_tools);
         },
         // A call the provider ran is its line alone, grouped with
         // other tool rows like a result with no output.
