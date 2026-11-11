@@ -27,12 +27,17 @@ pub const Route = enum { selector, draft, screen, blocked };
 pub const RowStep = struct { row: policy.Row, route: Route };
 
 pub fn rowStep(row: policy.Row, key: RowKey) RowStep {
+    // The editor, not the choice's key classification, owns every draft key
+    // except returning to the choice and refusing to send while it waits.
+    if (row == .draft) return switch (key) {
+        .escape => .{ .row = .selector, .route = .blocked },
+        .enter => .{ .row = .draft, .route = .blocked },
+        else => .{ .row = .draft, .route = .draft },
+    };
     return switch (key) {
         .printable, .paste => .{ .row = .draft, .route = .draft },
-        .escape => .{ .row = .selector, .route = if (row == .draft) .blocked else .screen },
-        .screen => .{ .row = row, .route = .screen },
-        .enter => .{ .row = row, .route = if (row == .draft) .blocked else .selector },
-        .arrows, .other => .{ .row = row, .route = if (row == .draft) .draft else .selector },
+        .escape, .screen => .{ .row = .selector, .route = .screen },
+        .enter, .arrows, .other => .{ .row = .selector, .route = .selector },
     };
 }
 
@@ -155,17 +160,19 @@ test "Action consent row policy covers every key and kept draft state" {
         .{ .key = .escape, .choice = .{ .row = .selector, .route = .screen }, .draft = .{ .row = .selector, .route = .blocked } },
         .{ .key = .enter, .choice = .{ .row = .selector, .route = .selector }, .draft = .{ .row = .draft, .route = .blocked } },
         .{ .key = .arrows, .choice = .{ .row = .selector, .route = .selector }, .draft = .{ .row = .draft, .route = .draft } },
-        .{ .key = .screen, .choice = .{ .row = .selector, .route = .screen }, .draft = .{ .row = .draft, .route = .screen } },
+        .{ .key = .screen, .choice = .{ .row = .selector, .route = .screen }, .draft = .{ .row = .draft, .route = .draft } },
         .{ .key = .other, .choice = .{ .row = .selector, .route = .selector }, .draft = .{ .row = .draft, .route = .draft } },
     };
-    for ([_][]const u8{ "", "kept draft" }) |draft| {
+    for ([_][]const u8{ "", "kept draft", "first line\nsecond line" }) |draft| {
         for ([_]policy.Row{ .selector, .draft }) |row| for (cases) |case| {
             errdefer std.debug.print("row={s}, key={s}, kept draft={s}\n", .{ @tagName(row), @tagName(case.key), draft });
             var consent: Self = .{};
             consent.adopt(17);
             consent.row = row;
             const expected = if (row == .selector) case.choice else case.draft;
-            try std.testing.expectEqualDeep(expected, rowStep(row, case.key));
+            const step = rowStep(row, case.key);
+            try std.testing.expectEqual(expected.row, step.row);
+            try std.testing.expectEqual(expected.route, step.route);
             try std.testing.expectEqual(expected.route, consent.route(case.key));
             try std.testing.expectEqual(expected.row, consent.row);
             // Arrival always shows the selector, regardless of a kept draft.
