@@ -5,8 +5,8 @@ human_cli_integration.py runs these cases in its full and renderer modes, and
 alone as `session-chrome`. Each case judges the screen the person sees, at
 80×24 unless it says otherwise: the feed fills rows 0–17, row 18 is
 reserved for the marker even at the end, and the input sits
-between the rules on rows 19–21, the facts row is 22 and the last row 23.
-Feed/page/activity rows have one gutter column; input, facts and status
+between rules on rows 19–21, the identity/keys footer is 22 and the state slot is 23.
+Feed/page/activity rows have one gutter column; input, footer and state
 retain their own margins."""
 import json
 import os
@@ -31,7 +31,8 @@ from terminal_process import close_pty, open_pty, spawn
 
 ROWS = 24
 BOTTOM = ROWS - 6  # The permanently reserved marker row below the feed.
-LAST = ROWS - 1
+FOOTER = ROWS - 2
+NOTICE = ROWS - 1
 
 
 def rows(screen):
@@ -92,9 +93,9 @@ class Chrome:
         if kind is None:
             shutil.rmtree(self.state)
 
-    def session(self):
+    def session(self, permission="bypass"):
         reply = json.loads(run(self.home, "session", "configure", "--workspace", self.workspace,
-            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", "bypass"))
+            "--provider", "codex", "--model", "gpt-6-sol", "--permission-mode", permission))
         return reply["answer"]["session"]
 
     def answered(self, session, *inputs):
@@ -118,6 +119,11 @@ class Chrome:
 
     def leave(self, master, caller):
         os.write(master, b"\x15/exit\r")
+        _, errors = terminal_exit(caller, master)
+        assert caller.returncode == 0, errors
+
+    def detach(self, master, caller):
+        os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
 
@@ -176,9 +182,9 @@ def activity_case():
         chrome.answered(session, "seed")
         master, caller, _ = chrome.open(session, lambda screen: "SEED-ANSWER" in screen)
         try:
-            # Idle: no tail, nothing on the last row.
+            # Idle: no tail or stop key; the footer keeps the chat identity.
             idle = settle_screen(master, quiet=0.5)
-            assert rows(idle)[LAST].strip() == "" and "⠹" not in idle, idle
+            assert rows(idle)[FOOTER].strip().startswith("‹ ") and "ctrl+x stop" not in rows(idle)[FOOTER] and "⠹" not in idle, idle
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
@@ -189,9 +195,9 @@ def activity_case():
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
             assert transcript_rows(running)[BOTTOM - 1].startswith("⠹ Held call · ") and not rows(running)[BOTTOM].strip(), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
-            # Alone at the right of the last row, inside its one-column margin.
-            last = rows(running)[LAST]
-            assert last.strip() == "ctrl+x stop" and len(last.rstrip()) == 79, running
+            # At the right of the footer, beside the chat identity.
+            last = rows(running)[FOOTER]
+            assert last.strip().startswith("‹ ") and last.endswith("ctrl+x stop") and len(last.rstrip()) == 80, running
             # Waiting Messages: one row, the newest's first line, counted, never called queued.
             for index in range(3):
                 os.write(master, f"WAITING-{index}\nsecond line {index}\r".encode())
@@ -203,12 +209,12 @@ def activity_case():
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
             assert transcript_rows(waiting)[BOTTOM - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[BOTTOM].strip(), waiting
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
-            assert rows(waiting)[LAST].endswith("ctrl+x stop"), waiting
+            assert rows(waiting)[FOOTER].endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             # The waiting Messages join the turn when its call ends.
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
                 and "◌" not in screen and "⠹" not in screen, timeout=30)
-            assert rows(done)[LAST].strip() == "", done
+            assert rows(done)[FOOTER].strip().startswith("‹ ") and "ctrl+x stop" not in rows(done)[FOOTER], done
             # Each waiting Message is its own row once, in the order sent.
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
@@ -232,10 +238,10 @@ def send_state_case():
         frames = frames_until(master, b"\r", lambda screen: "SENT-ANSWER" in screen)
         cleared = [frame for frame in frames if composing(frame, "")]
         assert cleared, frames
-        assert rows(cleared[0])[LAST] == "Sending…", cleared[0]
+        assert rows(cleared[0])[NOTICE] == "Sending…", cleared[0]
         seen = set()
         for frame in cleared:
-            last, shown = rows(frame)[LAST].strip(), "\n".join(transcript_rows(frame))
+            last, shown = rows(frame)[NOTICE].strip(), "\n".join(transcript_rows(frame))
             seen.add(last)
             if "› SEND-ME" in shown:
                 break
@@ -291,7 +297,7 @@ def scroll_marker_case():
 
             scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓" and moved(screen))
             assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
-            assert rows(scrolled)[LAST].strip() == "", (keys, "no heading or hint", scrolled)
+            assert rows(scrolled)[NOTICE].strip() == "" and rows(scrolled)[FOOTER].strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
             assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
             # End edits this nonempty draft without moving the feed. Empty-
             # draft End and Ctrl-End delegate to the conversation's end action.
@@ -348,7 +354,7 @@ def pages_case():
             release.set()
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             working = chrome.frame(master, b"/status\r", lambda screen: transcript_rows(screen)[0].strip() == f"Status · {session}")
-            assert rows(working)[LAST].endswith("ctrl+x stop"), working
+            assert rows(working)[FOOTER].endswith("ctrl+x stop"), working
             chrome.frame(master, b"\x1b", lambda screen: "⠹ Held call · " in screen and marker(screen) is None)
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "PAGES-DONE"), timeout=30)
@@ -356,7 +362,49 @@ def pages_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: /status and /help open as pages with ↓ and no heading, Esc returns; a page during work keeps ctrl+x stop", flush=True)
+    print("session chrome: /status and /help open as pages with the return marker and no extra heading, Esc returns; a page during work keeps ctrl+x stop", flush=True)
+
+
+def approval_overflow_case():
+    """A clipped request reports its omitted rows; both open gestures reveal
+    them in the same panel, keeping the decision and any draft intact."""
+    with Chrome("rui-chrome-approval-overflow.", []) as chrome:
+        for count in (40, 3):
+            session = chrome.session(permission="ask")
+            command = "\n".join(f"printf step-{index:02d}" for index in range(count))
+            chrome.endpoint.responses.append(fixture.sse_tool_calls(f"steps-{count}", [
+                ("bash", f"steps-{count}-call", json.dumps({
+                    "cmd": command, "description": "Review all steps", "timeout_ms": None}))]))
+            request = admit(chrome.home, "session", "send", "--to", session, input="Review these steps")["request"]
+            fixture.wait_for(lambda: fixture.observe(chrome.store, request)["state"] == "waiting_for_permission", "pending request")
+            for width, height in ((140, 40), (46, 30)):
+                for click in (False, True):
+                    master, slave = open_pty(width, height)
+                    chrome.descriptors += [master, slave]
+                    caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
+                        env={**os.environ, "HOME": str(chrome.home)}, cwd=str(chrome.workspace),
+                        stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+                    chrome.callers.append(caller)
+                    shown = chrome.frame(master, b"", lambda screen: "Allow once" in screen and "Deny" in screen)
+                    if count == 3:
+                        assert "step-02" in shown and "more lines" not in shown, shown
+                        chrome.detach(master, caller)
+                        continue
+                    assert "more lines" in shown and "step-39" not in shown, shown
+                    assert "shift+" not in shown, shown
+                    # The draft stays the input when a continuation is opened.
+                    shown = chrome.frame(master, b"kept draft", lambda screen: "kept draft" in screen)
+                    if click:
+                        row, line = next((index, line) for index, line in enumerate(rows(shown)) if "more lines" in line)
+                        col = line.rindex("…") + 1
+                        gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
+                    else:
+                        gesture = b"\x0f"
+                    opened = chrome.frame(master, gesture, lambda screen: "step-39" in screen)
+                    assert "kept draft" in opened and "more lines" not in opened, opened
+                    assert fixture.observe(chrome.store, request)["state"] == "waiting_for_permission"
+                    chrome.detach(master, caller)
+    print("session chrome: clipped approvals report remaining rows; Ctrl-O and a click open them in place at both sizes, preserving the draft; fitting requests have no overflow state", flush=True)
 
 
 def opening_case():
@@ -382,7 +430,7 @@ def opening_case():
             master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "⠹ Held call · " in screen)
             tail = tail_rows(opened)
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened
-            assert rows(opened)[LAST].endswith("ctrl+x stop"), opened
+            assert rows(opened)[FOOTER].endswith("ctrl+x stop"), opened
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "HELD-DONE") and "◌" not in screen, timeout=30)
             chrome.leave(master, caller)
@@ -413,15 +461,15 @@ def opening_case():
 
 
 def notice_case():
-    """A notice shows on the last row until the next key; `?` on an empty
+    """A notice shows in the bottom state slot until the next key; `?` on an empty
     draft shows the shortcuts and the next key closes them."""
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
-        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: rows(screen)[LAST].startswith("! Unknown command /nosuch"))
+        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: rows(screen)[NOTICE].startswith("! Unknown command /nosuch"))
         assert composing(unknown, ""), unknown
         gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert rows(gone)[LAST].strip() == "", gone
+        assert rows(gone)[NOTICE].strip() == "" and rows(gone)[FOOTER].strip().startswith("‹ "), gone
         os.write(master, b"\x15")
         chrome.frame(master, b"", lambda screen: composing(screen, ""))
         shortcuts = chrome.frame(master, b"?", lambda screen: "shift+enter or ctrl+j new line" in screen)
@@ -437,5 +485,6 @@ def main():
     activity_case()
     scroll_marker_case()
     pages_case()
+    approval_overflow_case()
     opening_case()
     notice_case()

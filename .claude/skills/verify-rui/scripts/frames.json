@@ -204,6 +204,11 @@
         "× Fail with an excerpt · exit 1",
         "The project has a README",
         "retry policy notes"
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
     },
     {
@@ -743,11 +748,16 @@
         {
           "wait": "× Model reply unreadable"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
       ]
     },
     {
       "name": "approval",
-      "note": "17-approval",
+      "note": "17-approval: clipped requests retain a quiet remaining-row count; no key hint",
       "open": "Schema migration",
       "steps": [
         {
@@ -756,11 +766,17 @@
         {
           "wait": "Deny"
         }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends",
+        "more lines · shift+↓"
       ]
     },
     {
       "name": "approval-typing",
-      "note": "17c-approval-typing",
+      "note": "17c-approval-typing: the retained draft does not hide request overflow",
       "open": "Schema migration",
       "steps": [
         {
@@ -770,8 +786,15 @@
           "text": "I am checking the migration before approving it."
         },
         {
-          "wait": "I am checking the migration before approving it."
+          "wait": "approving it."
         }
+      ],
+      "expect": [
+        "I am checking the migration before",
+        "approving it."
+      ],
+      "absent": [
+        "more lines · shift+↓"
       ]
     },
     {
