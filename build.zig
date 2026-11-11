@@ -293,6 +293,18 @@ pub fn build(b: *std.Build) void {
     );
     mysql_wire_integration_step.dependOn(&mysql_wire_integration.step);
 
+    const mysql_launch_admin = b.addExecutable(.{
+        .name = "rui-mysql-launch-admin",
+        .use_llvm = test_actor_llvm,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/integration/mysql_launch_admin.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+            .link_libc = true,
+        }),
+    });
+    mysql_launch_admin.root_module.addImport("mysql_connection", mysql_connection);
+
     const host_status_actor = b.addExecutable(.{
         .name = "rui-host-status-test",
         .use_llvm = test_actor_llvm,
@@ -308,6 +320,7 @@ pub fn build(b: *std.Build) void {
     host_status_integration.addFileArg(b.path("tests/integration/host_status_integration.py"));
     host_status_integration.addFileArg(ci.path(release_safe));
     host_status_integration.addFileArg(ci.path(host_status_actor));
+    host_status_integration.addFileArg(ci.path(mysql_launch_admin));
     const host_status_step = b.step("host-status-integration", "Run native Host information and lease observation cases");
     host_status_step.dependOn(&host_status_integration.step);
 
@@ -327,17 +340,6 @@ pub fn build(b: *std.Build) void {
     launch_frame_integration.addFileArg(b.path("tests/integration/launch_frame_integration.py"));
     launch_frame_integration.addFileArg(ci.path(release_safe));
     launch_frame_integration.addArg("--require-mcp-sdk");
-    const mysql_launch_admin = b.addExecutable(.{
-        .name = "rui-mysql-launch-admin",
-        .use_llvm = test_actor_llvm,
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("tests/integration/mysql_launch_admin.zig"),
-            .target = target,
-            .optimize = .ReleaseSafe,
-            .link_libc = true,
-        }),
-    });
-    mysql_launch_admin.root_module.addImport("mysql_connection", mysql_connection);
     const mysql_launch_integration = b.addSystemCommand(&.{"python3"});
     mysql_launch_integration.addFileArg(b.path("tests/integration/launch_frame_mysql_integration.py"));
     mysql_launch_integration.addFileArg(ci.path(release_safe));
