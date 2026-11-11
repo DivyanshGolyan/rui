@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        slot: [1, 2, 3, 4, 5, 6, 7, 8]
+        slot: [prefetch-1, prefetch-2, control-1, control-2]
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -27,6 +27,24 @@ jobs:
           sudo mkdir -p /tmp/cores && sudo chmod 1777 /tmp/cores
           sudo sysctl -w kernel.core_pattern=/tmp/cores/core.%e.%p
           (sudo apt-get install -yq gdb >/dev/null 2>&1 || true) &
+      - name: Probe the lazy package host
+        continue-on-error: true
+        run: |
+          ulimit -c unlimited
+          echo | openssl s_client -connect deps.files.ghostty.org:443 -servername deps.files.ghostty.org -tls1_3 2>&1 | grep -iE 'Negotiated|group|Protocol|Cipher|Server Temp Key' || true
+          zig fetch https://deps.files.ghostty.org/wuffs-7411f488fe2e2c205c3d3b3d28638b7356522930.tar.gz; echo "zig fetch exit $?"
+          zig fetch https://release.files.ghostty.org/libghostty-vt/1.0.0/libghostty-vt-1.0.0.tar.gz; echo "zig fetch exit $?"
+      - name: Prefetch the lazy packages with curl
+        if: ${{ startsWith(matrix.slot, 'prefetch') }}
+        run: |
+          set -euo pipefail
+          get() {
+            mkdir -p "screen-emulator/zig-pkg/$2"
+            curl -sSfL "$1" | tar -xz --strip-components=1 -C "screen-emulator/zig-pkg/$2"
+          }
+          get https://deps.files.ghostty.org/wuffs-7411f488fe2e2c205c3d3b3d28638b7356522930.tar.gz N-V-__8AAP5JWgCGP_AD0teWpa4krRvE9VPZzvviGdbmN4jI
+          get https://deps.files.ghostty.org/highway-66486a10623fa0d72fe91260f96c892e41aceb06.tar.gz N-V-__8AAGmZhABbsPJLfbqrh6JTHsXhY6qCaLAQyx25e0XE
+          ls screen-emulator/zig-pkg
       - name: Build as linux_build does, with cores
         id: build
         continue-on-error: true
