@@ -2628,7 +2628,7 @@ fn settleReader(self: *Self) !void {
         pending.failure.status == 503 and std.mem.eql(u8, pending.failure.diagnostic.code.slice(), "dispatch_fenced")
     else
         false;
-    const host_lost = if (end == .failed) self.hostFailure(end.failed.err) else false;
+    const host_lost = if (end == .failed and self.job.result.failure_origin == .host_transport) self.hostFailure(end.failed.err) else false;
     if (fenced and self.app_hooks.host != null) self.app_hooks.host.?.lost(self.app_hooks.host.?.context);
     if (host_lost or (fenced and self.app_hooks.host != null)) {
         // A joined failed read has published no staged output. Keep its
@@ -4896,9 +4896,196 @@ test "a card taller than the screen says how many lines it hides and Shift-Down 
     } else return error.TestUnexpectedResult;
 }
 
+test "reader failure provenance keeps transport loss separate from local copy failures, reachable or held" {
+    const Probe = struct {
+        const Mode = enum { read_disconnect, copy_disconnect, command_disconnect, temporary, sink, rename };
+        var mode: Mode = undefined;
+        var local_effects: usize = 0;
+        fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
+            if (mode == .temporary and std.mem.startsWith(u8, path, ".rui-")) {
+                local_effects += 1;
+                return error.FileNotFound;
+            }
+            return std.testing.io.vtable.dirCreateFile(userdata, dir, path, options);
+        }
+        fn write(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
+            if (mode == .sink) {
+                local_effects += 1;
+                return error.BrokenPipe;
+            }
+            return std.testing.io.vtable.fileWritePositional(userdata, file, header, data, splat, offset);
+        }
+        fn rename(_: ?*anyopaque, _: std.Io.Dir, _: []const u8, _: std.Io.Dir, _: []const u8) std.Io.Dir.RenameError!void {
+            local_effects += 1;
+            return error.FileNotFound;
+        }
+        fn command(_: std.process.Init, requests: client.Requests, store: []const u8, session: []const u8, _: []u8) !void {
+            try std.testing.expect(requests.cancellation != null);
+            _ = try requests.activityPage(store, session, .{});
+            return error.TestUnexpectedResult;
+        }
+    };
+    const Peer = struct {
+        mode: Probe.Mode,
+        listener: *std.Io.net.Server,
+        stopping: std.atomic.Value(bool) = .init(false),
+        result: anyerror!void = {},
+        pages: usize = 0,
+        contents: usize = 0,
+        const answer = "answer";
+        fn run(self: *@This()) void {
+            self.result = self.serve();
+        }
+        fn request(self: *@This(), route: []const u8) !std.Io.net.Stream {
+            const stream = try self.listener.accept(std.testing.io);
+            errdefer stream.close(std.testing.io);
+            if (self.stopping.load(.acquire)) return error.Cancelled;
+            var bytes: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const count = try std.posix.read(stream.socket.handle, bytes[used..]);
+                if (count == 0) return error.UnexpectedEof;
+                used += count;
+                if (std.mem.indexOf(u8, bytes[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, bytes[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOf(u8, bytes[start..end], "\r\n").? + start;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, bytes[start..finish], 10)) break;
+                }
+            }
+            var prefix: [96]u8 = undefined;
+            try std.testing.expectStringStartsWith(bytes[0..used], try std.fmt.bufPrint(&prefix, "POST {s} HTTP/1.1\r\n", .{route}));
+            return stream;
+        }
+        fn reply(stream: std.Io.net.Stream, content_type: []const u8, length: usize, extra: []const u8, body: []const u8) !void {
+            var header: [512]u8 = undefined;
+            var writer = stream.writer(std.testing.io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n{s}Connection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ content_type, length, extra }));
+            try writer.interface.writeAll(body);
+        }
+        fn serve(self: *@This()) !void {
+            {
+                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else "/v1/conversation-page");
+                defer page.close(std.testing.io);
+                self.pages += 1;
+                if (self.mode == .read_disconnect or self.mode == .command_disconnect) return; // Physical EOF, no response.
+                var bytes: [1024]u8 = undefined;
+                var body = std.Io.Writer.fixed(&bytes);
+                const shape = protocol.conversation_page_reply;
+                try protocol.writeShape(&body, shape.head, .{1});
+                try protocol.writeShape(&body, shape.item(.assistant), .{ 1, 0, answer.len, protocol.contentDigest(answer) });
+                try protocol.writeShape(&body, shape.item_end ++ shape.last, .{});
+                try reply(page, "application/json", body.buffered().len, "", body.buffered());
+            }
+            if (self.mode == .temporary) return; // The local create fails next.
+            const content = try self.request("/v1/conversation-content");
+            defer content.close(std.testing.io);
+            self.contents += 1;
+            var extra: [128]u8 = undefined;
+            try reply(content, "application/octet-stream", answer.len, try std.fmt.bufPrint(&extra, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ answer.len, answer.len }), if (self.mode == .copy_disconnect) answer[0..1] else answer);
+        }
+    };
+    const Discovery = struct {
+        unavailable: bool = false,
+        losses: usize = 0,
+        fn held(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.unavailable;
+        }
+        fn lost(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.unavailable = true;
+            self.losses += 1;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return error.TestUnexpectedResult;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    const io = std.testing.io;
+    for (std.enums.values(Probe.Mode)) |mode| for ([_]bool{ false, true }) |already_unavailable| {
+        errdefer std.debug.print("mode={s}, already unavailable={}\n", .{ @tagName(mode), already_unavailable });
+        Probe.mode = mode;
+        Probe.local_effects = 0;
+        var fixture: ChromeFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const self = fixture.self;
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        var listener = try (try std.Io.net.UnixAddress.init(lease.paths.socket.slice())).listen(io, .{});
+        defer {
+            listener.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, lease.paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        }
+        var peer: Peer = .{ .mode = mode, .listener = &listener };
+        const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+        var joined = false;
+        defer if (!joined) {
+            peer.stopping.store(true, .release);
+            if ((std.Io.net.UnixAddress.init(lease.paths.socket.slice()) catch unreachable).connect(io)) |wake| wake.close(io) else |_| {}
+            thread.join();
+        };
+        var vtable = io.vtable.*;
+        vtable.dirCreateFile = Probe.create;
+        vtable.fileWritePositional = Probe.write;
+        if (mode == .rename) vtable.dirRename = Probe.rename;
+        self.init.io = .{ .userdata = io.userdata, .vtable = &vtable };
+        self.store = root;
+        self.live.cursor = .{ .position = 19 };
+        self.reading.opening = mode == .read_disconnect;
+        _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
+        var discovery: Discovery = .{};
+        self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
+        self.command = Probe.command;
+        self.inspection.kind = if (mode == .command_disconnect) .command else .{ .copy = if (mode == .temporary or mode == .rename) .file else .answer };
+        const job = self.freeze(if (mode == .read_disconnect) .activity else .inspection);
+        try self.launch(job, if (mode == .read_disconnect) reads.scan else if (mode == .command_disconnect) reads.runCommand else reads.copyAnswer);
+        // An independent discovery change while this job is in flight must
+        // not change where its own error came from or suppress a local notice.
+        discovery.unavailable = already_unavailable;
+        try self.settleReader();
+        thread.join();
+        joined = true;
+        try peer.result;
+        const transport = mode == .read_disconnect or mode == .copy_disconnect or mode == .command_disconnect;
+        try std.testing.expectEqual(if (transport) client.FailureOrigin.host_transport else .local, self.job.result.failure_origin);
+        try std.testing.expectError(if (transport) error.TruncatedResponse else if (mode == .sink) error.BrokenPipe else error.FileNotFound, self.reader.result.?);
+        try std.testing.expectEqual(@as(usize, @intFromBool(transport)), discovery.losses);
+        try std.testing.expectEqual(already_unavailable or transport, self.hostHeld());
+        try std.testing.expectEqual(@as(usize, @intFromBool(!transport)), Probe.local_effects);
+        try std.testing.expectEqual(@as(usize, 1), peer.pages);
+        try std.testing.expectEqual(@as(usize, @intFromBool(mode != .read_disconnect and mode != .command_disconnect and mode != .temporary)), peer.contents);
+        try std.testing.expect(self.reader.thread == null and self.leaving == null);
+        try std.testing.expectEqual(mode == .read_disconnect, self.reading.opening);
+        try std.testing.expectEqual(@as(u64, 19), self.live.cursor.position);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        if (transport) {
+            try std.testing.expect(self.notice == null);
+        } else {
+            try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", self.notice.?);
+            try self.afterInput(&fixture.ctx);
+            const rows = try fixture.rows();
+            for (rows) |line| {
+                if (std.mem.indexOf(u8, line, "Copy unavailable; draft retained.") != null) break;
+            } else {
+                for (rows) |line| std.debug.print("{s}\n", .{line});
+                return error.TestUnexpectedResult;
+            }
+        }
+    };
+}
+
 test "Host recovery joins unavailable reads in every phase without losing the Session" {
     const Fault = struct {
         failure: anyerror,
+        job: *Job,
+        origin: client.FailureOrigin = .local,
         lost: usize = 0,
         fenced: bool = false,
         fn run(raw: *anyopaque, task: *Task) !void {
@@ -4909,6 +5096,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
                 try failure.diagnostic.code.set("dispatch_fenced");
                 return task.requests().failRead(failure);
             }
+            self.job.result.failure_origin = self.origin;
             return self.failure;
         }
         fn held(_: *anyopaque) bool {
@@ -4932,7 +5120,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
     for (std.enums.values(ReadPhase)) |phase| {
         for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse }) |failure| {
-            var fault: Fault = .{ .failure = failure };
+            var fault: Fault = .{ .failure = failure, .job = &self.job, .origin = .host_transport };
             self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
             self.reading.phase = phase;
             self.reading.opening = true;
@@ -4947,7 +5135,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
             try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         }
     }
-    var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
+    var fenced: Fault = .{ .failure = error.HostInvocationFailed, .job = &self.job, .fenced = true };
     self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
     self.reading.phase = .activity;
     try self.reader.start(std.testing.io, &fenced, Fault.run);
@@ -4956,7 +5144,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     try std.testing.expect(self.reading.pending_diagnostic == null);
     // A canonical or unrelated failure still has its original fatal boundary.
     for ([_]anyerror{ error.CanonicalStoreFailure, error.AccessDenied }) |failure| {
-        var fault: Fault = .{ .failure = failure };
+        var fault: Fault = .{ .failure = failure, .job = &self.job };
         self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
         self.reading.phase = .activity;
         try self.reader.start(std.testing.io, &fault, Fault.run);

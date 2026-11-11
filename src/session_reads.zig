@@ -265,6 +265,9 @@ pub const Job = struct {
     provider: ?protocol.Provider = null,
     hint_wanted: bool = false,
     result: struct {
+        /// The request borrower stamps only an escaping socket failure. Local
+        /// staging/rendering errors keep their own failure path, even offline.
+        failure_origin: client.FailureOrigin = .local,
         // The work the page's own Store read saw: its history, footer and
         // consent describe one moment.
         work: protocol.PageWork = .{},
@@ -319,6 +322,12 @@ pub const Job = struct {
         // The step passed over a sent Message the draft cannot hold.
         recall_passed: bool = false,
     } = .{},
+
+    fn borrow(self: *Job, task: *Task) client.Requests {
+        var requests = task.requests();
+        requests.failure_origin = &self.result.failure_origin;
+        return requests;
+    }
 };
 
 /// One step over the Messages the person sent, from the one the draft
@@ -328,7 +337,7 @@ pub const Job = struct {
 /// passed over, its content read at most once, and the result says so.
 pub fn recall(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const requests = task.requests();
+    const requests = job.borrow(task);
     const step = job.recall.?;
     std.debug.assert(step.older or step.from != null);
     // A person's Messages are the activity page's `admission` rows. A
@@ -413,7 +422,7 @@ const RecallStaging = struct {
 /// through its own descriptor. No command reads terminal input.
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = .{ .io = task.io, .cancellation = job.interrupted }, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = .{ .io = task.io, .cancellation = job.interrupted, .failure_origin = &job.result.failure_origin }, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -458,7 +467,12 @@ pub const CommandRun = struct {
         const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, self.requests, self.store, self.session, self.line);
         const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
         const stderr_restored = std.c.dup2(saved[1], 2) >= 0;
-        return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = if (!stdout_restored or !stderr_restored) error.TerminalCleanupFailed else result };
+        if (!stdout_restored or !stderr_restored) {
+            // Restoration replaced the command's outcome with a local failure.
+            if (self.requests.failure_origin) |origin| origin.* = .local;
+            return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = error.TerminalCleanupFailed };
+        }
+        return .{ .rendering = true, .stderr_restored = true, .outcome = result };
     }
 };
 
@@ -470,7 +484,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
         var output: DisplayCapture = .{ .task = task, .file = job.files.action };
         // A target resolved between reads is the same as a scan with no
         // pending Action: leave result.action empty and refresh, without consent.
-        job.result.summary = (try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) orelse return;
+        job.result.summary = (try View.permission(job.borrow(task), job.store, job.session, action, job.files.scratch, &output, job.colour)) orelse return;
         job.result.compact_tools = false;
         job.result.action = action;
     }
@@ -478,7 +492,7 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
 
 pub fn scan(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const requests = task.requests();
+    const requests = job.borrow(task);
     var cursor = job.cursor;
     if (job.opening) cursor.direction = .backward;
     const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
@@ -564,7 +578,7 @@ pub fn history(raw: *anyopaque, task: *Task) !void {
         .listing => |step| return list(job, task, step),
         .message => unreachable,
     };
-    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
+    const prepared = try History.prepare(job.borrow(task), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
@@ -582,7 +596,7 @@ fn searchFrom(queued: protocol.Queued) ?u64 {
 /// Renders one listed Message, bound to its item's length and digest, and
 /// where the listing continues. Nothing shows until the UI prepends it.
 fn list(job: *Job, task: *Task, step: Listing) !void {
-    const requests = task.requests();
+    const requests = job.borrow(task);
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
     switch (step) {
@@ -824,7 +838,7 @@ const DisplayCapture = struct {
 /// before anything shows; its full text then follows at column 0.
 pub fn fullMessage(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const requests = task.requests();
+    const requests = job.borrow(task);
     const target = job.target.message;
     const Staging = struct {
         io: std.Io,
@@ -980,7 +994,7 @@ pub const clipboard_limit = 100_000 / 4 * 3;
 
 pub fn copyAnswer(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const requests = task.requests();
+    const requests = job.borrow(task);
     const answer = (try lastAnswer(requests, job.store, job.session)) orelse return;
     const Sink = struct {
         io: std.Io,
@@ -1071,7 +1085,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);
-        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
+        try job.requests(job.init, job.borrow(task), job.store, job.session, &output.interface, &job.result.requests);
         try writeSubmission(job.inspection_submission, null, &output.interface);
     }
     try output.flush();

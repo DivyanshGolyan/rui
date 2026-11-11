@@ -3898,7 +3898,9 @@ const HostRecovery = struct {
         files += 1;
         return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
     }
-    fn lost(_: *anyopaque, _: *ClientTask) !void {
+    fn lost(raw: *anyopaque, _: *ClientTask) !void {
+        const frontend: *SessionFrontend = @ptrCast(@alignCast(raw));
+        frontend.job.result.failure_origin = .host_transport;
         return error.ConnectionRefused;
     }
     fn completed(frontend: *SessionFrontend) !bool {
