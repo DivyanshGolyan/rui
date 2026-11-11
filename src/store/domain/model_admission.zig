@@ -168,8 +168,9 @@ pub const AttemptAdmission = struct {
 /// took. Main's text, but that it reads whether the Turn is active, not
 /// its outcome code, which it weighed only for that.
 const latest_turn = rsql.Read(.{
-    .sql = "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code IS NULL AS active,latest.first_admission_id " ++
+    .sql = "SELECT current.purpose,current.resolution_code,current.operation_id,latest.outcome_code IS NULL AS active,latest.first_admission_id,r.model " ++
         "FROM turn latest @index(turn_session_latest) LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
+        "LEFT JOIN session_revision r ON r.session_ref=current.session_ref AND r.revision=current.settings_revision " ++
         "WHERE latest.session_ref=?1 ORDER BY latest.turn_id DESC LIMIT 1",
     .Args = struct { session: []const u8 },
     .Row = struct {
@@ -178,6 +179,7 @@ const latest_turn = rsql.Read(.{
         operation_id: rsql.Positive,
         active: bool,
         first_admission_id: rsql.Positive,
+        model: Bounded(model_capability.max_model_bytes),
     },
     .cardinality = .optional,
 });
@@ -262,7 +264,7 @@ pub const CompactionRead = struct {
     fn weigh(read: *CompactionRead, next_first: ?u64) @TypeOf(read.stage) {
         const latest = read.latest.?;
         const resolution: []const u8 = if (latest.resolution_code) |*code| code.slice() else "";
-        read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first);
+        read.facts.previous = previousTurn(latest.purpose == 1, resolution, latest.active, latest.first_admission_id.get(), next_first, output_format.OutputItemKind.compaction.replayableTo(latest.model.slice(), read.model, .selected_base));
         return if (turn_policy.forcedPurpose(read.facts.previous, read.facts.trigger) == null) .context else .done;
     }
 };
@@ -277,12 +279,12 @@ fn asksNextInput(compaction: bool, active: bool) bool {
 /// Current report alike: its call's purpose and resolution, whether it is
 /// active, and, where `asksNextInput`, whether `next_first`, the first
 /// Message the next Turn takes, is the one it started from.
-fn previousTurn(compaction: bool, resolution: []const u8, active: bool, latest_first: u64, next_first: ?u64) turn_policy.Previous {
+fn previousTurn(compaction: bool, resolution: []const u8, active: bool, latest_first: u64, next_first: ?u64, same_model: bool) turn_policy.Previous {
     return .{
-        .purpose = if (compaction) .compaction else .assistant_response,
-        .context_overflow = turn_policy.Resolution.parse(resolution) == .context_overflow,
+        .purpose = if (compaction and same_model) .compaction else .assistant_response,
+        .context_overflow = same_model and turn_policy.Resolution.parse(resolution) == .context_overflow,
         .turn_active = active,
-        .same_input_prefix = asksNextInput(compaction, active) and next_first.? == latest_first,
+        .same_input_prefix = same_model and asksNextInput(compaction, active) and next_first.? == latest_first,
     };
 }
 
@@ -347,11 +349,17 @@ fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []c
 
 /// The Session ?1's newest compaction base before the position ?2, as the
 /// CTE `base`: zero rows or one.
-const compaction_base_sql = "base AS (SELECT admission_position FROM model_operation @index(model_operation_compaction_bases) " ++
-    "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 " ++
-    "ORDER BY admission_position DESC LIMIT 1)";
+fn compactionBaseSql(comptime model: []const u8) []const u8 {
+    // Pressure is estimated against the same model/anchor identity as the
+    // request. A different-model base cannot cover visible history here.
+    return "candidate_base AS (SELECT operation_id,admission_position,session_ref,settings_revision FROM model_operation @index(model_operation_compaction_bases) " ++
+        "WHERE session_ref=?1 AND purpose=1 AND " ++ store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 " ++
+        "ORDER BY admission_position DESC LIMIT 1)," ++
+        "base AS (SELECT candidate.admission_position FROM candidate_base candidate JOIN session_revision r " ++
+        "ON r.session_ref=candidate.session_ref AND r.revision=candidate.settings_revision WHERE r.model=" ++ model ++ ")";
+}
 
-/// Over `compaction_base_sql`: true when there is no base, or the base has
+/// Over `compactionBaseSql`: true when there is no base, or the base has
 /// a changed suffix before ?2. Any changed suffix of the newest base also
 /// belongs to every older base, so older bases cannot change the answer.
 const changed_since_base_sql = "NOT EXISTS(SELECT 1 FROM base " ++
@@ -365,7 +373,7 @@ const changed_since_base_sql = "NOT EXISTS(SELECT 1 FROM base " ++
 /// True when the Session has no compaction base before `boundary`, or
 /// the newest one has a changed suffix before it. Its text is main's.
 pub const context_changed = rsql.Read(.{
-    .sql = "WITH " ++ compaction_base_sql ++ " SELECT " ++ changed_since_base_sql ++ " AS changed",
+    .sql = "WITH " ++ compactionBaseSql("(SELECT r.model FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision WHERE o.session_ref=?1 AND o.admission_position=?2)") ++ " SELECT " ++ changed_since_base_sql ++ " AS changed",
     .Args = struct { session: []const u8, boundary: u64 },
     .Row = struct { changed: bool },
     .cardinality = .one,
@@ -413,12 +421,14 @@ const admission_facts = rsql.Read(.{
         " SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation,s.reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
-        "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution," ++
+        "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
         "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions," ++
         context_columns_sql ++ " " ++
         "FROM session s LEFT JOIN turn latest ON latest.turn_id=(SELECT t.turn_id FROM turn t @index(turn_session_latest) " ++
         "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1) " ++
-        "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id CROSS JOIN measured WHERE s.session_ref=?1",
+        "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
+        "LEFT JOIN session_revision latest_revision ON latest_revision.session_ref=current.session_ref AND latest_revision.revision=current.settings_revision " ++
+        "CROSS JOIN measured WHERE s.session_ref=?1",
     .Args = struct { session: []const u8, boundary: u64 },
     .Row = struct {
         session: rsql.SessionHead,
@@ -435,6 +445,7 @@ const admission_facts = rsql.Read(.{
         latest_operation: ?rsql.Positive,
         latest_compaction: ?bool,
         latest_resolution: ?Bounded(outcome_code.max_bytes),
+        latest_model: ?Bounded(model_capability.max_model_bytes),
         instructions: u64,
         changed: bool,
         uncached: ?u64,
@@ -466,7 +477,7 @@ pub const admission_facts_sql = admission_facts.sql;
 /// `latest_usage` reads the newest, and the join holds it to the base. `provider`
 /// and `model` name the Session's settings.
 fn contextCtesSql(comptime provider: []const u8, comptime model: []const u8) []const u8 {
-    return compaction_base_sql ++ "," ++
+    return compactionBaseSql(model) ++ "," ++
         "since AS (SELECT " ++ changed_since_base_sql ++ " AS changed,coalesce((SELECT admission_position FROM base),0) AS frontier)," ++
         "latest_usage AS (" ++ latestUsageSql("0", provider, model) ++ ")," ++
         "measured AS (SELECT since.changed,since.frontier,latest_usage.uncached,latest_usage.cache_read,latest_usage.cache_write,latest_usage.output," ++
@@ -659,7 +670,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         if (facts.latest_operation == null) return error.CorruptStore;
         const latest_first = facts.latest_first orelse return error.CorruptStore;
         const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
-        compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission);
+        compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
     }
     if (turn_policy.forcedPurpose(compaction.previous, compaction.trigger) == null) try takeContext(&compaction, &facts);
     const purpose = turn_policy.nextPurpose(compaction);
@@ -675,7 +686,7 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     } else null;
     // A compaction that makes no room keeps its base's floor (D217).
     const floor: ?u64 = if (room) |choice| choice.floor else if (purpose == .compaction)
-        try history_floor_domain.inheritedFloor(writer, session_ref, selection.session.next_position.get())
+        try history_floor_domain.inheritedFloor(writer, session_ref, selection.session.next_position.get(), facts.model.slice())
     else
         null;
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;

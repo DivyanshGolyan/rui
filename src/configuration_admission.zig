@@ -24,7 +24,6 @@ pub const Rejection = enum {
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
-    model_is_immutable,
     revision_exhausted,
     skills_unavailable,
 };

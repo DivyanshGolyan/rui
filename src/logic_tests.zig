@@ -70,6 +70,7 @@ const cores = .{
     .{ "models_dev.zig", @import("models_dev.zig") },
     .{ "mutation_answer.zig", @import("mutation_answer.zig") },
     .{ "outcome_code.zig", @import("outcome_code.zig") },
+    .{ "output_item.zig", @import("output_item.zig") },
     .{ "overview_style.zig", @import("overview_style.zig") },
     .{ "overview_view.zig", @import("overview_view.zig") },
     .{ "path_list.zig", @import("path_list.zig") },

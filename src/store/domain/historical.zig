@@ -467,6 +467,15 @@ pub const HistoricalView = struct {
         return outputAt(self, position) catch |err| store_core.fence(self.store, err);
     }
 
+    /// Open only the items replayable to this request's model. A skipped
+    /// opaque item owns no content reader or message digest to finish.
+    pub fn replayOutput(self: *HistoricalView, entry: *const HistoricalEntry, model: []const u8) !?HistoricalOutput {
+        const output = try self.openOutput(entry.position);
+        if (output.kind.replayableTo(entry.requested_model.?.slice(), model, if (self.anchor == entry.position) .selected_base else .history)) return output;
+        self.output_parts = null;
+        return null;
+    }
+
     pub fn nextOutputPart(self: *HistoricalView) !?HistoricalPart {
         std.debug.assert(self.active and self.output_parts != null);
         if (partsExhausted(self)) try readHistoricalParts(self.store, self);
@@ -807,8 +816,8 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     _ = try model_settlement_domain.attemptKindOf(standing, view.binding);
     if (!found.get() or !row.catalogs_consistent) return error.CorruptStore;
     if (first) {
-        try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
         try sources.finish();
+        try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
     }
     page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
     if (row.member_count > tool_catalog.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
@@ -893,20 +902,39 @@ fn readPrefixSealHeld(self: *Store, binding: AttemptBinding) !?PrefixSeal {
 
 /// The prefix seal of an Operation's Session.
 const session_prefix_seal = rsql.Read(.{
-    .sql = "SELECT s.prefix_seal FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
+    .sql = "SELECT s.prefix_seal,o.admission_position FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
-    .Row = struct { prefix_seal: ?[prefix_seal.encoded_bytes]u8 },
+    .Row = struct { prefix_seal: ?[prefix_seal.encoded_bytes]u8, admission_position: rsql.Positive },
     .cardinality = .one,
 });
 
-/// The Session's recorded seal, in a round of its own. A failed step is
-/// `CorruptStore`, main's answer for it.
+/// Model identity for a seal is derived from its existing Operation
+/// admission position, so neither the seal nor the Store format grows.
+const seal_model = rsql.Read(.{
+    .sql = "SELECT sealed_revision.model=current_revision.model AS same_model " ++
+        "FROM model_operation current JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
+        "JOIN model_operation sealed ON sealed.session_ref=current.session_ref AND sealed.admission_position=?2 " ++
+        "JOIN session_revision sealed_revision ON sealed_revision.session_ref=sealed.session_ref AND sealed_revision.revision=sealed.settings_revision " ++
+        "WHERE current.operation_id=?1",
+    .Args = struct { operation: u64, admission: u64 },
+    .Row = struct { same_model: bool },
+    .cardinality = .one,
+});
+
+/// A recorded span binds only requests for its model. A failed read or
+/// a seal whose producing Operation is missing is canonical corruption.
 pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
     var row: session_prefix_seal.Row = undefined;
     a.read(session_prefix_seal, .{ .operation = binding.operation_id }, &row);
     try store_access.runAs(a, error.CorruptStore);
     const bytes = row.prefix_seal orelse return null;
-    return try PrefixSeal.decode(&bytes);
+    const seal = try PrefixSeal.decode(&bytes);
+    // A later view neither binds nor is replaced; its model is irrelevant.
+    if (seal.admission_position > row.admission_position.get()) return seal;
+    var identity: seal_model.Row = undefined;
+    a.read(seal_model, .{ .operation = binding.operation_id, .admission = seal.admission_position }, &identity);
+    try store_access.runAs(a, error.CorruptStore);
+    return if (identity.same_model) seal else null;
 }
 
 pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
@@ -955,13 +983,15 @@ const base_anchors_where = "WHERE anchor.operation_id=base.operation_id AND anch
 /// position, and how many have their bag's row.
 const output_boundary = rsql.Read(.{
     .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier," ++
-        "current.history_floor AS own_floor,base.history_floor AS base_floor," ++
+        "current.history_floor AS own_floor,base.history_floor AS base_floor,current_revision.model AS current_model,base_revision.model AS base_model," ++
         "(SELECT count(*) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchors," ++
         "(SELECT min(anchor.session_position) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchor_position," ++
         "(SELECT count(*) " ++ base_anchors_from ++ "JOIN content bag ON bag.content_id=anchor.extras_content_id " ++ base_anchors_where ++ ") AS anchor_bags," ++
         "CASE WHEN coalesce(current.history_floor,base.history_floor) IS NULL THEN 0 ELSE coalesce((SELECT min(first.session_position) " ++
         "FROM conversation_entry first @index(conversation_entry_history) WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) END AS first_message " ++
         "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=" ++ selected_base_sql ++ " " ++
+        "JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
+        "LEFT JOIN session_revision base_revision ON base_revision.session_ref=base.session_ref AND base_revision.revision=base.settings_revision " ++
         "WHERE current.operation_id=?1",
     .Args = struct { operation: u64 },
     .Row = struct {
@@ -970,6 +1000,8 @@ const output_boundary = rsql.Read(.{
         frontier: u64,
         own_floor: ?rsql.Positive,
         base_floor: ?rsql.Positive,
+        current_model: Bounded(model_capability.max_model_bytes),
+        base_model: ?Bounded(model_capability.max_model_bytes),
         anchors: u64,
         anchor_position: ?rsql.Positive,
         anchor_bags: u64,
@@ -1058,7 +1090,25 @@ fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) er
     view.selected_base = if (row.operation_id) |id| id.get() else 0;
     view.output_frontier = row.frontier;
     view.anchor = if (row.anchors == 1 and row.anchor_bags == 1) (row.anchor_position orelse return error.CorruptStore).get() else null;
-    const base_floor: u64 = if (row.base_floor) |floor| floor.get() else 0;
+    // Validate the selected base even when its opaque state cannot be sent.
+    if (view.selected_base != 0 and view.anchor == null) return error.CorruptStore;
+    const compatible = if (view.selected_base != 0) OutputItemKind.compaction.replayableTo(
+        (row.base_model orelse return error.CorruptStore).slice(),
+        row.current_model.slice(),
+        .selected_base,
+    ) else true;
+    if (!compatible) {
+        // Rebuild the visible exchanges the old base (and its floor) covered.
+        // The settings round's speculative first output page began at that
+        // old frontier: restart its validation from the beginning as well.
+        view.selected_base = 0;
+        view.output_frontier = 0;
+        view.anchor = null;
+        view.output_cursor = 0;
+        view.output_cursor_id = 0;
+        view.outputs_validated = false;
+    }
+    const base_floor: u64 = if (compatible) (if (row.base_floor) |floor| floor.get() else 0) else 0;
     const own_floor: u64 = if (row.own_floor) |floor| floor.get() else 0;
     // A compaction keeps its base's floor or goes deeper.
     if (own_floor != 0 and own_floor < base_floor) return error.CorruptStore;

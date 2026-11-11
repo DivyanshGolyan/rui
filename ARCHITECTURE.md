@@ -170,18 +170,20 @@ A supplied Workspace is checked like any other, and a spec without Bash that omi
 Enabling Bash later runs it in the saved Workspace, which a later configure cannot change.
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
 The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, a supported saved effort or the product's effort choice, and the provider's compactAt default as described under [Supported model IDs](#supported-model-ids).
-Addressed configure preserves every omitted setting; the model, provider and Workspace binding remain immutable.
+Addressed configure preserves every omitted setting; provider and Workspace remain immutable, while the model may change within the provider (D192).
 A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and resolved answers bind the resolved configuration for idempotent replay (D22).
 Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
 Later configurations preserve omitted provider/model values and accept explicit equal values.
-A different provider or model rejects the whole update, without a revision or partial changes.
-This applies before, during and after work, regardless of saved continuation.
-Unknown providers reject without fallback.
+A different provider rejects the whole update, without a revision or partial changes; unknown providers reject without fallback.
+A model change is an ordinary revision and writes a `session_changed` row for `model`, before, during or after work.
+The Session ID and attached children carry on.
+Validate retained or supplied effort against the new model only when the catalog lists it; an unlisted model passes any supported effort word through (D229/D137).
+The retained or supplied compactAt must fit the new model's known window.
 
-To use another binding, create a new Session.
+To use another provider, create a new Session.
 V1 has no fork, history transfer or cross-provider handoff.
-The restriction belongs to configuration admission, not permanent storage immutability: Operations resolve their frozen settings revisions, and output retains its producing Operation's provenance.
+Operations still resolve their frozen settings revisions, and output retains its producing Operation's provenance.
 
 Other supplied mutable fields apply in admission order; omitted fields remain unchanged.
 Enforce immutable Workspace/access constraints and supported Core values.
@@ -422,7 +424,7 @@ The revision does not give every setting the same application boundary:
 | Label | Presentation only. It takes effect at commit and no Operation freezes it. |
 
 No separate settings store or applied-state machinery is required.
-Session identity, Workspace/access scope and the V1 provider/model binding are fixed under [configuration admission](#naming-and-configuring-a-session); other supported settings are mutable.
+Session identity, Workspace/access scope and provider binding are fixed under [configuration admission](#naming-and-configuring-a-session); other supported settings are mutable.
 Core validates updates atomically.
 The adapter must establish continuation compatibility for the exact frozen Operation without changing Conversation membership.
 Revisions do not add provider capabilities.
@@ -766,13 +768,17 @@ Select the newest accepted base in the current lineage, then validate that exact
 
 Both checks must pass; no validity flag is stored.
 Failed or unresolved compaction cannot replace a base.
-Unsupported or incompatible selected material fails `continuation_unavailable`, without falling back to an older base or reconstructing from visible Conversation.
+Unsupported selected material fails `continuation_unavailable`, without falling back to an older base.
+A selected base made for another requested model is not replayable: use the visible canonical history it covered, including exchanges its floor omitted, rather than its opaque state.
 Missing or corrupt required canonical state fences the Host instead of failing only the Operation.
 
 Configuration changes do not prevalidate or discard saved continuation.
 Request preparation validates the frozen Operation's selected recipe.
-Codex initially restricts continuation to the same requested model binding and records requested/served-model evidence; actual provider qualification requires adapter evidence even though V1 configuration admission fixes the Session binding.
-Incompatible continuation fails that Operation with `continuation_unavailable`, without replaying it or dropping private meaning.
+The producing Operation's frozen revision supplies each item's requested model; served-model evidence never substitutes for that identity.
+One output-item replay rule permits visible assistant messages, tool calls and tool results across models, but omits reasoning and compaction items from a different requested model (D192).
+A model switch therefore rebuilds from visible history, costing one unavoidable cache miss; it changes no canonical output and needs no new Store column.
+The ordinary compaction trigger weighs this rebuilt history for the new model; old-model compaction floors and successor exemptions do not apply.
+Actual provider qualification still requires adapter evidence.
 If complete retained input still cannot fit, fail with `ResourceExceeded` under terminal-settlement rules.
 Never discard pending instructions to fit or impose a durable-history limit.
 
@@ -959,7 +965,8 @@ Sessions are durable and have no end event, so an idle Session's memo lasts unti
 
 The provider caches requests by their prefix, so a Host that encodes the same history differently, after an upgrade or through a bug, would lose a Session's cache without any sign.
 Each Session therefore stores one 56-byte prefix seal: the anchor and admission position of the view whose fully rebuilt span it records, that span's length and its SHA-256.
-Every full rebuild of a span, under the same anchor and with a view containing the sealing view, must begin with exactly the sealed bytes.
+Every full rebuild of a span, under the same model and anchor and with a view containing the sealing view, must begin with exactly the sealed bytes.
+Derive the seal's model from the existing Operation at its admission position; a different model's seal does not bind or change the 56-byte encoding.
 After the request seals, preparation hashes the span from the sealed request in chunks under the preparation byte allowance, handing each chunk on to the memo being written, so the span is read once; a mismatch, or a span shorter than the seal, fails the Attempt `encoding_drift` before anything is sent, keeps no memo, and leaves the seal in place.
 A memo copy is this Host's own earlier encoding and is not hashed again.
 The seal is replaced by the whole span once a rebuilt span is at least twice the sealed length, so a Session writes its seal a logarithmic number of times per anchor and the seal always covers at least half of a rebuilt span; between replacements a rebuild hashes only the sealed bytes.

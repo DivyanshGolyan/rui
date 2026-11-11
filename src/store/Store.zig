@@ -156,9 +156,7 @@ pub const Store = struct {
         return observation;
     }
 
-    /// Test fixture for a historical producing binding unavailable through
-    /// today's immutable Session configuration admission. Requires a newer
-    /// current revision, leaving that revision and its frozen inputs intact.
+    /// Reads the seal applicable to this frozen Operation's model.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         return self.queue().run(prefixSealForTestingHeld, .{ self, binding });
     }

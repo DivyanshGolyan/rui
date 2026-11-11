@@ -455,7 +455,7 @@ Measure the Rui CLI and helpers separately from the Host target.
 ## Contract index
 
 ARCHITECTURE owns behavior; tests own cases.
-Quoted names are Zig filters: `zig build test -Dtest-filter='immutable binding'`.
+Quoted names are Zig filters: `zig build test -Dtest-filter='model revisions'`.
 Other identifiers name targets, `tests/integration/` fixtures, modes or functions.
 `none located` means no check; `planned` means unimplemented behavior.
 Neither is coverage.
@@ -498,7 +498,7 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
 | [Capture, recovery and descriptor bound](ARCHITECTURE.md#caller-capture-and-recovery) | `'capture retransmits'`, `'capture publication'`, `human_cli_integration.py`, `saved_request_resources.py BASELINE CANDIDATE` | The `fsync` cut is Linux-only and not power loss. The resource fixture needs `/proc` and samples descriptors without asserting the bound |
-| Configuration binding, Message admission and selection | `'immutable binding'`, `'message admissions remain'`, `'runnable discovery'`, `dispatch_integration.py`, `canonical_failure_integration.py` | Sizes are qualification workloads, not request quotas |
+| Configuration revisions, Message admission and selection | `'model revisions'`, `'model switch'`, `'message admissions remain'`, `'runnable discovery'`, `dispatch_integration.py`, `canonical_failure_integration.py` | Sizes are qualification workloads, not request quotas |
 | [Loaded tools](ARCHITECTURE.md#authorizing-exact-actions) | `store/tests.zig` `'loaded tools configure'`; loaded-set history and call rejection regressions in `store/sqlite_tests.zig`; schema 53-to-54 forward migration | Strict subsets require a future `find_tools` catalog entry; visibility tests seed stored subsets |
 | Core key domain, including empty keys | `'core preserves empty keys'` | 128-byte accept and 129-byte reject bounds, recovery-binding retention: none located |
 
@@ -602,7 +602,7 @@ Extend existing owners and their gates; replace obsolete wait wrappers and fixed
 
 | Contract | Canonical checks | Limits and exceptions |
 | --- | --- | --- |
-| [Control replay and conflicts](ARCHITECTURE.md#recovering-a-submission-after-a-lost-reply) | `'exact model interruption'`, `'idle Session stop'`, `'controls remove scheduled retries'`, `'allow once survives'`, `'immutable binding'` | Reopen is not crash recovery |
+| [Control replay and conflicts](ARCHITECTURE.md#recovering-a-submission-after-a-lost-reply) | `'exact model interruption'`, `'idle Session stop'`, `'controls remove scheduled retries'`, `'allow once survives'`, `'model revisions'` | Reopen is not crash recovery |
 | Native control replay | `control_integration.py` `prove_idle_stop_wire_recovery`, `prove_retry_wait_control`, `check_schema`, `bash_integration.py`, `admission_integration.sh` | None |
 
 ### Control races and acknowledgement

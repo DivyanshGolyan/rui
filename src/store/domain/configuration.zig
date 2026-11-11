@@ -225,6 +225,8 @@ pub fn configurationBeforeWorkspace(
     if (requested.compaction_trigger.state == .explicit_null) return .invalid_compaction_trigger;
     const compact_at = if (requested.compaction_trigger.state == .value)
         tokenCount(requested.compaction_trigger.value.slice(), false) catch return .invalid_compaction_trigger
+    else if (current) |existing|
+        existing.compaction_trigger
     else
         null;
     _ = configurationTokens(requested.output_reservation, null, true) catch return .invalid_output_reservation;
@@ -245,11 +247,6 @@ pub fn configurationBeforeWorkspace(
     if (current) |existing| {
         if (provider) |value| {
             if (value != existing.provider) return .provider_is_immutable;
-        }
-        if (requested.model.state == .value and
-            !existing.model.eql(requested.model.value.slice()))
-        {
-            return .model_is_immutable;
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
@@ -272,6 +269,10 @@ pub fn configurationBeforeWorkspace(
         const effort = std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
             return .unsupported_reasoning_effort;
         if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
+    } else if (requested.model.state == .value and requested.reasoning_effort.state == .omitted) {
+        if (current) |existing| if (effectiveReasoningEffort(existing)) |effort| {
+            if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
+        };
     }
     return null;
 }
