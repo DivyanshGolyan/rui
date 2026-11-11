@@ -258,36 +258,72 @@ pub fn effectiveReasoningEffort(current: anytype) ?model_capability.ReasoningEff
     return current.reasoning_effort orelse current.previous_reasoning_effort;
 }
 
-/// The source of the effective effort at a revision. Unrelated revisions
-/// inherit it; a refusal removes only its named source, not later choices.
-/// All request, report and status readers resolve through this owner.
-pub fn reasoningEffortRevisionSql(comptime session: []const u8) []const u8 {
-    return reasoningEffortSourceSql(session, "revision");
-}
+/// One provenance model for both a revision's effective choice and an
+/// Operation's choice when it was admitted. Refusals are immutable facts
+/// positioned after the Operation they reject, not ranges of revisions.
+const EffortProvenanceSql = struct {
+    session_ref: []const u8,
+    revision: []const u8,
+    known_before: ?[]const u8 = null,
 
-fn reasoningEffortSourceSql(comptime session: []const u8, comptime column: []const u8) []const u8 {
-    return "(SELECT effort_revision." ++ column ++ " FROM session_revision effort_revision LEFT JOIN session_revision before_effort ON before_effort.session_ref=effort_revision.session_ref AND before_effort.revision=effort_revision.revision-1 WHERE effort_revision.session_ref=" ++ session ++ ".session_ref AND effort_revision.revision<=" ++ session ++ ".revision " ++
-        "AND (effort_revision.revision=1 OR NOT @same(effort_revision.reasoning_effort,before_effort.reasoning_effort) OR effort_revision.model<>before_effort.model OR EXISTS(SELECT 1 FROM session_change effort_change WHERE effort_change.session_ref=effort_revision.session_ref AND effort_change.revision=effort_revision.revision AND effort_change.field IN ('reasoning_effort','model'))) " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=effort_revision.session_ref AND refused.revision=effort_revision.revision AND refused.field='reasoning_effort_refused') " ++
-        "ORDER BY effort_revision.revision DESC LIMIT 1)";
+    fn atRevision(comptime revision: []const u8) EffortProvenanceSql {
+        return .{ .session_ref = revision ++ ".session_ref", .revision = revision ++ ".revision" };
+    }
+
+    fn atAdmission(comptime operation: []const u8) EffortProvenanceSql {
+        return .{ .session_ref = operation ++ ".session_ref", .revision = operation ++ ".settings_revision", .known_before = operation ++ ".admission_position" };
+    }
+
+    fn hasRefusal(comptime self: EffortProvenanceSql) []const u8 {
+        return "EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ self.session_ref ++ " AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ self.revision ++ ")";
+    }
+
+    /// Old snapshots predate change rows. Their differences remain evidence
+    /// until a refusal can make a later snapshot merely copy effective state.
+    /// Thereafter the immutable effort/model change rows own new choices.
+    fn source(comptime self: EffortProvenanceSql, comptime column: []const u8) []const u8 {
+        return "(SELECT effort_revision." ++ column ++ " FROM session_revision effort_revision LEFT JOIN session_revision before_effort ON before_effort.session_ref=effort_revision.session_ref AND before_effort.revision=effort_revision.revision-1 WHERE effort_revision.session_ref=" ++ self.session_ref ++ " AND effort_revision.revision<=" ++ self.revision ++ " " ++
+            "AND CASE WHEN effort_revision.revision=1 OR effort_revision.model<>before_effort.model THEN 1 WHEN EXISTS(SELECT 1 FROM session_change effort_change WHERE effort_change.session_ref=effort_revision.session_ref AND effort_change.revision=effort_revision.revision AND effort_change.field IN ('reasoning_effort','model')) THEN 1 WHEN EXISTS(SELECT 1 FROM session_change prior_refusal WHERE prior_refusal.session_ref=effort_revision.session_ref AND prior_refusal.field='reasoning_effort_refused' AND prior_refusal.revision<effort_revision.revision) THEN 0 ELSE NOT @same(effort_revision.reasoning_effort,before_effort.reasoning_effort) END " ++
+            "AND NOT EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=effort_revision.session_ref AND refused.revision=effort_revision.revision AND refused.field='reasoning_effort_refused'" ++
+            (if (self.known_before) |position| " AND refused.position<" ++ position else "") ++ ") " ++
+            "ORDER BY effort_revision.revision DESC LIMIT 1)";
+    }
+
+    fn override(comptime self: EffortProvenanceSql, comptime revision: []const u8) []const u8 {
+        return "CASE WHEN " ++ self.hasRefusal() ++ " THEN " ++ self.source("reasoning_effort") ++ " ELSE " ++ revision ++ ".reasoning_effort END";
+    }
+
+    fn previous(comptime self: EffortProvenanceSql, comptime revision: []const u8) []const u8 {
+        const admitted = atAdmission("legacy");
+        return "CASE WHEN " ++ revision ++ ".reasoning_effort IS NULL OR " ++ self.hasRefusal() ++ " THEN (SELECT legacy.reasoning_effort FROM model_operation legacy @index(model_operation_admission) WHERE legacy.session_ref=" ++ self.session_ref ++ " AND legacy.settings_revision<=" ++ self.revision ++ " " ++
+            "AND NOT EXISTS(SELECT 1 FROM session_change invalidated WHERE invalidated.session_ref=legacy.session_ref AND invalidated.field='reasoning_effort_refused' AND invalidated.revision=" ++ admitted.source("revision") ++ ") " ++
+            "ORDER BY legacy.admission_position DESC LIMIT 1) END";
+    }
+
+    fn effective(comptime self: EffortProvenanceSql, comptime revision: []const u8) []const u8 {
+        return "coalesce(" ++ self.override(revision) ++ "," ++ self.previous(revision) ++ ")";
+    }
+};
+
+pub fn reasoningEffortRevisionSql(comptime session: []const u8) []const u8 {
+    return EffortProvenanceSql.atRevision(session).source("revision");
 }
 
 pub fn reasoningEffortOverrideSql(comptime session: []const u8) []const u8 {
-    return "CASE WHEN EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ session ++ ".session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ session ++ ".revision) THEN " ++ reasoningEffortSourceSql(session, "reasoning_effort") ++ " ELSE " ++ session ++ ".reasoning_effort END";
+    return EffortProvenanceSql.atRevision(session).override(session);
 }
 
-/// Legacy null specs carry a frozen effort, never a fresh catalog default.
-/// Attempts admitted under a refused source cannot supply that fallback.
+/// A null spec carries a valid earlier frozen effort, never a fresh default.
+/// Each candidate is checked against its own source at admission, so unrelated
+/// later revisions cannot rehabilitate an Operation whose source was refused.
 pub fn previousReasoningEffortSql(comptime session: []const u8) []const u8 {
-    return "CASE WHEN " ++ session ++ ".reasoning_effort IS NULL OR EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ session ++ ".session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ session ++ ".revision) THEN (SELECT legacy.reasoning_effort FROM model_operation legacy @index(model_operation_admission) WHERE legacy.session_ref=" ++ session ++ ".session_ref AND legacy.settings_revision<=" ++ session ++ ".revision " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=legacy.session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=legacy.settings_revision AND refused.revision>" ++ reasoningEffortRevisionSql(session) ++ ") " ++
-        "ORDER BY legacy.admission_position DESC LIMIT 1) END";
+    return EffortProvenanceSql.atRevision(session).previous(session);
 }
 
-/// Preserve an Operation's frozen legacy effort when no refusal invalidates
-/// its source. Otherwise replay the same effective setting every reader sees.
+/// Frozen legacy efforts remain authoritative unless their source was refused.
 pub fn operationReasoningEffortSql(comptime operation: []const u8, comptime revision: []const u8) []const u8 {
-    return "CASE WHEN EXISTS(SELECT 1 FROM session_change refused WHERE refused.session_ref=" ++ revision ++ ".session_ref AND refused.field='reasoning_effort_refused' AND refused.revision<=" ++ revision ++ ".revision) THEN coalesce(" ++ reasoningEffortOverrideSql(revision) ++ "," ++ previousReasoningEffortSql(revision) ++ ") ELSE " ++ operation ++ ".reasoning_effort END";
+    const provenance = EffortProvenanceSql.atRevision(revision);
+    return "CASE WHEN " ++ provenance.hasRefusal() ++ " THEN " ++ provenance.effective(revision) ++ " ELSE " ++ operation ++ ".reasoning_effort END";
 }
 
 /// `next` holds the current configuration's values, or the defaults when

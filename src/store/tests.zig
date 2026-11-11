@@ -12263,6 +12263,97 @@ test "configuration validates effective effort across retained requested and tar
     }
 }
 
+test "effort provenance excludes refused Operations across unrelated revisions" {
+    try store_testing.forEachEngine(struct {
+        fn expectEffort(storage: *Store, binding: AttemptBinding, effort: ?protocol.ReasoningEffort) !void {
+            var view: HistoricalView = undefined;
+            storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var settings: HistoricalSettings = undefined;
+            try view.settings(&settings);
+            try std.testing.expectEqual(effort, settings.reasoning_effort);
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            const Before = enum { none, before_admission, after_admission };
+            const After = enum { none, label, no_op };
+            const efforts = [_]?protocol.ReasoningEffort{ null, .none, .low, .medium, .high, .xhigh, .max };
+            for (efforts) |effort| for ([_]bool{ false, true }) |legacy| for (std.enums.values(Before)) |before| for (std.enums.values(After)) |after| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("provenance-create", "", workspace, "unlisted-effort-model");
+                if (effort) |value| {
+                    create.configuration.reasoning_effort.state = .value;
+                    try create.configuration.reasoning_effort.value.set(@tagName(value));
+                } else create.configuration.reasoning_effort.state = .explicit_null;
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                try answerTestTurn(&storage, &tmp, session.slice(), "provenance-first", &.{.{ .encoded = "ok", .decoded = "ok" }});
+                // A migrated null spec retains the earlier frozen effort.
+                if (legacy) try store_testing.setLegacyNullEffortForTesting(&storage, session.slice());
+                const override = if (legacy) null else effort;
+                const rejected: protocol.ReasoningEffort = if (effort == .high) .max else .high;
+                var change: wire_request.ConfigureCommand = .{};
+                change.session = session;
+                try change.key.set("provenance-rejected-choice");
+                change.configuration.reasoning_effort.state = .value;
+                try change.configuration.reasoning_effort.value.set(@tagName(rejected));
+                const revision = (try storage.configure(&change, .{})).accepted.revision;
+                var unrelated: wire_request.ConfigureCommand = .{};
+                unrelated.session = session;
+                if (before != .none) {
+                    try unrelated.key.set("provenance-before");
+                    unrelated.configuration.label.state = .value;
+                    try unrelated.configuration.label.value.set("before refusal");
+                    if (before == .before_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
+                }
+                try submitTestMessage(&storage, &tmp, "provenance-input", "provenance-message", session.slice(), "change effort");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (before == .after_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
+                try expectEffort(&storage, binding, rejected);
+                try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: effort update" } }, .effort_change_refused, .{});
+                const refused = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(effort, refused.reasoning_effort);
+                try std.testing.expectEqual(override, refused.reasoning_effort_override);
+                if (after != .none) {
+                    try unrelated.key.set("provenance-after");
+                    unrelated.configuration = .{};
+                    if (after == .label) {
+                        unrelated.configuration.label.state = .value;
+                        try unrelated.configuration.label.value.set("after refusal");
+                    }
+                    try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
+                }
+                const observed = try storage.inspectSessionForTesting(session.slice());
+                // The P2 counterexample must fail here, not during setup.
+                try std.testing.expectEqual(effort, observed.reasoning_effort);
+                try std.testing.expectEqual(override, observed.reasoning_effort_override);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT " ++ configuration_domain.reasoningEffortRevisionSql("s") ++ " FROM session s WHERE s.session_ref=?1", .{session.slice()}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='reasoning_effort_refused'", .{ session.slice(), revision }));
+                var retry = (try storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
+                const retried = try retry.permit.consume();
+                try expectEffort(&storage, retried, effort);
+                try settleItemsForTesting(&storage, &tmp, retried, &.{"{\"type\":\"message\",\"id\":\"provenance-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}"}, "ok");
+                try submitTestMessage(&storage, &tmp, "provenance-next", "provenance-next-message", session.slice(), "next Operation");
+                const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try expectEffort(&storage, next, effort);
+                try std.testing.expectEqual(effort, (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+                // Re-selecting the refused value is a new choice, not a
+                // permanent blacklist of that effort word.
+                try change.key.set("provenance-new-choice");
+                const chosen = (try storage.configure(&change, .{})).accepted;
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, rejected), (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+                try std.testing.expectEqual(chosen.revision, try store_testing.queryU64(&storage, "SELECT " ++ configuration_domain.reasoningEffortRevisionSql("s") ++ " FROM session s WHERE s.session_ref=?1", .{session.slice()}));
+                try expectEffort(&storage, next, effort);
+            };
+        }
+    }.run);
+}
+
 test "effective effort carries legacy history without inferring a fresh default" {
     var current: CurrentConfiguration = .{ .provider = .codex };
     try current.model.set("unlisted-model");

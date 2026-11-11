@@ -990,6 +990,8 @@ The history view yields an Operation element at each earlier Operation's admissi
 At an Operation whose effort differs from the one in force, the codec writes `{"type":"configuration_update","reasoning":{"effort":…}}` and its carry takes the new effort; an unchanged effort writes nothing.
 If an unambiguous provider error refuses that update (D77, D137), settlement appends a `session_changed` refusal row with the provider's bounded report and schedules the same Operation for retry without the refused update.
 The refusal names the effort revision, not a new compensating revision: effective effort is the last effort source not named by a refusal, including across later revisions that changed another setting.
+Legacy fallback Operations are checked against their own effort source as of admission, not the current revision's source.
+A later snapshot copying the effective value after refusal is not a new choice; label-only and no-op revisions cannot restore rejected provenance.
 The configuration domain owns that derivation for admission, replay, Session reports and status; frozen Operations and revisions remain unchanged.
 Refusal settlement invalidates the history prefix seal, so a memo from before the refusal cannot reintroduce the rejected item.
 Initial top-level effort errors, ambiguous errors, and failures without an eligible update remain ordinary provider failures; retries use the existing Attempt allowance.
@@ -3250,7 +3252,7 @@ An `approval_requested` row (D115) follows each call whose Action was saved unde
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
 Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
 A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
-A `session_changed` row (D138, D218) carries `revision`, `field` and nullable `provider_text`.
+A `session_changed` row (D138, D218) carries `revision`, `field` and required nullable `provider_text` (explicit `null` for ordinary changes).
 An ordinary row names a setting the revision changed (`provider`, `model`, `instructions`, `tools`, `loaded_tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`) and has null provider text.
 The revision's commit writes those rows at one position, never edited; creation and an unchanged revision have none.
 A refused effort update is also an immutable row, with `field:"reasoning_effort_refused"`, the revision whose effort was refused, and the provider report in `provider_text`, using the same bounded, control-normalized report as other provider failures.

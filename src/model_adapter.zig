@@ -4208,7 +4208,7 @@ test "a refused top-level effort remains an ordinary provider failure without a 
 test "a refused effort change retries without the update and later Operations keep the effective effort" {
     // An unlisted model passes configure-time validation. The provider, not
     // a catalog guess, decides whether its effort update is accepted.
-    for ([_]bool{ false, true }) |unrelated_revision| {
+    for ([_]?protocol.ReasoningEffort{ null, .low }) |initial| for ([_]bool{ false, true }) |unrelated_revision| for ([_]bool{ false, true }) |after_refusal| {
         var setup: PreparationTestSetup = undefined;
         try setup.init();
         defer setup.close();
@@ -4216,8 +4216,8 @@ test "a refused effort change retries without the update and later Operations ke
         var change: wire_request.ConfigureCommand = .{};
         change.session = session;
         try change.key.set("refusal-low");
-        change.configuration.reasoning_effort.state = .value;
-        try change.configuration.reasoning_effort.value.set("low");
+        change.configuration.reasoning_effort.state = if (initial != null) .value else .explicit_null;
+        if (initial) |effort| try change.configuration.reasoning_effort.value.set(@tagName(effort));
 
         try std.testing.expect(try setup.storage.configure(&change, .{}) == .accepted);
         try setup.submit("refusal-message", "refusal-message", session.slice(), "continue after a refused change");
@@ -4227,6 +4227,7 @@ test "a refused effort change retries without the update and later Operations ke
         defer memos.deinit(std.testing.io);
         _ = try expectMemoRebuildEqual(&setup, first, &memos, .{});
         try change.key.set("refusal-high");
+        change.configuration.reasoning_effort.state = .value;
         try change.configuration.reasoning_effort.value.set("high");
         const changed = try setup.storage.configure(&change, .{});
 
@@ -4268,6 +4269,14 @@ test "a refused effort change retries without the update and later Operations ke
             try std.testing.expectEqualStrings(provider_text, item.value.session_changed.provider_text.?.slice());
         };
         try std.testing.expectEqual(@as(usize, 1), refusals);
+        if (after_refusal) {
+            var label: wire_request.ConfigureCommand = .{};
+            label.session = session;
+            try label.key.set("refusal-label-after");
+            label.configuration.label.state = .value;
+            try label.configuration.label.value.set("still no new effort choice");
+            try std.testing.expect(try setup.storage.configure(&label, .{}) == .accepted);
+        }
         var retry = (try setup.storage.tryAdmitNextModelRetry(.empty(), .{}, null)).?;
         const retried = try retry.permit.consume();
         try std.testing.expectEqual(second.operation_id, retried.operation_id);
@@ -4282,15 +4291,20 @@ test "a refused effort change retries without the update and later Operations ke
         defer std.testing.allocator.free(next.bytes);
         try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, next.bytes, "configuration_update"));
         const observed = try setup.storage.inspectSessionForTesting(session.slice());
-        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
-        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort_override);
-        try std.testing.expectEqual(revision, observed.revision);
+        try std.testing.expectEqual(initial, observed.reasoning_effort);
+        try std.testing.expectEqual(initial, observed.reasoning_effort_override);
+        try std.testing.expectEqual(revision + @intFromBool(after_refusal), observed.revision);
         // The feed is append-only: later work did not edit the refusal row.
         page_request.direction = .backward;
         var after: @import("activity_facts.zig").Page = undefined;
         try setup.storage.activityPage(&page_request, &after);
-        try std.testing.expectEqualStrings(provider_text, after.items[0].value.session_changed.provider_text.?.slice());
-    }
+        var retained_refusals: usize = 0;
+        for (after.items[0..after.count]) |item| if (item.value.session_changed.field == .reasoning_effort_refused) {
+            retained_refusals += 1;
+            try std.testing.expectEqualStrings(provider_text, item.value.session_changed.provider_text.?.slice());
+        };
+        try std.testing.expectEqual(@as(usize, 1), retained_refusals);
+    };
 }
 
 test "an effort change keeps each request's input a prefix of the next" {
