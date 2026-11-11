@@ -186,6 +186,22 @@ function presetTypeContract(sessions: Sessions): void {
 }
 void presetTypeContract;
 
+test("unknown tool refusals preserve MCP advisory detail through request errors", async () => {
+	const message = "spec.tools: lookup is not a known tool; MCP server notes is unavailable and may provide it";
+	for (const code of ["mcp_server_unavailable", "unknown_tool"] as const) {
+		const detail = code === "mcp_server_unavailable" ? message : null;
+		const link: Link = { exchange: async () => Buffer.from(JSON.stringify({ answer: { status: "rejected", code, message: detail } })) };
+		const session = new Session(link, "abc123");
+		const spec: SessionSpec = { model: "model-a", effort: null, compactAt: 1000, tools: ["lookup"], permissionMode: "ask" };
+		for (const request of [
+			() => new Sessions(link).create(spec, { idempotencyKey: "create" }),
+			() => session.update({ tools: ["lookup"] }),
+			() => session.send("task", { idempotencyKey: "send" }),
+		]) {
+			await assert.rejects(request(), (error: unknown) => error instanceof RuiRequestError && error.code === code && error.message === (detail ?? `Rui rejected the request: ${code}`));
+		}
+	}
+});
 
 test("create parent is a create-only relation in the shared wire spec", async () => {
     const requests: components["schemas"]["ConfigureRequest"][] = [];

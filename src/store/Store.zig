@@ -699,10 +699,13 @@ pub const Store = struct {
         defer access.deinit();
         // Running out of memory, the caller's for a reload or the engine's,
         // rolls the write back cleanly and is the caller's to answer.
-        return entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
+        var reply = entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
             else => .infrastructure_failure,
         };
+        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
+            reply.rejected.message = configuration_domain.missingToolMessage(self.catalog().catalog, &command.configuration.tools);
+        return reply;
     }
 
     /// A fresh Message admission, as `MessageCommitted` receives it.
@@ -755,7 +758,10 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
+        var reply = entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
+        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
+            reply.rejected.message = configuration_domain.missingToolMessage(self.catalog().catalog, &command.configuration.?.tools);
+        return reply;
     }
 
     pub fn stopSession(
@@ -1117,10 +1123,18 @@ pub const Store = struct {
     /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
     /// stay off the frame of a caller that goes on to dispatch the Attempt.
     pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults });
+        return self.admitModelAttemptInto(admission_kind, faults, null);
     }
 
-    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    /// `admitModelAttempt`, which also starts the admitted Attempt's
+    /// request in `start`: its view opens there and its settings round
+    /// rides the admission's commit. `request_started` says whether it did;
+    /// when not, `start` is as it was and the caller opens the view.
+    pub fn admitModelAttemptInto(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
+        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults, start });
+    }
+
+    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         var reader: ReadAccess = .open(&entry);
@@ -1129,16 +1143,16 @@ pub const Store = struct {
         // an assistant response under a guard on that size, and so reads no
         // size. Only the guard's failure, rolled back, admits again as the
         // compaction it showed is due.
-        const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults);
+        const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults, start);
         const due = if (first) |_| false else |err| err == error.CompactionDue;
-        return entry.finishTransaction(Ordinary.none, faults, if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults) else first);
+        return entry.finishTransaction(Ordinary.none, faults, if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults, start) else first);
     }
 
     /// Never inlined: the second admission reuses the first's frame.
-    noinline fn admitModelAttemptOnce(entry: *const Entry, reader: *ReadAccess, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults) !?AttemptAdmission {
+    noinline fn admitModelAttemptOnce(entry: *const Entry, reader: *ReadAccess, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed, CompactionDue }) = .open(entry);
         defer writer.deinit();
-        return writer.end(faults, model_admission_domain.admitNextModelAttempt(reader, &writer, admission_kind, pressure, faults));
+        return writer.end(faults, model_admission_domain.admitNextModelAttempt(reader, &writer, admission_kind, pressure, faults, start));
     }
 
     pub fn admitNextActionAttempt(
@@ -1651,7 +1665,8 @@ pub const Store = struct {
     ) !void {
         const entry = try enter(self, .fromSettlement(faults.settlement_trace));
         defer entry.release();
-        var access: Access(.write, Ordinary.model_success) = .open(&entry);
+        var access: Access(.settlement, Ordinary.model_success) = undefined;
+        access.init(&entry);
         defer access.deinit();
         return entry.finishTransaction(Ordinary.model_success, faults, access.end(faults, model_settlement_domain.settleModelSuccess(&access, self.io, binding, output, faults)));
     }
@@ -2107,20 +2122,29 @@ pub fn commitsWithWrites(self: *Store) bool {
 /// the Host asks, and the commit stands.
 pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     const kept = &self.identities().survey;
-    if (kept.asked == .never) return writer.passCommit(null);
+    const follow = self.identities().follow;
+    self.identities().follow = null;
+    const surveyed = kept.asked != .never;
+    if (!surveyed and follow == null) return writer.passCommit(null);
     kept.kept = .none;
     var reads: store_access.Access(.survey, error{}) = .{ .store = self, .tail = true };
     defer reads.deinit();
+    if (follow) |after| after.queue(after.context, &reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
-    survey.queue(&reads, kept.asked == .paused);
+    if (surveyed) survey.queue(&reads, kept.asked == .paused);
     if (reads.failure != null) {
         self.engine.dropTail();
         return writer.passCommit(null);
     }
     writer.passCommit(reads.asTail());
     if (writer.failure != null) return;
-    const answer: anyerror!?DispatchWork = if (reads.failure) |err| err else survey.work();
-    const found = (answer catch |err| {
+    if (reads.failure) |err| {
+        @as(anyerror!void, fence(self, err)) catch {};
+        return;
+    }
+    if (follow) |after| after.settle(after.context);
+    if (!surveyed) return;
+    const found = (survey.work() catch |err| {
         @as(anyerror!void, fence(self, err)) catch {};
         return;
     }) orelse return;
@@ -2131,6 +2155,23 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     kept.tool_continuation = found.tool_continuation;
     kept.retry = found.retry;
     kept.kept = .fresh;
+}
+
+/// Reads a write asks to follow its COMMIT in the same message, ahead of
+/// the dispatch survey: `queue` binds them, and `settle` takes their
+/// answers once the message ran with no failure. They ride whole or not
+/// at all, as the survey does, so their owner must be able to read them
+/// in a round of its own.
+pub const Follow = struct {
+    context: *anyopaque,
+    queue: *const fn (*anyopaque, *store_access.Access(.survey, error{})) void,
+    settle: *const fn (*anyopaque) void,
+};
+
+/// Sets, or with null clears, the reads the holder's next commit carries
+/// (`commitWithSurvey`). The write that set them clears them when it ends.
+pub fn followCommit(self: *Store, follow: ?Follow) void {
+    self.identities().follow = follow;
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2399,6 +2440,8 @@ const HostValues = struct {
     /// and advances the generation, then `ready` until the next advance.
     /// It fits the padding after `admitted_len`.
     survey: Survey = .{},
+    /// The reads the holder's next commit carries after it (`followCommit`).
+    follow: ?Follow = null,
 };
 
 const Survey = packed struct(u16) {

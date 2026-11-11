@@ -363,6 +363,7 @@ app_input: InputArea = undefined,
 /// What can fill the list's place, each its own widget: the screen shows
 /// the one the core names. Only the Sessions hear a press.
 app_sessions: GroupedList = .{},
+session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_panel: GroupedList = .{},
 app_picker: GroupedList = .{},
 /// The counts line and its bands, which take the view-name click.
@@ -624,7 +625,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
+    const child = frontend.attach(.{ .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -1016,6 +1017,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
 }
 
 fn destroy(self: *Self) void {
+    self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
     self.upgrade_job.deinit();
     if (self.upgrade_report) |*report| report.deinit();
