@@ -96,7 +96,9 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.Catalog, so
         record.* = item.record;
         digest.* = tools.recordDigest(record);
     }
-    return .{ .records = records, .digests = digests };
+    const configured_servers = try arena.alloc([]const u8, sources.len);
+    for (sources, configured_servers) |source, *name| name.* = source.server;
+    return .{ .records = records, .digests = digests, .configured_servers = configured_servers };
 }
 
 pub const Fetched = union(enum) {
@@ -290,4 +292,50 @@ test "MCP read-only hints survive listing and unavailable-server fallback" {
     const replaced = try merge(memory.allocator(), &saved, &.{.{ .server = "docs", .listed = &.{read} }}, &collision);
     try std.testing.expect(!replaced.records[replaced.find("read_page").?].read_only);
     try std.testing.expect(!std.mem.eql(u8, &saved.digests[saved.find("read_page").?], &replaced.digests[replaced.find("read_page").?]));
+}
+
+test "MCP missing tools distinguish empty servers from saved copies without guessing ownership" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    var collision: Collision = .{};
+    const entries = [_]Listing.Entry{listed("kept")};
+    const saved = try merge(memory.allocator(), null, &.{.{ .server = "notes", .listed = &entries }}, &collision);
+    for ([_]struct { sources: []const Source, previous: ?*const tools.Catalog = null, unavailable: bool }{
+        .{ .sources = &.{}, .unavailable = false },
+        .{ .sources = &.{.{ .server = "notes", .listed = &entries }}, .unavailable = false },
+        .{ .sources = &.{.{ .server = "notes", .listed = null }}, .unavailable = true },
+        .{ .sources = &.{.{ .server = "notes", .listed = &.{} }}, .unavailable = true },
+        .{ .sources = &.{.{ .server = "notes", .listed = null }}, .previous = &saved, .unavailable = false },
+        .{ .sources = &.{ .{ .server = "notes", .listed = null }, .{ .server = "other", .listed = null } }, .previous = &saved, .unavailable = true },
+    }) |case| {
+        const catalog = try merge(memory.allocator(), case.previous, case.sources, &collision);
+        try std.testing.expectEqualStrings(if (case.unavailable) "mcp_server_unavailable" else "unknown_tool", @tagName(catalog.resolve("lookup")));
+        try std.testing.expect(catalog.resolve("bash") == .found);
+        if (case.previous != null) try std.testing.expect(catalog.resolve("kept") == .found);
+    }
+
+    const catalog = try merge(memory.allocator(), null, &.{ .{ .server = "notes", .listed = null }, .{ .server = "other", .listed = null } }, &collision);
+    var buffer: [tools.Catalog.max_refusal_message_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try catalog.writeMissingTool("lookup", &writer);
+    try std.testing.expectEqualStrings("spec.tools: lookup is not a known tool; MCP servers notes, other are unavailable and may provide it", writer.buffered());
+}
+
+test "MCP missing tools maximum launch names fit the request and start_agent diagnostic" {
+    var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer memory.deinit();
+    var collision: Collision = .{};
+    var names: [launch_frame.Frame.max_mcp_servers][launch_frame.Frame.max_mcp_name_bytes]u8 = undefined;
+    var sources: [names.len]Source = undefined;
+    for (&names, &sources, 0..) |*name, *source, index| {
+        @memset(name, @as(u8, 'a') + @as(u8, @intCast(index)));
+        source.* = .{ .server = name, .listed = null };
+    }
+    const catalog = try merge(memory.allocator(), null, &sources, &collision);
+    const tool = @as([@import("../tool_name.zig").max_bytes]u8, @splat('z'));
+    var buffer: [tools.Catalog.max_refusal_message_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try catalog.writeMissingTool(&tool, &writer);
+    try writer.writeAll(" (mcp_server_unavailable). Nothing was started.");
+    for (names) |name| try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), &name) != null);
 }
