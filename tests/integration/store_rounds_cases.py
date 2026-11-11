@@ -16,6 +16,12 @@ operation are an upper bound while the Host still rescans after each
 commit and the observe loop below polls, which makes them vary by a few
 from run to run.
 
+`run` measures twice: with the relay in front of MySQL itself, and with it
+in front of a ProxySQL that fronts the same server with multiplexing on
+(mysql_server.start_proxy). Both hold the same BUDGET, so a Store behind
+a pooling proxy spends the round trips it spends without one, and relies
+on no session state the proxy does not carry.
+
 launch_frame_mysql_integration.py runs `run` after its own cases, with
 the same arguments, so launch-frame-integration holds the budget wherever
 CI starts MySQL. Like the other live MySQL integrations, it skips when RUI_TEST_MYSQL_* is
@@ -36,6 +42,7 @@ import h2_fixture
 import host_process
 import live_engines
 import launch_frame_fixture as frame_host
+import mysql_server
 
 WIRE = frame_host.WIRE
 OPERATIONS = 4
@@ -45,15 +52,16 @@ IDLE_SECONDS = 5
 BUDGET = {
     # A Session's first operation, exact.
     "first_commits": 4,
-    "first_write_round_trips": 9,
+    "first_write_round_trips": 8,
     # Each later operation, exact.
     "commits": 3,
-    "write_round_trips": 6,
+    "write_round_trips": 5,
     # Any operation, upper bound: rescans and the observe loop below make
-    # the total vary (19 for a first operation and 14 for a later one
-    # over four runs once an observation read its command and Message
-    # in one round; earlier work varied by up to 6).
-    "round_trips": 25,
+    # the total vary (15 for a first operation and 10 for a later one
+    # over four runs once an observation read its command, its Message
+    # and the active Turn's work in one round; earlier work varied by
+    # up to 6).
+    "round_trips": 21,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,
@@ -154,6 +162,27 @@ def run(rui, admin):
         assert "mysql" not in os.environ.get(live_engines.REQUIRE, "").split(","), "CI required MySQL but did not supply it"
         print("Store round trips: skipped (no RUI_TEST_MYSQL_* server)")
         return
+    measure(rui, admin, socket, password, "Store round trips")
+    name = f"rui-proxysql-{os.getpid()}"
+    config = tempfile.NamedTemporaryFile(prefix="rui-proxysql-", suffix=".cnf")
+    proxy = mysql_server.proxy_socket_path(socket, name)
+    try:
+        mysql_server.start_proxy(name, socket, password, config.name)
+        measure(rui, admin, proxy, password, "Store round trips behind ProxySQL")
+    except BaseException:
+        host_process.dispose_all(lambda: print(mysql_server.docker("logs", name, capture_output=True).stderr[-4000:]))
+        raise
+    finally:
+        # A forced removal succeeds when the proxy never started.
+        host_process.dispose_all(
+            lambda: mysql_server.docker("rm", "--force", "--volumes", name, capture_output=True),
+            lambda: os.unlink(proxy) if os.path.lexists(proxy) else None,
+            config.close)
+
+
+def measure(rui, admin, socket, password, label):
+    """Drives the operations with the Host's connection relayed to `socket`
+    and holds what it counts to BUDGET."""
     root = host_process.canonical_fixture_root(tempfile.mkdtemp(prefix="rui-store-rounds-"))
 
     def sql(text):
@@ -239,7 +268,7 @@ def run(rui, admin):
             commits, write_round_trips = shape(queries)
             per_operation.append({"round_trips": len(queries), "commits": commits, "write_round_trips": write_round_trips})
         for name in ("round_trips", "commits", "write_round_trips"):
-            print(f"Store round trips: {name} per operation {[operation[name] for operation in per_operation]}")
+            print(f"{label}: {name} per operation {[operation[name] for operation in per_operation]}")
         first, later = per_operation[0], per_operation[1:]
         measured["first_commits"] = first["commits"]
         measured["first_write_round_trips"] = first["write_round_trips"]
@@ -258,11 +287,11 @@ def run(rui, admin):
             sql(f"DROP DATABASE IF EXISTS {database}")
         except subprocess.CalledProcessError:
             pass
-    print("Store round trips: " + json.dumps(measured))
+    print(f"{label}: " + json.dumps(measured))
     failures = []
     for name, bound in BUDGET.items():
         if measured[name] > bound:
             failures.append(f"{name} is {measured[name]}, above its budget {bound}")
         elif name in EXACT and measured[name] < bound:
             failures.append(f"{name} fell to {measured[name]}: lower its budget from {bound}")
-    assert not failures, "; ".join(failures)
+    assert not failures, f"{label}: " + "; ".join(failures)

@@ -329,9 +329,9 @@ while True:
         break
 os.set_blocking(1, True)
 os.write(held, str(count).encode())
-# Main-screen bytes, then the committed frame of the card's choice row.
+# Main-screen bytes, then the committed frame of the input's choice row.
 tail = (b't' * 65536 + b'\\x1b[?2026h\\x1b[H\\x1b[2J? probe\\r\\n'
-        b'\\xe2\\x94\\x82  Allow once    Deny\\r\\n\\x1b[?2026l')
+        b' \\xe2\\x80\\xba Allow once    Deny\\r\\n\\x1b[?2026l')
 while tail:
     tail = tail[os.write(1, tail):]
 termios.tcdrain(1)

@@ -9,6 +9,7 @@ const slash_commands = @import("slash_commands.zig");
 const View = @import("session_view.zig");
 const ConsentPolicy = @import("session_consent.zig");
 const session_id = @import("session_id.zig");
+const tool_fold = @import("tool_fold.zig");
 const Self = @This();
 
 /// What the conversation area shows. The transcript is a frozen copy of live
@@ -277,7 +278,7 @@ fn boundary(self: *Self, text: []const u8) !usize {
 /// view or transcript, a collapsed user block, counted by how many collapsed
 /// blocks follow it in that document, or a peer's name, by its Session's ID.
 /// Call right after drawing: later text moves what the frame drew.
-pub const Openable = union(enum) { message: usize, session: [session_id.bytes]u8 };
+pub const Openable = union(enum) { message: usize, session: [session_id.bytes]u8, tool: tool_fold.Reference };
 
 pub fn openableInView(self: *Self, gpa: std.mem.Allocator) !?Openable {
     if (self.view != .live and self.view != .transcript) return null;
@@ -287,12 +288,15 @@ pub fn openableInView(self: *Self, gpa: std.mem.Allocator) !?Openable {
     // A line cut at the bottom shows its first rows, which hold the mark.
     const end = if (next.offset >= text) text else if (next.row != 0) document.lineEnd(next.offset) else next.offset;
     const start = @min(self.drawn.first.offset, text);
-    const mark = document.collapsed(start, end).last;
+    const message = document.collapsed(start, end).last;
+    const tool = document.lastTool(start, end);
+    const mark = if (message) |value| if (tool) |row| @max(value, row) else value else tool;
     if (try document.lastShownSession(gpa, self.textLayout(), start, end)) |name| if (mark == null or name > mark.?) {
         const id = document.sessionAt(name).?;
         if (id.len == session_id.bytes) return .{ .session = id[0..session_id.bytes].* };
     };
     const last = mark orelse return null;
+    if (tool != null and last == tool.?) return .{ .tool = document.toolAt(last).? };
     return .{ .message = document.collapsed(last + 1, text).count };
 }
 

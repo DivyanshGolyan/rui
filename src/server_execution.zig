@@ -1496,7 +1496,7 @@ noinline fn runStartAgent(host: *Host, input: *const store_module.CoreActionInpu
     defer inheritance.deinit(host.allocator);
     const committed = inheritance.messageCallback();
     const parent_skills = host.store.readSkills(arena, input.session.slice()) catch return .retry_later;
-    // The task binds against the catalog the new Session starts with.
+    // The task binds against the tool set the new Session starts with.
     const prepared = @import("session_skills.zig").prepareCreation(arena, host.allocator, host.io, parent_skills.workspace.slice(), host.bash_facts.home, .{ .bytes = start.task }) catch return .retry_later;
     _ = host.store.startAgentWithInitialSkills(input.binding, input.session.slice(), start.task, start.attached, &start.configuration, committed, prepared.initial, if (prepared.captured) |*value| value else null, host.hooks.storeFaults(.action_result)) catch |err| switch (err) {
         // A stop resolved the call first.
@@ -1844,7 +1844,9 @@ fn admitNewAttempt(
     preparation: *model_adapter.Preparation,
 ) AdmissionProgress {
     const token = host.custody.reserve() orelse return .no_work;
-    var admission = host.store.admitModelAttempt(kind, host.hooks.storeFaults(.attempt_admission)) catch |err| {
+    // The slot's preparation is free (`modelPreparationOpen`), so the
+    // admission starts the request in it: the settings ride its commit.
+    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
@@ -1852,7 +1854,7 @@ fn admitNewAttempt(
         host.custody.releaseUnused(token) catch unreachable;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, admission.request_started);
 }
 
 fn admitRetryAttempt(
@@ -1875,7 +1877,7 @@ fn admitRetryAttempt(
         scanned.* = true;
         return .no_work;
     };
-    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation);
+    return beginAdmittedAttempt(host, slot, token, &admission.permit, preparation, false);
 }
 
 fn beginAdmittedAttempt(
@@ -1884,15 +1886,19 @@ fn beginAdmittedAttempt(
     token: execution.CustodyToken,
     permit: *store_module.DispatchPermit,
     preparation: *model_adapter.Preparation,
+    /// The admission already opened the preparation's view and read its
+    /// settings (`Store.admitModelAttemptInto`).
+    started: bool,
 ) AdmissionProgress {
     const binding = attachSlot(host, slot, token, permit) catch |err| {
+        if (started) preparation.view.close();
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "custody attachment", err);
         return .admitted;
     };
     // The view opens where it lives for the whole preparation; it never
     // moves.
-    host.store.openHistoricalView(binding, &preparation.view);
+    if (!started) host.store.openHistoricalView(binding, &preparation.view);
     var retained_scratch: ?named_scratch.Owner = null;
     preparation.init(
         host.io,
@@ -4214,10 +4220,10 @@ test "catalog answer slims saves and a 304 keeps its generation and facts" {
 }
 
 test "Host resolves MCP calls without Bash admission and continues the Turn" {
-    // Keep the native catalog complete independently of this Session's
+    // Keep the native tool set complete independently of this Session's
     // deliberately restricted tools and the MCP behavior asserted below.
     const records = comptime blk: {
-        var out = tools.built_in.records[0..tools.built_in.records.len].* ++ [_]tools.Record{.{
+        var out = tools.built_in_tool_set.records[0..tools.built_in_tool_set.records.len].* ++ [_]tools.Record{.{
             .name = "fetch_page",
             .owner = .mcp,
             .server = "docs",
@@ -4237,11 +4243,11 @@ test "Host resolves MCP calls without Bash admission and continues the Turn" {
         for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
         break :blk out;
     };
-    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: store_module.Store = undefined;
-    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+    try store_module.testingStoreWith(&.{ .engine = .sqlite }, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     const workspace = try store_module.testingCanonicalCwd(std.testing.io, &workspace_buffer);

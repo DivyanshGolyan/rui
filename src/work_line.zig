@@ -156,7 +156,7 @@ pub fn clockText(buffer: *[max_clock_bytes]u8, clock: Clock, form: Form, script:
             var span: [max_span_bytes]u8 = undefined;
             break :elapsed std.fmt.bufPrint(buffer, " {s} {s}", .{ set.dot, spanText(&span, seconds) }) catch unreachable;
         },
-        // The overview leaves the attempt to /details: it adds nothing to a scan.
+        // The overview leaves the attempt to the tool row: it adds nothing to a scan.
         .retry => |retry| if (form == .row)
             std.fmt.bufPrint(buffer, " {s} retry in {d}s", .{ set.dot, retry.seconds }) catch unreachable
         else

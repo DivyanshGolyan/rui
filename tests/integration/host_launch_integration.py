@@ -893,9 +893,8 @@ def main():
             output = bytearray()
             screen = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
             until = time.monotonic() + COMMAND_TIMEOUT
-            # The committed screen, not a byte match, establishes the overview:
-            # the empty Store's hint has drawn and the cursor sits at the composer.
-            while not (screen.completed and "No unarchived Sessions. /sessions archived shows the archive." in screen.completed
+            # The committed screen with the cursor at the composer establishes the overview.
+            while not (screen.completed
                     and screen.screen.display[screen.screen.cursor.y].startswith(" ›")):
                 remaining = until - time.monotonic()
                 assert remaining > 0 and select.select([master], [], [], remaining)[0], (screen.completed, output)
