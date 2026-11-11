@@ -878,7 +878,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "revision_exhausted" | "skills_unavailable";
+                code: "invalid_session_reference" | "unknown_session" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable";
             };
             execution: {
                 /** @constant */
@@ -1550,7 +1550,7 @@ export interface components {
                 replayed: boolean;
                 session: string;
                 /** @enum {string} */
-                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "revision_exhausted" | "skills_unavailable" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
+                code: "session_archiving" | "invalid_session_reference" | "unknown_session" | "invalid_sender_handle" | "unsupported_permission_mode" | "unsupported_provider" | "invalid_model" | "model_capability_unavailable" | "invalid_output_schema" | "invalid_compaction_trigger" | "compact_at_too_large" | "invalid_output_reservation" | "unsupported_reasoning_effort" | "unknown_tool" | "provider_tool_missing" | "loaded_tools_not_in_tools" | "loaded_tools_unreachable" | "invalid_label" | "incomplete_initial_configuration" | "unknown_preset" | "preset_on_update" | "invalid_workspace" | "workspace_is_immutable" | "provider_is_immutable" | "model_is_immutable" | "revision_exhausted" | "skills_unavailable" | "skill_file_unavailable" | "skill_file_too_large" | "skill_text_invalid";
             };
             input: {
                 /** @constant */
@@ -3044,7 +3044,7 @@ export interface components {
         StartError: {
             rui_start_error: {
                 /** @enum {string} */
-                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version_unsupported" | "mysql_durability_unsafe" | "mysql_read_only" | "mysql_binlog_unsafe" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision";
+                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version" | "mariadb" | "read_only_replica" | "durability_innodb_flush_log_at_trx_commit" | "durability_sync_binlog" | "binlog_statement" | "mysql_unreachable" | "mysql_login" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision";
                 message: string;
             };
         };

@@ -32,6 +32,7 @@ It travels in the launch frame, not argv or the environment; do not add `--provi
 The path must be nonempty, contain no NUL bytes and fit the platform's path limit; relative paths use the Host's working directory, and a file that cannot be loaded or a peer that cannot be verified fails without falling back to system trust.
 `database` accepts a SQLite directory or a `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE` URL.
 For a Unix socket, use its percent-encoded absolute path in place of HOST; TCP verifies TLS.
+For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 The MySQL database must already contain the DDL from `rui store schema --engine mysql`.
 The key, tokens and MySQL URL never reach the child's argv, environment or disk.
 Readiness discovers the MySQL Store's stable opaque id, which the client uses on requests instead of the URL.
@@ -84,7 +85,8 @@ The real-Host feed test uses a local HTTPS provider and the `openssl` command to
 `create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`, or a `preset` name with optional overrides.
 `provider` may be left out when the Host serves one provider.
 `effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
-An update may leave out any setting, and an omitted setting stays as it is.
+Updates may change the model within the Session's fixed provider; the Workspace also remains fixed.
+An omitted setting stays as it is.
 
 ```ts
 const session = await rui.sessions.create({
@@ -96,6 +98,7 @@ const session = await rui.sessions.create({
 	workspace: "/work/project",
 }, { idempotencyKey: "project:1" });
 await session.update({ compactAt: 200000 });
+await session.update({ model: "gpt-5.5" });
 ```
 
 `await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode`, `latestOutcome` and `archiveState`.

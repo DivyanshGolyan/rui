@@ -241,6 +241,7 @@ fn insertMeta(w: *std.Io.Writer, key: []const u8, value: []const u8) !void {
 
 fn serverError(code: u16) anyerror {
     return switch (code) {
+        1044, 1045 => error.LoginRefused,
         1146 => error.StoreSchemaMissing,
         1114, 1021 => error.CanonicalStorageFull,
         else => error.StatementFailed,
@@ -283,4 +284,11 @@ fn expectOkCount(conn: *wire.Connection) !u64 {
 
 fn expectOk(conn: *wire.Connection) !void {
     _ = try expectOkCount(conn);
+}
+
+test "store.mysql open access denials keep the login refusal" {
+    try std.testing.expectEqual(error.LoginRefused, serverError(1044));
+    try std.testing.expectEqual(error.LoginRefused, serverError(1045));
+    try std.testing.expectEqual(error.StoreSchemaMissing, serverError(1146));
+    try std.testing.expectEqual(error.StatementFailed, serverError(9999));
 }

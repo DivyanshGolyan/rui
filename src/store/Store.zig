@@ -123,7 +123,7 @@ pub const Store = struct {
     /// `.open` once it commits, each later write in a savepoint; `.lost`
     /// once a rollback failed, so the batch never commits. A write outside
     /// a batch (a test's own Entry) opens and commits its own.
-    batch: enum(u8) { none, ready, first, open, lost } = .none,
+    batch: enum(u8) { none, ready, first, open, saved, lost } = .none,
     /// Whether the current write's savepoint is open in the batch.
     savepoint: bool = false,
     /// Release a bulk writer's cache after the queue's outer commit, not
@@ -215,7 +215,7 @@ pub const Store = struct {
         ids.* = .{ .next = undefined };
         self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
         self.served = options.served;
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
         // The Store is in final storage, so the function may keep its address.
         try self.engine.sqlite.serve(&self.served);
         // Tells this opening's `since` tokens from another's. It grants
@@ -329,7 +329,7 @@ pub const Store = struct {
             if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
             @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
         }
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
         io.random(&self.instance);
         try loadIdentities(self, .full);
         self.queue().opened();
@@ -1177,16 +1177,9 @@ pub const Store = struct {
     fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        // SQLite's one-statement autocommit is already atomic. Network
-        // writes must include the ownership fence in the same transaction.
-        if (self.engine == .mysql) {
-            var access: Access(.write, error{}) = .open(&entry);
-            defer access.deinit();
-            return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
-        }
         var access: Access(.single, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.revokeActionSender(&access, binding));
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
@@ -1766,14 +1759,13 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    // The settlement batch is the larger use: 19240 bytes, the original
-    // 14480 plus 4760 for per-batch call names, membership flags and their
-    // lookup visitor. The creation reads use 14968, including command/Message
-    // facts, saved parent reference and the saved tool and loaded names a
-    // subset update reads, the skills a Message bound and the one retained
-    // validation plan. This uses existing scratch, with no resident growth.
+    // The settlement batch keeps the request's offered names and borrows
+    // existing content identities for withdrawn names. Binding transient
+    // history arguments avoids retaining a second copy of every call name.
+    // Its 19032 bytes are below the previous 19240-byte resident ceiling;
+    // configuration reads reuse saved_tools for parent names and stay 14968.
     // Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 14968 or scratch_bytes != 19240)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 14968 or scratch_bytes != 19032)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1782,8 +1774,8 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 19240 bytes, a settlement
-/// batch's size; a configure uses 13552.
+/// resident for the Store's life: at most 19032 bytes, a settlement
+/// batch's size; a configure uses 14968.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
@@ -1926,7 +1918,10 @@ pub const Entry = struct {
         store.scratch_use = .none;
         // Counts autocommit and explicit-transaction writes alike. A
         // rolled-back change touched everything: never a missed change.
-        if (store.engine.totalChanges() != self.changes) {
+        // An attempt that lost its connection with nothing saved, and runs
+        // again, changed nothing yet: its second run records the change.
+        const reruns = store.engine == .mysql and store.engine.mysql.defersFence();
+        if (store.engine.totalChanges() != self.changes and !reruns) {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
@@ -2000,7 +1995,8 @@ pub fn begin(self: *Store) !void {
             return;
         },
         .open => {},
-        .first, .lost => unreachable,
+        // The Queue ends a saved batch before its next write.
+        .first, .saved, .lost => unreachable,
     }
     std.debug.assert(!self.savepoint);
     try self.engine.control(.savepoint);
@@ -2013,7 +2009,8 @@ pub fn begin(self: *Store) !void {
 pub fn commit(self: *Store) !void {
     switch (self.batch) {
         .first => {
-            self.batch = .open;
+            // Its COMMIT rode its last writes (`commitsWithWrites`).
+            self.batch = if (self.engine.inTransaction()) .open else .saved;
             return;
         },
         .open => {
@@ -2022,11 +2019,27 @@ pub fn commit(self: *Store) !void {
             return;
         },
         .none => {},
-        .ready, .lost => unreachable,
+        .ready, .saved, .lost => unreachable,
     }
     try self.engine.control(.commit);
     self.identities().taken = .empty;
     self.identities().second = 0;
+}
+
+/// Whether a write Access that commits now sends COMMIT with its last
+/// writes: on a network engine, when it is its batch's first write and no
+/// other write waits to share the batch's COMMIT. The batch is then saved
+/// and takes no more (`batchClosed`). A batch that runs again
+/// (`recoverRerun`) is no longer armed and holds every write it held, so
+/// it commits at its end.
+pub fn commitsWithWrites(self: *Store) bool {
+    return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
+}
+
+/// `Queue.Batch.closed`: the batch's COMMIT already ran.
+fn batchClosed(context: *anyopaque) bool {
+    const self: *Store = @ptrCast(@alignCast(context));
+    return self.batch == .saved;
 }
 
 fn startBatch(context: *anyopaque) void {
@@ -2105,7 +2118,7 @@ fn recoverRerun(context: *anyopaque) bool {
 
 fn commitBatch(self: *Store) !void {
     switch (self.batch) {
-        .ready => {},
+        .ready, .saved => {},
         .open => self.engine.control(.commit) catch |err| return fence(self, err),
         .lost => return fence(self, error.CanonicalRollbackFailed),
         .none, .first => unreachable,
@@ -2326,14 +2339,12 @@ fn IdentityCeiling(comptime column: Identity) type {
 }
 
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
-    if (self.engine == .mysql) {
+    if (self.engine.batches()) {
         inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (@import("builtin").is_test) {
-            if (columns.count() != 0) self.engine.mysql.state.testing_shape.identity_passes += 1;
-        }
+        if (columns.count() != 0) self.engine.notePass(.identity);
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};
@@ -2378,7 +2389,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
             self.batch = .ready;
             return;
         },
-        .none, .ready => return rollbackTransaction(self, faults),
+        .none, .ready, .saved => return rollbackTransaction(self, faults),
         // A rollback that failed once fails again: nothing undid the write.
         .lost => return error.CanonicalRollbackFailed,
     }

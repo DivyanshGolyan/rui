@@ -3076,11 +3076,13 @@ test "Message observation work and recovery fit the unchanged resident response 
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
+    var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
+    try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     var observation = store_module.CommandObservation{ .status = .accepted, .kind = .{ .message = .{
         .content = .{ .length = max, .digest = @splat(0xff) },
         .queue = .{ .admission_id = max, .state = .{ .processing = .{ .turn_id = max, .operation_id = max, .attempt_ordinal = max } } },
         .admitted_at = max,
-        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } }, .first_action = max },
+        .work = .{ .state = .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } }, .first_action = max },
     } } };
     try observation.target.set(&escaped_session);
     observation.kind.message.?.recovery.count = protocol.message_recovery_limit;
@@ -4425,7 +4427,8 @@ test "presets seed configure before Store validation and idempotency" {
     try std.testing.expectEqual(@as(?u64, 12000), observed.compaction_trigger_override);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), observed.reasoning_effort_override);
     try std.testing.expectEqualStrings("bypass", observed.permission_mode.slice());
-    try std.testing.expectEqual(@as(u8, tools.toolBit(.start_agent)), observed.tools_mask);
+    try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{observed.tool_set_id}));
+    try std.testing.expectEqual(@as(u64, 1), try store_module.testing.queryU64(&storage, "SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND tool.name='start_agent'", .{observed.tool_set_id}));
     try std.testing.expectEqualSlices(u8, &protocol.contentDigest("Overridden instructions"), &observed.instructions.digest);
     try std.testing.expect(observed.output_schema == null);
 

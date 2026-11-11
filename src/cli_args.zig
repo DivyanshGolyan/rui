@@ -91,7 +91,7 @@ pub const Command = enum {
             .host_serve => serve_grammar.definition,
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
-            .store_schema => .{ .resource = .store, .name = "schema", .description = "Print this build's MySQL DDL for the database team to apply; the Host never changes MySQL tables.", .options = &.{value("engine", "mysql")}, .requires = &.{&.{"engine"}} },
+            .store_schema => .{ .resource = .store, .name = "schema", .description = "Print this build's MySQL DDL for a new Store, or with --from N print every forward migration from format N to this build. The current format prints nothing. The Host never changes MySQL tables.", .options = &.{ value("engine", "mysql"), numeric("from", "N", 0, std.math.maxInt(u64), .count_malformed) }, .requires = &.{&.{"engine"}} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
     }
@@ -146,10 +146,17 @@ const saved_identity = &[_]PositionalConflict{
     .{ .code = .handle_names_store_and_key, .option = "key" },
     .{ .code = .handle_names_store_and_key, .option = "key-hex" },
 };
+const tool_choices = blk: {
+    var text: []const u8 = "";
+    for (std.enums.values(@import("built_in_tool.zig").BuiltInTool), 0..) |tool, i| {
+        text = text ++ (if (i == 0) "" else ",") ++ @tagName(tool);
+    }
+    break :blk text ++ "|none";
+};
 /// Session settings shared by `session configure` and the live /configure.
 const settings = &[_]Option{
-    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,find_tools,message_agent,read_transcript,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
-    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                                               value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
+    value("workspace", "PATH"),       value("instructions", "-"), value("tools", tool_choices),                  value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
+    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"), value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
     value("label", "TEXT"),
 };
 const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[4], settings[7], settings[8], settings[9], settings[10] };
@@ -434,6 +441,21 @@ test "store schema requires an explicit mysql engine" {
     try expectValidation(.store_schema, &.{ "--store", "/tmp/s" }, error.UnknownArgument);
 }
 
+test "store schema --from parses formats and requires an explicit engine" {
+    const definition = Command.store_schema.definition();
+    var storage: [1024]u8 = undefined;
+    for ([_]u64{ 0, 1, std.math.maxInt(u32) + 1, std.math.maxInt(u64) }) |from| {
+        var text: [32]u8 = undefined;
+        const parsed = try testParse(definition, &.{ "--engine", "mysql", "--from", try std.fmt.bufPrint(&text, "{d}", .{from}) }, &storage);
+        try std.testing.expect(parsed.missing() == null);
+        try std.testing.expectEqual(@as(?u64, from), try parsed.number(u64, "from"));
+    }
+    const missing = try testParse(definition, &.{ "--from", "1" }, &storage);
+    try std.testing.expectEqualStrings("engine", missing.missing().?[0]);
+    try expectValidation(.store_schema, &.{ "--engine", "mysql", "--from", "not-a-number" }, error.InvalidOptionValue);
+    try expectValidation(.store_schema, &.{ "--engine", "mysql", "--from" }, error.MissingArgumentValue);
+}
+
 test "loaded tools are accepted beside tools on configure and start" {
     inline for (.{ Command.session_configure.definition(), Command.session_start.definition(), live_configure }) |grammar| {
         var storage: [256]u8 = undefined;
@@ -554,6 +576,7 @@ test "numeric options reject malformed decimals and state their accepted range" 
         .{ .command = .session_read_conversation, .name = "ordinal", .code = .count_malformed, .low = "0", .high = "9223372036854775807" },
         .{ .command = .session_inspect, .name = "attempt", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
         .{ .command = .request_wait, .name = "timeout-seconds", .code = .count_malformed, .low = "1", .high = "86400" },
+        .{ .command = .store_schema, .name = "from", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(u64)}) },
         .{ .command = .host_start, .name = "active-capacity", .code = .count_malformed, .low = "0", .high = std.fmt.comptimePrint("{d}", .{std.math.maxInt(usize)}) },
         .{ .command = .host_serve, .name = "test-retention-entry-capacity", .code = .count_malformed, .low = "2", .high = std.fmt.comptimePrint("{d}", .{retention_capacity.entries}) },
         .{ .command = .host_serve, .name = "bash-timeout-ms", .code = .count_malformed, .low = "1", .high = "9223372036854775807" },
@@ -701,4 +724,13 @@ test "archive list visibility is independent of all Workspaces" {
     try expectValidation(.session_list, &.{ "--all", "--archived" }, false);
     try expectValidation(.session_list, &.{ "--all", "--include-archived" }, false);
     _ = try expectRefusal(.session_list, &.{ "--archived", "--include-archived" }, .archive_visibility_conflict, "archived");
+}
+
+test "tool help lists every built-in including skill in name order" {
+    for ([_]Command{ .session_configure, .session_start }) |command| {
+        var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer help.deinit();
+        try command.definition().help(&help.writer);
+        try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_transcript,skill,start_agent,web_search|none") != null);
+    }
 }

@@ -83,6 +83,7 @@ const cores = .{
     .{ "queued_line.zig", @import("queued_line.zig") },
     .{ "request_wait.zig", @import("request_wait.zig") },
     .{ "retention_capacity.zig", @import("retention_capacity.zig") },
+    .{ "replay_recipe.zig", @import("replay_recipe.zig") },
     .{ "retry_policy.zig", @import("retry_policy.zig") },
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },

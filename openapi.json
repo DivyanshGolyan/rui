@@ -3365,6 +3365,7 @@
                       "invalid_workspace",
                       "workspace_is_immutable",
                       "provider_is_immutable",
+                      "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable"
                     ]
@@ -5824,8 +5825,8 @@
                   "anyOf": [
                     {
                       "type": "string",
-                      "maxLength": 100,
-                      "x-rui-max-bytes": 100
+                      "maxLength": 200,
+                      "x-rui-max-bytes": 200
                     },
                     {
                       "type": "null"
@@ -6004,6 +6005,7 @@
                       "invalid_workspace",
                       "workspace_is_immutable",
                       "provider_is_immutable",
+                      "model_is_immutable",
                       "revision_exhausted",
                       "skills_unavailable",
                       "skill_file_unavailable",
@@ -12144,10 +12146,14 @@
                   "store_locked",
                   "store_schema_missing",
                   "store_schema_behind",
-                  "mysql_version_unsupported",
-                  "mysql_durability_unsafe",
-                  "mysql_read_only",
-                  "mysql_binlog_unsafe",
+                  "mysql_version",
+                  "mariadb",
+                  "read_only_replica",
+                  "durability_innodb_flush_log_at_trx_commit",
+                  "durability_sync_binlog",
+                  "binlog_statement",
+                  "mysql_unreachable",
+                  "mysql_login",
                   "store_fenced",
                   "runtime_dir_unusable",
                   "tool_name_collision"
@@ -12176,8 +12182,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 100,
-                "x-rui-max-bytes": 100
+                "maxLength": 200,
+                "x-rui-max-bytes": 200
               },
               {
                 "type": "null"
@@ -12296,8 +12302,8 @@
                 "anyOf": [
                   {
                     "type": "string",
-                    "maxLength": 100,
-                    "x-rui-max-bytes": 100
+                    "maxLength": 200,
+                    "x-rui-max-bytes": 200
                   },
                   {
                     "type": "null"
@@ -12334,8 +12340,8 @@
                 "anyOf": [
                   {
                     "type": "string",
-                    "maxLength": 100,
-                    "x-rui-max-bytes": 100
+                    "maxLength": 200,
+                    "x-rui-max-bytes": 200
                   },
                   {
                     "type": "null"

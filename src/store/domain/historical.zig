@@ -1,6 +1,7 @@
 //! The historical view a model request reads: settings, conversation entries,
 //! outputs, parts, tool results and prefix seals.
 
+const replay_recipe = @import("../../replay_recipe.zig");
 const std = @import("std");
 const activity_read = @import("../../activity_read.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -24,6 +25,7 @@ const skills_domain = @import("skills.zig");
 const history_floor_domain = @import("history_floor.zig");
 const reads_domain = @import("reads.zig");
 const rsql = @import("../rsql.zig");
+const tool_set = @import("tool_set.zig");
 const store_access = @import("../access.zig");
 pub const ReadAccess = reads_domain.ReadAccess;
 const content_metadata = content_domain.content_metadata;
@@ -755,9 +757,9 @@ fn readHistoricalSettingsHeld(self: *Store, view: *HistoricalView, out: *Histori
 /// The settings an Operation's request froze, with its Session's binding.
 /// The texts decode straight into the caller's settings.
 const historical_settings = rsql.Read(.{
-    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,coalesce(r.loaded_tool_set_id,r.tool_set_id) AS tool_set_id,tool_set.member_count," ++
+    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id," ++ tool_set.offeredSetSql("r") ++ " AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+        "WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         configuration_domain.operationReasoningEffortSql("o", "r") ++ " AS reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
@@ -765,7 +767,7 @@ const historical_settings = rsql.Read(.{
         pageBytesSql("instructions", "instructions_bytes") ++ "," ++
         "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
-        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 " ++
+        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 " ++
         "JOIN content instructions ON instructions.content_id=baseline.instructions_content_id " ++
         "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
@@ -975,11 +977,15 @@ pub fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !voi
     try a.commit();
 }
 
-/// The latest compacted Operation of `current`'s Session admitted before
-/// it: its selected Compaction Base.
-const selected_base_sql = "(SELECT selected.operation_id " ++
-    "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
-    "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1)";
+/// The newest accepted compaction before this boundary, without a model
+/// filter or fallback to an older base. Recipe.select owns replay selection.
+pub fn newestBaseSql(comptime session: []const u8, comptime boundary: []const u8) []const u8 {
+    return "(SELECT selected.operation_id FROM model_operation selected @index(model_operation_compaction_bases) " ++
+        "WHERE selected.session_ref=" ++ session ++ " AND selected.purpose=1 AND " ++
+        store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<" ++ boundary ++
+        " ORDER BY selected.admission_position DESC LIMIT 1)";
+}
+const selected_base_sql = newestBaseSql("current.session_ref", "current.admission_position");
 
 /// The base's compaction items, whose provider bag is the opaque
 /// continuation: a base has exactly one.
@@ -1101,11 +1107,12 @@ fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) er
     view.anchor = if (row.anchors == 1 and row.anchor_bags == 1) (row.anchor_position orelse return error.CorruptStore).get() else null;
     // Validate the selected base even when its opaque state cannot be sent.
     if (view.selected_base != 0 and view.anchor == null) return error.CorruptStore;
-    const compatible = if (view.selected_base != 0) OutputItemKind.compaction.replayableTo(
-        (row.base_model orelse return error.CorruptStore).slice(),
-        row.current_model.slice(),
-        .selected_base,
-    ) else true;
+    const recipe = replay_recipe.Recipe.select(row.current_model.slice(), if (row.operation_id != null) .{
+        .position = row.frontier,
+        .floor = if (row.base_floor) |floor| floor.get() else 0,
+        .model = (row.base_model orelse return error.CorruptStore).slice(),
+    } else null, if (row.own_floor) |floor| floor.get() else 0);
+    const compatible = (view.selected_base != 0) == (recipe.frontier != 0);
     if (!compatible) {
         // Rebuild the visible exchanges the old base (and its floor) covered.
         // The settings round's speculative first output page began at that
@@ -1122,7 +1129,7 @@ fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) er
     // A compaction keeps its base's floor or goes deeper.
     if (own_floor != 0 and own_floor < base_floor) return error.CorruptStore;
     view.floor = .{
-        .position = @max(own_floor, base_floor),
+        .position = recipe.floor,
         .first_message = row.first_message,
         .own = own_floor > base_floor,
     };
@@ -1228,8 +1235,8 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ configuration_domain.operationReasoningEffortSql("earlier", "revision") ++ ",coalesce(revision.loaded_tool_set_id,revision.tool_set_id)," ++
-        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("coalesce(revision.loaded_tool_set_id,revision.tool_set_id)", "earlier.admission_position", "?6") ++ "),NULL " ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ configuration_domain.operationReasoningEffortSql("earlier", "revision") ++ "," ++ tool_set.offeredSetSql("revision") ++ "," ++
+        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where(tool_set.offeredSetSql("revision"), "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
         "WHERE current.operation_id=?1 AND earlier.admission_position>?2 AND earlier.admission_position<current.admission_position " ++
@@ -1276,7 +1283,7 @@ const declared_members_from = "tool_set_member member JOIN tool_record tool ON t
 fn declared_members_where(comptime set: []const u8, comptime position: []const u8, comptime anchor: []const u8) []const u8 {
     return "member.tool_set_id=" ++ set ++ " AND tool.owner!='provider' AND member.tool_record_id NOT IN (" ++
         "SELECT previous_member.tool_record_id FROM tool_set_member previous_member WHERE previous_member.tool_set_id=coalesce((" ++
-        "SELECT coalesce(previous_revision.loaded_tool_set_id,previous_revision.tool_set_id) FROM model_operation previous JOIN session_revision previous_revision " ++
+        "SELECT " ++ tool_set.offeredSetSql("previous_revision") ++ " FROM model_operation previous JOIN session_revision previous_revision " ++
         "ON previous_revision.session_ref=previous.session_ref AND previous_revision.revision=previous.settings_revision " ++
         "WHERE previous.session_ref=current.session_ref AND previous.admission_position<" ++ position ++
         " AND previous.admission_position>=" ++ anchor ++ " ORDER BY previous.admission_position DESC LIMIT 1),0))";

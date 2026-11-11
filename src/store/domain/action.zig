@@ -14,6 +14,7 @@ const session_id = @import("../../session_id.zig");
 const tool_catalog = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
+const tool_set = @import("tool_set.zig");
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
@@ -34,29 +35,71 @@ fn callNameSql(comptime test_sql: []const u8) []const u8 {
         "WHERE tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal AND call_name.digest" ++ test_sql ++ ")";
 }
 
-/// Whether the Action `action` carries out a call the core runs (D24): its
-/// call names a core tool, whose names' digests `first` and the three parameters
-/// after it bind, in `CoreNames` order.
+/// Whether the Action `action` calls a core tool. The contiguous name
+/// parameters start at `first`, in table order.
 fn coreCallSql(comptime first: u8) []const u8 {
-    return callNameSql(std.fmt.comptimePrint(" IN(?{d},?{d},?{d},?{d},?{d})", .{ first, first + 1, first + 2, first + 3, first + 4 }));
+    comptime {
+        var sql: []const u8 = " IN(";
+        for (std.enums.values(CoreTool), 0..) |_, i| {
+            sql = sql ++ (if (i == 0) "" else ",") ++ std.fmt.comptimePrint("?{d}", .{first + i});
+        }
+        return callNameSql(sql ++ ")");
+    }
 }
 
-/// The digests of the core tools' names, which `coreCallSql` binds.
+fn coreCaseSql() []const u8 {
+    comptime {
+        var sql: []const u8 = "CASE";
+        for (std.enums.values(CoreTool), 0..) |tool, i| {
+            // The WHERE restricts the domain to these tools. Keep the final
+            // ELSE, like the original CASE, without another name lookup.
+            sql = sql ++ if (i + 1 == core_count)
+                " ELSE '" ++ @tagName(tool) ++ "'"
+            else
+                " WHEN " ++ callNameSql(std.fmt.comptimePrint("=?{d}", .{i + 1})) ++ " THEN '" ++ @tagName(tool) ++ "'";
+        }
+        return sql ++ " END AS tool ";
+    }
+}
+
+const core_count = std.enums.values(CoreTool).len;
+
+/// The core name digests in table order. Args expands this one group into
+/// rsql's flat parameters after a statement's prefix, without changing the
+/// binder or introducing runtime storage/work beyond the original digests.
 pub const CoreNames = struct {
-    message_agent: [32]u8,
-    read_transcript: [32]u8,
-    start_agent: [32]u8,
-    find_tools: [32]u8,
-    skill: [32]u8,
+    digests: [core_count][32]u8,
 
     pub fn of() CoreNames {
-        return .{
-            .message_agent = content_string.digest(tool_catalog.message_agent_record.name),
-            .read_transcript = content_string.digest(tool_catalog.read_transcript_record.name),
-            .start_agent = content_string.digest(tool_catalog.start_agent_record.name),
-            .find_tools = content_string.digest(tool_catalog.find_tools_record.name),
-            .skill = content_string.digest(tool_catalog.skill_record.name),
-        };
+        var names: CoreNames = undefined;
+        inline for (std.enums.values(CoreTool), &names.digests) |tool, *digest| {
+            digest.* = content_string.digest(@tagName(tool));
+        }
+        return names;
+    }
+
+    pub fn Args(comptime Prefix: type) type {
+        const prefix = @typeInfo(Prefix).@"struct";
+        var fields: [prefix.field_names.len + core_count][]const u8 = undefined;
+        var types: [fields.len]type = undefined;
+        @memcpy(fields[0..prefix.field_names.len], prefix.field_names);
+        @memcpy(types[0..prefix.field_types.len], prefix.field_types);
+        for (std.enums.values(CoreTool), prefix.field_names.len..) |tool, i| {
+            fields[i] = @tagName(tool) ++ "_name";
+            types[i] = [32]u8;
+        }
+        return @Struct(.auto, null, &fields, &types, &@splat(.{}));
+    }
+
+    pub fn args(self: CoreNames, prefix: anytype) Args(@TypeOf(prefix)) {
+        var out: Args(@TypeOf(prefix)) = undefined;
+        inline for (@typeInfo(@TypeOf(prefix)).@"struct".field_names) |name| {
+            @field(out, name) = @field(prefix, name);
+        }
+        inline for (std.enums.values(CoreTool), self.digests) |tool, digest| {
+            @field(out, @tagName(tool) ++ "_name") = digest;
+        }
+        return out;
     }
 };
 
@@ -76,7 +119,7 @@ fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias:
     return "SELECT " ++ selected ++ " FROM model_tool_call tool_call " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "JOIN session_revision revision ON revision.session_ref=" ++ operation_alias ++ ".session_ref AND revision.revision=" ++ operation_alias ++ ".settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++
         "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
@@ -99,7 +142,7 @@ const next_action_attempt = rsql.Read(.{
         "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
         "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ nonBashCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
-    .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
+    .Args = CoreNames.Args(struct {}),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, bash_timeout_override_ms: ?rsql.Positive, session: rsql.SessionHead },
     .cardinality = .optional,
 });
@@ -108,7 +151,7 @@ pub const next_action_attempt_sql = next_action_attempt.sql;
 /// The next core tool call ready to run (D24), as `next_action_attempt`
 /// finds Bash's: decided, never attempted, of an open Turn no stop selected.
 const next_core_action = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session," ++ "CASE WHEN " ++ callNameSql("=?1") ++ " THEN 'message_agent' WHEN " ++ callNameSql("=?2") ++ " THEN 'read_transcript' WHEN " ++ callNameSql("=?3") ++ " THEN 'start_agent' WHEN " ++ callNameSql("=?4") ++ " THEN 'find_tools' ELSE 'skill' END AS tool " ++
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session," ++ coreCaseSql() ++
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
         "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
@@ -116,14 +159,14 @@ const next_core_action = rsql.Read(.{
         "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
         "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ coreCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
-    .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
+    .Args = CoreNames.Args(struct {}),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), tool: CoreTool },
     .cardinality = .optional,
 });
 
 /// A core tool call to run: which Action it is, which tool it calls, its
 /// Session, and its arguments' content.
-pub const CoreTool = enum { message_agent, read_transcript, start_agent, find_tools, skill };
+pub const CoreTool = tool_catalog.CoreTool;
 
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
@@ -224,7 +267,7 @@ const CoreSelection = struct {
         if (include_mcp) a.read(next_mcp_action, .{}, &selection.mcp);
         a.read(owed_ending, .{}, &selection.ending);
         a.read(forward_domain.next, .{}, &selection.forward);
-        a.read(next_core_action, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &selection.action);
+        a.read(next_core_action, names.args(.{}), &selection.action);
     }
 };
 
@@ -232,7 +275,7 @@ const CoreSelection = struct {
 /// `admitNextActionAttempt` selects, and the work read's Bash answer.
 fn queueNextActionAttempt(a: anytype, next: *next_action_attempt.Result) void {
     const names: CoreNames = .of();
-    a.read(next_action_attempt, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, next);
+    a.read(next_action_attempt, names.args(.{}), next);
 }
 
 /// Whether `nextCoreWork` and `admitNextActionAttempt` would find work:
@@ -489,7 +532,7 @@ pub const core_facts = rsql.Read(.{
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++
         "AND action.authorized=1 AND action.attempt_ordinal=0 AND action.resolution_code IS NULL AND " ++ coreCallSql(4),
-    .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64, message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
+    .Args = CoreNames.Args(struct { action_id: u64, parent_operation_id: u64, turn_id: u64 }),
     .Row = struct { session: rsql.SessionHead, stopped: bool },
     .cardinality = .optional,
 });
@@ -534,8 +577,8 @@ const revoke_sender = rsql.Write(.{
 
 /// Clears the Attempt's sender handle, when `binding` names an attempted
 /// Action; otherwise changes nothing. On a `.single` Access: the read and
-/// the one UPDATE, as main's UPDATE and its touch's Workspace read were,
-/// and no transaction.
+/// the one UPDATE. Access selects SQLite autocommit or an ownership-fenced
+/// network transaction, including the no-work and error exits.
 pub fn revokeActionSender(a: anytype, binding: ActionAttemptBinding) !void {
     var found: attempt_session.Result = undefined;
     a.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &found);
@@ -761,7 +804,7 @@ const next_mcp_action = rsql.Read(.{
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
-        "CROSS JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "CROSS JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
         "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
         "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
@@ -839,7 +882,7 @@ const mcp_input = rsql.Read(.{
         "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp' " ++
         "JOIN content schema_content ON schema_content.content_id=tool.input_schema_content_id " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++

@@ -46,32 +46,9 @@ pub const PresetDecision = struct {
 
 pub const ConfigureReply = command_reply.ConfigureReply;
 
-const Tool = tool_catalog.Tool;
-
-/// Decodes a persisted tools_mask.
-pub fn toolSet(mask: c_int) !tool_catalog.ToolSet {
-    var set: tool_catalog.ToolSet = .empty;
-    var remaining = std.math.cast(u8, mask) orelse return error.CorruptStore;
-    inline for (comptime std.meta.tags(Tool)) |tool| {
-        if (remaining & tool_catalog.toolBit(tool) != 0) set.insert(tool);
-        remaining &= ~tool_catalog.toolBit(tool);
-    }
-    if (remaining != 0) return error.CorruptStore;
-    return set;
-}
-
 /// D104: the spec alone selects tools; an empty list selects none.
 fn requestedNames(requested: *const content_custody.Configuration) *const command_input.ToolsField {
     return &requested.tools;
-}
-
-/// The built-in tools a creation or a `tools` change saves, or null when
-/// one of them is no built-in: what an agent's spec may narrow.
-pub fn requestedTools(requested: *const content_custody.Configuration) ?tool_catalog.ToolSet {
-    var set: tool_catalog.ToolSet = .empty;
-    var names = requestedNames(requested).iterator();
-    while (names.next()) |name| set.insert(tool_catalog.builtIn(name) orelse return null);
-    return set;
 }
 
 fn requestsBash(requested: *const content_custody.Configuration) bool {
@@ -133,9 +110,6 @@ pub const CurrentConfiguration = struct {
     provider: provider_name.Provider = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
-    /// Read only: the tools of the set `tool_set_id` names, as a mask,
-    /// until the wire names tools by name.
-    tools_mask: u8 = 0,
     /// The saved tool set; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
     /// Null means every configured tool is loaded.
@@ -257,22 +231,22 @@ pub fn configurationBeforeWorkspace(
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // A listed model with effort levels requires one of them. Models with no
-    // listed efforts can omit reasoning, but v2 cannot clear an assigned effort.
-    if (requested.reasoning_effort.state == .explicit_null) {
-        if (model_catalog.find(model_catalog.shipped, model)) |known| {
-            if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
-        }
-        if (current) |existing| if (effectiveReasoningEffort(existing) != null) return .unsupported_reasoning_effort;
-    }
-    if (requested.reasoning_effort.state == .value) {
-        const effort = std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
-            return .unsupported_reasoning_effort;
-        if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
-    } else if (requested.model.state == .value and requested.reasoning_effort.state == .omitted) {
-        if (current) |existing| if (effectiveReasoningEffort(existing)) |effort| {
-            if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
-        };
+    // Resolve the settings once: omission retains the effective historical
+    // effort, while a supplied value (including null) overrides it. Validate
+    // that result even when only the model, or neither setting, was supplied.
+    const retained_effort = if (current) |existing| effectiveReasoningEffort(existing) else null;
+    const effort = switch (requested.reasoning_effort.state) {
+        .omitted => retained_effort,
+        .explicit_null => null,
+        .value => std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
+            return .unsupported_reasoning_effort,
+    };
+    // The codec cannot encode a boundary back to unspecified effort.
+    if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
+    if (effort) |value| {
+        if (!model_capability.supportsReasoningEffort(model, value)) return .unsupported_reasoning_effort;
+    } else if (model_catalog.find(model_catalog.shipped, model)) |known| {
+        if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
     }
     return null;
 }
@@ -583,8 +557,10 @@ pub const ConfigurationReads = struct {
     /// null too when the catalog lacks a name, which the configure refuses.
     tools: ?tool_set.Selection = null,
     loaded_tools: ?tool_set.Selection = null,
-    /// Saved names used only when a tool update must preserve or narrow a
-    /// previously loaded subset. Keep these in Store scratch, not a frame.
+    /// Saved names for narrowing an existing loaded subset. A child creation
+    /// instead borrows saved_tools.names for its caller's configured names,
+    /// consumed before applying its configuration; creations never read the
+    /// saved tools here. Keep these in Store scratch, not a frame.
     saved_tools: command_input.ToolsField = undefined,
     saved_loaded: command_input.ToolsField = undefined,
     /// The Session a creation starts as the child of, when it has one.
@@ -600,7 +576,7 @@ pub const ConfigurationReads = struct {
 /// A Session's saved configuration, decoded into a CurrentConfiguration in
 /// place; `checkSaved` holds it to its types.
 const saved_session = rsql.Read(.{
-    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id," ++ tool_set.maskSql("session.tool_set_id") ++ " AS tools_mask,tool_set_id,loaded_tool_set_id,permission_mode," ++
+    .sql = "SELECT workspace,provider,model,instructions_content_id AS instructions_id,tool_set_id,loaded_tool_set_id,permission_mode," ++
         "output_schema_content_id AS output_schema_id,revision,next_position,compaction_trigger,output_reservation," ++
         reasoningEffortOverrideSql("session") ++ " AS reasoning_effort,label,created_at,workspace_key,parent_ref," ++ previousReasoningEffortSql("session") ++ " AS previous_reasoning_effort FROM session WHERE session_ref=?1",
     .Args = struct { session: []const u8 },
@@ -730,7 +706,6 @@ pub fn checkSaved(current: *const CurrentConfiguration) error{CorruptStore}!void
     const instructions = current.instructions_id orelse return error.CorruptStore;
     if (instructions == 0 or current.output_schema_id == @as(?i64, 0) or current.revision == 0 or current.next_position == 0 or
         current.compaction_trigger == @as(?u64, 0) or current.created_at == 0 or current.workspace_key == 0 or current.tool_set_id == 0 or current.loaded_tool_set_id == @as(?u64, 0)) return error.CorruptStore;
-    _ = try toolSet(current.tools_mask);
     _ = try permissionMode(current.permission_mode);
     if (current.label) |*label| try checkLabel(label.slice());
 }

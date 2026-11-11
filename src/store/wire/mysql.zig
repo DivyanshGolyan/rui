@@ -214,19 +214,21 @@ pub const Step = struct {
     const more: Step = .{ .consumed = 0, .event = null };
 };
 
+pub const VersionError = error{ MysqlTooOld, MysqlIsMariadb };
+
 pub const Error = error{
     /// Bytes the protocol does not allow at this point.
     ProtocolViolation,
     /// A packet other than a row larger than `receive_buffer_min` allows.
     PacketTooLarge,
-    /// MariaDB, MySQL before 8.4, or a server lacking a required capability.
+    /// A server lacking the required protocol or capability.
     UnsupportedServer,
     /// `.tcp_tls` was asked for and the server does not offer TLS.
     TlsRefused,
     /// The server asked for an authentication method other than
     /// caching_sha2_password, or for the password over plaintext TCP.
     AuthMethodRefused,
-};
+} || VersionError;
 
 pub const OptionsError = error{InvalidOptions};
 
@@ -622,20 +624,34 @@ pub const Client = struct {
     }
 };
 
+/// Shared by greeting admission and the Store's version/version_comment check.
+/// MariaDB takes precedence even when its compatibility version is too old.
+pub fn versionRefusal(version: []const u8, comment: []const u8) ?VersionError {
+    if (containsMaria(version) or containsMaria(comment)) return error.MysqlIsMariadb;
+    var parts = std.mem.splitScalar(u8, version, '.');
+    const major = decimal(parts.next() orelse return error.MysqlTooOld) orelse return error.MysqlTooOld;
+    const minor = decimal(parts.next() orelse return error.MysqlTooOld) orelse return error.MysqlTooOld;
+    if (major < 8 or (major == 8 and minor < 4)) return error.MysqlTooOld;
+    return null;
+}
+
+fn decimal(text: []const u8) ?u32 {
+    // parseInt alone also accepts signs and underscores.
+    if (text.len == 0 or std.mem.indexOfNone(u8, text, "0123456789") != null) return null;
+    return std.fmt.parseInt(u32, text, 10) catch null;
+}
+
+fn containsMaria(text: []const u8) bool {
+    const needle = "mariadb";
+    if (text.len < needle.len) return false;
+    for (0..text.len - needle.len + 1) |i| if (std.ascii.eqlIgnoreCase(text[i..][0..needle.len], needle)) return true;
+    return false;
+}
+
 /// MySQL 8.4 or later. MariaDB reports a 5.5.5- prefixed version and names
 /// itself; either way it is refused.
 fn checkVersion(version: []const u8) Error!void {
-    if (std.mem.indexOf(u8, version, "MariaDB") != null) return error.UnsupportedServer;
-    var parts = std.mem.splitScalar(u8, version, '.');
-    const major = decimal(parts.next().?) orelse return error.UnsupportedServer;
-    const minor = decimal(parts.next() orelse return error.UnsupportedServer) orelse return error.UnsupportedServer;
-    if (major < 8 or (major == 8 and minor < 4)) return error.UnsupportedServer;
-}
-
-/// Decimal digits only: parseInt also takes a sign and underscores.
-fn decimal(text: []const u8) ?u16 {
-    if (text.len == 0 or std.mem.indexOfNone(u8, text, "0123456789") != null) return null;
-    return std.fmt.parseInt(u16, text, 10) catch null;
+    if (versionRefusal(version, "")) |err| return err;
 }
 
 /// caching_sha2_password: SHA256(p) XOR SHA256(SHA256(SHA256(p)) || nonce).
@@ -1020,18 +1036,18 @@ test "MariaDB and MySQL before 8.4 are refused" {
     // MariaDB 11.4.13's greeting.
     const mariadb = comptime hex("5b0000000a31312e342e31332d4d6172696144422d75627532343034000300000050683a2859677c5800feff2d0200ff81150000000000001d000000244821696e6b4f297d5d3a47006d7973716c5f6e61746976655f70617373776f726400");
     var client: Client = try .init(plain_options);
-    try std.testing.expectError(error.UnsupportedServer, readOne(&client, mariadb));
+    try std.testing.expectError(error.MysqlIsMariadb, readOne(&client, mariadb));
     var edited = greeting[0..greeting.len].*;
     try std.testing.expectEqualStrings("8.4.13", edited[5..11]);
     edited[7] = '0';
     client = try .init(plain_options);
-    try std.testing.expectError(error.UnsupportedServer, readOne(&client, &edited));
+    try std.testing.expectError(error.MysqlTooOld, readOne(&client, &edited));
     try checkVersion("9.1.0");
     try checkVersion("8.4.0");
-    try std.testing.expectError(error.UnsupportedServer, checkVersion("8.3.0"));
-    try std.testing.expectError(error.UnsupportedServer, checkVersion("5.7.44-log"));
-    try std.testing.expectError(error.UnsupportedServer, checkVersion("+9.1.0"));
-    try std.testing.expectError(error.UnsupportedServer, checkVersion("8.0_4.0"));
+    try std.testing.expectError(error.MysqlTooOld, checkVersion("8.3.0"));
+    try std.testing.expectError(error.MysqlTooOld, checkVersion("5.7.44-log"));
+    try std.testing.expectError(error.MysqlTooOld, checkVersion("+9.1.0"));
+    try std.testing.expectError(error.MysqlTooOld, checkVersion("8.0_4.0"));
 }
 
 fn authSwitch(comptime body: []const u8) *const [5 + body.len]u8 {

@@ -171,7 +171,14 @@ function launchTypeChecks() {
 	// @ts-expect-error Provider CA trust is a PEM filename, never a verification toggle.
 	launchFor({ database: "/s", provider: { baseUrl: "https://example.com", key: "key", caFile: false } }, "/r");
 	new RuiStartError("store_fenced", "refused");
-	new RuiStartError("mysql_version_unsupported", "refused");
+	new RuiStartError("mysql_version", "refused");
+	new RuiStartError("mariadb", "refused");
+	new RuiStartError("read_only_replica", "refused");
+	new RuiStartError("durability_innodb_flush_log_at_trx_commit", "refused");
+	new RuiStartError("durability_sync_binlog", "refused");
+	new RuiStartError("binlog_statement", "refused");
+	new RuiStartError("mysql_unreachable", "refused");
+	new RuiStartError("mysql_login", "refused");
 	// @ts-expect-error Unknown codes are not launch refusals in the Host enum.
 	new RuiStartError("not_a_start_error", "refused");
 }

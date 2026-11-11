@@ -36,7 +36,7 @@ fn count(storage: *Store, session: []const u8, comptime table: []const u8) !u64 
 }
 
 fn loaded(storage: *Store, session: []const u8, name: []const u8) !bool {
-    return 1 == try testing.queryU64(storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=coalesce(s.loaded_tool_set_id,s.tool_set_id) " ++
+    return 1 == try testing.queryU64(storage, "SELECT count(*) FROM session s JOIN tool_set_member m ON m.tool_set_id=" ++ testing.offeredSetSql("s") ++ " " ++
         "JOIN tool_record t ON t.tool_record_id=m.tool_record_id WHERE s.session_ref=?1 AND t.name=?2", .{ session, name });
 }
 
