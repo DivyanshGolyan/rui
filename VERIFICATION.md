@@ -52,6 +52,7 @@ CI runs `python3 tests/ci/select_tests.py --base origin/main --phase review` on 
 Run it locally only to diagnose a CI red; [Evidence](CODING_STANDARDS.md#evidence) lists the pre-push checks.
 The selector reads the import graph of the tree it runs on: Zig `@import` and `@embedFile`, and the Python imports and `src/` reads of `tests/integration`.
 A changed file selects each unit root that compiles it and each process fixture whose scripts use it or whose driven owners (`FIXTURES`) reach it, and the Host's dispatch into them.
+A changed production `src/` file also selects fixtures whose Python or shell scripts contain a literal (including f-string constant parts) present in that file's quoted or Zig multiline string bodies at base or head, limited to at least 12 stripped characters containing a space and occurring in string bodies in fewer than three production `src/` files in the selector's working tree (counted only for prose found in changed files).
 A functional core listed in `src/logic_tests.zig` selects only its unit roots and the fixtures that name it as an owner.
 `RULES` add what no import names: C sources, generators, non-Zig consumers and fixtures that probe an owner from outside.
 A selection that holds every case `check` runs becomes `check`; source that neither the graph nor a rule names falls back to `check`.
