@@ -3123,3 +3123,32 @@ test "inline skills leave every existing canonical mutation digest unchanged" {
         try std.testing.expectEqualStrings(case.digest, &std.fmt.bytesToHex(digest, .lower));
     }
 }
+
+// Captured from the hand-written configureDigest before table derivation.
+test "Session settings configure digest golden" {
+    var command: Tested.ConfigureCommand = .{};
+    try command.session.set("k7m2qx");
+    try std.testing.expectEqualStrings("db4015965f28197d8bfae4b13f61edb8b1047904643d764a7cc8ce10f9680e30", &std.fmt.bytesToHex(command.semanticDigest(), .lower));
+    command.require_model = true;
+    const c = &command.configuration;
+    c.workspace.state = .value;
+    try c.workspace.value.set("/tmp/workspace");
+    c.provider.state = .value;
+    try c.provider.value.set("openai");
+    c.model.state = .value;
+    try c.model.value.set("gpt-5");
+    c.instructions = .{ .state = .value, .length = 3, .digest = contentDigest("abc") };
+    c.tools = try command_input.ToolsField.of(&.{ "bash", "find_tools" });
+    c.loaded_tools = try command_input.ToolsField.of(&.{"bash"});
+    c.permission_mode.state = .value;
+    try c.permission_mode.value.set("ask");
+    c.output_schema = .{ .state = .value, .length = 2, .digest = contentDigest("{}") };
+    c.compaction_trigger.state = .value;
+    try c.compaction_trigger.value.set("12345");
+    c.output_reservation.state = .explicit_null;
+    c.reasoning_effort.state = .value;
+    try c.reasoning_effort.value.set("high");
+    c.label.state = .value;
+    try c.label.value.set("Golden Session");
+    try std.testing.expectEqualStrings("46c2a9eafbd26d33d6584f2758bad73383b642adf2b6d1655dea294136399522", &std.fmt.bytesToHex(command.semanticDigest(), .lower));
+}
