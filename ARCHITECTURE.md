@@ -1400,6 +1400,8 @@ Schema 51 is the migration baseline (Divyansh, D204): every later format change 
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 The typed statement marker `@index(name)` renders as `INDEXED BY name` on SQLite.
 On MySQL it renders as `FORCE INDEX (name)` only when `schema.mysqlCanForceIndex` confirms that the named MySQL DDL index uses real columns; generated-leading and functional partial indexes remain unhinted, since forcing their lowered keys can turn a lookup into a full index scan.
+MySQL open includes every forceable index's canonical name in its catalog comparison and refuses a renamed index as `store_schema_behind` before any write; server-generated keys remain checked by definition.
+This admission digest is computed, not stored or pinned by Store format, so tightening its comparison changes no format or migration.
 Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
 Forward steps for an existing database are `schema.mysqlMigration(from)`; this command does not apply them.

@@ -1443,17 +1443,24 @@ pub fn hasIndex(comptime name: []const u8) bool {
     }
 }
 
+// Cache the DDL's names once; checking every forceable catalog name must
+// not regenerate every table's DDL for each index.
+const mysql_index_names: []const []const u8 = blk: {
+    @setEvalBranchQuota(objects_quota);
+    var names: []const []const u8 = &.{};
+    for (objects(.mysql)) |object| if (object.kind == .index) {
+        names = names ++ .{object.name};
+    };
+    break :blk names;
+};
+
 /// Whether MySQL's DDL has this named index on real columns. A lowered
 /// partial index cannot serve a query on its original prefix: forcing it
 /// would replace a lookup with a full index scan.
 pub fn mysqlCanForceIndex(comptime name: []const u8) bool {
     comptime {
         @setEvalBranchQuota(objects_quota);
-        if (!canForceMysqlIndex(&tables, &indexes, name)) return false;
-        for (objects(.mysql)) |object| {
-            if (object.kind == .index and std.mem.eql(u8, object.name, name)) return true;
-        }
-        return false;
+        return canForceMysqlIndex(&tables, &indexes, name) and contains(mysql_index_names, name);
     }
 }
 
@@ -1606,10 +1613,19 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
 /// SQL expression, such as `DATABASE()`). It holds what the schema value
 /// decides and leaves out what MySQL names or spells itself: CHECK and
 /// expression texts, which servers normalise differently, and the names
-/// of CHECKs, foreign keys and unique keys. Each value is cast to binary,
-/// so the lines compare as bytes whatever information_schema's collations.
+/// of CHECKs, foreign keys and server-generated keys. Forceable indexes
+/// include their canonical names: statements depend on those names, not
+/// just equivalent definitions. This admission digest is not stored or
+/// pinned by Store format; `digest()` covers bootstrap SQL separately.
+/// Each value is cast to binary, so the lines compare as bytes whatever
+/// information_schema's collations.
 pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
     return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        var forced: []const u8 = "FALSE";
+        for (indexes) |index| if (mysqlCanForceIndex(index.name)) {
+            forced = forced ++ " OR (" ++ binary("TABLE_NAME") ++ "='" ++ index.table ++ "' AND " ++ binary("INDEX_NAME") ++ "='" ++ index.name ++ "')";
+        };
         const in = "information_schema.";
         const text = "SELECT CONCAT('t '," ++ binary("TABLE_NAME") ++ ",' '," ++ binary("ENGINE") ++ ",' '," ++ binary("TABLE_COLLATION") ++ ") FROM " ++ in ++
             "TABLES WHERE TABLE_SCHEMA=" ++ database ++ " AND TABLE_TYPE='BASE TABLE'" ++
@@ -1617,7 +1633,7 @@ pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
             ",' '," ++ binary("COALESCE(COLLATION_NAME,'-')") ++ ",IF(EXTRA IN ('STORED GENERATED','VIRTUAL GENERATED'),' generated','')) FROM " ++ in ++
             "COLUMNS WHERE TABLE_SCHEMA=" ++ database ++
             " UNION ALL SELECT CONCAT('i '," ++ binary("TABLE_NAME") ++ ",IF(MAX(NON_UNIQUE)=0,' u ',' n '),GROUP_CONCAT(" ++ binary("COALESCE(COLUMN_NAME,'*')") ++
-            ",IF(COLLATION='D',' desc','') ORDER BY SEQ_IN_INDEX SEPARATOR ',')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
+            ",IF(COLLATION='D',' desc','') ORDER BY SEQ_IN_INDEX SEPARATOR ','),IF(" ++ forced ++ ",CONCAT(' '," ++ binary("INDEX_NAME") ++ "),'')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
             " UNION ALL SELECT CONCAT('f '," ++ binary("TABLE_NAME") ++ ",' ',GROUP_CONCAT(" ++ binary("COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ','),' '," ++
             binary("MAX(REFERENCED_TABLE_NAME)") ++ ",' ',GROUP_CONCAT(" ++ binary("REFERENCED_COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ',')) FROM " ++ in ++
             "KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=" ++ database ++ " AND REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_NAME,CONSTRAINT_NAME" ++
@@ -1673,7 +1689,11 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
             var parts: []const []const []const u8 = &.{table.primary_key};
             for (table.uniques) |unique| parts = parts ++ .{unique};
             var flags: []const bool = &.{true};
-            for (table.uniques) |_| flags = flags ++ .{true};
+            var forced_names: []const []const u8 = &.{""};
+            for (table.uniques) |_| {
+                flags = flags ++ .{true};
+                forced_names = forced_names ++ .{""};
+            }
             for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
                 var names: []const []const u8 = &.{};
                 for (index.columns, 0..) |column, position| {
@@ -1691,6 +1711,7 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 }
                 parts = parts ++ .{names};
                 flags = flags ++ .{index.unique};
+                forced_names = forced_names ++ .{if (canForceMysqlIndex(every, all_indexes, index.name)) " " ++ index.name else ""};
             };
             var added: usize = 0;
             for (table.foreign_keys) |key| {
@@ -1701,17 +1722,18 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 if (!led) {
                     parts = parts ++ .{key.columns};
                     flags = flags ++ .{false};
+                    forced_names = forced_names ++ .{""};
                     added += 1;
                 }
             }
-            for (parts, flags, 0..) |index_parts, unique, position| {
+            for (parts, flags, forced_names, 0..) |index_parts, unique, forced_name, position| {
                 // InnoDB keeps no index it added for a foreign key when a
                 // longer one it added for another key leads with it.
                 const implicit = parts[parts.len - added ..];
                 const covered = position >= parts.len - added and for (implicit) |other| {
                     if (other.len > index_parts.len and eqlList(other[0..index_parts.len], index_parts)) break true;
                 } else false;
-                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts)};
+                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts) ++ forced_name};
             }
         }
         return lines;
@@ -2362,6 +2384,8 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
     const lines = comptime catalogLines(&[_]Table{ mysql_test_order, mysql_test_label }, &.{
         .{ .name = "open", .table = "turn", .columns = &.{ "code", "turn_id DESC" }, .where = "live=1" },
         .{ .name = "one", .table = "turn", .columns = &.{"code"}, .unique = true, .where = "live=1" },
+        .{ .name = "by_live", .table = "turn", .columns = &.{"live"} },
+        .{ .name = "by_note", .table = "content", .columns = &.{"label"}, .unique = true },
     });
     const expected = [_][]const u8{
         "t turn InnoDB utf8mb4_0900_bin",
@@ -2374,6 +2398,7 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "i turn u turn_id",
         "i turn n open_lead,turn_id desc",
         "i turn u *",
+        "i turn n live by_live",
         "i turn n code",
         "t content InnoDB utf8mb4_0900_bin",
         "c content label varchar(8) NO utf8mb4_0900_bin",
@@ -2383,6 +2408,7 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "k content 3",
         "f content first_turn turn turn_id",
         "i content u label",
+        "i content u label by_note",
         "i content n first_turn",
     };
     try std.testing.expectEqual(expected.len, lines.len);

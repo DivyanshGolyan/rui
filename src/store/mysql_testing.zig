@@ -406,6 +406,62 @@ test "store.mysql open preserves an unreachable socket" {
     }, "/mysql-refusal-probe", .{}));
 }
 
+test "store.mysql live admission requires every forceable index name but not generated key names" {
+    const Rename = struct {
+        fn index(name: []const u8, comptime table: []const u8, comptime before: []const u8, comptime after: []const u8) !void {
+            mutex.lockUncancelable(std.testing.io);
+            defer mutex.unlock(std.testing.io);
+            _ = try connection();
+            var buffer: [256]u8 = undefined;
+            try run(try std.fmt.bufPrint(&buffer, "ALTER TABLE {s}." ++ table ++ " RENAME INDEX " ++ before ++ " TO " ++ after, .{name}));
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    const name_buffer = storage.engine.mysql.state.testing_database;
+    const name = std.mem.sliceTo(&name_buffer, 0);
+    var epoch = storage.engine.mysql.state.epoch;
+    try storage.close();
+
+    inline for (schema.indexes) |index| {
+        if (comptime schema.mysqlCanForceIndex(index.name)) {
+            try Rename.index(name, index.table, index.name, "renamed_probe");
+            {
+                defer Rename.index(name, index.table, "renamed_probe", index.name) catch @panic("cannot restore forceable index name");
+                var refused: Store = undefined;
+                // A mutation that admits the Store must still close its lock.
+                const admission = open(&refused, &tmp, std.testing.io, .{});
+                if (admission) |_| try refused.close() else |_| {}
+                try std.testing.expectError(error.StoreSchemaBehind, admission);
+            }
+            // Restoring only the name repairs admission; no migration or DDL
+            // from Rui is needed, and the refused open released GET_LOCK.
+            {
+                try openLive(&storage, &tmp);
+                defer storage.close() catch unreachable;
+                try std.testing.expectEqual(epoch + 1, storage.engine.mysql.state.epoch);
+                epoch = storage.engine.mysql.state.epoch;
+                try std.testing.expectEqual(@as(u64, 1), try liveWrite(&storage, live_noop, .{}));
+            }
+        }
+    }
+    // MySQL names these keys itself: a unique constraint and an FK-backing
+    // index. Lowered partial indexes are likewise never forced by name.
+    inline for (.{
+        .{ "content", "digest" },
+        .{ "session_revision", "instructions_content_id" },
+        .{ "session_stop", "session_stop_unpositioned" },
+        .{ "turn", "turn_one_active_per_session" },
+    }) |key| {
+        try Rename.index(name, key[0], key[1], "renamed_probe");
+        defer Rename.index(name, key[0], "renamed_probe", key[1]) catch @panic("cannot restore unforced index name");
+        try openLive(&storage, &tmp);
+        try storage.close();
+    }
+}
+
 test "store.mysql live admission refuses read_only" {
     try refusesGlobal("read_only", "1", error.MysqlReadOnly);
 }
