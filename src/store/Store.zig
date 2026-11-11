@@ -1670,6 +1670,8 @@ pub const OpenOptions = struct {
     found_schema_version: ?*u32 = null,
     /// Caller-owned evidence retained after a failed open destroys the Store.
     identity_mismatch: ?*store_schema.IdentityMismatch = null,
+    /// Told when a SQLite Store's startup migration begins and commits.
+    migration_notice: ?store_schema.MigrationNotice = null,
     /// The tools the Host offers, which it keeps for the Store's life.
     /// Null saves none: the Host reads the last one back (`readCatalog`)
     /// and saves its own (`saveCatalog`) before it serves.

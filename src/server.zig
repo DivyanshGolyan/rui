@@ -5,6 +5,7 @@ const os = @import("os/os.zig");
 const socket_os = @import("os/socket.zig");
 const pages = @import("os/pages.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const bash = @import("bash.zig");
@@ -1233,12 +1234,14 @@ noinline fn openStoreForHost(
 ) !void {
     var found_schema_version: u32 = store_module.schema_version;
     var identity_mismatch: store_module.IdentityMismatch = .{};
+    var migration: StartupMigration = .{ .diagnostics = diagnostics };
     const store_options: store_module.OpenOptions = .{
         .served = served.routes(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
         .identity_mismatch = &identity_mismatch,
+        .migration_notice = .{ .context = &migration, .notify = StartupMigration.notify },
         // With MCP servers the catalog is saved below, once they are listed.
         .catalog = if (!has_mcp) &tools.built_in else null,
     };
@@ -1262,6 +1265,34 @@ noinline fn openStoreForHost(
     };
     lease.paths.store.set(storage.storeId()) catch unreachable;
 }
+
+/// Announces a startup migration on the startup channel, where a launcher
+/// waits through it (`HostStartupWait`), and in the startup records.
+const StartupMigration = struct {
+    diagnostics: ?*HostDiagnostics,
+
+    fn notify(context: *anyopaque, event: store_module.MigrationNotice.Event) void {
+        const self: *StartupMigration = @ptrCast(@alignCast(context));
+        var message: [256]u8 = undefined;
+        var detail: [32]u8 = undefined;
+        const text, const phase, const format = switch (event) {
+            .begin => |from| .{
+                std.fmt.bufPrint(&message, "rui: backing up this Store and migrating it from format {d} to {d}; a large Store takes longer " ++ HostStartupWait.migrating_tag, .{ from, store_module.schema_version }) catch unreachable,
+                "migrating",
+                from,
+            },
+            .end => .{
+                std.fmt.bufPrint(&message, "rui: Store migrated to format {d} " ++ HostStartupWait.migrated_tag, .{store_module.schema_version}) catch unreachable,
+                "migrated",
+                store_module.schema_version,
+            },
+        };
+        // Best effort, as for other startup notices: a closed channel leaves
+        // the launcher to its ordinary readiness wait.
+        _ = rui_write_readiness(2, text.ptr, text.len);
+        if (self.diagnostics) |writer| writer.record(phase, std.fmt.bufPrint(&detail, "format_{d}", .{format}) catch unreachable);
+    }
+};
 
 noinline fn reportStoreIdentityMismatch(saved_selector: []const u8, actual_selector: []const u8) !void {
     var message: [2 * TerminalText.max_bytes_per_byte * protocol.max_store_bytes + 512]u8 = undefined;

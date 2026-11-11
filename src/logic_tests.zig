@@ -46,6 +46,7 @@ const cores = .{
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
+    .{ "HostStartupWait.zig", @import("HostStartupWait.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
     .{ "idempotency_key.zig", @import("idempotency_key.zig") },

@@ -21,6 +21,7 @@ const cli_args = @import("cli_args.zig");
 const configure_input = @import("configure_input.zig");
 const json_ascii = @import("json_ascii.zig");
 const client = @import("client.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
@@ -921,13 +922,22 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         }
         return error.HostLaunchFailed;
     }
-    const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_s;
+    var wait = HostStartupWait.init(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
     var startup_bytes: [8192]u8 = undefined;
     var startup_length: usize = 0;
-    while (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < until) {
+    // Startup output already written to the terminal: a migration's
+    // announcement, which explains a wait longer than ten seconds.
+    var shown: usize = 0;
+    while (!wait.expired(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds)) {
         const count = std.c.read(startup_read, startup_bytes[startup_length..].ptr, startup_bytes.len - startup_length);
         if (count > 0) startup_length += @intCast(count);
         const startup = startup_bytes[0..startup_length];
+        wait.observe(startup, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+        const until = wait.until(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
+        if (shown == 0) {
+            shown = HostStartupWait.shownWhileStarting(startup);
+            if (shown != 0) _ = @import("stderr.zig").write(startup[0..shown]);
+        }
         if ((count == 0 or startup_length == startup_bytes.len) and
             std.mem.indexOf(u8, startup, "[store_locked]\n") == null)
         {
@@ -941,7 +951,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 try path_text.finish(&header);
                 try header.writeAll(":\n");
                 _ = @import("stderr.zig").write(header.buffered());
-                _ = @import("stderr.zig").write(startup);
+                _ = @import("stderr.zig").write(startup[shown..]);
                 if (startup_length == 0) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
                 if (startup_length == startup_bytes.len) {
                     stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
@@ -962,7 +972,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
                 // A competing launcher lost to this ready owner; its expected
                 // lease refusal is not a warning about the running Host.
                 if (startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
-                    _ = @import("stderr.zig").write(notices);
+                    _ = @import("stderr.zig").write(notices[shown..]);
                 return reportStartedHost(io, &paths, ready, quiet, capacity);
             },
             .incompatible => return error.IncompatibleHost,
@@ -972,7 +982,7 @@ fn startHost(init: std.process.Init, selected: []const u8, quiet: bool, capacity
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 100 * std.time.ns_per_ms))), .awake);
     }
-    if (startup_length != 0) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
+    if (startup_length != shown) _ = @import("stderr.zig").write(startup_bytes[shown..startup_length]);
     stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
 }
