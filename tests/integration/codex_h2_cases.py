@@ -20,6 +20,10 @@ import model_fixture as fixture
 import os_semantics
 
 
+ORDINARY_EXCHANGE_DESCRIPTORS = 5
+DEFAULT_CLIENT_DESCRIPTORS = 100 * ORDINARY_EXCHANGE_DESCRIPTORS + 3
+
+
 def assert_managed_descriptor_rejection(rejected, limit):
     assert rejected.returncode != 0 and "descriptor capacity insufficient" in rejected.stderr, rejected.stderr
     assert not rejected.stdout.startswith("ready "), rejected.stdout
@@ -30,13 +34,13 @@ def assert_managed_descriptor_rejection(rejected, limit):
     assert inherited in os_semantics.INHERITED_DESCRIPTORS, fields
     fixed_host = os_semantics.HOST_FIXED_DESCRIPTORS
     authentication = os_semantics.AUTHENTICATION_DESCRIPTORS
-    # 100 ordinary exchanges at four descriptors, two controls and discovery.
-    required = inherited + fixed_host + 403 + 10 + authentication + 2
+    # 100 ordinary exchanges at five descriptors, two controls and discovery.
+    required = inherited + fixed_host + DEFAULT_CLIENT_DESCRIPTORS + 10 + authentication + 2
     expected = dict(active_capacity=1, required=required, soft_limit=limit,
-                    inherited=inherited, fixed_host=fixed_host, clients=403,
+                    inherited=inherited, fixed_host=fixed_host, clients=DEFAULT_CLIENT_DESCRIPTORS,
                     execution=10, authentication=authentication, self_wake=2)
     assert fields == expected, (fields, expected)
-    assert limit < required - 4 * (100 - 10), "only below-minimum intake may be refused"
+    assert limit < required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10), "only below-minimum intake may be refused"
     print(f"managed descriptor rejection passed: {expected}", flush=True)
     return required
 
@@ -65,11 +69,11 @@ def run(*, observed=False, intake=100):
     store = root / "store"
     try:
         # These totals describe default intake100, not the refusal boundary.
-        # Ten ordinary clients remain viable after dropping 90 * 4 descriptors.
-        # Three inherited, fixed Host, 100 ordinary exchanges at four, two
+        # Ten ordinary clients remain viable after dropping 90 * 5 descriptors.
+        # Three inherited, fixed Host, 100 ordinary exchanges at five, two
         # controls and discovery, authentication, and the intake wake pair.
-        default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + 403 + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2
-        minimum_required = default_required - 4 * (100 - 10)
+        default_required = 3 + os_semantics.HOST_FIXED_DESCRIPTORS + DEFAULT_CLIENT_DESCRIPTORS + 10 + os_semantics.AUTHENTICATION_DESCRIPTORS + 2
+        minimum_required = default_required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10)
         serve = [fixture.RUI, "host", "serve", "--store", store, "--active-capacity", "1",
                  "--test-codex-fixture-endpoint", f"https://localhost:{endpoint.server_address[1]}/responses",
                  "--provider-ca-file", root / "cert.pem", "--test-phase-trace"]
@@ -80,7 +84,7 @@ def run(*, observed=False, intake=100):
         rejected = subprocess.run(limited(minimum_required - 1), capture_output=True, text=True, timeout=15)
         required = assert_managed_descriptor_rejection(rejected, minimum_required - 1)
         assert not store.exists(), "managed capacity rejection created Store files"
-        actual_minimum = required - 4 * (100 - 10)
+        actual_minimum = required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - 10)
         if actual_minimum != minimum_required:
             rejected = subprocess.run(limited(actual_minimum - 1), capture_output=True, text=True, timeout=15)
             assert assert_managed_descriptor_rejection(rejected, actual_minimum - 1) == required, rejected.stderr
@@ -88,7 +92,7 @@ def run(*, observed=False, intake=100):
         # Execute the same complete workload at the exact production limit
         # at default and minimum intake; retain the separate default-intake
         # native channel run accounting for its two inherited descriptors.
-        limit = required - 4 * (100 - intake) + (2 if observed else 0)
+        limit = required - ORDINARY_EXCHANGE_DESCRIPTORS * (100 - intake) + (2 if observed else 0)
         host, _ = start_ready_process(
             limited(limit), observations="managed" if observed else None,
             required_fields={"execution": "enabled", "nghttp2": "1.70.0", "intake_capacity": str(intake),
