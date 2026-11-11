@@ -99,14 +99,22 @@ pub fn Policy(comptime Cursor: type) type {
             };
         }
 
-        /// Compare the low edge for fill_above, high for fill_below. A trim,
-        /// jump or suffix replacement may change it while the reader runs.
+        /// A forward result attaches only while both its original cursor and
+        /// replacement boundary match the window. Null matches only null: an
+        /// append cannot skip a provisional suffix that appeared during a read.
+        pub fn forwardAttaches(started_from: ?Cursor, replace_from: ?Cursor, window_high: ?Cursor, window_provisional: ?Cursor) bool {
+            return std.meta.eql(started_from, window_high) and std.meta.eql(replace_from, window_provisional);
+        }
+
+        /// Compare the low edge for fill_above; fill_below uses forward
+        /// attachment against the high edge and first provisional key now.
         /// Drop stale fills; need() will reissue. Scans are never dropped: live
         /// facts always land, and applyScan decides what happens to their rows.
         /// Opening/permission retain their own lifecycle, not an edge check.
-        pub fn applies(read: Read, started_from: ?Cursor, edge_now: ?Cursor) bool {
+        pub fn applies(read: Read, started_from: ?Cursor, replace_from: ?Cursor, edge_now: ?Cursor, window_provisional: ?Cursor) bool {
             return switch (read) {
-                .fill_above, .fill_below => std.meta.eql(started_from, edge_now),
+                .fill_above => std.meta.eql(started_from, edge_now),
+                .fill_below => forwardAttaches(started_from, replace_from, edge_now, window_provisional),
                 .opening, .scan, .permission => true,
             };
         }
@@ -127,8 +135,7 @@ pub fn Policy(comptime Cursor: type) type {
         /// `rows` counts newly rendered entries, excluding replayed entries;
         /// Activity positions and replayed provisional rows are not new count.
         pub fn applyScan(window_high: ?Cursor, scan_start: ?Cursor, replace_from: ?Cursor, window_provisional: ?Cursor, rows: usize) Scan {
-            const boundary_resident = replace_from == null or std.meta.eql(replace_from, window_provisional);
-            return .{ .rows = if (std.meta.eql(window_high, scan_start) and boundary_resident) .append else .{ .count_only = rows } };
+            return .{ .rows = if (forwardAttaches(scan_start, replace_from, window_high, window_provisional)) .append else .{ .count_only = rows } };
         }
     };
 }
@@ -218,13 +225,13 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     // Both edges: trim, jump-to-end replacement, and suffix replacement make
     // fills stale. A scroll alone leaves the edge unchanged and still applies.
     for ([_]Read{ .fill_above, .fill_below }) |read| {
-        try std.testing.expect(P.applies(read, high, high));
+        try std.testing.expect(P.applies(read, high, null, high, null));
         const changed = [_]?Key{ low, null, .{ .position = 30, .ordinal = 3 } };
-        for (changed) |edge| try std.testing.expect(!P.applies(read, high, edge));
-        try std.testing.expect(P.applies(read, null, null));
-        try std.testing.expect(!P.applies(read, null, high));
+        for (changed) |edge| try std.testing.expect(!P.applies(read, high, null, edge, null));
+        try std.testing.expect(P.applies(read, null, null, null, null));
+        try std.testing.expect(!P.applies(read, null, null, high, null));
     }
-    for ([_]Read{ .scan, .opening, .permission }) |read| try std.testing.expect(P.applies(read, high, low));
+    for ([_]Read{ .scan, .opening, .permission }) |read| try std.testing.expect(P.applies(read, high, null, low, null));
     for ([_]usize{ 0, 7 }) |rows| {
         const attached = P.applyScan(high, high, null, null, rows);
         try std.testing.expect(attached.live_facts and attached.rows == .append);
@@ -286,24 +293,54 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     try std.testing.expectEqual(@as(i96, 0), scanDue(10, true));
 }
 
-test "feed_reads scan replay boundary residency" {
+test "feed_reads forward attachment domain for scan and fill_below" {
     const P = Policy(u64);
-    const cases = [_]struct { current: ?u64, high: u64, attach: bool }{
+    const cases = [_]struct { replace_from: ?u64 = 20, current: ?u64, high: u64, attach: bool }{
+        // Replay boundary retained / evicted / changed, crossed with high
+        // unchanged / changed. A front trim can evict 20 while high stays 30.
         .{ .current = 20, .high = 30, .attach = true },
         .{ .current = 20, .high = 31, .attach = false },
         .{ .current = null, .high = 30, .attach = false },
         .{ .current = null, .high = 31, .attach = false },
         .{ .current = 21, .high = 30, .attach = false },
         .{ .current = 21, .high = 31, .attach = false },
+        // An exclusive continuation also needs the same (null) boundary.
+        .{ .replace_from = null, .current = null, .high = 30, .attach = true },
+        .{ .replace_from = null, .current = null, .high = 31, .attach = false },
+        .{ .replace_from = null, .current = 20, .high = 30, .attach = false },
+        .{ .replace_from = null, .current = 20, .high = 31, .attach = false },
     };
-    for (cases) |case| {
-        const result = P.applyScan(case.high, 30, 20, case.current, 7);
-        try std.testing.expect(result.live_facts);
-        if (case.attach) {
-            try std.testing.expect(result.rows == .append);
-        } else {
-            try std.testing.expect(result.rows == .count_only);
-            try std.testing.expectEqual(@as(usize, 7), result.rows.count_only);
+    for (cases, 0..) |case, index| {
+        errdefer std.debug.print("forward attachment case {d}: {any}\n", .{ index, case });
+        try std.testing.expectEqual(case.attach, P.forwardAttaches(30, case.replace_from, case.high, case.current));
+        for ([_]Read{ .scan, .fill_below }) |read| {
+            errdefer std.debug.print("forward read: {s}\n", .{@tagName(read)});
+            const page = P.request(read, .{
+                .opening = false,
+                .now_ns = 0,
+                .scan_due_ns = 0,
+                .at_end = false,
+                .high = 30,
+                .scan_cursor = 30,
+                .window_provisional = case.replace_from,
+                .scan_provisional = case.replace_from,
+            }).?;
+            const applies = P.applies(read, page.started_from, page.replace_from, case.high, case.current);
+            switch (read) {
+                .scan => {
+                    // Detached scans still deliver live facts and count rows.
+                    try std.testing.expect(applies);
+                    const result = P.applyScan(case.high, page.started_from, page.replace_from, case.current, 7);
+                    try std.testing.expect(result.live_facts);
+                    try std.testing.expectEqual(case.attach, result.rows == .append);
+                    if (!case.attach) try std.testing.expectEqual(@as(usize, 7), result.rows.count_only);
+                },
+                .fill_below => try std.testing.expectEqual(case.attach, applies),
+                else => unreachable,
+            }
         }
+        // Backward fills depend only on the low edge, not replay state.
+        try std.testing.expect(P.applies(.fill_above, 10, case.replace_from, 10, case.current));
+        try std.testing.expect(!P.applies(.fill_above, 10, case.replace_from, 11, case.current));
     }
 }
