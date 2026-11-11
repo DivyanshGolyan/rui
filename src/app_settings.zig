@@ -34,11 +34,11 @@ narrow: bool = false,
 values: preferences.Values = .{},
 read_failed: bool = false,
 panel: Panel = .{ .title = "Rui" },
-fields: [5]Panel.Field = undefined,
+fields: [6]Panel.Field = undefined,
 /// The row awaiting the backend's answer. Displayed values always come from
 /// the saved file, including uncertain saves.
 saving_row: ?usize = null,
-failures: [5]?[]const u8 = @splat(null),
+failures: [6]?[]const u8 = @splat(null),
 effort_choices: [std.enums.values(catalog.ReasoningEffort).len + 1][]const u8 = undefined,
 effort_count: usize = 0,
 version: []const u8 = @import("transport_options").version,
@@ -83,6 +83,17 @@ fn model(self: *const Self) []const u8 {
     return if (self.values.model.len == 0) defaults.recommended_model else self.values.model.slice();
 }
 
+fn permissionMode(self: *const Self) protocol.PermissionMode {
+    return self.values.permission_mode orelse std.meta.stringToEnum(protocol.PermissionMode, defaults.permission_mode).?;
+}
+
+fn permissionText(mode: protocol.PermissionMode) []const u8 {
+    return switch (mode) {
+        .bypass => "run without asking",
+        .ask => "ask first",
+    };
+}
+
 fn bind(self: *Self) void {
     self.panel.userdata = self;
     self.panel.on_activate = activate;
@@ -90,8 +101,9 @@ fn bind(self: *Self) void {
     self.fields = .{
         .{ .label = "Model", .value = if (self.read_failed) "unavailable" else self.model(), .tail = self.failures[0] },
         .{ .label = "Effort", .value = if (self.read_failed) "unavailable" else if (self.values.reasoning_effort) |effort| @tagName(effort) else "model default", .tail = self.failures[1] },
-        .{ .label = "Notifications", .value = if (self.read_failed) "unavailable" else if (self.values.notifications) "on" else "off", .tail = self.failures[2] },
-        .{ .label = "Sign-in", .value = if (self.read_failed) "unavailable" else if (self.provider()) |saved| saved.signIn() else "unavailable", .tail = self.failures[3] },
+        .{ .label = "Permissions", .value = if (self.read_failed) "unavailable" else permissionText(self.permissionMode()), .tail = self.failures[2] },
+        .{ .label = "Notifications", .value = if (self.read_failed) "unavailable" else if (self.values.notifications) "on" else "off", .tail = self.failures[3] },
+        .{ .label = "Sign-in", .value = if (self.read_failed) "unavailable" else if (self.provider()) |saved| saved.signIn() else "unavailable", .tail = self.failures[4] },
         .{ .label = "Version", .value = self.version, .tail = self.versionTail() },
     };
     if (self.saving_row) |row| self.fields[row].tail = " · saving";
@@ -105,7 +117,7 @@ fn bind(self: *Self) void {
 }
 
 fn versionTail(self: *Self) ?[]const u8 {
-    if (self.failures[4]) |failure| return failure;
+    if (self.failures[5]) |failure| return failure;
     const backend = self.backend orelse return null;
     const run = backend.run(backend.context) orelse return null;
     return upgrade_status.fieldTail(run, &self.upgrade_buffer);
@@ -116,14 +128,14 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     const backend = self.backend orelse return;
     if (self.saving_row != null) return;
     self.failures[index] = null;
-    if (index == 4) {
+    if (index == 5) {
         backend.upgrade(backend.context) catch {
-            self.failures[4] = " · couldn't start upgrade";
+            self.failures[5] = " · couldn't start upgrade";
         };
         ctx.redraw = true;
         return;
     }
-    if (index == 3) return; // Sign-in stays selectable until its screen exists.
+    if (index == 4) return; // Sign-in stays selectable until its screen exists.
     try self.refresh();
     if (self.read_failed) return;
     switch (index) {
@@ -153,7 +165,8 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             }
             self.panel.openChoice(self.effort_choices[0..self.effort_count], current);
         },
-        2 => {
+        2 => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.permissionMode() == .bypass) 0 else 1),
+        3 => {
             const enabled = !self.values.notifications;
             try self.save(ctx, index, .{ .notifications = enabled });
         },
@@ -174,6 +187,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
                 .set = std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_choices[choice]).?,
             },
         },
+        2 => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
         else => unreachable,
     };
     try self.save(ctx, field, edit);
@@ -238,6 +252,7 @@ const Fixture = struct {
     save_status: SaveState = .idle,
     fail_read: bool = false,
     fail_save: bool = false,
+    home: ?[]const u8 = null,
     upgrades: usize = 0,
     last_edit: ?preferences.Edit = null,
     status: ?upgrade_status.Run = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 0 } }, .outcome = .unchanged } },
@@ -254,7 +269,10 @@ const Fixture = struct {
         const self: *Fixture = @ptrCast(@alignCast(raw));
         if (self.fail_save) return error.AccessDenied;
         self.last_edit = edit;
-        self.save_status = .pending;
+        if (self.home) |home| {
+            self.values = try preferences.update(home, edit, &.initFill(.configured));
+            self.save_status = .saved;
+        } else self.save_status = .pending;
     }
     fn saveState(raw: *anyopaque) SaveState {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -335,7 +353,7 @@ test "App settings choices submit typed edits and show saved values after the ba
     fixture.save_status = .saved;
     try page.widget().handleEvent(&ctx, .tick);
 
-    page.panel.selected = 2;
+    page.panel.selected = 3;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(?bool, false), fixture.last_edit.?.notifications);
     try std.testing.expect(page.values.notifications);
@@ -345,11 +363,11 @@ test "App settings choices submit typed edits and show saved values after the ba
     try std.testing.expect(!page.values.notifications);
 
     // Read-only sign-in doesn't submit, while Version delegates to Upgrade.
-    page.panel.selected = 3;
+    page.panel.selected = 4;
     fixture.last_edit = null;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
-    page.panel.selected = 4;
+    page.panel.selected = 5;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(usize, 1), fixture.upgrades);
     try std.testing.expectEqualStrings(upgrade_status.fieldTail(.checking, &page.upgrade_buffer), page.versionTail().?);
@@ -362,10 +380,10 @@ test "App settings failures stay on the field and can recover" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try page.refresh();
-    page.panel.selected = 2;
+    page.panel.selected = 3;
     fixture.fail_save = true;
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures[3].?);
     try std.testing.expect(page.values.notifications);
     fixture.fail_save = false;
     try press(&page, &ctx, vaxis.Key.enter);
@@ -373,19 +391,19 @@ test "App settings failures stay on the field and can recover" {
     fixture.values.notifications = false;
     fixture.save_status = .failed;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(page.failures[2] != null);
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expect(page.failures[3] != null);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures[3].?);
     try std.testing.expect(!page.values.notifications);
     try std.testing.expectEqual(@as(?usize, null), page.saving_row);
     page.bind();
-    try std.testing.expectEqualStrings(" · couldn't save", page.fields[2].tail.?);
+    try std.testing.expectEqualStrings(" · couldn't save", page.fields[3].tail.?);
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings(" · couldn't save", page.failures[2].?);
+    try std.testing.expectEqualStrings(" · couldn't save", page.failures[3].?);
     try press(&page, &ctx, vaxis.Key.enter);
     fixture.values.notifications = true;
     fixture.save_status = .saved;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqual(@as(?[]const u8, null), page.failures[2]);
+    try std.testing.expectEqual(@as(?[]const u8, null), page.failures[3]);
     fixture.fail_read = true;
     try page.refresh();
     try std.testing.expect(page.read_failed);
@@ -403,9 +421,9 @@ test "App settings completion uses the backend outcome and reports read failures
             defer arena.deinit();
             var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
             try page.refresh();
-            page.panel.selected = 2;
+            page.panel.selected = 3;
             try press(&page, &ctx, vaxis.Key.enter);
-            try std.testing.expectEqual(@as(?usize, 2), page.saving_row);
+            try std.testing.expectEqual(@as(?usize, 3), page.saving_row);
             fixture.save_status = state;
             fixture.fail_read = fail_read;
             // The saved file is authoritative for displayed values; the
@@ -416,11 +434,11 @@ test "App settings completion uses the backend outcome and reports read failures
             try std.testing.expect(page.values.notifications);
             const failure: ?[]const u8 = if (state == .failed) " · couldn't save" else if (fail_read) " · couldn't read settings" else null;
             if (failure) |text| {
-                try std.testing.expectEqualStrings(text, page.failures[2].?);
+                try std.testing.expectEqualStrings(text, page.failures[3].?);
                 page.bind();
-                try std.testing.expectEqualStrings(text, page.fields[2].tail.?);
+                try std.testing.expectEqualStrings(text, page.fields[3].tail.?);
             } else {
-                try std.testing.expectEqual(@as(?[]const u8, null), page.failures[2]);
+                try std.testing.expectEqual(@as(?[]const u8, null), page.failures[3]);
             }
         }
     }
@@ -450,6 +468,7 @@ test "App settings page text and ground at 99x20 and 46x20" {
         const model_row = try std.fmt.allocPrint(arena.allocator(), "   Model           {s}", .{defaults.recommended_model});
         try std.testing.expect(std.mem.indexOf(u8, text, model_row) != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
@@ -467,7 +486,7 @@ test "App settings sign-in and effort choices reflect saved values without assum
     var page: Self = .{ .backend = fixture.backend() };
     try page.refresh();
     page.bind();
-    try std.testing.expectEqualStrings("API key", page.fields[3].value);
+    try std.testing.expectEqualStrings("API key", page.fields[4].value);
     try std.testing.expectEqualStrings("model default", page.fields[1].value);
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -481,7 +500,7 @@ test "App settings sign-in and effort choices reflect saved values without assum
     try fixture.values.provider.set("legacy");
     try page.refresh();
     page.bind();
-    try std.testing.expectEqualStrings("unavailable", page.fields[3].value);
+    try std.testing.expectEqualStrings("unavailable", page.fields[4].value);
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
     try std.testing.expectEqualStrings(" · sign-in unavailable", page.failures[0].?);
@@ -520,4 +539,38 @@ test "App settings refresh invalidates choices tied to the old saved snapshot" {
     try std.testing.expect(!page.hasChoice());
     try std.testing.expect(page.read_failed);
     try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
+}
+
+test "App settings Permissions choices save both modes and display the saved words" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var fixture: Fixture = .{ .home = home };
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.refresh();
+    page.bind();
+    try std.testing.expectEqualStrings("Permissions", page.fields[2].label);
+    try std.testing.expectEqualStrings(permissionText(std.meta.stringToEnum(protocol.PermissionMode, defaults.permission_mode).?), page.fields[2].value);
+    page.panel.selected = 2;
+    for ([_]protocol.PermissionMode{ .ask, .bypass }) |mode| {
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.hasChoice());
+        try std.testing.expectEqual(@as(?usize, if (page.permissionMode() == .bypass) 0 else 1), page.panel.choice.?.current);
+        try std.testing.expectEqualStrings("run without asking", page.panel.choice.?.labels[0]);
+        try std.testing.expectEqualStrings("ask first", page.panel.choice.?.labels[1]);
+        page.panel.choice.?.selected = if (mode == .bypass) 0 else 1;
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(!page.hasChoice());
+        try std.testing.expectEqual(mode, fixture.last_edit.?.permission_mode.set);
+        try std.testing.expectEqual(.keep, fixture.last_edit.?.model);
+        try std.testing.expectEqual(.keep, fixture.last_edit.?.reasoning_effort);
+        try std.testing.expectEqual(mode, (try preferences.load(home)).permission_mode.?);
+        page.bind();
+        try std.testing.expectEqualStrings(if (mode == .bypass) "run without asking" else "ask first", page.fields[2].value);
+        try std.testing.expectEqual(@as(?usize, null), page.saving_row);
+    }
 }
