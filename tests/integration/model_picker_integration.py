@@ -10,7 +10,7 @@ import codex_fixture
 import host_process
 import model_fixture as fixture
 from human_cli_fixture import command_frame, overview_frame, overview_title, read_terminal, terminal_exit
-from terminal_process import open_pty, spawn
+from terminal_process import close_pty, open_pty, spawn
 
 
 def main():
@@ -70,8 +70,8 @@ def main():
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         caller = None
-        os.close(master)
-        os.close(slave)
+        close_pty(master)
+        close_pty(slave)
         master = slave = None
 
         master, slave = open_pty(columns=80, rows=24)
@@ -85,8 +85,8 @@ def main():
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         caller = None
-        os.close(master)
-        os.close(slave)
+        close_pty(master)
+        close_pty(slave)
         master = slave = None
 
         created = subprocess.run(
@@ -112,8 +112,8 @@ def main():
     finally:
         host_process.dispose_all(
             lambda: host_process.stop_process(caller, timeout=5) if caller else None,
-            lambda: os.close(master) if master is not None else None,
-            lambda: os.close(slave) if slave is not None else None,
+            lambda: close_pty(master) if master is not None else None,
+            lambda: close_pty(slave) if slave is not None else None,
             lambda: fixture.stop_host(host) if host else None,
             endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
         )
