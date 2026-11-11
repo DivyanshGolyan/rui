@@ -85,6 +85,17 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    // The sign-in row owns input even if the list had focus before it opened.
+    // In particular, key bytes must never reach a hidden task composer or the
+    // settings page beneath it. Route paste boundaries with those same bytes.
+    if (self.sign_in_open) switch (input) {
+        .key_press, .paste_start, .paste_end, .invalid_key => {
+            try self.sign_in_page.widget().handleEvent(ctx, input);
+            ctx.consumeEvent();
+            return;
+        },
+        else => {},
+    };
     switch (input) {
         .paste_start => self.pasting = true,
         .paste_end => self.pasting = false,
@@ -641,4 +652,28 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
             std.debug.print("\nSIGN-IN {s} {d}x12\n{s}END SIGN-IN\n", .{ @tagName(stage), width, text });
         }
     }
+}
+
+test "Sign-in input stays with the row over settings and a previously focused list" {
+    const empty: vxfw.Text = .{ .text = "" };
+    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .settings_open = true, .sign_in_open = true };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
+    const Events = @import("testing/app_events.zig").Events;
+    var input: Events = .init("\x1b[C\r\x1b[200~sk-masked\r\x1b[201~");
+    while (input.next()) |value| {
+        ctx.consume_event = false;
+        try root.widget().captureEvent(&ctx, value);
+        try std.testing.expect(ctx.consume_event);
+    }
+    try std.testing.expectEqual(@import("sign_in.zig").Stage.key_entry, root.sign_in_page.state.stage);
+    try std.testing.expectEqualStrings("sk-masked", root.sign_in_page.key.slice());
+    try std.testing.expect(!root.settings_page.hasChoice());
+    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, root.sign_in_page.state.stage);
+    try std.testing.expectEqual(@as(usize, 0), root.sign_in_page.key.len);
+    try std.testing.expect(root.settings_open);
+    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
+    try std.testing.expect(ctx.quit);
 }

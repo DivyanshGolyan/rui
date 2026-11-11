@@ -1152,6 +1152,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
 
 fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.root.sign_in_page.task.thread != null) return;
+    if (!view.admitsDefaultsEdit(&self.state) or self.state.save.running != null or self.defaults_save == .pending) return error.DefaultsUnavailable;
     self.root.sign_in_page.reset();
     self.root.sign_in_page.selectors = self.options.selectors;
     self.root.sign_in_page.selectors.store = self.options.store;
@@ -1195,7 +1196,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
     }
     self.root.sign_in_open = false;
     try self.root.showMain(ctx);
-    try ctx.requestFocus(self.app_input.composer.widget());
+    if (self.root.session == null) try ctx.requestFocus(self.app_input.composer.widget());
 }
 
 /// Accept one typed preference edit. Only this owner writes its worker queue;
@@ -6747,4 +6748,67 @@ test "App settings typed queued saves settle on departure and retain failures" {
         }
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
     }
+}
+
+test "Sign-in completion applies the core default and restores only a visible focus target" {
+    for ([_]bool{ false, true }) |session_open| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .low } }, &.initFill(.configured));
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        const session: vxfw.Text = .{ .text = "Retained Session" };
+        if (session_open) overview.root.session = session.widget();
+        overview.root.settings_open = true;
+        overview.root.sign_in_open = true;
+        var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
+        try activation.binding.provider.set("openai");
+        try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
+        try activation.store.set("/store");
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try signedIn(overview, &ctx, activation);
+        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
+        try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
+        try std.testing.expect(overview.state.login_at != null);
+        try std.testing.expect(!overview.root.sign_in_open and !overview.root.settings_open);
+        const expected = if (session_open) session.widget() else overview.app_input.composer.widget();
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(expected));
+        if (session_open) {
+            for (ctx.cmds.items) |command| if (command == .request_focus) {
+                try std.testing.expect(command.request_focus.eql(session.widget()));
+            };
+        }
+    }
+}
+
+test "Sign-in admission waits for every pending default writer and Host upgrade" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    for (0..4) |busy| {
+        switch (busy) {
+            0 => overview.defaults_save = .pending,
+            1 => overview.state.save.running = overview.state.default,
+            2 => overview.state.save.wanted = overview.state.default,
+            3 => overview.state.upgrade = .{ .run = .checking },
+            else => unreachable,
+        }
+        try std.testing.expectError(error.DefaultsUnavailable, overview.openSignIn(&ctx));
+        try std.testing.expect(!overview.root.sign_in_open);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        overview.defaults_save = .idle;
+        overview.state.save = .{};
+        overview.state.upgrade = .{};
+    }
+    try overview.openSignIn(&ctx);
+    try std.testing.expect(overview.root.sign_in_open);
 }

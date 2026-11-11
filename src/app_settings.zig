@@ -173,7 +173,10 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
             self.failures.set(.version, " · couldn't start upgrade");
         },
         .sign_in => {
-            if (backend.sign_in) |open| try open(backend.context, ctx);
+            if (backend.sign_in) |open| open(backend.context, ctx) catch |err| {
+                if (err != error.DefaultsUnavailable) return err;
+                self.failures.set(.sign_in, " · settings busy");
+            };
             return;
         },
         .model, .effort, .permissions, .notifications => {
@@ -618,8 +621,10 @@ test "App settings Permissions choices save both modes and display the saved wor
 test "App settings Sign-in row opens the shared sign-in screen on Enter" {
     const SignIn = struct {
         opens: usize = 0,
+        busy: bool = false,
         fn open(raw: *anyopaque, _: *vxfw.EventContext) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.busy) return error.DefaultsUnavailable;
             self.opens += 1;
         }
     };
@@ -639,4 +644,8 @@ test "App settings Sign-in row opens the shared sign-in screen on Enter" {
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqual(@as(usize, 1), owner.opens);
     try std.testing.expect(!page.hasChoice());
+    owner.busy = true;
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), owner.opens);
+    try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
 }

@@ -1802,6 +1802,12 @@ def provider_line_cases():
         assert refused.returncode == 2 and "[terminal_required]" in refused.stderr, refused
         assert "rui needs terminal input and output" in refused.stderr, refused.stderr
         assert not (no_tty / ".config").exists() and not (no_tty / ".local").exists()
+        scripted = subprocess.run([str(fixture.RUI), "session", "start", "--store", str(no_tty / "store")],
+            cwd=state, env={**os.environ, "HOME": str(no_tty)}, input="script task",
+            capture_output=True, text=True, timeout=5)
+        assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
+        assert "[ChatGPT]" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
+        assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
         for choice in ("codex", "key", "device", "escape"):
             home = state / choice
             config = home / ".config/rui"
@@ -1850,7 +1856,13 @@ def provider_line_cases():
                         os.write(master, b"\x1b")
                         read_terminal(master, "[ChatGPT]", fresh=True)
                     else:
-                        os.write(master, b"hello\x1b")
+                        # Choice typing does nothing. Escape from key entry
+                        # returns to a visibly different choice frame before
+                        # Ctrl-C, so it cannot become an Alt+Ctrl-C sequence.
+                        os.write(master, b"hello\x1b[C\r")
+                        read_terminal(master, "esc back")
+                        os.write(master, b"\x1b")
+                        read_terminal(master, "←→ choose · enter", fresh=True)
                 os.write(master, b"\x03")
                 output, errors = terminal_exit(caller, master)
                 assert caller.returncode == 0, (choice, caller.returncode, errors)
