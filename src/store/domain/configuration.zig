@@ -126,9 +126,9 @@ pub const CurrentConfiguration = struct {
     provider: provider_name.Provider = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
-    /// The saved tool set; 0 until a creation saves its first.
+    /// Configured name intent; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
-    /// Null means every configured tool is loaded.
+    /// Loaded name intent. Null means every configured name.
     loaded_tool_set_id: ?u64 = null,
     permission_mode: u8 = 0,
     output_schema_id: ?i64 = null,
@@ -538,6 +538,8 @@ pub const creation_hint = rsql.Read(.{
 });
 
 /// Parent inheritance has one admission owner for start_agent and native create.
+/// Its ceiling is configured intent, not loaded intent or an Operation offer;
+/// the ordinary configuration validation still checks Host tool set availability.
 const parent_settings = rsql.Read(.{
     .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1 " ++
         "AND NOT EXISTS(SELECT 1 FROM session_archive archived WHERE archived.session_ref=session.session_ref AND archived.command_key IS NOT NULL)",

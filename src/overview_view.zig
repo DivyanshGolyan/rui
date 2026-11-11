@@ -1087,6 +1087,9 @@ pub const State = struct {
     save: Save = .{},
     /// The screen the shell draws, which `layout` divides.
     size: Size = .{},
+    /// The shell shows its one Host line above the input this frame. The
+    /// shell owns what the line says; `layout` owns the row it takes.
+    host_line: bool = false,
     /// Open from /model until a pick, Esc or typing; it acts only while
     /// `layout` shows it.
     picker: ?Picker = null,
@@ -1131,8 +1134,9 @@ pub const State = struct {
     pending: Vec(Row) = .{},
     next_list_ms: u64 = 0,
     listed_at_ms: ?u64 = null,
-    /// The Host has not answered a list request since this time.
-    unreachable_since_ms: ?u64 = null,
+    /// The latest listing failed. Rows remain visible but faded and still;
+    /// this is list freshness, not a Host availability observation.
+    list_stale: bool = false,
     /// Sort scratch reused across refreshes.
     sort_keys: Vec(SortKey) = .{},
 
@@ -1645,7 +1649,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 std.debug.assert(state.listing);
                 state.listing = false;
                 state.pending.items.len = 0;
-                if (state.unreachable_since_ms == null) state.unreachable_since_ms = state.now_ms;
+                state.list_stale = true;
             },
         },
         .first_line => |result| try firstLine(state, result),
@@ -2061,7 +2065,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     state.pending.items.len = 0;
     state.token = answer.since;
     state.listed_at_ms = state.now_ms;
-    state.unreachable_since_ms = null;
+    state.list_stale = false;
     try arrange(state);
     if (completed_archive) |ref| state.say(.quiet, "Archived {s}.", .{&ref});
     if (state.selected == .session and state.selectedRow() == null) {
@@ -3036,14 +3040,17 @@ const unicode_glyphs: Glyphs = .{ .prompt = "›", .dot = work_line.glyphs.get(.
 const ascii_glyphs: Glyphs = .{ .prompt = ">", .dot = work_line.glyphs.get(.ascii).dot, .rule = "-", .ellipsis = work_line.glyphs.get(.ascii).ellipsis, .arrows = "^v", .sides = "<>", .up = "^", .down = "v", .newline = "|" };
 
 /// Where App's rows go: any provider band from row 0, the list (or the
-/// panel or picker in its place), the pinned Settings tail, then the input
-/// area. The core reads it to know what shows, and the overview's widgets
-/// draw by it.
+/// panel or picker in its place), the pinned Settings tail, any Host line,
+/// then the input area. The core reads it to know what shows, and the
+/// overview's widgets draw by it.
 pub const Layout = struct {
     top: u16 = 0,
     list: Rows = .{},
     /// The pinned tail under the list: its rule and the Settings row.
     settings: Rows = .{},
+    /// The shell's Host line between the Settings tail and the input, when
+    /// it shows.
+    host: Rows = .{},
     /// The input area's first row: the composer's top rule.
     input: u16 = 0,
 
@@ -3058,16 +3065,17 @@ pub const Layout = struct {
 };
 
 /// The rows of `state`'s screen. The input area is the composer's rules
-/// around its draft row, the status's rows, and one Footer. The Settings
-/// tail takes its rows above the input before the list, which occupies the
-/// rest.
+/// around its draft row, the status's rows, and one Footer. Any Host line
+/// sits directly above the input, the Settings tail above that, and the
+/// list occupies the rest.
 pub fn layout(state: *const State) Layout {
     const height = state.size.height;
     if (height == 0 or state.size.width == 0) return .{};
     const top: u16 = @intCast(@min(topRows(state), height));
     const input = @max(top, height -| (3 + statusRows(state) + 1));
-    const settings = @max(top, input -| settings_rows);
-    return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = input }, .input = input };
+    const host = @max(top, input -| @intFromBool(state.host_line));
+    const settings = @max(top, host -| settings_rows);
+    return .{ .top = top, .list = .{ .start = top, .end = settings }, .settings = .{ .start = settings, .end = host }, .host = .{ .start = host, .end = input }, .input = input };
 }
 
 /// The Settings tail's rows: its rule and the Settings row.
@@ -3536,7 +3544,7 @@ pub fn rowSecondSegments(arena: Allocator, state: *const State, at: usize, width
 /// Unicode in colour spins, and a faded row's state is stale, so it holds
 /// still.
 pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
-    if (item != .row or state.unreachable_since_ms != null or !caps.unicode or caps.depth == .none) return false;
+    if (item != .row or state.list_stale or !caps.unicode or caps.depth == .none) return false;
     const row = &state.rows.items[state.order.items[item.row]];
     return row.from_person_at != null and rules.get(shownKind(state, row)).spins;
 }
@@ -4350,7 +4358,7 @@ test "App header preserves provider recovery without a counts or Host-stopped ba
     defer arena.deinit();
     var state = try opened(&.{failedRow("aaaaaa", 60, "provider_http_401", null)});
     defer state.deinit();
-    state.unreachable_since_ms = state.now_ms - 5000;
+    state.list_stale = true;
     const segments = try headerSegments(arena.allocator(), &state, 100, .{});
     try std.testing.expectEqual(Background.band, (try styleOf(segments, "Sign-in expired. Run ")).background);
     const text = try segmentText(arena.allocator(), segments);
@@ -4481,7 +4489,7 @@ test "your Sessions at work turn the spinner in step, and every other mark holds
     try std.testing.expectEqualStrings("⠹", markOf(asked, "Mine, thinking"));
     // ASCII, NO_COLOR and a faded screen hold still on every frame.
     for ([_]Caps{ .{ .unicode = false }, .{ .depth = .none }, .{ .unicode = false, .depth = .none }, .{} }, 0..) |caps, at| {
-        if (at == 3) state.unreachable_since_ms = state.now_ms;
+        if (at == 3) state.list_stale = true;
         const first = try screenText(&state, 80, 24, caps);
         defer std.testing.allocator.free(first);
         for (1..spinner.len + 1) |frame| {
@@ -7477,8 +7485,8 @@ test "overview long name fills to the age and detail never overlaps its folder" 
     const second = try rowSecondSegments(arena.allocator(), &state, 0, 40, .{});
     try std.testing.expectEqualStrings(" ✓ abcdefghijklmnopqrstuvwxyzABCDE… 19s ", try segmentText(arena.allocator(), first));
     try std.testing.expectEqualStrings("   A very long result that must … drift ", try segmentText(arena.allocator(), second));
-    // Host loss does not grey ended names, and unsafe bytes never escape.
-    state.unreachable_since_ms = state.now_ms;
+    // A stale listing does not grey ended names, and unsafe bytes never escape.
+    state.list_stale = true;
     const faded = try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0);
     try std.testing.expectEqual(Colour.strong, (try styleOf(faded, "abcdefghijklmnopqrstuvwxyzABCDE…")).colour);
 }

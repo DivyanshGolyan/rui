@@ -14,7 +14,8 @@ const Body = union(enum) {
     none,
     omitted,
     whole: Span,
-    tool: struct { tail: Span, facts: View.ToolHeaderFacts },
+    /// A Tool Result's heading facts; its output is read only when its row opens.
+    tool: View.ToolHeaderFacts,
 };
 
 /// Owns metadata; borrows unchanged scratch from successful prepare to render.
@@ -69,13 +70,12 @@ pub const Prepared = struct {
             };
             const span: Span = switch (prepared_body) {
                 .whole => |span| span,
-                .tool => |tool| tool.tail,
-                .none => .{ .offset = 0, .length = 0 },
+                .none, .tool => .{ .offset = 0, .length = 0 },
                 .omitted => unreachable,
             };
             const staged: Staged = .{ .io = io, .scratch = scratch, .start = span.offset, .bytes = span.length, .window = &window };
             if (item.kind == .tool_result or item.kind == .hosted_call) {
-                try View.toolResultRow(item.presentation.?, if (prepared_body == .tool) prepared_body.tool.facts else .{}, if (item.kind == .tool_result) tool_fold.Reference{ .position = item.position, .ordinal = item.ordinal, .content = .{ .length = item.content.bytes, .digest = item.content.digest } } else null, sink, colour, &compact);
+                try View.toolResultRow(item.presentation.?, if (prepared_body == .tool) prepared_body.tool else .{}, if (item.kind == .tool_result) tool_fold.Reference{ .position = item.position, .ordinal = item.ordinal, .content = .{ .length = item.content.bytes, .digest = item.content.digest } } else null, sink, colour, &compact);
                 continue;
             }
             compact = false;
@@ -131,8 +131,8 @@ pub fn prepare(requests: client.Requests, store: []const u8, session: []const u8
     return stagePage(requests.io, page, scratch, Source{ .requests = requests, .store = store, .session = session });
 }
 
-// The source authenticates the complete result, including discarded prefixes.
-// After all writes, scratch is checked against independently received retained bytes.
+// The source authenticates each complete item, including Tool Results that keep nothing.
+// After all writes, scratch is checked against each staged item's digest.
 fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.File, source: anytype) !Prepared {
     var prepared: Prepared = .{ .page = page };
     try scratch.setLength(io, 0);
@@ -141,25 +141,18 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
         file: std.Io.File,
         start: u64,
         total: u64,
-        skip: u64,
+        /// A Tool Result keeps only its heading facts: nothing of it is staged.
+        retain: bool,
         received: u64 = 0,
-        retained: u64 = 0,
-        hash: std.crypto.hash.sha2.Sha256 = protocol.contentHasher(),
         header: View.ToolHeaderScan = .{},
 
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             if (bytes.len > self.total - self.received) return error.ContentBindingMismatch;
-            try self.header.feed(bytes);
-            const discard: usize = @intCast(@min(bytes.len, self.skip -| self.received));
-            const tail = bytes[discard..];
-            self.hash.update(tail);
-            if (tail.len != 0) try self.file.writePositionalAll(self.io, tail, self.start + self.retained);
+            if (self.retain) try self.file.writePositionalAll(self.io, bytes, self.start + self.received) else try self.header.feed(bytes);
             self.received += bytes.len;
-            self.retained += tail.len;
         }
     };
     var end: u64 = 0;
-    var expected_digests: [protocol.public_conversation_page_items][32]u8 = undefined;
     for (page.items[0..page.count], 0..) |item, index| {
         if (item.kind == .hosted_call or item.sender != null) continue;
         const tool = item.kind == .tool_result;
@@ -167,23 +160,22 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
             prepared.bodies[index] = .omitted;
             continue;
         }
-        const length = @min(item.content.bytes, item_bytes);
-        var staging: Staging = .{ .io = io, .file = scratch, .start = end, .total = item.content.bytes, .skip = item.content.bytes - length };
+        var staging: Staging = .{ .io = io, .file = scratch, .start = end, .total = item.content.bytes, .retain = !tool };
         try source.read(item, index, &staging);
         if (staging.received != item.content.bytes) return error.ContentBindingMismatch;
-        std.debug.assert(staging.retained == length);
-        expected_digests[index] = if (tool) staging.hash.finalResult() else item.content.digest;
-        const span: Span = .{ .offset = end, .length = length };
-        prepared.bodies[index] = if (tool) .{ .tool = .{ .tail = span, .facts = staging.header.facts(item.presentation.?.code) } } else .{ .whole = span };
-        end += length;
+        if (tool) {
+            prepared.bodies[index] = .{ .tool = staging.header.facts(item.presentation.?.code) };
+            continue;
+        }
+        prepared.bodies[index] = .{ .whole = .{ .offset = end, .length = item.content.bytes } };
+        end += item.content.bytes;
         std.debug.assert(end <= max_scratch_bytes);
     }
     var window: [protocol.content_window_bytes]u8 = undefined;
     for (prepared.bodies[0..page.count], 0..) |body, index| {
         const span = switch (body) {
             .whole => |span| span,
-            .tool => |tool| tool.tail,
-            .none, .omitted => continue,
+            .none, .omitted, .tool => continue,
         };
         var hash = protocol.contentHasher();
         var offset: u64 = 0;
@@ -193,7 +185,7 @@ fn stagePage(io: std.Io, page: protocol_reply.ConversationPage, scratch: std.Io.
             hash.update(window[0..wanted]);
             offset += wanted;
         }
-        if (!std.mem.eql(u8, &hash.finalResult(), &expected_digests[index])) return error.ContentBindingMismatch;
+        if (!std.mem.eql(u8, &hash.finalResult(), &page.items[index].content.digest)) return error.ContentBindingMismatch;
     }
     return prepared;
 }
@@ -252,7 +244,7 @@ test "historical export preserves hex Store escaping and canonical Session IDs" 
         "\n\x1b[2;8m← Received message from \x1b]8;;rui-session:k7m2qx\x1b\\\x1b[4mk7m2qx\x1b]8;;\x1b\\\x1b[0m\x1b[2;8m\x1b[8m{s}\x1b[0m\n", .{ clock, identity, identity, clock }), sink.bytes[0..sink.length]);
 }
 
-test "history tool tails are exact bounded suffixes and transcript headers only" {
+test "history stages nothing of a Tool Result and shows its heading only" {
     const Sink = struct {
         bytes: [32 * 1024]u8 = undefined,
         length: usize = 0,
@@ -293,14 +285,9 @@ test "history tool tails are exact bounded suffixes and transcript headers only"
                 var page: protocol_reply.ConversationPage = .{ .end = 7, .count = 1, .more = false };
                 page.items[0] = .{ .position = 7, .ordinal = 2, .kind = .tool_result, .content = .{ .bytes = size, .digest = protocol.contentDigest(bytes[0..size]) }, .presentation = .{ .description = description, .code = code, .publication_position = 7 } };
                 const prepared = try stagePage(io, page, scratch, Bytes{ .body = bytes[0..size], .chunk = chunk });
-                const retained = @min(size, item_bytes);
-                const span = prepared.bodies[0].tool.tail;
-                try std.testing.expectEqual(retained, span.length);
-                var staged: [8192]u8 = undefined;
-                try std.testing.expectEqual(retained, try scratch.readPositionalAll(io, staged[0..retained], span.offset));
-                try std.testing.expectEqualSlices(u8, bytes[size - retained .. size], staged[0..retained]);
-                var extra: [1]u8 = undefined;
-                try std.testing.expectEqual(@as(usize, 0), try scratch.readPositionalAll(io, &extra, retained));
+                // Nothing of a Tool Result is staged, whatever its size.
+                try std.testing.expect(prepared.bodies[0] == .tool);
+                try std.testing.expectEqual(@as(u64, 0), (try scratch.stat(io)).size);
                 var sink: Sink = .{};
                 try prepared.render(io, scratch, "store", "09azvw", &sink, false, "", .terminal);
                 var heading: Sink = .{};
@@ -339,9 +326,8 @@ test "history mixed retained spans respect the page scratch ceiling" {
         const prepared = try stagePage(io, page, scratch, source);
         for (prepared.bodies, source.bodies) |body, raw| {
             const span = switch (body) {
-                .tool => |tool| tool.tail,
                 .whole => |span| span,
-                .omitted => continue,
+                .omitted, .tool => continue,
                 .none => return error.MissingPreparedBody,
             };
             try std.testing.expectEqual(expected, span.offset);
@@ -351,7 +337,7 @@ test "history mixed retained spans respect the page scratch ceiling" {
             try std.testing.expectEqual(length, try scratch.readPositionalAll(io, staged[0..length], span.offset));
             try std.testing.expectEqualSlices(u8, raw[raw.len - length ..], staged[0..length]);
         }
-        try std.testing.expectEqual(if (mixed) @as(u64, 4 * (8192 + 6)) else max_scratch_bytes, expected);
+        try std.testing.expectEqual(@as(u64, if (mixed) 4 * 6 else 0), expected);
         var extra: [1]u8 = undefined;
         try std.testing.expectEqual(@as(usize, 0), try scratch.readPositionalAll(io, &extra, expected));
     }
@@ -569,7 +555,7 @@ test "history preparation binds wire and staged bytes before exposure" {
     }
 }
 
-test "history tool suffix authenticates discarded prefixes through the production reader" {
+test "history authenticates a whole Tool Result through the production reader and stages none of it" {
     const Peer = struct {
         var client_fd: std.posix.fd_t = undefined;
         var failure: ?anyerror = null;
@@ -672,9 +658,7 @@ test "history tool suffix authenticates discarded prefixes through the productio
             if (mode == .intact) {
                 try result;
                 if (surface == .history) {
-                    var retained: [8192]u8 = undefined;
-                    try std.testing.expectEqual(item_bytes, try scratch.readPositionalAll(io, &retained, 0));
-                    try std.testing.expectEqualSlices(u8, body[body.len - item_bytes ..], &retained);
+                    try std.testing.expectEqual(@as(u64, 0), (try scratch.stat(io)).size);
                 } else try std.testing.expectEqualStrings("\n× Tool call\n", sink.bytes[0..sink.length]);
             } else {
                 try std.testing.expectEqual(@as(usize, 0), sink.length);
@@ -688,7 +672,7 @@ test "history tool suffix authenticates discarded prefixes through the productio
     }
 }
 
-test "history tool suffix rejects scratch corruption and dropped writes at every retained window" {
+test "history rejects scratch corruption and dropped writes at every staged window" {
     const Fault = struct {
         var at: u64 = 0;
         var drop: bool = false;
@@ -731,27 +715,28 @@ test "history tool suffix rejects scratch corruption and dropped writes at every
     var vtable = io.vtable.*;
     vtable.fileWritePositional = Fault.stage;
     const faulty_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    const body = &@as([16385]u8, @splat('x'));
+    const body = &@as([item_bytes]u8, @splat('x'));
     var page: protocol_reply.ConversationPage = .{ .end = 2, .count = 2, .more = false };
     for (page.items[0..2], 0..) |*item, index| {
         const text = if (index == 0) body else "";
-        item.* = .{ .position = 2 - index, .ordinal = 0, .kind = .tool_result, .content = .{ .bytes = text.len, .digest = protocol.contentDigest(text) }, .presentation = .{ .description = null, .code = .succeeded, .publication_position = 2 - index } };
+        item.* = .{ .position = 2 - index, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = text.len, .digest = protocol.contentDigest(text) } };
     }
-    for ([_]u64{ 0, 4095, 8191 }) |offset| {
+    const last = item_bytes - protocol.content_window_bytes;
+    for ([_]u64{ 0, last }) |offset| {
         for ([_]bool{ false, true }) |drop| {
             Fault.at = offset;
             Fault.drop = drop;
             Fault.hits = 0;
             const result = stagePage(faulty_io, page, scratch, Source{ .body = body });
             try std.testing.expectEqual(@as(usize, 1), Fault.hits);
-            if (drop and offset == 8191) {
+            if (drop and offset == last) {
                 try std.testing.expectError(error.TruncatedHistoryScratch, result);
             } else try std.testing.expectError(error.ContentBindingMismatch, result);
         }
     }
 }
 
-test "history tool suffix rejects later writes corrupting earlier spans" {
+test "history rejects later writes corrupting earlier staged spans" {
     const Fault = struct {
         var hits: usize = 0;
         fn stage(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
@@ -786,23 +771,23 @@ test "history tool suffix rejects later writes corrupting earlier spans" {
     var vtable = io.vtable.*;
     vtable.fileWritePositional = Fault.stage;
     const faulty_io: std.Io = .{ .userdata = io.userdata, .vtable = &vtable };
-    const first = &@as([8193]u8, @splat('x'));
-    const second = &@as([8194]u8, @splat('y'));
+    const first = &@as([item_bytes]u8, @splat('x'));
+    const second = &@as([item_bytes]u8, @splat('y'));
     const source: Source = .{ .bodies = .{ first, second } };
     var page: protocol_reply.ConversationPage = .{ .end = 2, .count = 2, .more = false };
     for (page.items[0..2], source.bodies, 0..) |*item, body, index| {
-        item.* = .{ .position = 2 - index, .ordinal = 0, .kind = .tool_result, .content = .{ .bytes = body.len, .digest = protocol.contentDigest(body) }, .presentation = .{ .description = null, .code = .succeeded, .publication_position = 2 - index } };
+        item.* = .{ .position = 2 - index, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = body.len, .digest = protocol.contentDigest(body) } };
     }
     Fault.hits = 0;
     const result = stagePage(faulty_io, page, scratch, source);
     try std.testing.expectEqual(@as(usize, 1), Fault.hits);
     var retained: [item_bytes]u8 = undefined;
     try std.testing.expectEqual(retained.len, try scratch.readPositionalAll(io, &retained, item_bytes));
-    try std.testing.expectEqualSlices(u8, second[2..], &retained);
+    try std.testing.expectEqualSlices(u8, second, &retained);
     try std.testing.expectError(error.ContentBindingMismatch, result);
 }
 
-test "history tool raw suffix boundary stays exact without revealing controls" {
+test "history shows only the heading of a Tool Result that holds controls" {
     const Sink = struct {
         bytes: [16 * 1024]u8 = undefined,
         length: usize = 0,
@@ -828,9 +813,7 @@ test "history tool raw suffix boundary stays exact without revealing controls" {
     var page: protocol_reply.ConversationPage = .{ .end = 1, .count = 1, .more = false };
     page.items[0] = .{ .position = 1, .ordinal = 0, .kind = .tool_result, .content = .{ .bytes = body.len, .digest = protocol.contentDigest(&body) }, .presentation = .{ .description = null, .code = .succeeded, .publication_position = 1 } };
     const prepared = try stagePage(io, page, scratch, Source{ .body = &body });
-    var raw: [8192]u8 = undefined;
-    try std.testing.expectEqual(raw.len, try scratch.readPositionalAll(io, &raw, 0));
-    try std.testing.expectEqualSlices(u8, body[8..], &raw);
+    try std.testing.expectEqual(@as(u64, 0), (try scratch.stat(io)).size);
     var sink: Sink = .{};
     try prepared.render(io, scratch, "store", "09azvw", &sink, false, "", .terminal);
     const output = sink.bytes[0..sink.length];

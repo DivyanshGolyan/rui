@@ -50,7 +50,7 @@ test "overview header draws no counts view name or Host-stopped band" {
     const plain = try header.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 0), plain.size.height);
     state.archive = .archived;
-    state.unreachable_since_ms = state.now_ms;
+    state.list_stale = true;
     const stopped = try header.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 0), stopped.size.height);
 }

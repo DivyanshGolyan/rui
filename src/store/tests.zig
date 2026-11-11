@@ -1558,20 +1558,31 @@ test "Session list capture and cursor storage stay page bounded as dormant Sessi
             var root: [protocol.max_store_bytes]u8 = undefined;
             const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
             var used = std.atomic.Value(u64).init(0);
-            var first_length: usize = 0;
+            var first_fixed_length: usize = 0;
             for (0..1000) |i| {
                 var key_buffer: [32]u8 = undefined;
                 const key = try std.fmt.bufPrint(&key_buffer, "dormant-key-{d}", .{i});
                 var config = try completeConfiguration(key, "", workspace, "model");
-                try std.testing.expect(try storage.configure(&config, .{}) == .accepted);
+                const reply = try storage.configure(&config, .{});
+                // 1,000 creations share these lines: name the one that failed.
+                errdefer std.debug.print("dormant Session {d} (every write run twice: {}): {any}\n", .{ i, case.rerun, reply });
+                try std.testing.expect(reply == .accepted);
                 if (i == 99 or i == 999) {
+                    // The change hint counts writes, not Sessions (and can
+                    // include rolled-back writes). Cross a wider token boundary
+                    // independently of the population's 100 -> 1000 boundary.
+                    _ = storage.commit_generation.fetchAdd(if (i == 99) 900 else 100000, .release);
                     const bytes = try testingSessionList(&storage, &tmp, .{}, &used, i + 1);
                     defer std.testing.allocator.free(bytes);
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
                     defer parsed.deinit();
-                    try std.testing.expectEqual(@as(usize, protocol.session_list_page_size), parsed.value.object.get("sessions").?.array.items.len);
-                    // Only the ceiling and the token's generation gain a digit.
-                    if (i == 99) first_length = bytes.len else try std.testing.expect(bytes.len <= first_length + 2);
+                    const page = parsed.value.object;
+                    try std.testing.expectEqual(@as(usize, protocol.session_list_page_size), page.get("sessions").?.array.items.len);
+                    // The same first page and continuation remain byte bounded;
+                    // only the opaque token and ceiling may change their widths.
+                    const variable_bytes = page.get("since").?.string.len + page.get("next").?.object.get("ceiling").?.string.len;
+                    const fixed_bytes = bytes.len - variable_bytes;
+                    if (i == 99) first_fixed_length = fixed_bytes else try std.testing.expectEqual(first_fixed_length, fixed_bytes);
                     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
                 }
             }
@@ -2781,6 +2792,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/session_list_read.zig"),
         @embedFile("domain/session_report_read.zig"),
         @embedFile("domain/skills.zig"),
+        @embedFile("domain/tool_offer.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("mysql_literal.zig"),
@@ -10589,6 +10601,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/session_list_read.zig"),
         @embedFile("domain/session_report_read.zig"),
         @embedFile("domain/skills.zig"),
+        @embedFile("domain/tool_offer.zig"),
         @embedFile("domain/tool_set.zig"),
         @embedFile("domain/turn.zig"),
         @embedFile("mysql_literal.zig"),
@@ -11561,17 +11574,17 @@ test "complete historical tool-result traversal scales with groups and calls, in
 /// A bound fixture statement that adds `?1` failed Operations after
 /// Operation `?2`, in its Turn.
 const failed_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-    "attempt_ordinal,output_reservation,resolution_code,resolved_at) " ++
+    "attempt_ordinal,output_reservation,resolution_code,resolved_at,tool_set_id) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-    "1,0,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+    "1,0,'failed',1,current.tool_set_id FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 /// `failed_operations_sql`, the Operations alternating in purpose.
 const failed_purpose_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-    "output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+    "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-    "0,1,'failed',1 FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+    "0,1,'failed',1,current.tool_set_id FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 test "historical accepted output selection work excludes failed Operation population, in rounds" {
     try store_testing.forEachEngine(struct {
@@ -11756,9 +11769,9 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 sequence_to_first_argument ++
                 "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
                 sequence_to_first_argument ++
-                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1 FROM sequence", .{ history, session.slice(), start });
+                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT value,0,?2,?3+4*(value-1)+1,3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
@@ -11856,9 +11869,9 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             // Each tool group names its Turn before the Turn row exists. A
             // cancelled Turn needs no answer content.
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1 FROM sequence", .{ history, session.slice(), start });
+                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT 1000+value,0,?2,?3+3*(value-1),3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });

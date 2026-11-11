@@ -161,9 +161,22 @@ def command_frame(master, command, accept, timeout=15, *, end="\r"):
     return found[0]
 
 
+def chat_content_row(row):
+    """Remove exactly the feed's one-column gutter, preserving text indentation.
+
+    Use on transcript, page and activity rows, not composer/facts/status rows:
+    those keep their own margins and physical cursor/width assertions.
+    """
+    return row.removeprefix(" ")
+
+
 def conversation_text(frame):
-    """Transcript rows alone, without a wide shell's list and divider."""
-    return "\n".join(row.partition("│")[2] if "│" in row else row for row in frame.split("\n"))
+    """Chat-column text without the wide list/divider or one feed gutter.
+
+    A semantic text projection, not a screen for cursor/column assertions.
+    """
+    return "\n".join(chat_content_row(row.partition("│")[2] if "│" in row else row)
+                     for row in frame.split("\n"))
 
 
 def composer_line(screen, y):
