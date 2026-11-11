@@ -130,6 +130,11 @@ fn nonBashCallSql(comptime first: u8) []const u8 {
     return "(" ++ coreCallSql(first) ++ " OR " ++ mcpCallSql("action", "operation") ++ ")";
 }
 
+fn bashReadySql(comptime first: u8) []const u8 {
+    return "action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+        "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ nonBashCallSql(first);
+}
+
 /// The next Action ready for an Attempt, with its Session. Reads only
 /// `action_operation_executable`, so an Action waiting for permission costs
 /// admission nothing.
@@ -138,9 +143,7 @@ const next_action_attempt = rsql.Read(.{
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
         "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
-        "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-        "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ nonBashCallSql(1) ++ " " ++
+        "WHERE " ++ bashReadySql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
     .Args = CoreNames.Args(struct {}),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, bash_timeout_override_ms: ?rsql.Positive, session: rsql.SessionHead },
@@ -790,13 +793,17 @@ const mcp_serial_sql = "NOT EXISTS(SELECT 1 FROM action_operation earlier JOIN m
     "WHERE earlier.session_ref=action.session_ref AND earlier.resolution_code IS NULL " ++
     "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND " ++ mcpCallSql("earlier", "earlier_operation") ++ ")";
 
+// Runner identity is established by mcpCallSql for point lookups and by the
+// frozen-offer joins in the ordered selection. The remaining readiness is shared.
+const mcp_ready_sql = "action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+    "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
+    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcp_serial_sql;
+
 const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,NULL AS timeout_override_ms " ++
     "FROM action_operation action @index(action_operation_executable) " ++
     "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
     "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
-    "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-    "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
-    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcpCallSql("action", "operation") ++ " AND " ++ mcp_serial_sql;
+    "WHERE " ++ mcp_ready_sql ++ " AND " ++ mcpCallSql("action", "operation");
 const ReadyFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: rsql.SessionHead, timeout_override_ms: ?rsql.Positive };
 // Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
 // offers never open their call ranges; candidate calls seek their Action by
@@ -812,10 +819,7 @@ const next_mcp_action = rsql.Read(.{
         "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
         "CROSS JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
-        "WHERE active.outcome_code IS NULL AND action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
-        "AND " ++ mcp_serial_sql ++ " ORDER BY action.action_id LIMIT 1",
+        "WHERE " ++ mcp_ready_sql ++ " ORDER BY action.action_id LIMIT 1",
     .Args = struct {},
     .Row = struct { action_id: rsql.Positive, server: Bounded(tool_catalog.max_server_bytes) },
     .cardinality = .optional,
@@ -852,8 +856,7 @@ const bash_facts = rsql.Read(.{
     .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,action.bash_timeout_override_ms AS timeout_override_ms " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
-        "WHERE action.action_id=?1 AND action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-        "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ nonBashCallSql(2),
+        "WHERE action.action_id=?1 AND " ++ bashReadySql(2),
     .Args = CoreNames.Args(struct { action_id: u64 }),
     .Row = ReadyFacts,
     .cardinality = .optional,

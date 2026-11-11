@@ -10812,3 +10812,43 @@ test "an engine OutOfMemory under configure, a skills reload or a catalog read a
         try std.testing.expect(!storage.isFenced());
     }
 }
+
+test "Bash admission entry points agree on readiness" {
+    const Case = enum { ready, unauthorized, resolved, attempted, closed, stopped };
+    for (std.enums.values(Case)) |case| {
+        var results: [2]bool = undefined;
+        for (&results, 0..) |*result, entry| {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try testingStoreCatalog(&storage, &tmp, std.testing.io, &mcp_catalog);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var configuration = try completeConfiguration("bash-matrix", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            configuration.configuration.tools = try .of(&.{"bash"});
+            configuration.configuration.permission_mode.state = .value;
+            try configuration.configuration.permission_mode.value.set("bypass");
+            const configured = try storage.configure(&configuration, .{});
+            try std.testing.expect(configured == .accepted);
+            const session = configured.accepted.session;
+            try submitTestMessage(&storage, &tmp, "bash-matrix-input", "bash-matrix-input", session.slice(), "propose");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try settleCallsForTesting(&storage, &tmp, model, "bash-matrix-calls", &.{.{ .item_id = "one", .name = "bash", .encoded_call_id = "one", .decoded_call_id = "one", .encoded_arguments = "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"true\\\"}", .decoded_arguments = "{\"description\":\"Run\",\"cmd\":\"true\"}" }});
+            const id = try store_testing.sqlite_only.queryU64(&storage, "SELECT action_id FROM action_operation", .{});
+            switch (case) {
+                .ready => {},
+                .unauthorized => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET authorized=0,decided_at=NULL", .{}),
+                .resolved => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET resolution_code='failed',resolution_content_id=(SELECT min(content_id) FROM content),acceptance_position=1,resolved_at=1", .{}),
+                .attempted => try store_testing.sqlite_only.exec(&storage, "UPDATE action_operation SET attempt_ordinal=1,attempt_at=1,bash_timeout_ms=1", .{}),
+                .closed => try store_testing.sqlite_only.exec(&storage, "UPDATE turn SET outcome_code='cancelled',outcome_at=1", .{}),
+                .stopped => try store_testing.sqlite_only.exec(&storage, "INSERT INTO session_stop(command_key,session_ref,selected_turn_id,admission_cutoff,stopped_at) SELECT 'bash-matrix',session_ref,turn_id,0,1 FROM turn", .{}),
+            }
+            result.* = if (entry == 0)
+                (try storage.admitNextActionAttempt(300_000, .{})) != null
+            else
+                (try storage.admitActionAttempt(.{ .action_id = id, .runner = .bash }, 300_000, .{})) != null;
+        }
+        try std.testing.expectEqual(case == .ready, results[0]);
+        try std.testing.expectEqual(results[0], results[1]);
+    }
+}
