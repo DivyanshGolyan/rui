@@ -83,7 +83,7 @@ jobs:
           sys.path.insert(0, 'tests/ci')
           from docs_only import ChangeKind, classify
           from qualification import shards, split_build
-          from select_tests import CHECK_COVERS
+          from select_tests import CHECK_COVERS, live_mysql_suites
           p = json.load(open('selection.json'))
           kind = (classify(p['base'], p['head']) if os.environ['EVENT_NAME'] == 'pull_request'
                   else ChangeKind.NORMAL)
@@ -111,6 +111,7 @@ jobs:
               # the frame gate and the Debug recovery, so they run beside it.
               core = {'check-full', 'test-logic', 'admission-debug-integration'}
               p['targets'] = sorted((set(p['targets']) - CHECK_COVERS - {'check'}) | core | {'stack-frames'})
+              p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets']))
               p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS - {'check'}) | core)
               p['retry'] = False
           elif ready_pr:
@@ -419,9 +420,9 @@ jobs:
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
     env:
-      # The unit dialect check and launch-frame Host integration both
-      # require CI's live MySQL server.
-      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') }}
+      # The unit dialect check and live-MySQL process fixtures require
+      # CI's server; test_selection checks these against the fixture inputs.
+      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') || contains(matrix.targets, 'host-status-integration') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

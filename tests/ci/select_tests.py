@@ -5,6 +5,7 @@ A changed file selects the unit roots and process fixtures that reach it
 through literal imports (`Graph`), plus the targets its path rules name.
 """
 import argparse
+import ast
 import difflib
 from functools import cache
 import fnmatch
@@ -153,6 +154,32 @@ SOURCE_READ = re.compile(r"\b(src/[\w./-]+)")
 SOURCE_JOIN = re.compile(r'/\s*"src"\s*/\s*"([\w./-]+)"')
 
 
+def uses_live_mysql(source, *, entry):
+    """Find server inputs, not environment forwarding or server provisioning.
+
+    Imported helpers do not execute their main blocks: mysql_server's CLI
+    reads a provisioning password there, but its Docker fixture callers do not.
+    """
+    tree = ast.parse(source)
+    if not entry:
+        tree.body = [node for node in tree.body if not (
+            isinstance(node, ast.If) and any(isinstance(part, ast.Constant) and part.value == "__main__"
+                                            for part in ast.walk(node.test)))]
+    nodes = list(ast.walk(tree))
+    modules = {alias.asname or alias.name for node in nodes if isinstance(node, ast.Import)
+               for alias in node.names if alias.name == "live_engines"}
+    names = {alias.asname or alias.name for node in nodes
+             if isinstance(node, ast.ImportFrom) and node.module == "live_engines"
+             for alias in node.names if alias.name.startswith("MYSQL_")}
+    return any((isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id in modules and node.attr.startswith("MYSQL_"))
+               or (isinstance(node, ast.Name) and node.id in names)
+               or (isinstance(node, (ast.Call, ast.Subscript))
+                   and any(isinstance(part, ast.Constant) and isinstance(part.value, str)
+                           and part.value.startswith("RUI_TEST_MYSQL_") for part in ast.walk(node)))
+               for node in nodes)
+
+
 class Graph:
     """Literal import edges of one source tree and the targets each file reaches.
 
@@ -164,11 +191,16 @@ class Graph:
     def __init__(self, names, read):
         names = set(names)
         self.production, self.every, self.python = {}, {}, {}
+        entries = {script for scripts, _, _ in FIXTURES.values() for script in scripts}
+        mysql_cases = set()
         for name in sorted(names):
             if name.endswith(".zig") and name.startswith(("src/", I)):
                 self.zig(name, read(name))
             elif name.startswith(I) and name.endswith((".py", ".sh")):
                 source = read(name)
+                if (uses_live_mysql(source, entry=name in entries) if name.endswith(".py")
+                    else "RUI_TEST_MYSQL_" in source):
+                    mysql_cases.add(name)
                 # Python names a file it reads in a string; shell, anywhere.
                 strings = (" ".join(token.string for token in tokenize.generate_tokens(io.StringIO(source).readline)
                                     if token.type == tokenize.STRING) if name.endswith(".py") else source)
@@ -207,8 +239,10 @@ class Graph:
                        and name.endswith(".zig") and name in names
                        and re.search(r'\b\w+\.forEachEngine\s*\(', read(name))]
         self.live_conformance = self.closure(self.every, conformance)
-        self.driven, self.owners = {}, {}
+        self.driven, self.owners, self.live_mysql = {}, {}, set()
         for target, (scripts, executables, owners) in FIXTURES.items():
+            if self.scripts(scripts) & mysql_cases:
+                self.live_mysql.add(target)
             self.owners[target] = {name for name in names if matches(name, owners)}
             owners = [*self.owners[target], *(host if HOST in owners else ())]
             self.reached[target] = self.reached.get(target, set()) | self.scripts(scripts)
@@ -468,9 +502,9 @@ RULES = (
 )
 
 # check.yml's LIVE_MYSQL: Linux shards for the unit dialect check
-# (src/store/mysql_dialect_check.zig) and the launch-frame Host fixture.
+# (src/store/mysql_dialect_check.zig) and live-MySQL process fixtures.
 LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
-LIVE_MYSQL_TARGETS = LIVE_MYSQL_DIALECT_TARGETS | {"launch-frame-integration"}
+LIVE_MYSQL_TARGETS = LIVE_MYSQL_DIALECT_TARGETS | {"launch-frame-integration", "host-status-integration"}
 # check.yml's Postgres step condition: the Linux targets whose shards start
 # postgres:15 for test-pg's live rounds.
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
@@ -654,6 +688,20 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
+def live_mysql_suites(targets, graph=None):
+    """Standalone fixtures that must also run with CI's live MySQL server."""
+    graph = graph or tree_graph()
+    targets = set(targets)
+    # check-full's callers shard has no MySQL. Keep each selected live
+    # fixture standalone too, even when that composed gate absorbed it.
+    # check runs every part together with MySQL, so needs no duplicate.
+    selected = targets | (CHECK_COVERS if "check-full" in targets else set())
+    suites = selected & graph.live_mysql
+    if suites - LIVE_MYSQL_TARGETS:
+        raise ValueError(f"Live MySQL fixtures have no MySQL-enabled job: {sorted(suites - LIVE_MYSQL_TARGETS)}")
+    return suites
+
+
 def select(paths, phase, available, graph=None, contents=None):
     """`contents` maps FIXTURE_TABLE, or a path a `CONTENT_RULES` entry matches,
     to its (before, after) text; a path it leaves out counts as changed throughout."""
@@ -778,6 +826,10 @@ def select(paths, phase, available, graph=None, contents=None):
             targets.add("test")
     if "test" in targets:
         targets.difference_update({"test-native", "test-store"})
+    mysql_suites = live_mysql_suites(targets, graph)
+    targets.update(mysql_suites)
+    if mysql_suites:
+        reasons.add("Live MySQL fixtures also run in a MySQL-enabled Linux job")
     for reason, served_by in live_reasons:
         if not targets & served_by:
             raise ValueError(f"{reason!r} selected none of the targets that start its server: {sorted(served_by)}")
