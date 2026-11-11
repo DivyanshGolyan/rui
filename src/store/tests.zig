@@ -9383,6 +9383,19 @@ test "Full revision queries bound the rows MySQL must drain after a streaming st
     }.run);
 }
 
+test "Full revision owners pin both covering indexes in both dialects" {
+    const full_revisions = report_domain.full_revisions;
+    inline for (.{ "instructions", "output_schema" }) |field| {
+        const index = "session_revision_" ++ field;
+        try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, full_revisions.sql, "INDEXED BY " ++ index));
+        try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, comptime full_revisions.mysql.prepared(), "FORCE INDEX (" ++ index ++ ")"));
+        const own_instructions = "SELECT min(revision)*2 FROM session_revision INDEXED BY session_revision_instructions WHERE session_ref=?1 AND instructions_content_id=r." ++ field ++ "_content_id";
+        const own_schema = "SELECT min(revision)*2+1 FROM session_revision INDEXED BY session_revision_output_schema WHERE session_ref=?1 AND output_schema_content_id=r." ++ field ++ "_content_id";
+        try std.testing.expect(std.mem.indexOf(u8, full_revisions.sql, own_instructions) != null);
+        try std.testing.expect(std.mem.indexOf(u8, full_revisions.sql, own_schema) != null);
+    }
+}
+
 test "Full revisions show each content whole where it first occurs" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {

@@ -1486,6 +1486,48 @@ pub fn hasIndex(comptime name: []const u8) bool {
     }
 }
 
+// Cache the DDL's names once; checking every forceable catalog name must
+// not regenerate every table's DDL for each index.
+const mysql_index_names: []const []const u8 = blk: {
+    @setEvalBranchQuota(objects_quota);
+    var names: []const []const u8 = &.{};
+    for (objects(.mysql)) |object| if (object.kind == .index) {
+        names = names ++ .{object.name};
+    };
+    break :blk names;
+};
+
+/// Whether MySQL's DDL has this named index on real columns. A lowered
+/// partial index cannot serve a query on its original prefix: forcing it
+/// would replace a lookup with a full index scan.
+pub fn mysqlCanForceIndex(comptime name: []const u8) bool {
+    comptime {
+        @setEvalBranchQuota(objects_quota);
+        return canForceMysqlIndex(&tables, &indexes, name) and contains(mysql_index_names, name);
+    }
+}
+
+fn canForceMysqlIndex(comptime every: []const Table, comptime all_indexes: []const Index, comptime name: []const u8) bool {
+    for (all_indexes) |index| {
+        if (!std.mem.eql(u8, index.name, name)) continue;
+        if (mysqlIndexForm(index)) |form| if (form != .plain_unique) return false;
+        for (every) |table| {
+            if (!std.mem.eql(u8, table.name, index.table)) continue;
+            if (!table.engines.on(.mysql)) return false;
+            for (index.columns) |part| {
+                const column_name = indexColumn(part).name;
+                const found = for (table.columns) |column| {
+                    if (std.mem.eql(u8, column.name, column_name)) break column.engines.on(.mysql);
+                } else false;
+                if (!found) return false;
+            }
+            return index.columns.len != 0;
+        }
+        return false;
+    }
+    return false;
+}
+
 /// The DDL that creates every table, then every index.
 pub fn ddl(comptime dialect: rsql.Dialect) [:0]const u8 {
     return comptime blk: {
@@ -1614,10 +1656,31 @@ fn mysqlObjects(comptime every: []const Table, comptime all_indexes: []const Ind
 /// SQL expression, such as `DATABASE()`). It holds what the schema value
 /// decides and leaves out what MySQL names or spells itself: CHECK and
 /// expression texts, which servers normalise differently, and the names
-/// of CHECKs, foreign keys and unique keys. Each value is cast to binary,
-/// so the lines compare as bytes whatever information_schema's collations.
+/// of CHECKs, foreign keys and server-generated keys. Forceable indexes
+/// include their canonical names: statements depend on those names, not
+/// just equivalent definitions. This admission digest is not stored or
+/// pinned by Store format; `digest()` covers bootstrap SQL separately.
+/// MySQL 8.4 STATISTICS plan domain: TABLE_NAME and forceable INDEX_NAME identify
+/// the key; NON_UNIQUE, ordered COLUMN_NAME (SEQ_IN_INDEX), COLLATION,
+/// SUB_PART, INDEX_TYPE, PACKED and IS_VISIBLE describe its usable shape.
+/// Visibility applies to every index: canonical DDL makes all visible, and
+/// hiding even an unhinted key weakens a Store plan. NULLABLE is derived
+/// from the checked COLUMNS; functional parts are nullable. EXPRESSION's
+/// presence is the `*` part; its server-normalized text is not a forced-plan
+/// dependency, since mysqlCanForceIndex excludes every functional key.
+/// TABLE_CATALOG is always def; TABLE_SCHEMA/INDEX_SCHEMA only locate the
+/// database. Only CARDINALITY (estimates), COMMENT (server status prose)
+/// and INDEX_COMMENT (DBA prose) are ignored mutable index metadata: none
+/// changes the key's definition or availability to a statement.
+/// Each value is cast to binary, so the lines compare as bytes whatever
+/// information_schema's collations.
 pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
     return comptime blk: {
+        @setEvalBranchQuota(objects_quota);
+        var forced: []const u8 = "FALSE";
+        for (indexes) |index| if (mysqlCanForceIndex(index.name)) {
+            forced = forced ++ " OR (" ++ binary("TABLE_NAME") ++ "='" ++ index.table ++ "' AND " ++ binary("INDEX_NAME") ++ "='" ++ index.name ++ "')";
+        };
         const in = "information_schema.";
         const text = "SELECT CONCAT('t '," ++ binary("TABLE_NAME") ++ ",' '," ++ binary("ENGINE") ++ ",' '," ++ binary("TABLE_COLLATION") ++ ") FROM " ++ in ++
             "TABLES WHERE TABLE_SCHEMA=" ++ database ++ " AND TABLE_TYPE='BASE TABLE'" ++
@@ -1625,7 +1688,9 @@ pub fn catalogSql(comptime database: []const u8) [:0]const u8 {
             ",' '," ++ binary("COALESCE(COLLATION_NAME,'-')") ++ ",IF(EXTRA IN ('STORED GENERATED','VIRTUAL GENERATED'),' generated','')) FROM " ++ in ++
             "COLUMNS WHERE TABLE_SCHEMA=" ++ database ++
             " UNION ALL SELECT CONCAT('i '," ++ binary("TABLE_NAME") ++ ",IF(MAX(NON_UNIQUE)=0,' u ',' n '),GROUP_CONCAT(" ++ binary("COALESCE(COLUMN_NAME,'*')") ++
-            ",IF(COLLATION='D',' desc','') ORDER BY SEQ_IN_INDEX SEPARATOR ',')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
+            ",IF(SUB_PART IS NULL,'',CONCAT('(',SUB_PART,')')),CASE COLLATION WHEN 'A' THEN '' WHEN 'D' THEN ' desc' ELSE ' unordered' END," ++
+            "IF(PACKED IS NULL,'',CONCAT(' packed='," ++ binary("PACKED") ++ ")) ORDER BY SEQ_IN_INDEX SEPARATOR ','),' '," ++ binary("MAX(INDEX_TYPE)") ++
+            ",' '," ++ binary("MAX(IS_VISIBLE)") ++ ",IF(" ++ forced ++ ",CONCAT(' '," ++ binary("INDEX_NAME") ++ "),'')) FROM " ++ in ++ "STATISTICS WHERE TABLE_SCHEMA=" ++ database ++ " GROUP BY TABLE_NAME,INDEX_NAME" ++
             " UNION ALL SELECT CONCAT('f '," ++ binary("TABLE_NAME") ++ ",' ',GROUP_CONCAT(" ++ binary("COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ','),' '," ++
             binary("MAX(REFERENCED_TABLE_NAME)") ++ ",' ',GROUP_CONCAT(" ++ binary("REFERENCED_COLUMN_NAME") ++ " ORDER BY ORDINAL_POSITION SEPARATOR ',')) FROM " ++ in ++
             "KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=" ++ database ++ " AND REFERENCED_TABLE_NAME IS NOT NULL GROUP BY TABLE_NAME,CONSTRAINT_NAME" ++
@@ -1681,7 +1746,11 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
             var parts: []const []const []const u8 = &.{table.primary_key};
             for (table.uniques) |unique| parts = parts ++ .{unique};
             var flags: []const bool = &.{true};
-            for (table.uniques) |_| flags = flags ++ .{true};
+            var forced_names: []const []const u8 = &.{""};
+            for (table.uniques) |_| {
+                flags = flags ++ .{true};
+                forced_names = forced_names ++ .{""};
+            }
             for (all_indexes) |index| if (std.mem.eql(u8, index.table, table.name)) {
                 var names: []const []const u8 = &.{};
                 for (index.columns, 0..) |column, position| {
@@ -1699,6 +1768,7 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 }
                 parts = parts ++ .{names};
                 flags = flags ++ .{index.unique};
+                forced_names = forced_names ++ .{if (canForceMysqlIndex(every, all_indexes, index.name)) " " ++ index.name else ""};
             };
             var added: usize = 0;
             for (table.foreign_keys) |key| {
@@ -1709,17 +1779,18 @@ fn catalogLines(comptime every: []const Table, comptime all_indexes: []const Ind
                 if (!led) {
                     parts = parts ++ .{key.columns};
                     flags = flags ++ .{false};
+                    forced_names = forced_names ++ .{""};
                     added += 1;
                 }
             }
-            for (parts, flags, 0..) |index_parts, unique, position| {
+            for (parts, flags, forced_names, 0..) |index_parts, unique, forced_name, position| {
                 // InnoDB keeps no index it added for a foreign key when a
                 // longer one it added for another key leads with it.
                 const implicit = parts[parts.len - added ..];
                 const covered = position >= parts.len - added and for (implicit) |other| {
                     if (other.len > index_parts.len and eqlList(other[0..index_parts.len], index_parts)) break true;
                 } else false;
-                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts)};
+                if (!covered) lines = lines ++ .{"i " ++ table.name ++ (if (unique) " u " else " n ") ++ list(index_parts) ++ " BTREE YES" ++ forced_name};
             }
         }
         return lines;
@@ -2370,6 +2441,8 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
     const lines = comptime catalogLines(&[_]Table{ mysql_test_order, mysql_test_label }, &.{
         .{ .name = "open", .table = "turn", .columns = &.{ "code", "turn_id DESC" }, .where = "live=1" },
         .{ .name = "one", .table = "turn", .columns = &.{"code"}, .unique = true, .where = "live=1" },
+        .{ .name = "by_live", .table = "turn", .columns = &.{"live"} },
+        .{ .name = "by_note", .table = "content", .columns = &.{"label"}, .unique = true },
     });
     const expected = [_][]const u8{
         "t turn InnoDB utf8mb4_0900_bin",
@@ -2379,10 +2452,11 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "k turn 1",
         "c turn open_lead varchar(8) YES utf8mb4_0900_bin generated",
         "f turn code content label",
-        "i turn u turn_id",
-        "i turn n open_lead,turn_id desc",
-        "i turn u *",
-        "i turn n code",
+        "i turn u turn_id BTREE YES",
+        "i turn n open_lead,turn_id desc BTREE YES",
+        "i turn u * BTREE YES",
+        "i turn n live BTREE YES by_live",
+        "i turn n code BTREE YES",
         "t content InnoDB utf8mb4_0900_bin",
         "c content label varchar(8) NO utf8mb4_0900_bin",
         "c content note text YES utf8mb4_0900_bin",
@@ -2390,8 +2464,9 @@ test "a catalog line names each table, column, index, foreign key and CHECK coun
         "c content first_turn bigint NO -",
         "k content 3",
         "f content first_turn turn turn_id",
-        "i content u label",
-        "i content n first_turn",
+        "i content u label BTREE YES",
+        "i content u label BTREE YES by_note",
+        "i content n first_turn BTREE YES",
     };
     try std.testing.expectEqual(expected.len, lines.len);
     for (expected, lines) |want, line| try std.testing.expectEqualStrings(want, line);
@@ -2570,4 +2645,81 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
     try openExisting(std.testing.io, database, root, null);
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
+}
+
+test "MySQL index hints require a named real-column index on that engine" {
+    const table: Table = .{
+        .name = "fixture",
+        .columns = &.{ .{ .name = "id", .type = .int }, .{ .name = "value", .type = .int } },
+        .primary_key = &.{"id"},
+    };
+    const index: Index = .{ .name = "by_value", .table = "fixture", .columns = &.{"value DESC"} };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{index}, "by_value"));
+    const unique = comptime blk: {
+        var copy = index;
+        copy.unique = true;
+        copy.columns = &.{"value"};
+        copy.where = "value IS NOT NULL";
+        break :blk copy;
+    };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{unique}, "by_value"));
+    const plain_unique = comptime blk: {
+        var copy = unique;
+        copy.where = null;
+        break :blk copy;
+    };
+    try std.testing.expect(comptime canForceMysqlIndex(&.{table}, &.{plain_unique}, "by_value"));
+    const trailing_sqlite_column = comptime blk: {
+        var copy = index;
+        copy.columns = &.{ "id", "value DESC" };
+        break :blk copy;
+    };
+    const sqlite_table = comptime blk: {
+        var copy = table;
+        copy.engines = .sqlite;
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_table}, &.{index}, "by_value"));
+    const sqlite_column = comptime blk: {
+        var copy = table;
+        var columns = table.columns[0..2].*;
+        columns[1].engines = .sqlite;
+        copy.columns = &columns;
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_column}, &.{index}, "by_value"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{sqlite_column}, &.{trailing_sqlite_column}, "by_value"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{index}, "absent"));
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{}, &.{index}, "by_value"));
+    const missing_column = comptime blk: {
+        var copy = index;
+        copy.columns = &.{"absent"};
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{missing_column}, "by_value"));
+    const functional = comptime blk: {
+        var copy = unique;
+        copy.where = "value>0";
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{functional}, "by_value"));
+    const leading = comptime blk: {
+        var copy = index;
+        copy.where = "value IS NOT NULL";
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{leading}, "by_value"));
+    const empty = comptime blk: {
+        var copy = index;
+        copy.columns = &.{};
+        break :blk copy;
+    };
+    try std.testing.expect(!comptime canForceMysqlIndex(&.{table}, &.{empty}, "by_value"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("action_operation_executable"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("turn_one_active_per_session"));
+    try std.testing.expect(!comptime mysqlCanForceIndex("absent"));
+    inline for (.{ "session_revision_instructions", "session_revision_output_schema" }) |name| {
+        try std.testing.expect(comptime hasIndex(name));
+        try std.testing.expect(comptime mysqlCanForceIndex(name));
+    }
 }
