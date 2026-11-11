@@ -2206,7 +2206,7 @@ test "/status takes the Session's facts from Current, lists every Action awaitin
         "Permissions     ask · Bash and MCP ask first\n",
         "Effort          high  \x1b[90mSession override",
         "Compact at      1,000 tokens · now 310",
-        "Model           gpt-6.1-sol · API key  \x1b[90mfixed",
+        "Model           gpt-6.1-sol · API key\n",
         "Store           ~/s  \x1b[90mfixed",
         "Instructions    none\n",
         " Work\n   Finished\n   Current message: m1\n   Recent messages (use /result KEY for an answer):\n     m1: completed\n",

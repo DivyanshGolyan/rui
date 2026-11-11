@@ -3050,7 +3050,7 @@ test "controls wait behind an active model settlement transaction" {
     );
 }
 
-fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u8) !void {
+fn expectModelRevisions(storage: *Store, session: []const u8, phase: []const u8) !void {
     for (0..6) |variant| {
         const before = try storage.inspectSessionForTesting(session);
         var key_buffer: [128]u8 = undefined;
@@ -3065,24 +3065,27 @@ fn expectBindingPreserved(storage: *Store, session: []const u8, phase: []const u
             update.configuration.model.state = .value;
             try update.configuration.model.value.set(if (variant == 5) "model-b" else "model-a");
         }
-        if (variant >= 4) {
+        if (variant == 4) {
             update.configuration.tools.state = .value;
             update.configuration.tools.count = 0;
             update.configuration.permission_mode.state = .value;
             try update.configuration.permission_mode.value.set("bypass");
         }
         const reply = try storage.configure(&update, .{});
-        if (variant < 4) {
+        if (variant != 4) {
             try std.testing.expect(reply == .accepted);
             try std.testing.expectEqual(before.revision + 1, reply.accepted.revision);
         } else {
             try std.testing.expect(reply == .rejected);
-            try std.testing.expectEqual(if (variant == 4) protocol.ConfigurationRejection.unsupported_provider else protocol.ConfigurationRejection.model_is_immutable, reply.rejected.code);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_provider, reply.rejected.code);
         }
         const after = try storage.inspectSessionForTesting(session);
-        try std.testing.expectEqual(before.revision + @as(u64, if (variant < 4) 1 else 0), after.revision);
+        try std.testing.expectEqual(before.revision + @as(u64, if (variant != 4) 1 else 0), after.revision);
         try std.testing.expectEqual(protocol.Provider.codex, after.provider.?);
-        try std.testing.expectEqualStrings("model-a", after.model.slice());
+        try std.testing.expectEqualStrings(if (update.configuration.model.state == .value) update.configuration.model.value.slice() else before.model.slice(), after.model.slice());
+        if (variant == 5) {
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='model'", .{ session, after.revision }));
+        }
         try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
         try std.testing.expectEqualStrings(before.permission_mode.slice(), after.permission_mode.slice());
         try std.testing.expectEqualDeep(before.instructions, after.instructions);
@@ -3105,7 +3108,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     const created_session_0_reply = try storage.configure(&configuration, .{});
     try std.testing.expect(created_session_0_reply == .accepted);
     const created_session_0 = created_session_0_reply.accepted.session;
-    try expectBindingPreserved(&storage, created_session_0.slice(), "before-reopen");
+    try expectModelRevisions(&storage, created_session_0.slice(), "before-reopen");
     try storage.close();
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
@@ -3113,7 +3116,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
     try std.testing.expectEqual(protocol.Provider.codex, reopened.provider.?);
     try tests.expectToolSetNames(&storage, reopened.tool_set_id, &.{"bash"});
     try std.testing.expectEqualStrings("ask", reopened.permission_mode.slice());
-    try expectBindingPreserved(&storage, created_session_0.slice(), "after-reopen");
+    try expectModelRevisions(&storage, created_session_0.slice(), "after-reopen");
 
     const file = try tmp.dir.createFile(std.testing.io, "provider-reopen-message", .{ .read = true });
     try file.writeStreamingAll(std.testing.io, "message");
@@ -3622,6 +3625,52 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try sqlite.exec(storage.sqliteDatabase(), "PRAGMA foreign_keys=ON");
     try std.testing.expectError(error.StaleActionAttemptBinding, storage.readBashExecutionInput(action, &input));
     try std.testing.expect(!storage.isFenced());
+}
+
+test "SQLite single Access keeps autocommit on success guard failure and abandon" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const read = rsql.Read(.{
+        .sql = "SELECT min(content_id) AS id FROM content",
+        .Args = struct {},
+        .Row = struct { id: u64 },
+        .cardinality = .one,
+    });
+    const write = rsql.Write(.{
+        .sql = "UPDATE content SET private=private WHERE content_id=?1",
+        .Args = struct { id: u64 },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
+    });
+    for ([_]enum { success, guard, abandon, no_op }{ .success, .guard, .abandon, .no_op }) |outcome| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.single, error{TestingGuard}) = .open(&entry);
+        defer a.deinit();
+        var statements: TestingStatements = .{};
+        statements.begin(storage.sqliteDatabase());
+        defer statements.end(storage.sqliteDatabase());
+        var row: read.Result = undefined;
+        a.read(read, .{}, &row);
+        try a.run();
+        try std.testing.expect(!storage.engine.inTransaction());
+        if (outcome != .no_op) a.write(write, .{ .id = if (outcome == .guard) 0 else row.id });
+        if (outcome == .no_op or outcome == .abandon) {
+            // Even a rollback fault is irrelevant: no transaction opened,
+            // and a queued, unstepped autocommit write is simply discarded.
+            try a.abandon(.{ .rollback_failure = true });
+        } else if (outcome == .guard) {
+            const result = a.end(.{ .rollback_failure = true }, a.commit());
+            try std.testing.expectError(error.TestingGuard, entry.finishTransaction(error{TestingGuard}, .{}, result));
+        } else {
+            try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, a.commit()));
+        }
+        try std.testing.expectEqual(@as(u64, if (outcome == .success or outcome == .guard) 2 else 1), statements.count);
+        try std.testing.expect(!storage.engine.inTransaction());
+        try std.testing.expect(!storage.isFenced());
+    }
 }
 
 test "revoking a sender runs main's statements, with no transaction, and a missing Attempt changes nothing" {
@@ -4969,12 +5018,9 @@ test "one committed selection freezes its settings and input prefix" {
     update.configuration.model.state = .value;
     try update.configuration.model.value.set("model-b");
     const active_update = try storage.configure(&update, .{});
-    try std.testing.expect(active_update == .rejected);
-    try std.testing.expectEqual(
-        protocol.ConfigurationRejection.model_is_immutable,
-        active_update.rejected.code,
-    );
-    try expectBindingPreserved(&storage, created_session_0.slice(), "during-work");
+    try std.testing.expect(active_update == .accepted);
+    try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
+    try expectModelRevisions(&storage, created_session_0.slice(), "during-work");
 
     var view: HistoricalView = undefined;
     storage.openHistoricalView(binding, &view);
@@ -5033,9 +5079,9 @@ test "one committed selection freezes its settings and input prefix" {
 
     try update.key.set("configure-after-failure");
     const failed_update = try storage.configure(&update, .{});
-    try std.testing.expect(failed_update == .rejected);
-    try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, failed_update.rejected.code);
-    try expectBindingPreserved(&storage, created_session_0.slice(), "after-failure");
+    try std.testing.expect(failed_update == .accepted);
+    try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
+    try expectModelRevisions(&storage, created_session_0.slice(), "after-failure");
 
     var tools_update: wire_request.ConfigureCommand = .{};
     try tools_update.key.set("tools-after-failure");
@@ -5051,7 +5097,7 @@ test "one committed selection freezes its settings and input prefix" {
     var later_settings: HistoricalSettings = undefined;
     try later_view.settings(&later_settings);
     try std.testing.expectEqual(protocol.Provider.codex, later_settings.provider);
-    try std.testing.expectEqualStrings("model-a", later_settings.model.slice());
+    try std.testing.expectEqualStrings("model-b", later_settings.model.slice());
     try std.testing.expectEqual(@as(u64, 0), later_settings.tool_count);
     var position: u64 = 0;
     // The failed first Operation keeps its boundary between the inputs.
@@ -5063,7 +5109,7 @@ test "one committed selection freezes its settings and input prefix" {
     try std.testing.expect((try later_view.nextEntry(position)) == null);
 }
 
-test "continued accepted output keeps model immutable and public text readable" {
+test "continued accepted output allows model revisions and keeps public text readable" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
@@ -5193,19 +5239,16 @@ test "continued accepted output keeps model immutable and public text readable" 
     try update.session.set(created_session_0.slice());
     update.configuration.model.state = .value;
     try update.configuration.model.value.set("model-b");
-    const rejected = try storage.configure(&update, .{});
-    try std.testing.expect(rejected == .rejected);
-    try std.testing.expectEqual(
-        protocol.ConfigurationRejection.model_is_immutable,
-        rejected.rejected.code,
-    );
+    const changed = try storage.configure(&update, .{});
+    try std.testing.expect(changed == .accepted);
+    try std.testing.expectEqualStrings("model-b", (try storage.inspectSessionForTesting(created_session_0.slice())).model.slice());
 
     const completion_binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try storage.settleModelSuccess(completion_binding, &output, .{});
     // The same output is an answer both before and after pending input is
     // consumed. Only the owning Turn's completion decision differs.
     try std.testing.expectEqual(@as(u64, 2), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE resolution_code='answer'", .{}));
-    try expectBindingPreserved(&storage, created_session_0.slice(), "after-output");
+    try expectModelRevisions(&storage, created_session_0.slice(), "after-output");
     const completed = (try store_testing.observeCommandForTesting(&storage, "continued-first")).kind.message.?.queue.?;
     const completion = switch (completed.state) {
         .completed => |value| value,
@@ -7390,13 +7433,14 @@ test "a Current report's step faults answer the name of the earliest round that 
     // Each read keeps main's name; when reads in two rounds fail, the
     // earlier round's name wins. The Action count steps after the tool
     // outcome rule in their round, so a faulted action_operation answers
-    // the rule's CallReadFailed, as on main. A list with nothing to show
-    // is not read, where main read every list and answered
-    // ActionReadFailed for a faulted session_revision.
+    // the rule's CallReadFailed. Model-bound compaction facts read the
+    // producing session_revision before Action lists and answer CorruptStore
+    // for that fault. With no Turn or list to read, an idle Session does not
+    // step session_revision.
     inline for (.{
         .{ TestingWorkShape.awaiting, "model_tool_call", error.CallReadFailed },
         .{ TestingWorkShape.awaiting, "action_operation", error.CallReadFailed },
-        .{ TestingWorkShape.awaiting, "session_revision", error.ActionReadFailed },
+        .{ TestingWorkShape.awaiting, "session_revision", error.CorruptStore },
         .{ TestingWorkShape.idle, "session_revision", null },
     }) |case| {
         var tmp = std.testing.tmpDir(.{});
@@ -7482,8 +7526,15 @@ test "a failed context read answers its reader's name and fences" {
     // as main named the estimate's. Admission reads the context within
     // `admission_facts`, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
-    // weighs the context, and the report estimates it.
-    for ([_]bool{ false, true }) |report| {
+    // weighs the context, and the report estimates it. Both readers name a
+    // failed uncovered-byte read CorruptStore, after selecting the recipe.
+    for ([_]struct { report: bool, bytes: bool }{
+        .{ .report = false, .bytes = false },
+        .{ .report = true, .bytes = false },
+        .{ .report = false, .bytes = true },
+        .{ .report = true, .bytes = true },
+    }) |case| {
+        const report = case.report;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -7500,7 +7551,9 @@ test "a failed context read answers its reader's name and fences" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = if (report)
+        var fault: TestingStatementFault = .{ .sql = if (case.bytes)
+            namedStatementForTesting(model_admission_domain.compaction_failures, null, " AS uncovered_bytes")
+        else if (report)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
         else
             model_admission_domain.admission_facts_sql };
@@ -7509,7 +7562,7 @@ test "a failed context read answers its reader's name and fences" {
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(if (case.bytes) error.CorruptStore else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }

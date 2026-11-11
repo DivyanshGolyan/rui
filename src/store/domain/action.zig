@@ -577,8 +577,8 @@ const revoke_sender = rsql.Write(.{
 
 /// Clears the Attempt's sender handle, when `binding` names an attempted
 /// Action; otherwise changes nothing. On a `.single` Access: the read and
-/// the one UPDATE, as main's UPDATE and its touch's Workspace read were,
-/// and no transaction.
+/// the one UPDATE. Access selects SQLite autocommit or an ownership-fenced
+/// network transaction, including the no-work and error exits.
 pub fn revokeActionSender(a: anytype, binding: ActionAttemptBinding) !void {
     var found: attempt_session.Result = undefined;
     a.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &found);
