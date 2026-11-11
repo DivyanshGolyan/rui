@@ -2890,7 +2890,7 @@ test "frontend joined read diagnostic survives a worker reset and shows as the n
         try std.testing.expectEqual(cause, settled.failure(.final_exit, cause).?);
     try self.presentReadDiagnostic();
     try std.testing.expect(self.reading.pending_diagnostic == null);
-    try std.testing.expectEqualStrings("! Message unavailable; Ctrl-O retries. HTTP 503; type: busy; code: host_busy\\x1b\\n", self.notice.?);
+    try std.testing.expectEqualStrings("! Message unavailable. HTTP 503; type: busy; code: host_busy\\x1b\\n", self.notice.?);
 }
 
 fn applyReader(self: *Self, end: ReadEnd) !void {

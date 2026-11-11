@@ -641,7 +641,7 @@ def permission_read_cases(state):
             output = human.current_screen(master)
             # The notice under the input names what failed, then the Host's
             # own words, whole within the row. A diagnostic is never a feed row.
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable; Ctrl-O retries. HTTP 503; type: busy; code: host_busy", output
+            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable. HTTP 503; type: busy; code: host_busy", output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)

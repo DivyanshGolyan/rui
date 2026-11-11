@@ -276,18 +276,23 @@ def scroll_marker_case():
         end = chrome.frame(master, b"", lambda screen: composing(screen, "keep"))
         assert not rows(end)[BOTTOM].strip(), end
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓")
+            # The chip has not stolen a row: every overlapping unique content
+            # line moves by exactly half the feed height, not by half plus one.
+            # Rows above the loaded ones join first, so judge the frame where
+            # the whole move has landed.
+            end_rows = rows(end)[:BOTTOM]
+            before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
+
+            def moved(screen):
+                held_rows = rows(screen)[:BOTTOM]
+                after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
+                shared = before.keys() & after.keys()
+                return bool(shared) and all(after[line] - before[line] == BOTTOM // 2 for line in shared)
+
+            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓" and moved(screen))
             assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
             assert rows(scrolled)[LAST].strip() == "", (keys, "no heading or hint", scrolled)
             assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
-            # The chip has not stolen a row: every overlapping unique content
-            # line moves by exactly half the feed height, not by half plus one.
-            end_rows, held_rows = rows(end)[:BOTTOM], rows(scrolled)[:BOTTOM]
-            before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
-            after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
-            shared = before.keys() & after.keys()
-            assert shared, (end, scrolled)
-            assert all(after[line] - before[line] == BOTTOM // 2 for line in shared), (end, scrolled)
             # End edits this nonempty draft without moving the feed. Empty-
             # draft End and Ctrl-End delegate to the conversation's end action.
             # Older pages may still join above; judge the settled view.
