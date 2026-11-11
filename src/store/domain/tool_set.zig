@@ -45,8 +45,8 @@ const insert_member = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// SQL for the set offered by a Session or revision: its loaded set when
-/// explicit, otherwise its configured set.
+/// SQL for loaded intent on a Session or configuration revision: its explicit
+/// loaded set, otherwise all configured names. Frozen offers live on Operations.
 pub fn offeredSetSql(comptime revision_alias: []const u8) []const u8 {
     return "coalesce(" ++ revision_alias ++ ".loaded_tool_set_id," ++ revision_alias ++ ".tool_set_id)";
 }
@@ -353,4 +353,36 @@ pub fn finishSelection(a: anytype, selection: *const Selection, source_set: u64)
     var ordinal: u64 = 0;
     while (names.next()) |name| : (ordinal += 1) a.writeCount(insert_selected_member, .{ .set = set_id, .ordinal = ordinal, .source = source_set, .name = name }, 1);
     return set_id;
+}
+
+/// An already saved record, named within its source set. Mixed-source sets
+/// preserve frozen built-ins while selecting today's MCP records.
+pub const Member = struct {
+    name: Bounded(tool_record.max_name_bytes),
+    source: u64,
+    digest: [32]u8,
+};
+
+/// Intern a name-ordered effective offer. All members and their names must
+/// outlive the Access's next round.
+pub fn internMembers(a: anytype, members: []const Member) !u64 {
+    var digest: tool_record.SetDigest = .init();
+    var count: usize = 0;
+    for (members) |*member| {
+        digest.add(&member.digest);
+        count += 1;
+    }
+    const value = digest.final();
+    var saved: lookup_set.Result = null;
+    a.read(lookup_set, .{ .digest = value }, &saved);
+    try a.run();
+    if (saved) |row| return row.tool_set_id.get();
+    const id = try a.identity(.tool_set_id);
+    a.write(insert_set, .{ .id = id, .digest = value, .count = count });
+    var ordinal: u64 = 0;
+    for (members) |*member| {
+        a.writeCount(insert_selected_member, .{ .set = id, .ordinal = ordinal, .source = member.source, .name = member.name.slice() }, 1);
+        ordinal += 1;
+    }
+    return id;
 }
