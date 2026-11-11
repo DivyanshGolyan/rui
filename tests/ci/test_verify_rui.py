@@ -180,12 +180,14 @@ class FramesTest(unittest.TestCase):
             self.assertEqual(states[name]["open"], "Fix retry deadline")
             self.assertTrue(states[name]["expect"])
 
-    def test_narrow_markdown_frame_pins_the_code_continuation_indent(self):
+    def test_markdown_frame_pins_narrow_code_indent_before_the_split_layout(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "markdown-wrapped")
         self.assertEqual(state["open"], "Markdown retry")
-        self.assertEqual(state["sizes"], [(46, 30)])
-        self.assertIn("return null; //\n    expired", state["expect"])
+        self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
+        self.assertIn({"wait": "return null; //\n    expired"}, state["steps"])
+        for text in ("return null; //", "expired", "Late request  waits 30 s  fails at once", "retry policy notes"):
+            self.assertIn(text, state["expect"])
 
     def test_busy_frame_waits_for_work_text_not_a_rotating_spinner(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -223,7 +225,7 @@ class FramesTest(unittest.TestCase):
                 # Do not capture the asynchronous opening notice as the finished fold.
                 self.assertIn({"gone": "Opening tool output…"}, state["steps"])
         self.assertEqual(states["tool-open-nocolor"]["env"], {"NO_COLOR": "1"})
-        for name in ("tool-open", "tool-open-long", "tool-open-nocolor"):
+        for name in ("tool-open", "tool-open-two", "tool-open-long", "tool-open-nocolor"):
             self.assertEqual(states[name]["sizes"], [(46, 30), (140, 40)])
         keys = [key for step in states["tool-open-two"]["steps"] for key in step.get("keys", [])]
         self.assertEqual(keys.count("C-o"), 2)
@@ -233,6 +235,30 @@ class FramesTest(unittest.TestCase):
             self.assertIn({"gone": "/details"}, states[name]["steps"])
         self.assertIn("ctrl+o                 open", states["help"]["expect"])
         self.assertIn("× Fail with exit 127 · exit 127", states["chat"]["expect"])
+
+    def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "tool-open-two")
+        self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
+        # Reach a known narrow tail, then move rows rather than four half-pages:
+        # the wider terminal now gives only 99 columns to the chat beside the list.
+        self.assertEqual(state["steps"][:11], [
+            {"wait": "The project has a README"},
+            {"keys": ["C-o"]},
+            {"gone": "Opening tool output…"},
+            {"keys": ["PgDn"]},
+            {"wait": "    unknown option --help"},
+            {"keys": ["Up"] * 10},
+            {"wait": "✓ List project files"},
+            {"gone": "× Fail with exit 127"},
+            {"keys": ["C-o"]},
+            {"gone": "Opening tool output…"},
+            {"keys": ["PgDn"] * 3},
+        ])
+        for text in ("✓ List project files", "    README.md", "    src",
+                     "× Fail with exit 127 · exit 127", "× Fail with an excerpt · exit 1",
+                     "    usage: example", "    unknown option --help", "ctrl+o close"):
+            self.assertIn(text, state["expect"])
 
     def test_cumulative_cast_and_counted_labels(self):
         data = self.scenario()

@@ -248,10 +248,24 @@
         },
         {
           "keys": [
-            "S-Up",
-            "S-Up",
-            "S-Up",
-            "S-Up"
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up"
           ]
         },
         {
@@ -296,16 +310,19 @@
       ],
       "expect": [
         "✓ List project files",
-        "× Fail with an excerpt",
         "    README.md",
+        "    src",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    usage: example",
         "    unknown option --help",
         "ctrl+o close"
       ],
       "sizes": [
-        "140x38",
+        "46x30",
         "140x40"
       ],
-      "note": "10b-tool-open-two: first open List at the viewport bottom, then show both independent output bands; no extra mark or envelope prose, close key shares the facts footer"
+      "note": "10b-tool-open-two: open the excerpt, scroll ten rows from the narrow tail to make List the lowest visible tool, then show both open folds before and after the sidebar appears"
     },
     {
       "name": "tool-open-long",
@@ -493,18 +510,23 @@
     },
     {
       "name": "markdown-wrapped",
-      "note": "12c-markdown-wrapped: code continuation retains its own indent",
+      "note": "12c-markdown-wrapped: pin the four-space code continuation while narrow, then resize to the sidebar layout",
       "open": "Markdown retry",
       "sizes": [
-        "46x30"
+        "46x30",
+        "140x40"
       ],
       "steps": [
         {
           "wait": "retry policy notes"
+        },
+        {
+          "wait": "return null; //\n    expired"
         }
       ],
       "expect": [
-        "return null; //\n    expired",
+        "return null; //",
+        "expired",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
       ]
