@@ -43,6 +43,7 @@ const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
 const session_upgrade = @import("session_upgrade.zig");
 const Self = @This();
+const RetryFence = struct { ending: feed_window.Key, sent: u64 };
 const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
@@ -104,6 +105,9 @@ saved_requests: reads.SavedRequests = .{},
 /// are listed.
 recover_line: [slash_commands_shared.recover_line_bytes]u8 = undefined,
 reader: Task = .{},
+/// One gesture's authority, retained from scheduling through joined completion.
+/// The counter is the existing Message owner's fact, not another sent marker.
+retry_fence: ?RetryFence = null,
 /// The composer's skill suggestions reads and the rows they list. One read
 /// runs at a time on `skill_task`, apart from the reader, whose only
 /// context is `skill_job`.
@@ -164,12 +168,14 @@ inspection: struct {
 } = .{},
 // Messages sent.
 admission: struct {
-    /// Messages begun; earlier expansion reads never cover a later send.
+    /// Messages begun before Admission settles: fences retries and expansion
+    /// reads against newer input without waiting for live work to catch up.
     sent: u64 = 0,
 } = .{},
 // Live facts have their own scan cursor, independent of the resident window.
 live: struct {
     view: View.Live = .{},
+    latest_ending: ?reads.LatestEnding = null,
     work: protocol.SessionWork = .{},
     scan: FeedPolicy.Cycle = .{},
     queued: protocol.Queued = .{},
@@ -256,6 +262,7 @@ fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
     self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
     const job = &self.job;
+    job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
         job.watch_status = self.statusShown();
@@ -419,7 +426,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick } };
+    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
@@ -589,6 +596,16 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: feed_window.Point) !vo
         self.dropMessageRequest();
         if (tool) |key| self.toggleTool(key) else self.openCollapsed(message.?);
     }
+    try self.afterInput(ctx);
+}
+
+/// The synthetic feed link has exactly the key's admission and read path.
+fn appRetry(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null or self.retryable() == null) return;
+    self.shown_notice.dismiss();
+    try self.recover(null);
+    self.dirty = true;
     try self.afterInput(ctx);
 }
 
@@ -858,6 +875,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.activity.method = self.app_caps.width;
     chrome.activity.styles = .{ .ink = style.of(self.app_caps, .{ .colour = .ink }), .normal = normal, .quiet = quiet, .attention = attention, .failure = failure };
     self.app_content.tail = chrome.activity.widget();
+    self.app_content.latest_ending = self.live.latest_ending;
+    self.app_content.retry_actionable = self.retryable() != null;
     chrome.status.method = self.app_caps.width;
     chrome.status.quiet = quiet;
     chrome.status.attention = attention;
@@ -2009,6 +2028,7 @@ fn update(self: *Self) !Updated {
     }
     if (self.hostHeld()) return .waiting;
     try self.startQueuedCommand();
+    try self.startRetry();
     // Scans continue during consent, so an Action decided elsewhere leaves.
     if (self.reader.thread == null and self.reading.prepared_action == null) {
         if (self.expansion.queued == .ready) {
@@ -2081,7 +2101,61 @@ fn recover(self: *Self, key: ?[]const u8) !void {
         self.notice = session_notice.decision(action);
         return;
     }
-    try self.submission.requestRecovery(key);
+    if (self.submission.intent != null or key != null) {
+        try self.submission.requestRecovery(key);
+    } else if (self.retryable()) |fence| {
+        self.retry_fence = fence;
+    }
+}
+
+/// One eligibility value for the gesture, frame-local tail and asynchronous
+/// completion. Live facts guard reopened chats; the submission count fences
+/// local intent even before an Admission or a scan can report newer work.
+fn retryable(self: *const Self) ?RetryFence {
+    const ending = self.live.latest_ending orelse return null;
+    if (ending.cause.key == null or self.hostHeld()) return null;
+    if (self.live.work.state.progress() != null or self.live.queued.count != 0) return null;
+    if (self.submission.intent != null or self.submission.task.thread != null or
+        self.waitingAction() != null or self.live.work.first_action != null or
+        self.reading.prepared_action != null or self.reading.opening or
+        self.reading.phase == .permission or self.commandActive() or
+        self.retry_fence != null) return null;
+    return .{ .ending = ending.key, .sent = self.admission.sent };
+}
+
+/// A queued gesture never borrows a running reader's scratch or blocks input.
+fn startRetry(self: *Self) !void {
+    if (self.reader.thread != null) return;
+    const fence = self.retry_fence orelse return;
+    self.retry_fence = null;
+    if (!std.meta.eql(fence, self.retryable() orelse return)) return;
+    const job = self.freeze(.retry);
+    job.retry = fence.ending;
+    self.retry_fence = fence;
+    errdefer self.retry_fence = null;
+    try self.launch(job, reads.retry);
+}
+
+/// Applies only a successful retry result, after the shared reader owner has
+/// joined, preserved its diagnostic and classified cancellation or failure.
+fn finishRetry(self: *Self) !void {
+    const fence = self.retry_fence orelse return;
+    self.retry_fence = null;
+    // Consume this gesture once. No ordering of Admission and reader completion
+    // can revive it after any newer Message began, even with old live facts.
+    if (!std.meta.eql(fence, self.retryable() orelse return)) return;
+    const completion = self.job.retryCompletion(self.live.latest_ending);
+    switch (completion) {
+        .stale => {},
+        .failure => |failure| self.notice = switch (failure) {
+            .no_message => "! Retry unavailable: no earlier Message. Nothing sent.",
+            .too_large => "! Retry unavailable: last Message too large. Nothing sent.",
+        },
+        .message => |message| {
+            const ticket = try self.input.submitPreservingDraft(self.init.io, self.files.scratch, message.length);
+            try self.beginMessage(.{ .message = ticket });
+        },
+    }
 }
 
 /// The draft's list, which Enter, Esc and the arrows act on when the latest
@@ -2415,7 +2489,7 @@ fn feedState(self: *Self) FeedPolicy.State {
         .now_ns = std.Io.Clock.awake.now(self.init.io).nanoseconds,
         .scan_due_ns = self.poll_at,
         .opening = self.reading.opening,
-        .need = screen.anchor.need(screen.feed.layoutEntries(screen.textLayout()), screen.height, screen.feed.edges()),
+        .need = screen.anchor.need(screen.feed.layoutEntriesWith(screen.textLayout(), self.app_content.presentation()), screen.height, screen.feed.edges()),
         .at_end = screen.feed.at_end,
         .low = screen.feed.low,
         .high = screen.feed.high,
@@ -2608,6 +2682,14 @@ fn settleReader(self: *Self) !void {
     // a request left outstanding would refuse every later one.
     if (self.reading.phase == .recall and end != .complete) self.input.abandonStep();
     const phase = self.reading.phase;
+    // All terminal outcomes release the retry read, including supersession.
+    // Keep its phase through policy/application; diagnostics retain their own.
+    defer if (phase == .retry and end != .absent) {
+        self.retry_fence = null;
+        self.job.retry = null;
+        self.reading.phase = .activity;
+        self.dirty = true;
+    };
     if (end != .complete and (phase == .message or phase == .tool)) self.expansion.reading = null;
     if (lost) {
         // A joined failed read has published no staged output. Keep its
@@ -2632,6 +2714,7 @@ fn settleReader(self: *Self) !void {
             if (reader_policy.messageShows(request.asked, self.pageAsked())) try self.screen.showMessage(self.init.io, self.files.inspection);
         },
         .recalled => try self.showRecalled(),
+        .retried => try self.finishRetry(),
         .staged => try self.showStaged(),
         .copy => try self.showCopy(),
         .page => try self.showInspection(),
@@ -2731,12 +2814,12 @@ fn showStaged(self: *Self) !void {
             window.at_end = result.at_end;
             window.forward_partial = false;
         }
-        self.screen.anchor.prepend(window.layoutEntries(self.screen.textLayout()), self.screen.height, window.edges());
+        self.screen.anchor.prepend(window.layoutEntriesWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.edges());
     } else {
         window.high = if (complete) result.high else if (window.count != 0) window.entries[window.count - 1].key else window.high;
         window.at_end = complete and result.at_end;
         window.forward_partial = !window.at_end;
-        self.screen.anchor.append(window.layoutEntries(self.screen.textLayout()), self.screen.height, window.edges());
+        self.screen.anchor.append(window.layoutEntriesWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.edges());
     }
     self.reading.output_started = self.reading.output_started or result.row_count != 0;
     self.dirty = true;
@@ -2795,7 +2878,7 @@ fn insertFeed(self: *Self, entry: feed_window.Entry, backward: bool) bool {
     while (true) {
         const inserted = if (backward) window.prepend(&.{entry}) else window.append(&.{entry});
         if (inserted) |_| return true else |_| {}
-        var trim = self.screen.anchor.trim(window.heights(self.screen.textLayout()), self.screen.height, window.count -| 1);
+        var trim = self.screen.anchor.trim(window.heightsWith(self.screen.textLayout(), self.app_content.presentation()), self.screen.height, window.count -| 1);
         if (backward) trim.drop_front = 0 else trim.drop_back = 0;
         if (trim.drop_front == 0 and trim.drop_back == 0) {
             if (backward or window.count == 0 or !self.screen.anchor.following()) return false;
@@ -2942,6 +3025,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (result.line) |*line| self.line = line.*;
             if (result.hint) |*hint| self.hint = hint.*;
             self.live.view = result.live;
+            self.live.latest_ending = result.latest_ending;
             const cursor = result.cursor;
             self.live.scan = self.live.scan.landed(self.job.feed_page.?, if (cursor.position != 0) .{ .position = cursor.position, .ordinal = cursor.ordinal orelse std.math.maxInt(u64) } else null, cursor.end);
             if (read == .opening) self.reading.opening = false;
@@ -3686,6 +3770,7 @@ test "Ctrl-R while an Action waits recovers nothing and keeps the draft" {
         errdefer std.debug.print("ctrl_r={s}\n", .{ctrl_r[1..]});
         const held = try HeldFrontend.create();
         defer held.destroy();
+        held.self.failedRetryForTest();
         try sendKeys(&held.self, "kept");
         const file = try held.adopt(3);
         defer file.close(std.testing.io);
@@ -4171,11 +4256,13 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
         const held = try HeldFrontend.create();
         defer held.destroy();
         const self = &held.self;
+        self.failedRetryForTest();
         self.submission.intent = .{ .message = self.input.submitText("unconfirmed original") };
         self.submission.state = .unconfirmed;
         self.submission.key = "01234567-89ab-4cde-8012-0123456789ab".*;
         try held.keys(case.bytes);
         try std.testing.expectEqual(case.recovery, self.submission.retry != null);
+        try std.testing.expect(self.retry_fence == null);
     }
 }
 
@@ -6296,6 +6383,612 @@ test "SessionFrontend feed resize inside a long answer preserves the same logica
     try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
 }
 
+test "SessionFrontend feed latest ending is live state, not window fill state" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.reading.phase = .activity;
+    const ending: reads.LatestEnding = .{ .key = .{ .position = 10 }, .cause = @import("marks.zig").cause("provider_http_500") };
+    const newer: reads.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("provider_quota") };
+    for ([_]feed_reads.Read{ .opening, .scan, .fill_above, .fill_below }) |read| {
+        self.live.latest_ending = ending;
+        self.reading.feed_read = read;
+        self.job.feed_page = FeedPolicy.request(read, self.feedState());
+        self.job.result = .{ .latest_ending = newer };
+        try self.applyReader(.{ .cancelled = .{ .phase = .activity, .rendering = false } });
+        try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+        try self.applyReader(.complete);
+        try std.testing.expectEqualDeep(if (read == .opening or read == .scan) newer else ending, self.live.latest_ending.?);
+        // The next reader freezes the live scan fact even with no resident rows.
+        const job = self.freeze(.activity);
+        try std.testing.expectEqualDeep(self.live.latest_ending, job.latest_ending);
+    }
+}
+
+/// The shell tests use a joined worker result; session_reads' native Host
+/// fixtures separately exercise the production retry worker's exact-byte I/O.
+fn stageRetryForTest(self: *Self, completion: reads.RetryCompletion) !void {
+    const Worker = struct {
+        fn run(_: *anyopaque, _: *Task) !void {}
+    };
+    const fence = self.retry_fence.?;
+    const job = self.freeze(.retry);
+    job.retry = fence.ending;
+    job.result.retry = switch (completion) {
+        .message => |message| .{ .message = message },
+        .failure => |failure| .{ .failure = failure },
+        .stale => unreachable,
+    };
+    try self.launch(job, Worker.run);
+    try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.reader, RetrySettlementWorker.completed);
+}
+
+fn failedRetryForTest(self: *Self) void {
+    self.live.latest_ending = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
+}
+
+test "failed reply retry eligibility follows every live work state and admitted queue" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    self.failedRetryForTest();
+    const State = protocol.WorkState;
+    const cases = [_]struct { state: State, quiet: bool }{
+        .{ .state = .{ .idle = .{ .since = 1 } }, .quiet = true },
+        .{ .state = .{ .pending = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .working = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .retrying = .{ .since = 2, .due_at_ms = 3000, .cause = .{}, .attempt = 1 } }, .quiet = false },
+        .{ .state = .{ .bash = .{ .since = 2, .call = 1, .description = null, .running = 1, .approvals = 0 } }, .quiet = false },
+        .{ .state = .{ .approval = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .stopping = .{ .since = 2 } }, .quiet = false },
+        .{ .state = .{ .finished = .{ .since = 2 } }, .quiet = true },
+        .{ .state = .{ .failed = .{ .since = 2, .code = .{}, .resets_at = null } }, .quiet = true },
+        .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .quiet = true },
+    };
+    comptime std.debug.assert(cases.len == @typeInfo(State).@"union".field_names.len);
+    for (cases) |case| {
+        self.live.work.state = case.state;
+        for ([_]u64{ 0, 1, 2 }) |count| {
+            self.live.queued.count = count;
+            try std.testing.expectEqual(case.quiet and count == 0, self.retryable() != null);
+        }
+    }
+}
+
+/// The real begin transition retains the input and launches its borrower. The
+/// fixture has no Host; join that failed transport, then supply a typed answer
+/// through the same worker/advance/present handoff as Admission recovery.
+fn stageMessageForRetryTest(self: *Self, accepted: bool) !void {
+    const Worker = struct {
+        fn done(_: *anyopaque, _: *Task) !void {}
+        fn completed(owner: *Submission) bool {
+            return owner.task.completed();
+        }
+    };
+    self.submission.cancel();
+    try std.testing.expect(self.submission.join() == .failed);
+    const bytes = try self.input.message(self.submission.intent.?.message);
+    var code: protocol.Bounded(protocol.max_code_bytes) = .{};
+    try code.set("not_allowed");
+    self.submission.reply = .{
+        .status = 200,
+        .context = .{ .kind = .message },
+        .target = .{ .message = .{ .bytes = bytes.len, .digest = protocol.contentDigest(bytes) } },
+        .answer = .{ .replayed = false, .result = if (accepted) .{ .accepted = .{ .message = .{ .admission = 37 } } } else .{ .rejected = code } },
+    };
+    try self.submission.task.start(self.init.io, &self.submission, Worker.done);
+    try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.submission, Worker.completed);
+}
+
+fn settleMessageForRetryTest(self: *Self, accepted: bool) !void {
+    try self.stageMessageForRetryTest(accepted);
+    try self.admit();
+}
+
+/// Gates order actor boundaries, never sleeps. The retry worker is still
+/// running while the test submits/settles a person's newer Message.
+const RetryFenceWorker = struct {
+    const text = "/old literal\n\t café 💚\r\n";
+    var entered: std.atomic.Value(bool) = .init(false);
+    var release: std.atomic.Value(bool) = .init(false);
+
+    fn ready(task: *Task) bool {
+        return release.load(.acquire) or task.cancellation.stopped.load(.acquire);
+    }
+    fn run(raw: *anyopaque, task: *Task) !void {
+        const job: *Job = @ptrCast(@alignCast(raw));
+        entered.store(true, .release);
+        try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), task, ready);
+        if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+        job.result.retry = .{ .message = .{ .ending = job.retry.?, .position = 2, .length = text.len } };
+    }
+    fn start(self: *Self) !void {
+        entered.store(false, .release);
+        release.store(false, .release);
+        try self.files.scratch.writePositionalAll(self.init.io, text, 0);
+        try self.launchRetrySettlementForTest(run);
+        try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &entered, test_poll.isSet);
+    }
+    fn complete(self: *Self) !void {
+        release.store(true, .release);
+        try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.reader, RetrySettlementWorker.completed);
+    }
+};
+
+test "failed reply newer Message accepted before retry completion supersedes the fence before live work" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending.?;
+    const eligible = self.retryable().?;
+    try held.keys("\x12");
+    try std.testing.expectEqualDeep(eligible, self.retry_fence.?);
+    try RetryFenceWorker.start(self);
+    try held.keys("new Message\rkept éZ\x1b[D");
+    const draft = self.input.snapshot();
+    const newer_key = self.submission.key;
+    try std.testing.expect(!self.reader.completed()); // Admission precedes read completion.
+    try self.stageMessageForRetryTest(true);
+    try RetryFenceWorker.complete(self);
+    // Both borrowers are ready. Exercise update's actual admit-before-reader
+    // order with exactly the OLD quiescent work/queue/ending, not a new scan.
+    _ = try self.update();
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent); // Only the person's Message.
+    try std.testing.expect(self.submission.intent == null);
+    try std.testing.expectEqualSlices(u8, &newer_key, &self.submission.accepted.?.key);
+    try std.testing.expect(self.retry_fence == null);
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+    try std.testing.expect(self.live.work.state == .idle and self.live.queued.count == 0);
+    try std.testing.expectEqualDeep(draft, self.input.snapshot());
+    // Acceptance requested an ordinary scan. The no-Host fixture cancels that
+    // borrower before staging the LATER observed pending/working facts.
+    self.reader.cancel();
+    try std.testing.expect(self.joinReader() != .complete);
+    self.job.result = .{
+        .latest_ending = ending,
+        .work = .{ .work = .{ .state = .{ .pending = .{ .since = 2 } }, .turn = 1 } },
+        .queued = .{ .count = 1, .oldest_position = 4, .newest_admission = 37, .newest_position = 4 },
+    };
+    try self.applyReader(.complete);
+    try std.testing.expect(self.retryable() == null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") == null);
+    try held.keys("\x12");
+    try std.testing.expect(self.retry_fence == null);
+    self.job.result.work.work = .{ .state = .{ .working = .{ .since = 3 } }, .turn = 2 };
+    self.job.result.queued = .{};
+    try self.applyReader(.complete);
+    try std.testing.expect(self.retryable() == null);
+}
+
+test "failed reply stale pre-admission scan must not authorize a fresh Ctrl-R after acceptance" {
+    const Worker = struct {
+        var entered: std.atomic.Value(bool) = .init(false);
+        var release: std.atomic.Value(bool) = .init(false);
+        fn ready(task: *Task) bool {
+            return release.load(.acquire) or task.cancellation.stopped.load(.acquire);
+        }
+        fn run(_: *anyopaque, task: *Task) !void {
+            entered.store(true, .release);
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), task, ready);
+            if (task.cancellation.stopped.load(.acquire)) return error.Cancelled;
+        }
+    };
+    const Host = struct {
+        frontend: *Self,
+        listener: *std.Io.net.Server,
+        pages: usize = 0,
+        contents: usize = 0,
+        const text = "old literal Message";
+
+        // Service native HTTP requests while waiting for the actual ClientTask.
+        // The old-Message responses also let a reverted head check reach the
+        // erroneous second submission, rather than failing in the fixture.
+        fn pump(host: *@This()) !bool {
+            var fds = [_]std.posix.pollfd{.{ .fd = host.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 0) != 0) {
+                const peer = try host.listener.accept(std.testing.io);
+                defer peer.close(std.testing.io);
+                var request: [4096]u8 = undefined;
+                var used: usize = 0;
+                var body_start: usize = 0;
+                while (true) {
+                    const got = try std.posix.read(peer.socket.handle, request[used..]);
+                    if (got == 0) return error.UnexpectedEof;
+                    used += got;
+                    if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                        body_start = end + 4;
+                        const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                        const finish = std.mem.indexOfScalarPos(u8, request[0..end], start, '\r').?;
+                        if (used == body_start + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                    }
+                }
+                var storage: [4096]u8 = undefined;
+                var fixed = std.heap.FixedBufferAllocator.init(&storage);
+                const cursor = try std.json.parseFromSliceLeaky(struct { position: []const u8 }, fixed.allocator(), request[body_start..used], .{ .ignore_unknown_fields = true });
+                const position = try std.fmt.parseInt(u64, cursor.position, 10);
+                var buffer: [4096]u8 = undefined;
+                var out = std.Io.Writer.fixed(&buffer);
+                var extra_buffer: [128]u8 = undefined;
+                var extra: []const u8 = "";
+                var kind: []const u8 = "application/json";
+                if (std.mem.startsWith(u8, request[0..used], "POST /v1/activity-page ")) {
+                    host.pages += 1;
+                    // The newer Message is already admitted at Host, even
+                    // though the frontend's just-installed snapshot is idle.
+                    const reference: protocol.ActivityItem.Content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
+                    var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .queued = .{ .count = 1, .oldest_position = 3, .newest_admission = 37, .newest_position = 3 }, .work = .{ .revision = 2, .work = .{ .state = .{ .pending = .{ .since = 2 } } } } };
+                    try facts.work.workspace.set("/");
+                    facts.items[0] = .{ .position = if (position == 0) 3 else 1, .at = 1, .value = .{ .admission = .{ .admission = if (position == 0) 37 else 1, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
+                    try activity_reply.writePage(&out, &facts);
+                } else {
+                    try std.testing.expectStringStartsWith(request[0..used], "POST /v1/activity-content ");
+                    try std.testing.expectEqual(@as(u64, 1), position);
+                    host.contents += 1;
+                    kind = "application/octet-stream";
+                    extra = try std.fmt.bufPrint(&extra_buffer, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len });
+                    try out.writeAll(text);
+                }
+                var header: [512]u8 = undefined;
+                var writer = peer.writer(std.testing.io, &.{});
+                try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ kind, out.buffered().len, extra }));
+                try writer.interface.writeAll(out.buffered());
+            }
+            return host.frontend.reader.completed();
+        }
+    };
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const self = &held.self;
+    try seedFeed(held.screen, "old literal Message\n");
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending.?;
+    // Capture old idle facts before Admission, but publish them only after it.
+    const job = self.freeze(.activity);
+    job.result.latest_ending = ending;
+    job.result.work.work = .{ .state = .{ .idle = .{ .since = 1 } } };
+    job.result.queued = .{};
+    Worker.entered.store(false, .release);
+    Worker.release.store(false, .release);
+    try self.launch(job, Worker.run);
+    try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &Worker.entered, test_poll.isSet);
+    try held.keys("new Message\r");
+    try self.settleMessageForRetryTest(true);
+    try std.testing.expect(self.submission.intent == null);
+    try std.testing.expect(!self.reader.completed());
+    Worker.release.store(true, .release);
+    try test_poll.waitUntil(self.init.io, test_poll.after(self.init.io, .fromSeconds(2)), &self.reader, RetrySettlementWorker.completed);
+    try self.settleReader();
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+    try std.testing.expect(self.live.work.state == .idle and self.live.queued.count == 0);
+    // A fresh gesture captures the ALREADY increased count, but the real
+    // retry walk rejects the old ending against Host's newest admitted row.
+    const io = self.init.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const root = tmp.root[0..tmp.root_len];
+    var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+    defer lease.release();
+    try lease.prepareForServing(false);
+    const paths = lease.paths;
+    var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+    defer {
+        listener.deinit(io);
+        std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+    }
+    self.store = root;
+    self.session = "k7m2qx";
+    defer {
+        self.reader.cancel();
+        self.reader.join() catch |err| switch (err) {
+            error.Cancelled => {},
+            else => @panic(@errorName(err)),
+        };
+    }
+    try held.keys("kept éZ\x1b[D");
+    const draft = self.input.snapshot();
+    try held.keys("\x12");
+    try std.testing.expect(self.retry_fence != null);
+    try self.startRetry();
+    var host: Host = .{ .frontend = self, .listener = &listener };
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &host, Host.pump);
+    try self.settleReader();
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    try std.testing.expect(self.submission.intent == null and self.retry_fence == null);
+    try std.testing.expectEqual(@as(usize, 1), host.pages);
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
+    try std.testing.expectEqualDeep(draft, self.input.snapshot());
+    // No local suppression marker: before observation another gesture may
+    // read Host again, but cannot send. Once work is observed, the shared
+    // predicate hides the tail and the key starts no read.
+    try held.keys("\x12");
+    try self.startRetry();
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(2)), &host, Host.pump);
+    try self.settleReader();
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    _ = self.freeze(.activity);
+    self.job.result = .{
+        .latest_ending = ending,
+        .work = .{ .work = .{ .state = .{ .working = .{ .since = 2 } }, .turn = 2 } },
+    };
+    try self.applyReader(.complete);
+    try std.testing.expect(self.retryable() == null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") == null);
+    try held.keys("\x12");
+    try std.testing.expect(self.retry_fence == null and self.reader.thread == null);
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    try std.testing.expectEqualDeep(draft, self.input.snapshot());
+}
+
+test "failed reply retry completion before newer Message admission sends once and keeps the newer Message separate" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const self = &held.self;
+    self.failedRetryForTest();
+    try held.keys("\x12");
+    try RetryFenceWorker.start(self);
+    try RetryFenceWorker.complete(self);
+    try self.settleReader();
+    try std.testing.expect(self.retry_fence == null);
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    try std.testing.expectEqualStrings(RetryFenceWorker.text, try self.input.message(self.submission.intent.?.message));
+    const retry_key = self.submission.key;
+    try self.settleMessageForRetryTest(true);
+    try std.testing.expect(self.submission.intent == null);
+    try std.testing.expectEqualSlices(u8, &retry_key, &self.submission.accepted.?.key);
+    try held.keys("new Message\r");
+    const newer_key = self.submission.key;
+    try std.testing.expect(!std.mem.eql(u8, &retry_key, &newer_key));
+    try std.testing.expectEqualStrings("new Message", try self.input.message(self.submission.intent.?.message));
+    try std.testing.expectEqual(@as(u64, 2), self.admission.sent);
+    try self.settleMessageForRetryTest(true);
+    try std.testing.expect(self.submission.intent == null and self.retry_fence == null);
+    try std.testing.expectEqualSlices(u8, &newer_key, &self.submission.accepted.?.key);
+    try std.testing.expectEqual(@as(u64, 2), self.admission.sent);
+}
+
+test "failed reply rejected Message then discard supersedes pending retry but a fresh fence retries the unchanged ending" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending.?;
+    const original = self.retryable().?;
+    try held.keys("\x12");
+    try RetryFenceWorker.start(self);
+    try held.keys("rejected Message\rkept éZ\x1b[D");
+    const draft = self.input.snapshot();
+    try std.testing.expect(!self.reader.completed());
+    try self.settleMessageForRetryTest(false);
+    try std.testing.expectEqual(original_state.State.rejected, self.submission.state);
+    try self.slashCommand("/discard");
+    try std.testing.expect(self.submission.intent == null);
+    try RetryFenceWorker.complete(self);
+    try self.settleReader();
+    // Discard removes the submission hold, not the old gesture's supersession.
+    try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+    try std.testing.expect(self.submission.intent == null and self.retry_fence == null);
+    const fresh = self.retryable().?;
+    try std.testing.expectEqualDeep(original.ending, fresh.ending);
+    try std.testing.expectEqual(original.sent + 1, fresh.sent);
+    try std.testing.expectEqualDeep(ending, self.live.latest_ending.?);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") != null);
+    try held.keys("\x12");
+    try std.testing.expectEqualDeep(fresh, self.retry_fence.?);
+    try self.stageRetryForTest(.{ .message = .{ .ending = ending.key, .position = 2, .length = RetryFenceWorker.text.len } });
+    try self.settleReader();
+    try std.testing.expectEqualStrings(RetryFenceWorker.text, try self.input.message(self.submission.intent.?.message));
+    try std.testing.expectEqual(@as(u64, 2), self.admission.sent);
+    try std.testing.expectEqualDeep(draft, self.input.snapshot());
+}
+
+test "failed reply reopening during newer work hides retry tail and ignores Ctrl-R and click" {
+    const ending: reads.LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
+    for ([_]bool{ false, true }) |queued| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try seedFeed(held.screen, "× Model reply unreadable\n");
+        self.reading.opening = true;
+        _ = self.freeze(.activity);
+        // An opening can find the old failure while the newer Turn has not
+        // ended. No invocation-local submission history exists in this chat.
+        self.job.result = .{
+            .latest_ending = .{ .key = held.screen.feed.high.?, .cause = ending.cause },
+            .work = .{ .work = .{ .state = if (queued) .{ .pending = .{ .since = 2 } } else .{ .working = .{ .since = 2 } }, .turn = 2 } },
+            .queued = if (queued) .{ .count = 1, .oldest_position = 4, .newest_admission = 37, .newest_position = 4 } else .{},
+        };
+        try self.applyReader(.complete);
+        try std.testing.expect(!self.reading.opening);
+        try std.testing.expect(self.live.latest_ending != null);
+        try std.testing.expect(self.retryable() == null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "ctrl+r retries") == null);
+        try held.keys("draft éZ\x1b[D\x12");
+        const before = self.input.snapshot();
+        var ctx = held.context();
+        try appRetry(self, &ctx);
+        try std.testing.expect(self.retry_fence == null);
+        try std.testing.expect(self.reader.thread == null);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+    }
+}
+
+test "failed reply Ctrl-R schedules exact literal Message bytes without changing draft or caret" {
+    for ([_][]const u8{ "\x12", "\x1b[114;5u", "\x1b[27;5;114~" }) |key| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const io = std.testing.io;
+        const file = try held.tmp.dir.createFile(io, "retry", .{ .read = true });
+        defer file.close(io);
+        self.files.scratch = file;
+        const text = "//not a command\n\t café 💚\r\n";
+        try file.writePositionalAll(io, text, 0);
+        self.failedRetryForTest();
+        try held.keys("draft éZ\x1b[D");
+        const before = self.input.snapshot();
+        const revision = self.input.revision;
+        try held.keys(key);
+        try std.testing.expect(self.reader.thread == null); // Key never reads synchronously.
+        try std.testing.expectEqualDeep(self.live.latest_ending.?.key, self.retry_fence.?.ending);
+        try self.stageRetryForTest(.{ .message = .{ .ending = self.live.latest_ending.?.key, .position = 2, .length = text.len } });
+        const fence = self.retry_fence.?;
+        try held.keys(key); // A repeated gesture cannot replace the read's fence.
+        try std.testing.expectEqualDeep(fence, self.retry_fence.?);
+        try self.settleReader();
+        try std.testing.expect(self.submission.intent.? == .message);
+        try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        try std.testing.expectEqual(revision, self.input.revision);
+        try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+        try std.testing.expect(self.retryable() == null);
+        _ = self.submission.join();
+        self.submission.close();
+        try self.input.release(self.submission.intent.?.message);
+        self.submission.intent = null;
+        // This fixture has no Host: no Message was admitted. Releasing an
+        // unsent original must not suppress the unchanged failed ending.
+        try std.testing.expect(self.retryable() != null);
+    }
+}
+
+test "failed reply retry stale and every Message state refusal send nothing" {
+    for ([_]?reads.RetryFailure{ null, .no_message, .too_large }) |failure| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.failedRetryForTest();
+        try held.keys("kept\x1b[D\x12");
+        const before = self.input.snapshot();
+        try self.stageRetryForTest(if (failure) |reason| .{ .failure = reason } else .{ .message = .{ .ending = self.live.latest_ending.?.key, .position = 2, .length = 20 } });
+        if (failure == null) self.live.latest_ending.?.key.ordinal += 1;
+        try self.settleReader();
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        if (failure != null) try std.testing.expect(std.mem.endsWith(u8, self.notice.?, "Nothing sent."));
+    }
+}
+
+test "failed reply retry completion revalidates every submission hold" {
+    const Host = struct {
+        fn held(_: *anyopaque) bool {
+            return true;
+        }
+        fn lost(_: *anyopaque) void {}
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return false;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    const Hold = enum { original, action, prepared, opening, command, queued_command, upgrade, working, queued, host };
+    for (std.enums.values(Hold)) |hold| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.failedRetryForTest();
+        try held.keys("draft\x12");
+        try self.stageRetryForTest(.{ .message = .{ .ending = self.live.latest_ending.?.key, .position = 2, .length = 20 } });
+        switch (hold) {
+            .original => self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } },
+            .action => self.live.work.first_action = 7,
+            .prepared => self.reading.prepared_action = 7,
+            .opening => self.reading.opening = true,
+            .command => self.inspection.command_running = true,
+            .queued_command => self.input.queueCommand("/help"),
+            .upgrade => held.upgrade = .{ .after = .blocked },
+            .working => self.live.work.state = .{ .working = .{ .since = 2 } },
+            .queued => self.live.queued.count = 1,
+            .host => self.app_hooks.host = .{ .context = self, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice },
+        }
+        try self.settleReader();
+        try std.testing.expect(self.retryable() == null);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expect(self.submission.intent == null or hold == .original);
+        try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+        self.submission.intent = null;
+    }
+}
+
+test "failed reply retry tail follows only the latest ending and frontend eligibility" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    var shown = try held.shown();
+    errdefer std.debug.print("retry tail screen:\n{s}\n", .{shown});
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shown, "ctrl+r retries"));
+    try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") != null);
+    self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } };
+    shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") == null);
+    self.submission.intent = null;
+    self.live.latest_ending.?.cause = @import("marks.zig").cause("provider_quota");
+    shown = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, shown, "× Model reply unreadable · ctrl+r retries") == null);
+}
+
+test "failed reply retry gesture waits behind a reader and drops every superseded fence" {
+    const Worker = struct {
+        var release: std.atomic.Value(bool) = .init(false);
+        fn ready(task: *Task) bool {
+            return release.load(.acquire) or task.cancellation.stopped.load(.acquire);
+        }
+        fn run(_: *anyopaque, task: *Task) !void {
+            try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), task, ready);
+        }
+    };
+    for ([_]enum { position, ordinal, message }{ .position, .ordinal, .message }) |changed| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.failedRetryForTest();
+        Worker.release.store(false, .release);
+        try self.launch(self.freeze(.activity), Worker.run);
+        defer {
+            Worker.release.store(true, .release);
+            self.reader.join() catch {};
+        }
+        try held.keys("\x12");
+        const requested = self.retry_fence.?;
+        try self.startRetry();
+        try std.testing.expectEqualDeep(requested, self.retry_fence.?);
+        try std.testing.expect(self.job.retry == null);
+        switch (changed) {
+            .position => self.live.latest_ending.?.key.position += 1,
+            .ordinal => self.live.latest_ending.?.key.ordinal += 1,
+            .message => {
+                try self.beginMessage(.{ .message = self.input.submitText("new Message") });
+                try self.settleMessageForRetryTest(false);
+                try self.slashCommand("/discard");
+            },
+        }
+        Worker.release.store(true, .release);
+        try self.reader.join();
+        try self.startRetry();
+        try std.testing.expectEqualDeep(@as(?feed_window.Key, null), self.job.retry);
+        try std.testing.expect(self.retry_fence == null and self.reader.thread == null);
+        try std.testing.expect(self.submission.intent == null);
+    }
+}
+
 test "SessionFrontend backward fill supplies the scan replay boundary through the production handoff" {
     // Queued Admissions can be hidden while work holds the queue or echoed
     // while idle. Both are provisional rows, even outside the opening page.
@@ -6712,6 +7405,441 @@ test "SessionFrontend close from browsed feed returns to end before saving the c
     }
 }
 
+/// Find the key's first painted cell using an independent literal Document,
+/// not the production EndingLine decorator or hit query.
+fn retryCellForTest(self: *Self) !struct { row: i16, col: i16 } {
+    const text = "× Model reply unreadable · ctrl+r retries\n";
+    const start = std.mem.indexOf(u8, text, "ctrl+r retries").?;
+    const width = self.app_content.drawn.width;
+    var expected: viewport.Sized(128, true) = .{ .sidenotes = true, .quotes = true };
+    try expected.append(text);
+    try expected.prepare();
+    const height = expected.lineRows(.{ .width = width, .method = self.app_content.method }, 0);
+    const cells = try std.testing.allocator.alloc(vaxis.Cell, @as(usize, height) * width);
+    defer std.testing.allocator.free(cells);
+    @memset(cells, .{});
+    var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = self.app_content.method, .buf = cells };
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+    _ = expected.draw(win, .{}, true, false, .{}, .{});
+    for (cells, 0..) |cell, index| if (expected.cellOffset(cell) == start) return .{ .row = @intCast(self.app_content.drawn.pad + index / width), .col = @intCast(index % width) };
+    return error.RetryKeyNotDrawn;
+}
+
+test "failed reply retry click schedules the same exact Message with draft and caret kept at wide and wrapped widths" {
+    for ([_]u16{ 16, 80 }) |width| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size.width = width;
+        const self = &held.self;
+        const file = try held.tmp.dir.createFile(std.testing.io, "retry-click", .{ .read = true });
+        defer file.close(std.testing.io);
+        self.files.scratch = file;
+        const text = "/literal\n\t café 💚\r\n";
+        try file.writePositionalAll(std.testing.io, text, 0);
+        try seedFeed(held.screen, "× Model reply unreadable\n");
+        self.failedRetryForTest();
+        self.live.latest_ending.?.key = held.screen.feed.high.?;
+        try held.keys("draft éZ\x1b[D");
+        const before = self.input.snapshot();
+        _ = try held.draw();
+        const at = try self.retryCellForTest();
+        var ctx = held.context();
+        const content = self.app_content.widget();
+        try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .press } });
+        try std.testing.expect(self.retry_fence == null);
+        try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .release } });
+        try std.testing.expect(self.reader.thread == null); // A click schedules, never blocks on a read.
+        try std.testing.expectEqualDeep(self.live.latest_ending.?.key, self.retry_fence.?.ending);
+        try self.stageRetryForTest(.{ .message = .{ .ending = self.live.latest_ending.?.key, .position = 1, .length = text.len } });
+        try self.settleReader();
+        try std.testing.expect(self.submission.intent.? == .message);
+        try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+        try std.testing.expect(self.retryable() == null);
+    }
+}
+
+test "failed reply retry click revalidates the frontend predicate before scheduling" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    _ = try held.draw();
+    const at = try self.retryCellForTest();
+    var ctx = held.context();
+    const content = self.app_content.widget();
+    try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .press } });
+    // No redraw: FeedView's frame still offers the link, but admission changed.
+    self.submission.intent = .{ .decision = .{ .action = 7, .decision = .deny } };
+    defer self.submission.intent = null;
+    try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .release } });
+    try std.testing.expect(self.retry_fence == null and self.reader.thread == null);
+    try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+}
+
+const RetrySettlementWorker = struct {
+    fn cancelled(_: *anyopaque, task: *Task) !void {
+        try test_poll.waitUntil(task.io, test_poll.after(task.io, .fromSeconds(10)), &task.cancellation.stopped, test_poll.isSet);
+        return error.Cancelled;
+    }
+    fn transport(_: *anyopaque, _: *Task) !void {
+        return error.ConnectionResetByPeer;
+    }
+    fn host(_: *anyopaque, task: *Task) !void {
+        return diagnostic(task, "retry_busy");
+    }
+    fn store(_: *anyopaque, task: *Task) !void {
+        return diagnostic(task, "canonical_store_failure");
+    }
+    fn diagnostic(task: *Task, code: []const u8) !void {
+        var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+        try failure.diagnostic.type.set("busy\x1b\n");
+        try failure.diagnostic.code.set(code);
+        return task.requests().failRead(failure);
+    }
+    fn idle(_: *anyopaque, _: *Task) !void {}
+    fn completed(task: *Task) bool {
+        return task.completed();
+    }
+    fn settled(self: *Self) !bool {
+        _ = try self.update();
+        return self.reader.thread == null and self.input.queuedCommand() == null and !self.inspection.command_running;
+    }
+    fn requests(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, out: *std.Io.Writer, _: *reads.SavedRequests) !void {
+        try out.writeAll("RETRY-REQUESTS-PAGE\n");
+    }
+};
+
+/// Freeze the real retry phase while substituting just the worker's I/O.
+fn launchRetrySettlementForTest(self: *Self, worker: Task.Run) !void {
+    const fence = self.retry_fence.?;
+    const job = self.freeze(.retry);
+    job.retry = fence.ending;
+    try self.launch(job, worker);
+}
+
+test "failed reply retry reader keeps every read failure at the shared settlement boundary" {
+    const Host = struct {
+        frontend: *Self,
+        listener: *std.Io.net.Server,
+        fault: Fault,
+        target: Stage,
+        requests: usize = 0,
+        losses: usize = 0,
+        const Stage = enum { head, admission, content };
+        const Fault = enum { canonical, fenced, refused, truncated, invalid, length, digest, cancelled };
+        const text = "last literal Message";
+
+        fn code(fault: Fault) ?[]const u8 {
+            return switch (fault) {
+                .canonical => "canonical_store_failure",
+                .fenced => "dispatch_fenced",
+                .refused => "ContentNotFound",
+                else => null,
+            };
+        }
+        fn failure(fault: Fault) anyerror {
+            return switch (fault) {
+                .canonical => error.CanonicalStoreFailure,
+                .fenced, .refused => error.HostInvocationFailed,
+                .truncated => error.TruncatedResponse,
+                .invalid => error.InvalidResponse,
+                .length, .digest => error.ContentBindingMismatch,
+                .cancelled => error.Cancelled,
+            };
+        }
+        fn held(raw: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return self.losses != 0;
+        }
+        fn lost(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.losses += 1;
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return error.TestUnexpectedResult;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+        fn pump(host: *@This()) !bool {
+            const io = std.testing.io;
+            var fds = [_]std.posix.pollfd{.{ .fd = host.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 0) != 0) {
+                const peer = try host.listener.accept(io);
+                defer peer.close(io);
+                var request: [4096]u8 = undefined;
+                var used: usize = 0;
+                while (true) {
+                    const got = try std.posix.read(peer.socket.handle, request[used..]);
+                    if (got == 0) return error.UnexpectedEof;
+                    used += got;
+                    if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                        const start_at = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                        const finish = std.mem.indexOfScalarPos(u8, request[0..end], start_at, '\r').?;
+                        if (used == end + 4 + try std.fmt.parseInt(usize, request[start_at..finish], 10)) break;
+                    }
+                }
+                const stage: Stage = switch (host.requests) {
+                    0 => .head,
+                    1 => .admission,
+                    2 => .content,
+                    else => return error.TestUnexpectedResult,
+                };
+                try std.testing.expectStringStartsWith(request[0..used], if (stage == .content) "POST /v1/activity-content " else "POST /v1/activity-page ");
+                // Record the observed boundary before replying, closing or cancelling.
+                host.requests += 1;
+                const failing = stage == host.target;
+                if (failing and host.fault == .cancelled) {
+                    host.frontend.reader.cancel();
+                    return host.frontend.reader.completed();
+                }
+                var buffer: [4096]u8 = undefined;
+                var out = std.Io.Writer.fixed(&buffer);
+                var extra_buffer: [128]u8 = undefined;
+                var extra: []const u8 = "";
+                var kind: []const u8 = "application/json";
+                const status: []const u8 = if (!failing) "200 OK" else switch (host.fault) {
+                    .canonical => "500 Internal Server Error",
+                    .fenced => "503 Service Unavailable",
+                    .refused => "409 Conflict",
+                    else => "200 OK",
+                };
+                if (failing and code(host.fault) != null) {
+                    try protocol.writeShape(&out, protocol.error_reply, .{ switch (host.fault) {
+                        .canonical => protocol.ErrorType.invocation_error,
+                        .fenced => protocol.ErrorType.busy,
+                        .refused => protocol.ErrorType.activity_unavailable,
+                        else => unreachable,
+                    }, code(host.fault).? });
+                } else if (stage == .content) {
+                    kind = if (failing and host.fault == .invalid) "text/plain" else "application/octet-stream";
+                    extra = try std.fmt.bufPrint(&extra_buffer, "X-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n", .{ text.len, text.len });
+                    try out.writeAll(if (failing and host.fault == .digest) "LOST literal Message" else text);
+                } else {
+                    var facts: protocol.ActivityFacts = .{ .end = 3, .direction = .backward, .count = 1, .work = .{ .revision = 1, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+                    try facts.work.workspace.set("/");
+                    const reference: protocol.ActivityItem.Content = .{ .length = text.len + @intFromBool(host.fault == .length), .digest = protocol.contentDigest(text) };
+                    facts.items[0] = .{ .position = if (stage == .head) 3 else 2, .at = 1, .value = .{ .admission = .{ .admission = 2, .key = .{}, .turn = null, .state = .queued, .content = reference, .admitted_at = 1 } } };
+                    if (stage == .head) {
+                        var ending: protocol.ActivityItem.TurnEnded = .{ .session = .{ .bytes = "k7m2qx".*, .len = 6 }, .turn = 1, .operation = 1, .ending = .failed, .code = .{}, .content = null };
+                        try ending.code.set("malformed_provider_output");
+                        facts.items[0].value = .{ .turn_ended = ending };
+                    }
+                    try activity_reply.writePage(&out, &facts);
+                }
+                var header: [512]u8 = undefined;
+                var writer = peer.writer(io, &.{});
+                try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n{s}\r\n", .{ status, kind, out.buffered().len, extra }));
+                const body = out.buffered();
+                try writer.interface.writeAll(if (failing and host.fault == .truncated) body[0..1] else body);
+            }
+            return host.frontend.reader.completed();
+        }
+    };
+    const io = std.testing.io;
+    for (std.enums.values(Host.Fault)) |fault| for (std.enums.values(Host.Stage)) |target| {
+        if ((fault == .invalid or fault == .length or fault == .digest) and target != .content) continue;
+        for ([_]bool{ false, true }) |app| for ([_]bool{ false, true }) |superseded| {
+            if (superseded and fault != .cancelled) continue;
+            errdefer std.debug.print("retry fault={s}, target={s}, app={}, superseded={}\n", .{ @tagName(fault), @tagName(target), app, superseded });
+            const fixture = try FeedFixture.create();
+            defer fixture.destroy();
+            const held = fixture.held;
+            const self = &held.self;
+            var tmp = try @import("socket_fixture.zig").Directory.init();
+            defer tmp.cleanup();
+            const root = tmp.root[0..tmp.root_len];
+            var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+            defer lease.release();
+            try lease.prepareForServing(false);
+            const paths = lease.paths;
+            var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+            defer {
+                listener.deinit(io);
+                std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+            }
+            self.store = root;
+            self.session = "k7m2qx";
+            self.failedRetryForTest();
+            self.live.latest_ending.?.key = .{ .position = 3 };
+            var host: Host = .{ .frontend = self, .listener = &listener, .fault = fault, .target = target };
+            if (app) self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice };
+            defer self.app_hooks.host = null;
+            defer {
+                self.reader.cancel();
+                // On an assertion failure, reap without replacing that failure.
+                self.reader.join() catch {};
+            }
+            try held.keys("kept éZ\x1b[D\x12");
+            const before = self.input.snapshot();
+            try self.startRetry(); // The production worker, not a synthesized completion.
+            if (superseded) self.input.queueCommand("/help");
+            try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &host, Host.pump);
+            const loss = app and (fault == .fenced or fault == .truncated);
+            if (loss or superseded) {
+                try self.settleReader();
+            } else try std.testing.expectError(Host.failure(fault), self.settleReader());
+            try std.testing.expectEqual(@as(usize, @backingInt(target) + 1), host.requests);
+            try std.testing.expectError(Host.failure(fault), self.reader.result.outcome.?);
+            try std.testing.expectEqual(if (fault == .truncated) client.FailureOrigin.host_transport else .local, self.reader.result.failure_origin);
+            try std.testing.expectEqual(@as(usize, @intFromBool(loss)), host.losses);
+            try std.testing.expect(self.reader.thread == null and self.reader.read_failure == null);
+            try std.testing.expect(self.retry_fence == null and self.job.retry == null and self.submission.intent == null);
+            try std.testing.expectEqual(ReadPhase.activity, self.reading.phase);
+            try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+            try std.testing.expectEqualDeep(before, self.input.snapshot());
+            try std.testing.expect(self.notice == null and self.leaving == null);
+            if (!loss and Host.code(fault) != null) {
+                const pending = self.reading.pending_diagnostic.?;
+                try std.testing.expectEqual(ReadPhase.retry, pending.phase);
+                try std.testing.expect(!pending.recoverable);
+                try std.testing.expectEqualStrings(Host.code(fault).?, pending.failure.diagnostic.code.slice());
+                var bytes: [512]u8 = undefined;
+                var out = std.Io.Writer.fixed(&bytes);
+                try self.writePendingDiagnostic(&out);
+                try std.testing.expect(std.mem.endsWith(u8, out.buffered(), Host.code(fault).?));
+            } else try std.testing.expect(self.reading.pending_diagnostic == null);
+            if (loss) try std.testing.expectEqual(@as(i64, 0), self.poll_at);
+        };
+    };
+}
+
+test "failed reply retry settlement lets queued inspections cancel the read and run without sending" {
+    const io = std.testing.io;
+    for ([_][]const u8{ "/help", "/requests" }) |command| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        const file = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
+        defer file.close(io);
+        self.files.inspection = file;
+        self.requests = RetrySettlementWorker.requests;
+        try seedFeed(held.screen, "× Model reply unreadable\n");
+        self.failedRetryForTest();
+        self.live.latest_ending.?.key = held.screen.feed.high.?;
+        try held.keys("\x12");
+        try self.launchRetrySettlementForTest(RetrySettlementWorker.cancelled);
+        try held.keys(command);
+        try held.keys("\rdraft éZ\x1b[D");
+        const before = self.input.snapshot();
+        try std.testing.expectEqualStrings(command, self.input.queuedCommand().?);
+        try std.testing.expect(self.retryable() == null);
+        // Drive update's actual cancel -> join -> next-command launch sequence.
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, RetrySettlementWorker.settled);
+        try std.testing.expect(self.reader.thread == null and self.job.retry == null and self.retry_fence == null);
+        try std.testing.expect(self.leaving == null and held.left == null);
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        try std.testing.expectEqual(@as(@TypeOf(self.screen.view), .inspection), self.screen.view);
+        try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), if (std.mem.eql(u8, command, "/help")) "Marks" else "RETRY-REQUESTS-PAGE") != null);
+        try held.keys("\x07");
+        try std.testing.expect(self.retryable() != null);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
+    }
+}
+
+test "failed reply retry settlement accepts upgrade cancellation and returns the tail after reobservation" {
+    const io = std.testing.io;
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    const ending = self.live.latest_ending;
+    try held.keys("draft éZ\x1b[D\x12");
+    const before = self.input.snapshot();
+    try self.launchRetrySettlementForTest(RetrySettlementWorker.cancelled);
+    held.upgrade = .{ .run = .checking };
+    try std.testing.expectEqual(Updated.waiting, try self.update());
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, RetrySettlementWorker.settled);
+    try std.testing.expectEqual(Updated.waiting, try self.update());
+    try std.testing.expect(self.reader.thread == null and self.job.retry == null and self.retry_fence == null);
+    try std.testing.expectEqual(ReadPhase.activity, self.reading.phase);
+    try std.testing.expect(self.submission.intent == null and self.leaving == null);
+    try std.testing.expect(self.retryable() == null);
+    try std.testing.expectEqualDeep(before, self.input.snapshot());
+    try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+    // Host work resumes only after the normal observation clears the stale hold.
+    held.upgrade = .{};
+    const job = self.freeze(.activity);
+    self.reading.feed_read = .scan;
+    job.result.latest_ending = ending;
+    try self.applyReader(.complete);
+    try std.testing.expect(self.retryable() != null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
+}
+
+test "failed reply retry settlement preserves fatal Host diagnostics across supersession and worker reset" {
+    const io = std.testing.io;
+    const Context = enum { active, inspection, upgrade };
+    for ([_]struct { Task.Run, anyerror, []const u8 }{
+        .{ RetrySettlementWorker.host, error.HostInvocationFailed, "retry_busy" },
+        .{ RetrySettlementWorker.store, error.CanonicalStoreFailure, "canonical_store_failure" },
+    }) |case| for (std.enums.values(Context)) |context| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.failedRetryForTest();
+        try held.keys("draft éZ\x1b[D\x12");
+        const before = self.input.snapshot();
+        try self.launchRetrySettlementForTest(case[0]);
+        switch (context) {
+            .active => {},
+            .inspection => self.input.queueCommand("/help"),
+            .upgrade => held.upgrade = .{ .run = .checking },
+        }
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.reader, RetrySettlementWorker.completed);
+        try std.testing.expectError(case[1], self.settleReader());
+        try std.testing.expect(self.reader.read_failure == null);
+        const pending = self.reading.pending_diagnostic.?;
+        try std.testing.expectEqual(ReadPhase.retry, pending.phase);
+        try std.testing.expect(!pending.recoverable);
+        try std.testing.expectEqual(@as(u16, 503), pending.failure.status);
+        try std.testing.expectEqualStrings("busy\x1b\n", pending.failure.diagnostic.type.slice());
+        try std.testing.expectEqualStrings(case[2], pending.failure.diagnostic.code.slice());
+        try std.testing.expect(self.job.retry == null and self.submission.intent == null and self.retry_fence == null);
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        // A Task reset must not destroy the diagnostic already owned by the UI.
+        try self.reader.start(io, &self.job, RetrySettlementWorker.idle);
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.reader, RetrySettlementWorker.completed);
+        try std.testing.expect(self.joinReader() == .complete);
+        var bytes: [1024]u8 = undefined;
+        var out = std.Io.Writer.fixed(&bytes);
+        try self.writePendingDiagnostic(&out);
+        try std.testing.expect(std.mem.startsWith(u8, out.buffered(), "HTTP 503; type: busy\\x1b\\n; code: "));
+        try std.testing.expect(std.mem.endsWith(u8, out.buffered(), case[2]));
+        const settled = self.settle({});
+        try std.testing.expectEqual(case[1], settled.failure(.final_exit, case[1]).?);
+        try std.testing.expect(self.reading.pending_diagnostic != null);
+    };
+}
+
+test "failed reply retry settlement propagates transport errors and unexpected active cancellation" {
+    const io = std.testing.io;
+    for ([_]struct { Task.Run, anyerror }{
+        .{ RetrySettlementWorker.transport, error.ConnectionResetByPeer },
+        .{ RetrySettlementWorker.cancelled, error.Cancelled },
+    }) |case| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.failedRetryForTest();
+        try held.keys("\x12");
+        try self.launchRetrySettlementForTest(case[0]);
+        if (case[1] == error.Cancelled) self.reader.cancel();
+        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.reader, RetrySettlementWorker.completed);
+        try std.testing.expectError(case[1], self.settleReader());
+        try std.testing.expect(self.submission.intent == null and self.job.retry == null and self.retry_fence == null);
+        try std.testing.expect(self.reading.pending_diagnostic == null);
+    }
+}
+
 test "SessionFrontend fixed and growing end replay cycles count arrivals once across reader pages" {
     const Host = struct {
         fn respond(listener: *std.Io.net.Server, bytes: []const u8) !void {
@@ -6761,6 +7889,14 @@ test "SessionFrontend fixed and growing end replay cycles count arrivals once ac
             var out = std.Io.Writer.fixed(&buffer);
             try activity_reply.writePage(&out, &facts);
             try respond(listener, out.buffered());
+            if (read == .opening and facts.more) {
+                // This queued/sent-only history has no own ending. Opening
+                // asks for that live fact independently of its resident rows.
+                const endings: protocol.ActivityFacts = .{ .end = end, .direction = .backward, .work = facts.work };
+                var ending_out = std.Io.Writer.fixed(&buffer);
+                try activity_reply.writePage(&ending_out, &endings);
+                try respond(listener, ending_out.buffered());
+            }
             try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), frontend, struct {
                 fn complete(self: *Self) bool {
                     return self.reader.completed();

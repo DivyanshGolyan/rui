@@ -2,7 +2,7 @@
 //! they do not perform or stand in for restoration, cancellation or joins.
 const std = @import("std");
 
-pub const ReadPhase = enum { activity, fill, inspection, permission, message, tool, recall };
+pub const ReadPhase = enum { activity, fill, inspection, permission, message, tool, recall, retry };
 /// `inspection`: a pending inspection supersedes a silent read it cancelled.
 pub const Mode = enum { active, inspection, final_exit };
 pub const ReadEnd = union(enum) {
@@ -126,6 +126,18 @@ test "departure joined fact matrix preserves precedence and recovery" {
             }
         }
     }
+}
+
+test "retry settlement keeps substantive failures fatal in every supersession mode" {
+    for (std.enums.values(Mode)) |mode| for ([_]bool{ false, true }) |rendering| {
+        for ([_]anyerror{ error.ConnectionResetByPeer, error.HostInvocationFailed, error.CanonicalStoreFailure }) |err| {
+            const end: ReadEnd = .{ .failed = .{ .err = err, .progress = .{ .phase = .retry, .rendering = rendering } } };
+            try std.testing.expect(!end.preparationFailure());
+            try std.testing.expectEqual(err, end.failure(mode).?);
+        }
+        const cancelled: ReadEnd = .{ .cancelled = .{ .phase = .retry, .rendering = rendering } };
+        try std.testing.expectEqual(if (mode == .active) @as(?anyerror, error.Cancelled) else null, cancelled.failure(mode));
+    };
 }
 
 test "departure only historical fill preparation recovers while live scans and canonical failures remain fatal" {

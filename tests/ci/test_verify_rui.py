@@ -210,7 +210,7 @@ class FramesTest(unittest.TestCase):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         for name, words in (("stopped", "■ Stopped"),
-                            ("chat-failed", "× Model reply unreadable")):
+                            ("chat-failed", "× Model reply unreadable · ctrl+r retries")):
             with self.subTest(state=name):
                 self.assertEqual(states[name]["steps"], [{"wait": words}])
                 self.assertEqual(states[name]["expect"], [words])

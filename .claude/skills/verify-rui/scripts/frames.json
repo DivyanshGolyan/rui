@@ -746,7 +746,7 @@
       "open": "Flaky upload test",
       "steps": [
         {
-          "wait": "× Model reply unreadable"
+          "wait": "× Model reply unreadable · ctrl+r retries"
         }
       ],
       "absent": [

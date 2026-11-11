@@ -31,6 +31,8 @@ pub const Shows = enum {
     message,
     /// Lands a recall step on the draft.
     recalled,
+    /// Submits the exact staged Message after retry eligibility is rechecked.
+    retried,
     /// Appends the staged live output.
     staged,
     /// Sends the answer to /copy's target.
@@ -46,6 +48,7 @@ pub fn shows(phase: ReadPhase, inspection: Inspection) Shows {
         .message => .message,
         .tool => .tool,
         .recall => .recalled,
+        .retry => .retried,
         .activity, .fill, .permission => .staged,
         .inspection => if (inspection == .copy) .copy else .page,
     };
@@ -74,6 +77,7 @@ pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
         .message => .{ .say = "! Message unavailable." },
         .tool => .{ .say = "! Tool output unavailable." },
         .recall => .{ .say = "! Sent message unavailable; draft retained." },
+        .retry => .{ .say = "! Retry unavailable; nothing sent. Draft retained." },
         .inspection => if (inspection == .copy) .copy else .{ .say = "! Inspection unavailable; draft retained." },
     };
 }
@@ -135,6 +139,7 @@ test "a completed read shows what its phase read; only /copy's inspection copies
         .{ .message, .copy, .message },
         .{ .tool, .other, .tool },
         .{ .recall, .other, .recalled },
+        .{ .retry, .other, .retried },
         .{ .activity, .other, .staged },
         .{ .fill, .other, .staged },
         .{ .permission, .copy, .staged },
@@ -162,6 +167,7 @@ test "a read that failed while preparing says which page is unavailable" {
     try std.testing.expectEqualStrings("! Message unavailable.", unavailable(.message, .other).say);
     try std.testing.expectEqualStrings("! Tool output unavailable.", unavailable(.tool, .other).say);
     try std.testing.expectEqualStrings("! Sent message unavailable; draft retained.", unavailable(.recall, .other).say);
+    try std.testing.expectEqualStrings("! Retry unavailable; nothing sent. Draft retained.", unavailable(.retry, .other).say);
     try std.testing.expectEqualStrings("! Inspection unavailable; draft retained.", unavailable(.inspection, .command).say);
     try std.testing.expect(unavailable(.inspection, .copy) == .copy);
     try std.testing.expectEqualStrings("! Messages unavailable; scroll to retry.", unavailable(.fill, .copy).say);
