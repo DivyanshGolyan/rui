@@ -170,6 +170,49 @@ test "Store open failures return typed errors without unwinding panics" {
     try std.testing.expectError(error.StoreOpenFailed, refused.open(std.testing.io, database, root));
 }
 
+test "Store target owns SQLite identity routes and neutral diagnostics" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var expected: @import("../bounded.zig").Bounded(protocol.max_store_bytes) = .{};
+    try expected.set(root);
+    var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store.sqlite3", .{root});
+    var storage: Store = undefined;
+    try storage.openTarget(std.testing.io, .{ .sqlite = path }, root, .{});
+    defer storage.close() catch unreachable;
+    @memset(&root_buffer, 'x');
+    @memset(&path_buffer, 'x');
+    try std.testing.expectEqual(.sqlite, storage.kind());
+    try std.testing.expectEqualStrings(expected.slice(), storage.storeId());
+    try std.testing.expect(storage.admissionDiagnostic().doublewrite == null);
+    const diagnostic = storage.diagnostic();
+    try std.testing.expect(diagnostic == .sqlite);
+    try std.testing.expectEqualStrings("wal", diagnostic.sqlite.journal_mode.?.slice());
+    try std.testing.expect(storage.catalog().set_id != 0);
+    // The SQL callback must borrow final Store storage, not the opening's
+    // temporary options or the admitted engine value.
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
+    storage.served.openai = .unserved;
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(storage.sqliteDatabase(), "SELECT rui_served('openai')"));
+}
+
+test "Store target SQLite tail failure closes statements and releases the heap limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const empty_catalog: tool_catalog.Catalog = .{ .records = &.{}, .digests = &.{} };
+    var refused: Store = undefined;
+    try std.testing.expectError(error.InvalidToolCatalog, testingStoreCatalog(&refused, &tmp, std.testing.io, &empty_catalog));
+    try std.testing.expectEqual(@as(i64, 0), c.sqlite3_hard_heap_limit64(-1));
+    // Reopening the same file proves statement finalization and connection
+    // cleanup, not merely that the error made it to the caller.
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    try std.testing.expect(storage.catalog().set_id != 0);
+}
+
 fn createMaximumCanonicalStore(tmp: *std.testing.TmpDir, path_buffer: []u8) ![]const u8 {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
@@ -3830,7 +3873,7 @@ test "production Store applies finite durable SQLite settings" {
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_ATTACHED, -1));
     try std.testing.expectEqual(@as(c_int, 0), c.sqlite3_limit(storage.sqliteDatabase(), c.SQLITE_LIMIT_WORKER_THREADS, -1));
 
-    const diagnostic = storage.sqliteDiagnostic();
+    const diagnostic = storage.diagnostic().sqlite;
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?u64, 4096), diagnostic.page_size_bytes);
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
@@ -3952,15 +3995,15 @@ test "measurement Store can disable cache spill without changing other limits" {
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     var storage: Store = undefined;
-    try storage.openWithOptions(
+    try storage.openTarget(
         std.testing.io,
-        database,
+        .{ .sqlite = database },
         root,
         .{ .cache_spill = false },
     );
     defer storage.close() catch unreachable;
 
-    const diagnostic = storage.sqliteDiagnostic();
+    const diagnostic = storage.diagnostic().sqlite;
     try std.testing.expectEqual(@as(?i64, 0), diagnostic.cache_spill_threshold);
     try std.testing.expectEqual(@as(?u64, sqlite_heap_bytes), diagnostic.hard_heap_limit_bytes);
     try std.testing.expectEqual(@as(?i64, -1024), diagnostic.cache_size_setting);
@@ -3978,18 +4021,18 @@ test "measurement Store can force a smaller SQLite cache without changing produc
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
 
     var storage: Store = undefined;
-    try storage.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 32 });
+    try storage.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .cache_kib = 32 });
     defer storage.close() catch unreachable;
-    try std.testing.expectEqual(@as(?i64, -32), storage.sqliteDiagnostic().cache_size_setting);
+    try std.testing.expectEqual(@as(?i64, -32), storage.diagnostic().sqlite.cache_size_setting);
     var refused: Store = undefined;
 
     try std.testing.expectError(
         error.InvalidSqliteCacheSize,
-        refused.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 0 }),
+        refused.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .cache_kib = 0 }),
     );
     try std.testing.expectError(
         error.InvalidSqliteCacheSize,
-        refused.openWithOptions(std.testing.io, database, root, .{ .cache_kib = 4097 }),
+        refused.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .cache_kib = 4097 }),
     );
 }
 
@@ -4128,7 +4171,7 @@ test "SQLite selector mismatch retains caller-owned evidence after failed open" 
     var refused: Store = undefined;
     try std.testing.expectError(error.StoreIdentityMismatch, refused.open(std.testing.io, database, root));
     var evidence: store_schema.IdentityMismatch = .{};
-    try std.testing.expectError(error.StoreIdentityMismatch, refused.openWithOptions(std.testing.io, database, root, .{ .identity_mismatch = &evidence }));
+    try std.testing.expectError(error.StoreIdentityMismatch, refused.openTarget(std.testing.io, .{ .sqlite = database }, root, .{ .identity_mismatch = &evidence }));
     try std.testing.expectEqualStrings(saved_selector, evidence.saved_selector.slice());
     try refused.open(std.testing.io, database, saved_selector);
     try refused.close();
@@ -4206,7 +4249,7 @@ test "SQLite invalid identity metadata is not a selector mismatch" {
             var evidence: store_schema.IdentityMismatch = .{};
             try evidence.saved_selector.set("unchanged");
             var refused: Store = undefined;
-            try std.testing.expectError(case[1], refused.openWithOptions(std.testing.io, database, selector, .{ .identity_mismatch = &evidence }));
+            try std.testing.expectError(case[1], refused.openTarget(std.testing.io, .{ .sqlite = database }, selector, .{ .identity_mismatch = &evidence }));
             try std.testing.expectEqualStrings("unchanged", evidence.saved_selector.slice());
         }
     }
@@ -10563,7 +10606,7 @@ test "model catalog save releases its pager working set before leaving the queue
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
     _ = sqlite.c.sqlite3_db_release_memory(storage.sqliteDatabase());
-    const baseline_cache = storage.sqliteDiagnostic().cache_used_bytes.?;
+    const baseline_cache = storage.diagnostic().sqlite.cache_used_bytes.?;
     const catalog = @import("../model_catalog.zig");
     var ids: [1024][64]u8 = undefined;
     var facts: [ids.len]catalog.Entry = undefined;
@@ -10574,10 +10617,10 @@ test "model catalog save releases its pager working set before leaving the queue
     }
     try storage.saveModelFacts(&facts, "\"one\"");
     // Only the preexisting pinned fixture pages and accounting remain.
-    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(baseline_cache, storage.diagnostic().sqlite.cache_used_bytes.?);
     try std.testing.expectEqual(@as(?u32, 123), (try storage.modelFact(facts[999].id)).?.context_window);
     try storage.saveModelFacts(&facts, "\"two\"");
-    try std.testing.expectEqual(baseline_cache, storage.sqliteDiagnostic().cache_used_bytes.?);
+    try std.testing.expectEqual(baseline_cache, storage.diagnostic().sqlite.cache_used_bytes.?);
     try std.testing.expectEqual(@as(u64, 2), (try storage.readModelCatalogSource()).?.generation);
 }
 

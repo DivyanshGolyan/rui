@@ -17,11 +17,27 @@ pub const max_socket_path_bytes = max_runtime_directory_bytes + "/".len + 32 + s
 /// (launch_frame.zig); macOS binds at most this many path bytes.
 pub const max_launch_socket_path_bytes = 103;
 
+pub const Kind = @import("store_target.zig").Kind;
+
 pub const Paths = struct {
+    kind: Kind = .sqlite,
     store: protocol.Bounded(protocol.max_store_bytes) = .{},
     database: protocol.Bounded(max_database_path_bytes) = .{},
     scratch: protocol.Bounded(max_scratch_path_bytes) = .{},
     socket: protocol.Bounded(@max(max_socket_path_bytes, max_launch_socket_path_bytes)) = .{},
+
+    /// The socket's spelling may be a short alias for a long canonical path.
+    /// Only MySQL children need this non-secret client routing hint.
+    pub fn runtimeHint(self: *const Paths) ?[]const u8 {
+        return if (self.kind == .mysql) std.fs.path.dirname(self.socket.slice()) else null;
+    }
+
+    pub fn diagnosticsDirectory(self: *const Paths) []const u8 {
+        return switch (self.kind) {
+            .sqlite => self.store.slice(),
+            .mysql => self.runtimeHint().?,
+        };
+    }
 };
 
 pub const StoreLease = struct {
@@ -39,7 +55,11 @@ pub const StoreLease = struct {
     /// Read-only observation, not lease acquisition or readiness. Returns
     /// owned canonical paths by value; every probe descriptor closes here.
     pub fn observe(io: std.Io, supplied_path: []const u8) Observation {
-        const runtime = mysqlRuntimeDirectory(supplied_path);
+        const selected = resolveClientSelection(supplied_path);
+        const runtime: ?[]const u8 = switch (selected) {
+            .sqlite => null,
+            .mysql => |value| value.runtime,
+        };
         var store_dir = std.Io.Dir.cwd().openDir(io, runtime orelse supplied_path, .{}) catch |err| return switch (err) {
             error.FileNotFound => .unowned,
             else => .access_failure,
@@ -126,7 +146,7 @@ pub const StoreLease = struct {
             .permissions = .fromMode(0o600),
         });
         errdefer lock.close(io);
-        self.* = .{ .io = io, .paths = .{}, .store_dir = dir, .lock_file = lock };
+        self.* = .{ .io = io, .paths = .{ .kind = .mysql }, .store_dir = dir, .lock_file = lock };
         var canonical: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const runtime = canonical[0..try dir.realPath(io, &canonical)];
         self.paths.scratch.len = (try std.fmt.bufPrint(&self.paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
@@ -144,7 +164,7 @@ pub const StoreLease = struct {
         try validatePrivateDirectory(scratch, self.io);
         try cleanupOwnedIngress(&scratch, self.io, fault_cleanup);
 
-        if (self.runtime_dir == null and self.paths.database.len != 0) {
+        if (self.runtime_dir == null and self.paths.kind == .sqlite) {
             var runtime_dir_path: [max_runtime_directory_bytes]u8 = undefined;
             const runtime_path = try runtimeDirectory(&runtime_dir_path);
             var runtime_dir = try std.Io.Dir.cwd().createDirPathOpen(self.io, runtime_path, .{
@@ -198,12 +218,40 @@ pub const StoreLease = struct {
     }
 };
 
+/// Selection syntax is interpreted once, before filesystem or socket work.
+/// A missing MySQL runtime still names a network Store, never a SQLite path.
+/// The slices borrow CLI/environment storage for this selection's lifetime.
+pub const ClientSelection = union(Kind) {
+    sqlite: []const u8,
+    mysql: struct { store: []const u8, runtime: []const u8 },
+
+    pub fn paths(self: ClientSelection, io: std.Io) !Paths {
+        return switch (self) {
+            .mysql => |value| mysqlClientPaths(io, value.store, value.runtime),
+            .sqlite => |path| blk: {
+                var store_dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+                defer store_dir.close(io);
+                try validatePrivateDirectory(store_dir, io);
+                break :blk pathsFromOpenStore(store_dir, io);
+            },
+        };
+    }
+};
+
+pub fn resolveClientSelection(supplied_path: []const u8) ClientSelection {
+    const hint = if (std.c.getenv("RUI_RUNTIME_DIR")) |value| std.mem.span(value) else null;
+    return clientSelection(supplied_path, hint);
+}
+
+fn clientSelection(supplied_path: []const u8, runtime_hint: ?[]const u8) ClientSelection {
+    return switch (@import("store_target.zig").resolveKind(supplied_path, runtime_hint)) {
+        .mysql => .{ .mysql = .{ .store = supplied_path, .runtime = runtime_hint.? } },
+        .sqlite => .{ .sqlite = supplied_path },
+    };
+}
+
 pub fn resolveClientPaths(io: std.Io, supplied_path: []const u8) !Paths {
-    if (mysqlRuntimeDirectory(supplied_path)) |runtime| return mysqlClientPaths(io, supplied_path, runtime);
-    var store_dir = try std.Io.Dir.cwd().openDir(io, supplied_path, .{});
-    defer store_dir.close(io);
-    try validatePrivateDirectory(store_dir, io);
-    return pathsFromOpenStore(store_dir, io);
+    return resolveClientSelection(supplied_path).paths(io);
 }
 
 /// Store ids are distinct from SQLite's canonical absolute paths.
@@ -214,8 +262,10 @@ pub fn isOpaqueStoreId(text: []const u8) bool {
 /// Without this explicit non-secret hint, a relative SQLite directory whose
 /// name happens to be 32 hex characters keeps its existing path semantics.
 pub fn mysqlRuntimeDirectory(store: []const u8) ?[]const u8 {
-    if (!isOpaqueStoreId(store)) return null;
-    return std.mem.span(std.c.getenv("RUI_RUNTIME_DIR") orelse return null);
+    return switch (resolveClientSelection(store)) {
+        .sqlite => null,
+        .mysql => |value| value.runtime,
+    };
 }
 
 /// A routing hint, not Store authority: the Host checks `store` on every call.
@@ -224,7 +274,7 @@ pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Pat
     var dir = try std.Io.Dir.cwd().openDir(io, runtime, .{});
     defer dir.close(io);
     try validatePrivateDirectory(dir, io);
-    var paths: Paths = .{};
+    var paths: Paths = .{ .kind = .mysql };
     try paths.store.set(store);
     paths.socket.len = (try std.fmt.bufPrint(&paths.socket.bytes, "{s}/rui.sock", .{runtime})).len;
     paths.scratch.len = (try std.fmt.bufPrint(&paths.scratch.bytes, "{s}/scratch", .{runtime})).len;
@@ -838,9 +888,41 @@ test "MySQL runtime lease owns no host.lock and routes an opaque Store id" {
     try std.testing.expectError(error.RuntimeDirectoryInUse, second.acquireMysql(std.testing.io, runtime, address.path));
     const id = "0123456789abcdef0123456789abcdef";
     const paths = try mysqlClientPaths(std.testing.io, id, runtime);
+    try std.testing.expectEqual(.mysql, paths.kind);
+    try std.testing.expectEqual(.mysql, lease.paths.kind);
+    try std.testing.expectEqualStrings(runtime, paths.runtimeHint().?);
+    try std.testing.expectEqualStrings(runtime, paths.diagnosticsDirectory());
     try std.testing.expectEqualStrings(id, paths.store.slice());
     try std.testing.expectEqualStrings(address.path, paths.socket.slice());
     try std.testing.expectEqualStrings(lease.paths.scratch.slice(), paths.scratch.slice());
     try std.testing.expect(!isOpaqueStoreId("/sqlite/store"));
     try std.testing.expect(!isOpaqueStoreId("0123456789abcdef0123456789abcdeF"));
+}
+
+test "Store target paths keep SQLite routing with a separately launched runtime" {
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    var lease = try StoreLease.acquire(io, tmp.root[0..tmp.root_len]);
+    defer lease.release();
+    try tmp.dir.createDir(io, "runtime", .fromMode(0o700));
+    var runtime_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const runtime = (try tmp.address("runtime", &runtime_buffer)).path;
+    var socket_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const socket = try std.fmt.bufPrint(&socket_buffer, "{s}/rui.sock", .{runtime});
+    try lease.useRuntimeDirectory(runtime, socket);
+    try lease.prepareForServing(false);
+    try std.testing.expectEqual(.sqlite, lease.paths.kind);
+    try std.testing.expectEqual(@as(?[]const u8, null), lease.paths.runtimeHint());
+    try std.testing.expectEqualStrings(lease.paths.store.slice(), lease.paths.diagnosticsDirectory());
+    try std.testing.expectEqualStrings(socket, lease.paths.socket.slice());
+}
+
+test "Store target paths refuse invalid runtime hints without SQLite fallback" {
+    const id = "0123456789abcdef0123456789abcdef";
+    for ([_][]const u8{ "", "relative" }) |hint| {
+        const selected = clientSelection(id, hint);
+        try std.testing.expect(selected == .mysql);
+        try std.testing.expectError(error.InvalidStorePath, selected.paths(std.testing.io));
+    }
 }
