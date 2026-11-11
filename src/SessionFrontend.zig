@@ -128,6 +128,7 @@ reading: struct {
     opening: bool = true,
     output_started: bool = false,
     feed_read: feed_reads.Read = .opening,
+    fills: FeedPolicy.Fills = .{},
     // An Action the reader found, adopted once input is idle.
     prepared_action: ?u64 = null,
     prepared_summary: View.ActionSummary = .{},
@@ -719,6 +720,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
 /// After any App input: moves what was said into the notice, prepares the
 /// documents and, once the person asked to leave, leaves.
 fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.observeFeed();
     if (self.notice) |text| {
         self.shown_notice.show(text, self.nowMs());
         self.notice = null;
@@ -832,6 +834,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     var surface = try self.app_screen.widget().draw(ctx);
     const size = if (self.app_consent.request != null) self.app_preview.size else if (screen.view == .feed) self.app_content.size else self.app_document.size;
     screen.height = size.height;
+    self.observeFeed();
     screen.vx.screen.width = size.width;
     if (screen.view != .feed) screen.drawn = .{ .first = if (self.app_consent.request != null) self.app_preview.first else self.app_document.first, .rows = screen.height };
     surface.widget = self.widget();
@@ -1978,7 +1981,7 @@ fn update(self: *Self) !Updated {
             if (read == .permission) {
                 try self.launch(self.freeze(.permission), reads.permission);
             } else {
-                const job = self.freeze(.activity);
+                const job = self.freeze(if (read == .fill_above or read == .fill_below) .fill else .activity);
                 self.reading.feed_read = read;
                 job.feed_page = FeedPolicy.request(read, self.feedState());
                 try self.launch(job, reads.scan);
@@ -2246,6 +2249,7 @@ fn scroll(self: *Self, down: bool, rows: usize) !void {
     if (screen.view == .feed) {
         const amount: i32 = @intCast(@min(rows, std.math.maxInt(i32)));
         self.app_content.scroll(if (down) amount else -amount);
+        self.reading.fills = self.reading.fills.scrolled(self.feedState(), down);
         if (screen.anchor.following()) self.new_below = 0;
     } else for (0..rows) |_| _ = screen.browse(down, false);
     self.dirty = true;
@@ -2348,6 +2352,7 @@ fn feedState(self: *Self) FeedPolicy.State {
         .window_provisional = screen.feed.firstProvisional(),
         .window_continuing = screen.feed.forward_partial,
         .selection_held = self.app_content.dragging(),
+        .fills = self.reading.fills,
         .choice_open = screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,
@@ -2362,7 +2367,13 @@ fn jumpToEnd(self: *Self) !void {
         .opening_keep_frame => self.reading.opening = true,
     }
     self.new_below = 0;
+    self.reading.fills = .{};
     self.dirty = true;
+}
+
+/// Observe every anchor/window transition, including while a read is active.
+fn observeFeed(self: *Self) void {
+    self.reading.fills = self.reading.fills.observe(self.feedState());
 }
 
 /// The waiting Action, as the screen shows it now.
@@ -2572,6 +2583,7 @@ pub fn queuedRow(self: *const Self) ?struct { newest: u64, waiting: queued_line.
 /// Applies one page through the policy's single attachment decision. The
 /// resident window owns rows; neither the scan nor a fill owns another copy.
 fn showStaged(self: *Self) !void {
+    defer self.observeFeed();
     const page = self.job.feed_page orelse return;
     const read = self.reading.feed_read;
     const window = &self.screen.feed;
@@ -2805,6 +2817,10 @@ test "frontend joined read diagnostic survives failed notice and worker reset" {
 
 fn applyReader(self: *Self, end: ReadEnd) !void {
     if (end.preparationFailure()) {
+        if (self.reading.phase == .fill) {
+            self.reading.fills = self.reading.fills.failed(self.reading.feed_read, self.job.feed_page.?);
+            self.observeFeed();
+        }
         if (self.reading.pending_diagnostic == null)
             self.notice = switch (reader_policy.unavailable(self.reading.phase, self.readInspection())) {
                 .say => |text| text,
@@ -5382,6 +5398,71 @@ test "App Session keeps its real draft browsing anchor and focused composer acro
     }
 }
 
+test "SessionFrontend failed historical fills retain the edge while scans approval and directed retries progress" {
+    const Worker = struct {
+        fn fail(_: *anyopaque, _: *Task) !void {
+            return error.ConnectionResetByPeer;
+        }
+        fn complete(frontend: *Self) bool {
+            return frontend.reader.completed();
+        }
+    };
+    for ([_]feed_reads.Read{ .fill_above, .fill_below }) |read| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        const down = read == .fill_below;
+        try fixture.longPage(.opening, 100);
+        _ = try held.draw();
+        if (down) {
+            try self.scroll(false, 1);
+            held.screen.feed.at_end = false;
+        } else try self.scroll(false, 200);
+        _ = try held.draw();
+        self.poll_at = std.math.maxInt(i96);
+        try std.testing.expectEqual(read, FeedPolicy.nextRead(self.feedState()).?);
+        const cycle = self.live.scan;
+        const text = try std.testing.allocator.dupe(u8, held.screen.feed.document.text());
+        defer std.testing.allocator.free(text);
+        const job = self.freeze(.fill);
+        self.reading.feed_read = read;
+        job.feed_page = FeedPolicy.request(read, self.feedState());
+        try self.launch(job, Worker.fail);
+        try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), self, Worker.complete);
+        try self.settleReader();
+        try std.testing.expectEqual(ReadPhase.fill, self.reading.phase);
+        try std.testing.expectEqualDeep(cycle, self.live.scan);
+        try std.testing.expectEqualStrings(text, held.screen.feed.document.text());
+        try std.testing.expectEqualStrings("! Messages unavailable; scroll at this edge to retry. Draft retained.", self.notice.?);
+        try std.testing.expect(self.reading.fills.blocked != null);
+        for (0..3) |_| {
+            _ = try held.draw();
+            try std.testing.expect(FeedPolicy.nextRead(self.feedState()) == null);
+        }
+        // Successful unchanged live facts do not rearm the failed edge.
+        try fixture.page(.scan, &.{}, false, !down);
+        self.poll_at = std.math.maxInt(i96);
+        try std.testing.expect(FeedPolicy.nextRead(self.feedState()) == null);
+        self.poll_at = 0;
+        try std.testing.expectEqual(feed_reads.Read.scan, FeedPolicy.nextRead(self.feedState()).?);
+        self.live.work.first_action = 1;
+        try std.testing.expectEqual(feed_reads.Read.scan, FeedPolicy.nextRead(self.feedState()).?);
+        self.poll_at = std.math.maxInt(i96);
+        try std.testing.expectEqual(feed_reads.Read.permission, FeedPolicy.nextRead(self.feedState()).?);
+        self.live.work.first_action = null;
+        // User scroll in the other direction stays inside the same margin.
+        try self.scroll(!down, 1);
+        try std.testing.expect(FeedPolicy.nextRead(self.feedState()) == null);
+        try self.scroll(down, 1);
+        try std.testing.expectEqual(read, FeedPolicy.nextRead(self.feedState()).?);
+        // A deliberate jump starts a new lifecycle even at an unchanged edge.
+        self.reading.fills = self.reading.fills.failed(read, FeedPolicy.request(read, self.feedState()).?);
+        try self.jumpToEnd();
+        try std.testing.expect(self.reading.fills.blocked == null);
+    }
+}
+
 /// Feed-domain fixture: pages use the same staged-file handoff as the reader.
 const FeedFixture = struct {
     held: *HeldFrontend,
@@ -5407,7 +5488,7 @@ const FeedFixture = struct {
         // Freeze and settle exactly like the production read handoff. In
         // particular, fills must not advance the independent live cursor.
         if (read == .opening) frontend.reading.opening = true;
-        const job = frontend.freeze(.activity);
+        const job = frontend.freeze(if (read == .fill_above or read == .fill_below) .fill else .activity);
         frontend.reading.feed_read = read;
         job.feed_page = FeedPolicy.request(read, frontend.feedState());
         frontend.job.result.row_count = rows.len;
