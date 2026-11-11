@@ -172,7 +172,7 @@ admission: struct {
 live: struct {
     view: View.Live = .{},
     work: protocol.SessionWork = .{},
-    cursor: protocol_reply.ActivityCursor = .{},
+    scan: FeedPolicy.Cycle = .{},
     queued: protocol.Queued = .{},
     queued_line: ?queued_line.Shown = null,
 } = .{},
@@ -256,7 +256,7 @@ test "a read freezes its viewport width method for live and historical answers" 
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.live.cursor, .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread };
     const job = &self.job;
     if (phase == .activity or phase == .permission) {
         job.open_status = self.inspection.status_requested;
@@ -2323,6 +2323,16 @@ fn openCollapsed(self: *Self, target: View.Collapsed) void {
     self.notice = "Opening message…";
 }
 
+/// The scan owner's progress translated once to the reader's wire cursor.
+fn scanCursor(self: *const Self) protocol_reply.ActivityCursor {
+    const scan = self.live.scan;
+    return .{
+        .position = if (scan.cursor) |cursor| cursor.position else 0,
+        .ordinal = if (scan.cursor) |cursor| if (cursor.ordinal == std.math.maxInt(u64)) null else cursor.ordinal else null,
+        .end = if (scan.catchup) |sweep| sweep.end else null,
+    };
+}
+
 /// Inputs to the single read policy, derived from the current anchor/window.
 fn feedState(self: *Self) FeedPolicy.State {
     const screen = self.screen;
@@ -2334,9 +2344,8 @@ fn feedState(self: *Self) FeedPolicy.State {
         .at_end = screen.feed.at_end,
         .low = screen.feed.low,
         .high = screen.feed.high,
-        .scan_cursor = if (self.live.cursor.position != 0) .{ .position = self.live.cursor.position, .ordinal = self.live.cursor.ordinal orelse std.math.maxInt(u64) } else null,
+        .scan = self.live.scan,
         .window_provisional = screen.feed.firstProvisional(),
-        .scan_continuing = self.live.cursor.end != null,
         .window_continuing = screen.feed.forward_partial,
         .selection_held = self.app_content.dragging(),
         .choice_open = screen.consent != null or self.app_consent.request != null,
@@ -2822,7 +2831,8 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (result.line) |*line| self.line = line.*;
             if (result.hint) |*hint| self.hint = hint.*;
             self.live.view = result.live;
-            self.live.cursor = result.cursor;
+            const cursor = result.cursor;
+            self.live.scan = self.live.scan.landed(self.job.feed_page.?, if (cursor.position != 0) .{ .position = cursor.position, .ordinal = cursor.ordinal orelse std.math.maxInt(u64) } else null, cursor.end);
             if (read == .opening) self.reading.opening = false;
             self.upgrade_stale = false;
             self.poll_at = feed_reads.scanDue(std.Io.Clock.awake.now(self.init.io).nanoseconds, self.inspection.status_requested);
@@ -2854,6 +2864,7 @@ test "archive badges follow only completed server snapshots and stay distinct fr
         self.job.result = .{ .line = .{ .read = .{ .revision = 1, .end = 2 }, .archive_state = case.archive }, .work = .{ .work = .{ .state = case.work } } };
         try self.applyReader(.{ .cancelled = .{ .phase = .activity, .rendering = false } });
         try std.testing.expectEqual(previous, self.line.archive_state);
+        self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
         try self.applyReader(.complete);
         try std.testing.expectEqual(case.archive, self.line.archive_state);
         try std.testing.expectEqualDeep(case.work, self.live.work.state);
@@ -3434,6 +3445,8 @@ test "sending a Message drops a details read still waiting to start" {
     defer held.destroy();
     const self = &held.self;
     Worker.release.store(false, .release);
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result = .{ .at_start = true, .at_end = true };
     try self.reader.start(std.testing.io, self, Worker.read);
     defer {
         Worker.release.store(true, .release);
@@ -3463,6 +3476,8 @@ test "sending a Message drops a /status read still waiting to start" {
     defer held.destroy();
     const self = &held.self;
     Worker.release.store(false, .release);
+    self.job.feed_page = FeedPolicy.request(.scan, self.feedState());
+    self.job.result = .{ .at_start = true, .at_end = true };
     try self.reader.start(std.testing.io, self, Worker.read);
     defer {
         Worker.release.store(true, .release);
@@ -5409,7 +5424,7 @@ const FeedFixture = struct {
                 frontend.job.result.rows[i].collapsed_targets[0] = target;
                 frontend.job.result.rows[i].collapsed_count = 1;
             }
-            if (frontend.job.feed_page.?.started_from == null or row.key > frontend.job.feed_page.?.started_from.?.position) frontend.job.result.new_rows += 1;
+            if (row.text.len != 0 and FeedPolicy.isNew(frontend.job.feed_page.?, .{ .position = row.key })) frontend.job.result.new_rows += 1;
             offset += row.text.len;
         }
         try frontend.launch(job, struct {
@@ -5550,9 +5565,9 @@ test "SessionFrontend backward fill supplies the scan replay boundary through th
         defer fixture.destroy();
         const held = fixture.held;
         try fixture.page(.opening, &.{ .{ .key = 100, .text = "older answer\n" }, .{ .key = 110, .text = "settled turn\n" } }, false, true);
-        const scan_cursor = held.self.live.cursor;
+        const scan = held.self.live.scan;
         try fixture.page(.fill_above, &.{.{ .key = 90, .text = pending, .provisional = true }}, true, false);
-        try std.testing.expectEqualDeep(scan_cursor, held.self.live.cursor);
+        try std.testing.expectEqualDeep(scan, held.self.live.scan);
         const replay: feed_window.Key = .{ .position = 90 };
         try std.testing.expectEqualDeep(@as(?feed_window.Key, replay), held.screen.feed.firstProvisional());
         const planned = FeedPolicy.request(.scan, held.self.feedState()).?;
@@ -5812,5 +5827,117 @@ test "SessionFrontend close from browsed feed returns to end before saving the c
         defer reopened.destroy();
         try std.testing.expectEqualStrings(text, reopened.self.input.composition().bytes);
         try std.testing.expectEqual(caret, reopened.self.input.composition().cursor);
+    }
+}
+
+test "SessionFrontend fixed and growing end replay cycles count arrivals once across reader pages" {
+    const Host = struct {
+        fn respond(listener: *std.Io.net.Server, bytes: []const u8) !void {
+            const io = std.testing.io;
+            var fds = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+            if (try std.posix.poll(&fds, 2000) == 0) return error.TestUnexpectedResult;
+            const peer = try listener.accept(io);
+            defer peer.close(io);
+            var request: [4096]u8 = undefined;
+            var used: usize = 0;
+            while (true) {
+                const got = try std.posix.read(peer.socket.handle, request[used..]);
+                if (got == 0) return error.UnexpectedEof;
+                used += got;
+                if (std.mem.indexOf(u8, request[0..used], "\r\n\r\n")) |end| {
+                    const start = std.mem.indexOf(u8, request[0..end], "Content-Length: ").? + "Content-Length: ".len;
+                    const finish = std.mem.indexOfScalarPos(u8, request[0..end], start, '\r').?;
+                    if (used == end + 4 + try std.fmt.parseInt(usize, request[start..finish], 10)) break;
+                }
+            }
+            try std.testing.expectStringStartsWith(request[0..used], "POST /v1/activity-page HTTP/1.1\r\n");
+            var header: [256]u8 = undefined;
+            var writer = peer.writer(io, &.{});
+            try writer.interface.writeAll(try std.fmt.bufPrint(&header, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{bytes.len}));
+            try writer.interface.writeAll(bytes);
+        }
+        fn page(frontend: *Self, listener: *std.Io.net.Server, read: feed_reads.Read, first: u64, last: u64, end: u64) !void {
+            var facts: protocol.ActivityFacts = .{ .end = end, .direction = if (read == .opening or read == .fill_above) .backward else .forward, .count = @intCast(last - first + 1), .queued = .{ .count = 1, .oldest_position = 1, .newest_admission = 1, .newest_position = 1 }, .work = .{ .revision = 1, .work = .{ .state = .{ .working = .{ .since = 1 } }, .turn = 1, .operation = 1 } } };
+            facts.more = if (facts.direction == .backward) first != 1 else last < end;
+            try facts.work.workspace.set("/");
+            var peer: protocol.NamedPeer = .{ .session = .{} };
+            try peer.session.set("9f8e7d");
+            const content: protocol.ActivityItem.Content = .{ .length = 0, .digest = protocol.contentDigest("") };
+            for (facts.items[0..facts.count], 0..) |*item, i| {
+                const position = if (facts.direction == .backward) last - i else first + i;
+                item.* = .{ .position = position, .ordinal = 0, .at = 1, .value = if (position == 1) .{ .admission = .{ .admission = 1, .key = .{}, .turn = null, .state = .queued, .content = content, .admitted_at = 1 } } else .{ .sent = .{ .admission = position, .admitted_at = 1, .target = peer, .content = content } } };
+            }
+            const job = frontend.freeze(.activity);
+            frontend.reading.feed_read = read;
+            job.feed_page = FeedPolicy.request(read, frontend.feedState());
+            // This fixture isolates feed pagination from unchanged Current
+            // fields. No scan progress or novelty state is supplied by it.
+            job.line_read = .{ .revision = 1, .end = end };
+            job.queued_line = 1;
+            try frontend.launch(job, reads.scan);
+            var buffer: [16384]u8 = undefined;
+            var out = std.Io.Writer.fixed(&buffer);
+            try activity_reply.writePage(&out, &facts);
+            try respond(listener, out.buffered());
+            try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), frontend, struct {
+                fn complete(self: *Self) bool {
+                    return self.reader.completed();
+                }
+            }.complete);
+            try frontend.settleReader();
+        }
+    };
+    for ([_]bool{ false, true }) |growing| {
+        const io = std.testing.io;
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        const self = &held.self;
+        var tmp = try @import("socket_fixture.zig").Directory.init();
+        defer tmp.cleanup();
+        const root = tmp.root[0..tmp.root_len];
+        var lease = try @import("platform.zig").StoreLease.acquire(io, root);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        const paths = lease.paths;
+        var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+        defer {
+            listener.deinit(io);
+            std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
+        }
+        self.store = root;
+        self.session = "k7m2qx";
+        self.reading.opening = true;
+        defer {
+            self.reader.cancel();
+            self.reader.join() catch |err| switch (err) {
+                error.Cancelled => {},
+                else => @panic(@errorName(err)),
+            };
+        }
+        try Host.page(self, &listener, .opening, 33, 48, 48);
+        try Host.page(self, &listener, .fill_above, 17, 32, 48);
+        try Host.page(self, &listener, .fill_above, 1, 16, 48);
+        _ = try held.draw();
+        try self.scroll(false, 12);
+        try std.testing.expect(!held.screen.anchor.following());
+        var watermark: u64 = 48;
+        const ends: [2]u64 = if (growing) .{ 52, 54 } else .{ 48, 48 };
+        var expected_new: usize = 0;
+        for (ends) |frozen_end| {
+            var first: u64 = 1;
+            while (first <= frozen_end) : (first += 16) {
+                const last = @min(first + 15, frozen_end);
+                try Host.page(self, &listener, .scan, first, last, frozen_end);
+                try std.testing.expectEqualDeep(@as(?feed_window.Key, .{ .position = watermark, .ordinal = std.math.maxInt(u64) }), self.job.feed_page.?.novelty_after);
+                expected_new += @intCast(last - @min(last, @max(first - 1, watermark)));
+                try std.testing.expectEqual(expected_new, self.new_below);
+                if (last < frozen_end) {
+                    try std.testing.expectEqual(frozen_end, self.live.scan.catchup.?.end);
+                } else try std.testing.expect(self.live.scan.catchup == null);
+            }
+            watermark = frozen_end;
+        }
+        try std.testing.expectEqual(@as(usize, if (growing) 6 else 0), self.new_below);
     }
 }

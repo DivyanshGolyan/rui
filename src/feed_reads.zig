@@ -35,9 +35,8 @@ pub fn Policy(comptime Cursor: type) type {
             at_end: bool,
             low: ?Cursor = null,
             high: ?Cursor = null,
-            scan_cursor: ?Cursor = null,
+            scan: Cycle = .{},
             window_provisional: ?Cursor = null,
-            scan_continuing: bool = false,
             window_continuing: bool = false,
             /// A press holds the same read exclusion as an active drag.
             selection_held: bool = false,
@@ -72,6 +71,8 @@ pub fn Policy(comptime Cursor: type) type {
             /// The original edge, used for stale checks and scan attachment.
             started_from: ?Cursor,
             from: ?Cursor,
+            /// Initial high-water mark of the whole scan cycle, not its page.
+            novelty_after: ?Cursor = null,
             /// Non-null means read INCLUSIVELY at this key, then replace that
             /// suffix with feed_window.replaceFrom, not append duplicates.
             /// Null means the ordinary exclusive continuation at `from`.
@@ -81,6 +82,29 @@ pub fn Policy(comptime Cursor: type) type {
             continuing: bool = false,
         };
 
+        /// A scan cycle owns pagination progress and its independent novelty
+        /// origin. A frozen catch-up keeps that origin until its final page;
+        /// fills and the resident window never advance this owner.
+        pub const Cycle = struct {
+            cursor: ?Cursor = null,
+            catchup: ?struct { end: u64, novelty_after: ?Cursor } = null,
+
+            pub fn page(self: Cycle, provisional: ?Cursor) Page {
+                var result = forward(self.cursor, provisional, .all, self.catchup != null);
+                if (self.catchup) |sweep| result.novelty_after = sweep.novelty_after;
+                return result;
+            }
+
+            pub fn landed(self: Cycle, asked: Page, cursor: ?Cursor, end: ?u64) Cycle {
+                if (asked.kinds != .all) return self;
+                return .{ .cursor = cursor, .catchup = if (end) |frozen| .{ .end = frozen, .novelty_after = asked.novelty_after } else null };
+            }
+        };
+
+        pub fn isNew(page: Page, key: Cursor) bool {
+            return page.novelty_after == null or key.order(page.novelty_after.?) == .gt;
+        }
+
         /// The scan owns its cursor; the window alone owns the replay boundary.
         /// Opening reads newest backward; permission keeps its existing read.
         /// Capture this plan when the read starts, not when it completes.
@@ -88,7 +112,7 @@ pub fn Policy(comptime Cursor: type) type {
             return switch (read) {
                 .opening => .{ .direction = .backward, .kinds = .all, .started_from = null, .from = null },
                 .fill_above => .{ .direction = .backward, .kinds = .visible, .started_from = state.low, .from = state.low },
-                .scan => forward(state.scan_cursor, state.window_provisional, .all, state.scan_continuing),
+                .scan => state.scan.page(state.window_provisional),
                 .fill_below => forward(state.high, state.window_provisional, .visible, state.window_continuing),
                 .permission => null,
             };
@@ -100,6 +124,7 @@ pub fn Policy(comptime Cursor: type) type {
                 .kinds = kinds,
                 .started_from = edge,
                 .from = if (continuing) edge else first_provisional orelse edge,
+                .novelty_after = edge,
                 .replace_from = first_provisional,
                 .continuing = continuing,
             };
@@ -181,7 +206,7 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     }
     state.low = low;
     state.high = high;
-    state.scan_cursor = .{ .position = 40 };
+    state.scan.cursor = .{ .position = 40 };
     state.window_provisional = provisional;
     const opening = P.request(.opening, state).?;
     try std.testing.expect(opening.direction == .backward and opening.kinds == .all);
@@ -256,7 +281,7 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     try std.testing.expectEqual(Read.opening, P.nextRead(state).?);
 
     const independent_scan = P.request(.scan, state).?;
-    try std.testing.expect(std.meta.eql(state.scan_cursor, independent_scan.started_from));
+    try std.testing.expect(std.meta.eql(state.scan.cursor, independent_scan.started_from));
     try std.testing.expect(std.meta.eql(state.window_provisional, independent_scan.from));
     try std.testing.expectEqual(@as(usize, 2), P.applyScan(state.high, independent_scan.started_from, independent_scan.replace_from, state.window_provisional, 2).rows.count_only);
     const independent_fill = P.request(.fill_below, state).?;
@@ -266,7 +291,7 @@ test "feed_reads policy: opening, fair fills, stale edges, live scan, jump and p
     // Both forward paths replay inclusively at the provisional key, retaining
     // the original edge for attachment/staleness. No provisional means append.
     for ([_]Read{ .scan, .fill_below }) |read| {
-        state.scan_cursor = high;
+        state.scan.cursor = high;
         state.window_provisional = provisional;
         const page = P.request(read, state).?;
         try std.testing.expect(page.direction == .forward);
@@ -323,7 +348,7 @@ test "feed_reads forward attachment domain for scan and fill_below" {
                 .scan_due_ns = 0,
                 .at_end = false,
                 .high = 30,
-                .scan_cursor = 30,
+                .scan = .{ .cursor = 30 },
                 .window_provisional = case.replace_from,
             }).?;
             const applies = P.applies(read, page.started_from, page.replace_from, case.high, case.current);
@@ -349,12 +374,12 @@ test "feed_reads forward attachment domain for scan and fill_below" {
 test "feed_reads continues a paginated provisional replay without restarting or replacing twice" {
     const P = Policy(u64);
     for ([_]Read{ .scan, .fill_below }) |read| {
-        var state: P.State = .{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .at_end = false, .high = 30, .scan_cursor = 30, .window_provisional = 10 };
+        var state: P.State = .{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .at_end = false, .high = 30, .scan = .{ .cursor = 30 }, .window_provisional = 10 };
         const first = P.request(read, state).?;
         try std.testing.expectEqual(@as(?u64, 10), first.from);
         try std.testing.expect(!first.continuing);
         state.window_continuing = true;
-        state.scan_continuing = true;
+        state.scan.catchup = .{ .end = 40, .novelty_after = 30 };
         const next = P.request(read, state).?;
         try std.testing.expectEqual(@as(?u64, 30), next.from);
         try std.testing.expectEqual(@as(?u64, 10), next.replace_from);
@@ -380,5 +405,37 @@ test "feed_reads holds fills during selection without holding scans or permissio
                 try std.testing.expectEqual(Read.opening, P.nextRead(state).?);
             }
         }
+    }
+}
+
+test "feed_reads scan cycle keeps novelty independent of replay pagination" {
+    const Key = struct {
+        position: u64,
+        ordinal: u64 = 0,
+        pub fn order(a: @This(), b: @This()) std.math.Order {
+            const primary = std.math.order(a.position, b.position);
+            return if (primary == .eq) std.math.order(a.ordinal, b.ordinal) else primary;
+        }
+    };
+    const P = Policy(Key);
+    for ([_]?Key{ null, .{ .position = 20, .ordinal = 2 } }) |origin| {
+        var cycle: P.Cycle = .{ .cursor = origin };
+        const provisional: Key = .{ .position = 1 };
+        for ([_]u64{ 8, 16, 24 }, 0..) |position, index| {
+            const page = cycle.page(provisional);
+            try std.testing.expectEqualDeep(origin, page.novelty_after);
+            try std.testing.expectEqual(index != 0, page.continuing);
+            for ([_]Key{ .{ .position = 20, .ordinal = 1 }, .{ .position = 20, .ordinal = 2 }, .{ .position = 20, .ordinal = 3 }, .{ .position = 21 } }) |key| {
+                try std.testing.expectEqual(origin == null or key.order(origin.?) == .gt, P.isNew(page, key));
+            }
+            const unchanged = cycle.landed(.{ .direction = .backward, .kinds = .visible, .started_from = null, .from = null }, .{ .position = 99 }, null);
+            try std.testing.expectEqualDeep(cycle, unchanged);
+            cycle = cycle.landed(page, .{ .position = position }, if (index < 2) 24 else null);
+        }
+        try std.testing.expect(cycle.catchup == null);
+        try std.testing.expectEqualDeep(@as(?Key, .{ .position = 24 }), cycle.page(provisional).novelty_after);
+        // An opening is a fresh snapshot, not a continuation of prior replay.
+        cycle = cycle.landed(.{ .direction = .backward, .kinds = .all, .started_from = null, .from = null }, .{ .position = 40 }, null);
+        try std.testing.expectEqualDeep(@as(?Key, .{ .position = 40 }), cycle.page(provisional).novelty_after);
     }
 }

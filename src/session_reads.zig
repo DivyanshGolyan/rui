@@ -481,6 +481,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         .started_from = if (job.cursor.position == 0) null else .{ .position = job.cursor.position, .ordinal = job.cursor.ordinal orelse std.math.maxInt(u64) },
         .from = if (job.opening or job.cursor.position == 0) null else .{ .position = job.cursor.position, .ordinal = job.cursor.ordinal orelse std.math.maxInt(u64) },
         .continuing = !job.opening and job.cursor.end != null,
+        .novelty_after = if (job.opening or job.cursor.position == 0) null else .{ .position = job.cursor.position, .ordinal = job.cursor.ordinal orelse std.math.maxInt(u64) },
     };
     const page = switch (try requests.activityPage(job.store, job.session, pageCursor(job, plan))) {
         .page => |page| page,
@@ -531,7 +532,7 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         job.result.rows[job.result.row_count] = row;
         job.result.row_count += 1;
         offset += row.length;
-        if (row.length != 0 and (plan.started_from == null or key.order(plan.started_from.?) == .gt)) job.result.new_rows += 1;
+        if (row.length != 0 and FeedPolicy.isNew(plan, key)) job.result.new_rows += 1;
     }
     job.result.output_length = offset;
     job.result.at_start = plan.direction == .backward and !page.facts.more;
@@ -1623,7 +1624,7 @@ test "session_reads replay replaces a provisional echo after intervening rows an
             host.end = end;
             job.cursor = job.result.cursor;
             job.opening = false;
-            job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = previous, .from = replay, .replace_from = replay };
+            job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = previous, .from = replay, .replace_from = replay, .novelty_after = previous };
             job.result = .{};
             job.line_read = .{ .revision = 1, .end = end };
             try host.read(&job);
@@ -1650,12 +1651,13 @@ test "session_reads first provisional survives every continuation page" {
     var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
     try host.read(&job);
     const provisional = firstProvisional(&job.result);
+    const novelty_after = job.result.high;
     host.end = tail.len;
     var counted: usize = 0;
     for ([_]u64{ 16, 32, 40 }, 0..) |expected, page_index| {
         const edge = job.result.high;
         job.cursor = job.result.cursor;
-        job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = if (page_index == 0) provisional else edge, .replace_from = provisional, .continuing = page_index != 0 };
+        job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = if (page_index == 0) provisional else edge, .replace_from = provisional, .continuing = page_index != 0, .novelty_after = novelty_after };
         job.opening = false;
         job.result = .{};
         job.line_read = .{ .revision = 1, .end = host.end };
@@ -1681,7 +1683,7 @@ test "session_reads a hidden queued Admission replays when the queue becomes idl
     const edge = job.result.high;
     const replay = firstProvisional(&job.result);
     job.cursor = job.result.cursor;
-    job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = replay, .replace_from = replay };
+    job.feed_page = .{ .direction = .forward, .kinds = .all, .started_from = edge, .from = replay, .replace_from = replay, .novelty_after = edge };
     job.opening = false;
     job.result = .{};
     host.held = false;
