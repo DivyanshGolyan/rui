@@ -166,6 +166,9 @@ pub const DispatchPermit = attempt.DispatchPermit;
 
 pub const AttemptAdmission = struct {
     permit: DispatchPermit,
+    /// The admission's commit read the request's settings into the
+    /// caller's `historical_domain.Start`, whose view is open.
+    request_started: bool = false,
 };
 
 /// The latest Turn as `previousTurn` weighs it: its current Operation's
@@ -739,7 +742,7 @@ const IdleChecks = struct {
 /// Then it writes the Turn, binds and projects input, inserts the Operation
 /// and commits. The Entry mutex excludes every other writer; a moved head is
 /// `SelectionChanged`.
-pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults) !?AttemptAdmission {
+pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
     var found: runnable_selection.Result = undefined;
     var facts_row: SelectedRow = undefined;
     var facts_found: store_access.Found = undefined;
@@ -861,8 +864,24 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try writer.commit();
-    return .{ .permit = .{ .binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 } } };
+    const binding: AttemptBinding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
+    // The request's settings round reads only what this commit saves, so
+    // it follows COMMIT in the same message where that message has room.
+    var request: historical_domain.SettingsRead = undefined;
+    // Only a network engine's commit carries reads after it.
+    const opened = if (start) |into| writer.store.engine.batches() and into.open(writer.store, binding) else false;
+    if (opened) {
+        request = .init(start.?.view, start.?.settings);
+        store_core.followCommit(writer.store, request.follow());
+    }
+    defer if (opened) store_core.followCommit(writer.store, null);
+    writer.commit() catch |err| {
+        if (opened) start.?.view.close();
+        return err;
+    };
+    const started = opened and start.?.view.settled != null;
+    if (opened and !started) start.?.view.close();
+    return .{ .permit = .{ .binding = binding }, .request_started = started };
 }
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
