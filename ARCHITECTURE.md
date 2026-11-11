@@ -2159,6 +2159,12 @@ Request fields are `version`, `kind`, canonical `store`, `workspace` (exact cano
 A first page may also carry `since`, an opaque token from an earlier reply.
 Response `session_list` has up to eight `sessions`, then `delta`, a new `since` token, and `next` as either `null` or a continuation.
 Each row has exact `reference`, `workspace`, `provider`, `model`, `tools`, `permission_mode`, and `archive_state`; nullable `parent` (the creator’s six-character Session reference for an attached agent, otherwise `null`); nullable `label`; `created_at`; configuration `revision`; activity `end`; nullable `first_message` (position, admission, `admitted_at`, nullable Session `sender` and content reference); `work`, the Session's [Session work](#work-state-and-wait-conditions) state with `since` and that state's facts plus the latest Turn, Operation and first actionable Action; and `peers.from_person_at`, the admission time of the latest Message without a Session sender.
+Rows also carry nullable `last_line`: `{position, text}`, with a string-valued activity position and nullable text.
+It is the later by position of the newest ended Turn's outcome and the oldest pending approval's call.
+Completed Turn text is the first non-blank line from at most the first 1 KiB of public answer content, cut to at most 200 UTF-8 bytes at a code point with “…” when longer.
+Private content and failure or stop outcomes have null text; an approval uses its saved `model_tool_call.description`.
+Deciding an approval removes that candidate, falling back to the newest ended Turn; a Session with neither candidate has null `last_line`.
+These derived facts join the existing row-settings read, adding no list-page round, stored copy, Host cache or write.
 `work` is the same value that activity pages, Current and Message observations carry.
 With `since`, the Host answers one of three `delta` values.
 `not_modified` means no row has changed on this Host since the token; it is answered before any Store entry, lock or scratch, and never while the Store is fenced.
