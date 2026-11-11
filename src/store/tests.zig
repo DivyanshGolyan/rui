@@ -2594,8 +2594,8 @@ test "Store entry points queue and fence only through canonical access" {
             try std.testing.expect(std.mem.indexOf(u8, body, "entry.finish") != null);
         }
     }
-    // The Store's queue: `release`, `closing`, `take`, and its tests' `waitQueued`.
-    try std.testing.expectEqual(@as(usize, 4), locks);
+    // The Store's queue: `release`, `closing`, `writeWaiting`, `take`, and its tests' `waitQueued`.
+    try std.testing.expectEqual(@as(usize, 5), locks);
     try std.testing.expectEqual(@as(usize, 1), fence_stores);
     try std.testing.expectEqual(@as(usize, 1), fence_loads);
     try std.testing.expect(entered > 0);
@@ -12712,12 +12712,13 @@ test "model fact refresh reads existence once before batched writes" {
                 std.debug.print("model facts: {d} entries, {d} Access rounds\n", .{ count, rounds.taken() });
                 try std.testing.expectEqual(@as(u16, 2), rounds.taken());
                 if (case.engine == .mysql) {
-                    // Both reads share one pass. Access queues eight writes
-                    // per pass, source last; COMMIT is the sole control send.
-                    const write_passes = (count + 1 + 7) / 8;
+                    // Both reads share one pass. Access queues eight
+                    // statements per pass: the writes, source last, then
+                    // COMMIT in the last pass, so no control is sent.
+                    const write_passes = (count + 2 + 7) / 8;
                     try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.access_passes);
-                    try std.testing.expectEqual(@as(u64, 1), shape.controls);
-                    try std.testing.expectEqual(@as(u64, 2 + write_passes), shape.queries);
+                    try std.testing.expectEqual(@as(u64, 0), shape.controls);
+                    try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.queries);
                     try std.testing.expectEqual(shape.expected(), shape.queries);
                 }
                 try std.testing.expectEqual(@as(u64, refresh + 1), (try storage.readModelCatalogSource()).?.generation);

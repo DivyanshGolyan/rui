@@ -1703,7 +1703,7 @@ One thread at a time holds the Store: its connection, its scratch and its id all
 A caller that finds the Store free holds it and runs its entry point on its own thread; a caller that finds it busy queues its request and sleeps, and the holder runs queued requests in arrival order before it lets go, so each waiter wakes once, with its answer.
 A holder runs at most 64 requests for others, then hands the Store to the next waiter.
 Writes the holder runs back to back share one transaction and one fsync: each later write runs in a savepoint, so a write that fails rolls back alone, and no caller hears its answer until the batch's COMMIT; a failed COMMIT fences the Store and every write in the batch hears the Store as fenced.
-A lone write costs BEGIN and COMMIT, as before.
+A lone write costs BEGIN and COMMIT, as before; on MySQL its COMMIT shares the message of its last writes.
 A Message's commit callback runs once the batch's COMMIT succeeds, before any of its writers hears an answer.
 A dispatch check is never run for its caller: the holder hands that caller the Store, which keeps it until it has launched the Attempt or Action, so no stop commits between the check and the launch.
 
@@ -3667,6 +3667,10 @@ A second loss in that rerun fences, as does a lost read, which may already have 
 Only when no reconnect succeeds does the outcome stay unknown (`CommitOutcomeUnknown`).
 COMMIT is a statement of its message, and reads may follow it in that message; every message sets `autocommit=1`, so they run outside any transaction.
 The transaction is saved once COMMIT's own OK arrives: a connection lost before that OK is settled as above, with the reads sent again on the new connection when the transaction landed, and one lost after it, while the reads stream, keeps the commit and fences, and the batch never runs again.
+A write that is alone in its batch sends its last writes and its COMMIT as one message.
+The fence, and each write whose row count the statement itself does not fix, is followed by a statement that fails unless the count is the expected one; the server runs nothing of a message after a failed statement, so COMMIT never saves past a wrong count.
+The batch is then saved and takes no more writes: a write that queued meanwhile opens the next batch.
+A batch that runs again commits at its end.
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
