@@ -3,6 +3,7 @@ test {
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");
     _ = @import("widgets/Footer.zig");
+    _ = @import("widgets/List.zig");
     _ = @import("widgets/Feed.zig");
     _ = @import("AppScreen.zig");
     _ = @import("PermissionCard.zig");
