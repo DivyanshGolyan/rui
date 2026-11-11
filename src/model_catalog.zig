@@ -44,6 +44,41 @@ pub const openai_ids = blk: {
     break :blk ids;
 };
 
+/// The picker admits text conversations, not image, embedding, voice or
+/// realtime endpoints. This projection retains the type and text-modality
+/// decision the slim window/effort catalog otherwise drops.
+const chat_facts = @import("model_catalog_snapshot.zig");
+
+pub fn canChat(id: []const u8) bool {
+    const excluded = blk: {
+        var start: usize = 0;
+        var end = chat_facts.non_chat_ids.len;
+        while (start < end) {
+            const mid = start + (end - start) / 2;
+            switch (std.mem.order(u8, id, chat_facts.non_chat_ids[mid])) {
+                .eq => break :blk true,
+                .lt => end = mid,
+                .gt => start = mid + 1,
+            }
+        }
+        break :blk false;
+    };
+    if (find(shipped, id) != null) return !excluded;
+    // D229: unknown IDs pass through, except a catalog-proven non-chat
+    // family. Require a whole family token, never a partial-name match.
+    for (chat_facts.non_chat_families) |family| {
+        if (inFamily(id, family)) return false;
+    }
+    return true;
+}
+
+/// Exact family name or a complete hyphen-delimited family prefix.
+/// Generation and picker admission use the same token boundary.
+pub fn inFamily(id: []const u8, family: []const u8) bool {
+    return std.mem.eql(u8, id, family) or
+        (std.mem.startsWith(u8, id, family) and id.len > family.len and id[family.len] == '-');
+}
+
 /// Exact, case-sensitive lookup in a bytewise-sorted catalog.
 pub fn find(entries: []const Entry, id: []const u8) ?*const Entry {
     var start: usize = 0;
@@ -97,5 +132,27 @@ test "model catalog effort bits are part of the Store format" {
     try std.testing.expectEqual(@as(usize, 6), std.enums.values(ReasoningEffort).len);
     inline for (cases) |case| {
         try std.testing.expectEqual(@as(u8, case[1]), @as(u8, @intCast(Efforts.initOne(case[0]).bits.mask)));
+    }
+}
+
+test "model catalog chat facts cover exact types modalities and whole non-chat families" {
+    for (chat_facts.non_chat_ids, 0..) |id, at| {
+        try std.testing.expect(find(shipped, id) != null);
+        try std.testing.expect(!canChat(id));
+        if (at != 0) try std.testing.expect(std.mem.order(u8, chat_facts.non_chat_ids[at - 1], id) == .lt);
+    }
+    for ([_][]const u8{ "gpt-6.1-sol", "gpt-4.1", "future-chat", "gpt-imagery-next", "text-embeddingish-next" }) |id| try std.testing.expect(canChat(id));
+    // Image and embedding rows advertise text output too: modality alone
+    // cannot stand in for their explicit non-chat type.
+    for ([_][]const u8{ "gpt-image-1-mini", "text-embedding-3-large", "gpt-realtime-2.1", "openai/whisper-1", "gpt-image-future", "text-embedding-future", "gpt-realtime-future" }) |id| try std.testing.expect(!canChat(id));
+    for (chat_facts.non_chat_families) |family| {
+        var represented = false;
+        for (shipped) |entry| {
+            if (!std.mem.eql(u8, entry.id, family) and
+                (!std.mem.startsWith(u8, entry.id, family) or entry.id.len <= family.len or entry.id[family.len] != '-')) continue;
+            represented = true;
+            try std.testing.expect(!canChat(entry.id));
+        }
+        try std.testing.expect(represented);
     }
 }
