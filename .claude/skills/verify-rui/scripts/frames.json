@@ -250,6 +250,12 @@
           ]
         },
         {
+          "wait": "✓ List project files"
+        },
+        {
+          "gone": "× Fail with exit 127"
+        },
+        {
           "keys": [
             "C-o"
           ]
@@ -291,9 +297,10 @@
         "ctrl+o close"
       ],
       "sizes": [
+        "140x38",
         "140x40"
       ],
-      "note": "10b-tool-open-two: two independent selected rows keep their output bands; no extra mark or envelope prose, close key shares the facts footer"
+      "note": "10b-tool-open-two: first open List at the viewport bottom, then show both independent output bands; no extra mark or envelope prose, close key shares the facts footer"
     },
     {
       "name": "tool-open-long",
