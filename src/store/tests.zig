@@ -6630,6 +6630,78 @@ const WorkParity = struct {
     }
 };
 
+test "core tool table routes every built-in to its sole action selector" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const records = @import("../tool_record.zig");
+            for (std.enums.values(records.Tool)) |tool| {
+                errdefer std.debug.print("table routing failed for {s}\n", .{@tagName(tool)});
+                const row = records.built_in_rows.get(tool);
+                // Independent expectations pin the pre-table runner domain.
+                const expected: records.Runner = switch (tool) {
+                    .bash => .bash,
+                    .web_search => .provider,
+                    else => .core,
+                };
+                try std.testing.expectEqual(expected, row.runner);
+                try std.testing.expectEqual(row.runner, records.Runner.of(records.record(tool)));
+                // A provider name sent as a function call is rejected by
+                // classification, so it must reach neither selector.
+
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var command = try completeConfiguration("table-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                command.configuration.tools = try .of(&.{@tagName(tool)});
+                const configured = try storage.configure(&command, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "table-input", "table-input", session.slice(), "call");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const arguments = switch (tool) {
+                    .bash => "{\"cmd\":\"true\",\"description\":\"Run table check\"}",
+                    .message_agent => "{\"id\":\"zzzzzz\",\"text\":\"hi\"}",
+                    else => "{}",
+                };
+                var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer encoded.deinit();
+                try std.json.Stringify.value(arguments, .{}, &encoded.writer);
+                const quoted = encoded.written();
+                const calls = [_]TestingCall{.{
+                    .item_id = "table-item",
+                    .name = @tagName(tool),
+                    .encoded_call_id = "table-call",
+                    .decoded_call_id = "table-call",
+                    .encoded_arguments = quoted[1 .. quoted.len - 1],
+                    .decoded_arguments = arguments,
+                }};
+                try settleCallsForTesting(&storage, &tmp, binding, "table-calls", &calls);
+                const core = try storage.nextCoreWork();
+                const bash = try storage.admitNextActionAttempt(300_000, .{});
+                try std.testing.expectEqual(expected == .core, core != null);
+                try std.testing.expectEqual(expected == .bash, bash != null);
+                if (core) |work| {
+                    const call = work.action;
+                    try std.testing.expectEqualStrings(@tagName(tool), @tagName(call.tool));
+                    try std.testing.expectEqual(binding.operation_id, call.binding.parent_operation_id);
+                    try std.testing.expectEqual(binding.turn_id, call.binding.turn_id);
+                    try std.testing.expectEqualStrings(session.slice(), call.session.slice());
+                    // Selection is a read, not an Attempt or a resolution.
+                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+                }
+                if (bash) |attempted| {
+                    try std.testing.expectEqual(binding.operation_id, attempted.permit.binding.parent_operation_id);
+                    try std.testing.expect((try storage.nextCoreWork()) == null);
+                    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+                }
+            }
+        }
+    }.run);
+}
+
 test "the dispatch work read answers as each admission owner does, in every state a Turn passes through" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
