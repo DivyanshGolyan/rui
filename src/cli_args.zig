@@ -115,12 +115,13 @@ pub const label_help =
 ;
 
 pub const reasoning_help =
-    \\--reasoning-effort VALUE selects a model-supported effort; default selects the client default.
+    \\--reasoning-effort VALUE selects an effort; default selects the client default.
     \\Omission preserves an existing choice. New Sessions and resets prefer low, else the lowest listed effort.
     \\
 ++ "Efforts depend on the model: none, low, medium, high, xhigh and max" ++
     (if (model_capability.ids_without_max_effort.len == 0) "" else ". max is not listed for: " ++ model_capability.ids_without_max_effort) ++
-    ". The catalog lists which each model accepts.\n" ++
+    ". Listed models accept only their catalog efforts.\n" ++
+    \\Unlisted models pass any effort word through; the provider decides support.
     \\The setting applies to new model requests, including compaction; retries keep their frozen effort.
     \\
 ;

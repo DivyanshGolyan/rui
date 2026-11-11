@@ -453,7 +453,7 @@ Codex **Reasoning Effort** is an explicitly stated, nullable persistent Session 
 Its closed grammar is `none`, `low`, `medium`, `high`, `xhigh` and `max`.
 For a catalog-listed model, configuration accepts an explicit value only when its exact entry advertises it; an unlisted model passes any value in Rui's closed grammar through (D229).
 Unsupported values reject the whole update.
-`none` is a literal effort, not a reset, and is accepted wherever the catalog lists it.
+`none` is a literal effort, not a reset; like every effort word, it is accepted when the catalog lists it or the model is unlisted.
 Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fallback.
 Catalog support is source metadata, not account entitlement or live backend qualification.
 

@@ -39,10 +39,11 @@ pub const ids_without_max_effort = blk: {
 
 /// Listed models accept exactly their advertised efforts. D229: unlisted
 /// models pass Rui's closed grammar through; the provider decides support.
+/// Null is unspecified: listed models allow it only without effort levels.
 /// Frozen Operations do not consult this again.
-pub fn supportsReasoningEffort(model: []const u8, effort: ReasoningEffort) bool {
+pub fn supportsReasoningEffort(model: []const u8, effort: ?ReasoningEffort) bool {
     const row = catalog.find(catalog.shipped, model) orelse return true;
-    return row.efforts.contains(effort);
+    return if (effort) |value| row.efforts.contains(value) else row.efforts.count() == 0;
 }
 
 /// The effort a new Session on `model` starts at from the saved one: the
@@ -105,6 +106,7 @@ test "compaction policy never infers a spec from the model catalog" {
 test "reasoning effort checks listed models and passes grammar values for unlisted models" {
     for (catalog.shipped) |row| {
         try std.testing.expect(supportsModel(row.id));
+        try std.testing.expectEqual(row.efforts.count() == 0, supportsReasoningEffort(row.id, null));
         try std.testing.expectEqual(@as(u64, row.context_window orelse product_defaults.unlisted_context_window), contextWindow(row.id));
         inline for (std.meta.tags(ReasoningEffort)) |effort|
             try std.testing.expectEqual(row.efforts.contains(effort), supportsReasoningEffort(row.id, effort));
@@ -117,6 +119,7 @@ test "reasoning effort checks listed models and passes grammar values for unlist
     try std.testing.expect(!supportsReasoningEffort("gpt-5.5", .max));
     for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |unknown| {
         try std.testing.expect(!supportsModel(unknown));
+        try std.testing.expect(supportsReasoningEffort(unknown, null));
         try std.testing.expectEqual(product_defaults.unlisted_context_window, contextWindow(unknown));
         inline for (std.meta.tags(ReasoningEffort)) |effort|
             try std.testing.expect(supportsReasoningEffort(unknown, effort));
