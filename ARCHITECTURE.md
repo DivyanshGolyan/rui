@@ -590,6 +590,11 @@ Historical visibility does not bypass pending-input applicability, expose an inc
 Model history writes each saved Action Resolution and rejected call byte for byte; it never truncates or re-renders the saved result (D235, replacing D233).
 The MCP producer renders an answer once, within the transport's 4 MiB answer limit, and derives its model-facing Resolution: at most 10,000 prefix bytes, cut back to a UTF-8 boundary, followed by the existing omitted-byte suffix when anything was cut.
 When bytes were omitted, the same settlement transaction saves the complete rendered answer as a second public content on the Action, `full_content_id` (Store format 62); a fitting answer leaves that reference null.
+If the transport answer exceeds 4 MiB, retain the received JSON prefix with a larger-than-limit note, not a claim that the complete answer was saved.
+`mcp/result_text.zig` owns MCP certainty: an unsent request is failed-not-run; a definite tool result follows `isError`, a JSON-RPC error or HTTP 4xx fails, and HTTP 5xx or a lost sent request is indeterminate, without retry.
+For an over-limit JSON answer, a matching JSON-RPC envelope and an explicit `isError`, a completed result object with the default false flag, or an error code and complete message establish the outcome; otherwise it is indeterminate.
+Session stop before send cancels the call; after send, closing the connection leaves the remote outcome indeterminate.
+Shared Action settlement preserves MCP adapter evidence, including a definite answer and its full content when stop races settlement; Bash's confirmed local stop remains cancelled.
 `read_transcript(full)` reads the full content when present and the Resolution otherwise, through its existing bounded windows and next-offset line; Activity and transcript result byte counts describe the full content.
 Previously saved Resolutions remain untouched, preserving sealed model-history prefixes on resume.
 Bash's status, tail, omission notices and retention paths, and core-tool result windows, remain exactly as their producers saved them.
