@@ -1,6 +1,7 @@
 const std = @import("std");
 const TerminalText = @import("TerminalText.zig");
 const gwidth = @import("terminal_width");
+const display_text = @import("display_text.zig");
 const Renderer = @This();
 
 // A complete bounded fenced block may hide its delimiters. Unclosed or
@@ -26,12 +27,11 @@ const Boundary = enum { word, prose, other };
 
 /// Only the viewport consumes private presentation markers. A real terminal
 /// must keep its own background, regardless of foreground colour support.
-pub const Destination = enum { terminal, viewport };
+pub const Destination = display_text.Target;
 
 out: *std.Io.Writer,
 destination: Destination = .terminal,
 colour: bool = true,
-width_method: gwidth.Method = .wcwidth,
 /// Borrowed process HOME; only a valid absolute path enables `~/` links.
 home: []const u8 = "",
 prefix: [prefix_limit]u8 = undefined,
@@ -470,7 +470,10 @@ fn tableCell(self: *Renderer, bytes: []const u8, forward: bool) !u16 {
     self.escape_next = false;
     self.literal_run = null;
     self.boundary = .prose;
-    return gwidth.gwidth(measured.bytes[0..measured.length], self.width_method);
+    // Bordering padding is grapheme context on both sides: combining and
+    // prepend characters can join it. Padding itself contributes four cells.
+    @memcpy(measured.bytes[measured.length..][0..2], "  ");
+    return display_text.width(measured.bytes[0 .. measured.length + 2], self.destination) - 4;
 }
 
 const CellWidth = struct {
@@ -478,16 +481,29 @@ const CellWidth = struct {
     output: ?*std.Io.Writer,
     // A cell cannot exceed the held run. TerminalText expands at most four
     // bytes per source byte; presentation controls and addresses are omitted.
-    bytes: [fence_limit * TerminalText.max_bytes_per_byte]u8 = undefined,
+    bytes: [4 + fence_limit * TerminalText.max_bytes_per_byte]u8 = undefined,
     length: usize = 0,
     control: enum { text, escape, sgr, osc, osc_escape } = .text,
 
     fn init(self: *CellWidth, output: ?*std.Io.Writer) void {
         self.* = .{ .writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} }, .output = output };
+        // Every cell follows at least two padding spaces. Include that
+        // grapheme context: an initial combining mark can attach to a space.
+        @memcpy(self.bytes[0..2], "  ");
+        self.length = 2;
     }
 
     fn consume(self: *CellWidth, bytes: []const u8) std.Io.Writer.Error!void {
-        if (self.output) |output| try output.writeAll(bytes);
+        if (self.output) |output| {
+            // A table tab is one separator space in both destinations, not
+            // a position-dependent terminal tab stop (or eight Vaxis cells).
+            var parts = std.mem.splitScalar(u8, bytes, '\t');
+            try output.writeAll(parts.next().?);
+            while (parts.next()) |part| {
+                try output.writeByte(' ');
+                try output.writeAll(part);
+            }
+        }
         for (bytes) |byte| switch (self.control) {
             .text => if (byte == 0x1b) {
                 self.control = .escape;
@@ -1214,7 +1230,7 @@ test "long unsupported delimiter runs stream literally and recover locally" {
 test "chunked subset, malformed markup and terminal controls" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     const input = "# Heading\n- *item* and `code`\n**bold**\n```zig\n  x\t= 1\n```\nunfinished *mark\n\\*literal*\n" ++
         "bad \x1b]2;title\x07 \r \x7f \xe2\x80\xae café\n";
     for (input) |byte| try renderer.feed(&.{byte});
@@ -1538,7 +1554,7 @@ test "empty pair after nonempty nested code stays in the outer style" {
 test "indented fences render code without marker lines or reverse video" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo `hello`\n   ```\n`inline`\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[40m  echo `hello`\n\x1b[0m\x1b[94minline\x1b[0m\n", output.written());
@@ -1547,7 +1563,7 @@ test "indented fences render code without marker lines or reverse video" {
 test "closing fence at end of answer needs no final newline" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("   ```sh\n  echo hi\n   ```") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[40m  echo hi\n\x1b[0m", output.written());
@@ -1556,7 +1572,7 @@ test "closing fence at end of answer needs no final newline" {
 test "rendered content and unsupported fence syntax stay visible without a gutter" {
     var output = std.Io.Writer.Allocating.init(std.testing.allocator);
     defer output.deinit();
-    var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer };
+    var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer };
     for ("# Title\n```zig\n  call\n```\n```bad info\ntrailing `open\n") |byte| try renderer.feed(&.{byte});
     try renderer.finish();
     try std.testing.expectEqualStrings("\x1b[1mTitle\x1b[0m\n\x1b[40m  call\n\x1b[0m```bad info\ntrailing `open\n", output.written());
@@ -1707,7 +1723,7 @@ fn expectRenderedHome(input: []const u8, expected: []const u8, home: []const u8)
         if (!windowEdge(input, split)) continue;
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: Renderer = .{ .out = &output.writer, .home = home, .destination = .viewport };
+        var renderer: Renderer = .{ .out = &output.writer, .home = home, .destination = .{ .viewport = .wcwidth } };
         try renderer.feed(input[0..split]);
         for (input[split..]) |byte| try renderer.feed(&.{byte});
         try renderer.finish();
@@ -1928,7 +1944,7 @@ test "tables at answer end align CJK and complete graphemes and isolate malforme
             for (0..case[0].len + 1) |split| {
                 var output = std.Io.Writer.Allocating.init(std.testing.allocator);
                 defer output.deinit();
-                var renderer: Renderer = .{ .out = &output.writer, .colour = colour, .width_method = method };
+                var renderer: Renderer = .{ .out = &output.writer, .colour = colour, .destination = .{ .viewport = method } };
                 try renderer.feed(case[0][0..split]);
                 try renderer.feed(case[0][split..]);
                 try renderer.finish();
@@ -1978,7 +1994,7 @@ test "code foreground and complete fenced rows distinguish only links by underli
     for ([_]bool{ false, true }) |colour| for (0..input.len + 1) |split| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: Renderer = .{ .destination = .viewport, .out = &output.writer, .colour = colour };
+        var renderer: Renderer = .{ .destination = .{ .viewport = .wcwidth }, .out = &output.writer, .colour = colour };
         try renderer.feed(input[0..split]);
         try renderer.feed(input[split..]);
         try renderer.finish();
@@ -2061,4 +2077,13 @@ test "plain fenced code never emits a background with or without colour at every
             try std.testing.expectEqual(@as(?usize, null), std.mem.indexOfScalar(u8, output.written(), 0x1b));
         }
     };
+}
+
+test "terminal table padding measures emitted safe text without viewport-only escapes" {
+    var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer output.deinit();
+    var renderer: Renderer = .{ .out = &output.writer, .colour = false, .destination = .terminal };
+    try renderer.feed("| A | X |\n| --- | --- |\n| \u{200b} | X |\n| 雪 | X |\n| \x01 | X |\n");
+    try renderer.finish();
+    try std.testing.expectEqualStrings("  A     X\n  \u{200b}      X\n  雪    X\n  \\x01  X\n", output.written());
 }

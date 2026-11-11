@@ -170,6 +170,7 @@ pub fn add(b: *std.Build, ci: CiArtifacts, target: std.Build.ResolvedTarget, pin
     });
     const terminal = b.dependency("vaxis", .{ .target = target, .optimize = std.builtin.OptimizeMode.ReleaseSafe });
     answer_renderer.addImport("terminal_width", terminal.module("gwidth"));
+    answer_renderer.addImport("terminal_unicode", terminal.module("unicode"));
     renderer_allocation.root_module.addImport("AnswerRenderer", answer_renderer);
     const run_renderer_allocation = ci.run(renderer_allocation);
     logic_test_step.dependOn(&run_renderer_allocation.step);

@@ -919,7 +919,7 @@ test "history fenced code uses backgrounds only for viewport destinations" {
     var prepared: Prepared = .{ .page = .{ .end = 1, .count = 1, .more = false } };
     prepared.page.items[0] = .{ .position = 1, .ordinal = 0, .kind = .assistant, .content = .{ .bytes = text.len, .digest = protocol.contentDigest(text) } };
     prepared.bodies[0] = .{ .whole = .{ .offset = 0, .length = text.len } };
-    for ([_]View.Destination{ .terminal, .viewport }) |destination| for ([_]bool{ false, true }) |colour| {
+    for ([_]View.Destination{ .terminal, .{ .viewport = .wcwidth } }) |destination| for ([_]bool{ false, true }) |colour| {
         for ([_]Prepared.Mode{ .transcript, .details }) |mode| {
             var sink: Sink = .{};
             try prepared.render(io, scratch, "store", "09azvw", &sink, mode, colour, "", destination);

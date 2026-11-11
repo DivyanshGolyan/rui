@@ -180,6 +180,13 @@ class FramesTest(unittest.TestCase):
             self.assertEqual(states[name]["open"], "Fix retry deadline")
             self.assertTrue(states[name]["expect"])
 
+    def test_narrow_markdown_frame_pins_the_code_continuation_indent(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "markdown-wrapped")
+        self.assertEqual(state["open"], "Markdown retry")
+        self.assertEqual(state["sizes"], [(46, 30)])
+        self.assertIn("return null; //\n    expired", state["expect"])
+
     def test_busy_frame_waits_for_work_text_not_a_rotating_spinner(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "start-busy")

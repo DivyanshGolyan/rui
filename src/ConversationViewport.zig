@@ -8,15 +8,13 @@ const unicode = @import("terminal_unicode");
 const state_marks = @import("marks.zig");
 const draft_layout = @import("draft_layout.zig");
 const TerminalText = @import("TerminalText.zig");
+const display_text = @import("display_text.zig");
 pub const Document = Sized(capacity, true);
 pub const Method = gwidth.Method;
 
 pub const capacity = 256 * 1024;
-/// Clusters wider than the narrowest supported terminal are shown escaped.
-pub const widest_cluster = 8;
-/// Longer clusters (for example thousands of combining marks) are shown
-/// escaped too: every frame that draws a cell writes its whole cluster.
-pub const longest_cluster = 64;
+pub const widest_cluster = display_text.widest_cluster;
+pub const longest_cluster = display_text.longest_cluster;
 
 /// A row of laid-out text: the logical line starting at origin-relative byte
 /// `offset`, and the row within that line's wrapping.
@@ -34,12 +32,7 @@ pub const Layout = struct {
     }
 };
 
-pub fn representable(cluster: []const u8, method: gwidth.Method) bool {
-    if (std.mem.eql(u8, cluster, "\n") or std.mem.eql(u8, cluster, "\t")) return true;
-    if (cluster.len > longest_cluster) return false;
-    const cells = gwidth.gwidth(cluster, method);
-    return cells != 0 and cells <= widest_cluster;
-}
+pub const representable = display_text.representable;
 
 /// Rows used by a print that ended at `result`. A row is used once text
 /// reaches it; an exact fill leaves the next row unused. Overflow means
@@ -442,27 +435,8 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 while (clusters.next()) |value| {
                     if (styled) self.style = styles[value.start];
                     const raw = value.bytes(bytes[0..complete]);
-                    if (std.mem.eql(u8, raw, "\n") or std.mem.eql(u8, raw, "\t") or representable(raw, self.width_method)) {
-                        try self.appendText(raw);
-                    } else {
-                        // A run of one scalar is shown once with its count.
-                        var scalars = (try std.unicode.Utf8View.init(raw)).iterator();
-                        var run: ?u21 = null;
-                        var count: usize = 0;
-                        while (true) {
-                            const point = scalars.nextCodepoint();
-                            if (run != null and point == run) {
-                                count += 1;
-                                continue;
-                            }
-                            if (run) |previous| {
-                                var escaped: [40]u8 = undefined;
-                                try self.appendText(if (count == 1) try std.fmt.bufPrint(&escaped, "\\u{{{x}}}", .{previous}) else try std.fmt.bufPrint(&escaped, "\\u{{{x}}}×{d}", .{ previous, count }));
-                            }
-                            run = point orelse break;
-                            count = 1;
-                        }
-                    }
+                    var displayed: display_text.Cluster = .{ .raw = raw, .method = self.width_method };
+                    while (displayed.next()) |piece| try self.appendText(piece.bytes);
                 }
                 if (styled and complete < length) self.style = styles[complete];
                 try self.appendText(bytes[complete..length]);
@@ -496,12 +470,19 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 // unused cells after text and every wrapped continuation row.
                 // No retained line metadata or marker bytes are needed.
                 const line = window.child(.{ .y_off = row });
-                if (!commit or !colour) return rowsUsed(self.printRange(line, offset, end, .word, false, commit, colour, plain, colours));
-                const rows = rowsUsed(self.printRange(line, offset, end, .word, false, false, colour, plain, colours));
+                var leading: usize = offset;
+                while (leading < end and (self.bytes[leading] == ' ' or self.bytes[leading] == '\t')) leading += 1;
+                // Leave one cell for progress on very narrow windows. This
+                // is the code's own indent, never a prose/list marker.
+                const indent = @min(display_text.width(self.bytes[offset..leading], .{ .viewport = self.width_method }), line.width -| 1);
+                const body = line.child(.{ .x_off = indent });
+                const rows = rowsUsed(self.printRange(body, leading, end, .word, false, false, colour, plain, colours));
+                if (!commit) return rows;
                 const first_row: i32 = @max(row, 0);
                 const last_row: i32 = @min(@as(i32, row) + rows, window.height);
-                if (last_row > first_row) window.child(.{ .y_off = @intCast(first_row), .height = @intCast(last_row - first_row) }).fill(.{ .style = .{ .fg = plain.fg, .bg = colours.band } });
-                _ = self.printRange(line, offset, end, .word, false, true, colour, plain, colours);
+                if (colour and last_row > first_row) window.child(.{ .y_off = @intCast(first_row), .height = @intCast(last_row - first_row) }).fill(.{ .style = .{ .fg = plain.fg, .bg = colours.band } });
+                _ = self.printRange(line.child(.{ .width = indent, .height = 1 }), offset, leading, .word, false, true, colour, plain, colours);
+                _ = self.printRange(body, leading, end, .word, false, true, colour, plain, colours);
                 return rows;
             }
             var user = false;
@@ -1503,7 +1484,7 @@ test "rendered fences carry blank and wrapped bands through the real renderer vi
     for ([_]bool{ false, true }) |colour| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
-        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour, .destination = .viewport };
+        var renderer: @import("AnswerRenderer.zig") = .{ .out = &output.writer, .colour = colour, .destination = .{ .viewport = .wcwidth } };
         for ("```zig\nabcdefghijkl\n\nz\n```\nafter\n") |byte| try renderer.feed(&.{byte});
         try renderer.finish();
         var view: Sized(128, true) = .{};
@@ -1540,5 +1521,53 @@ test "one link keeps its address across plain quiet and ink labels without stori
         // its label unlinked, rather than pointing to a truncated target.
         view.discardFront(3);
         try expectLinks(&view, .{}, 8, &.{ "-", "-", "-", "-", "-" });
+    }
+}
+
+test "wrapped code keeps its own indent across widths clipping and scripts without line metadata" {
+    const Renderer = @import("AnswerRenderer.zig");
+    const content = "abcdefghijkl";
+    const plain: vaxis.Style = .{ .fg = .{ .index = 255 }, .bg = .{ .index = 19 } };
+    const colours: Colours = .{ .band = .{ .rgb = .{ 28, 29, 35 } } };
+    for ([_][]const u8{ "", " ", "    ", "\t\t", "                                " }) |prefix| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var renderer: Renderer = .{ .out = &output.writer, .destination = .{ .viewport = .unicode } };
+        try renderer.feed("```\n");
+        try renderer.feed(prefix);
+        try renderer.feed(content ++ "\n\n```\nafter\n");
+        try renderer.finish();
+        for (0..output.written().len + 1) |split| {
+            var view: Sized(256, true) = .{};
+            try view.append(output.written()[0..split]);
+            try view.append(output.written()[split..]);
+            try view.prepare();
+            try std.testing.expectEqual(@sizeOf(@TypeOf(view.bytes)), @sizeOf(@TypeOf(view.styles)));
+            for (1..21) |width_value| {
+                const width: u16 = @intCast(width_value);
+                const indent = @min(if (std.mem.indexOfScalar(u8, prefix, '\t') != null) prefix.len * 8 else prefix.len, width - 1);
+                const body_width = width - indent;
+                const wrapped = (content.len + body_width - 1) / body_width;
+                for ([_]bool{ false, true }) |colour| for (0..wrapped) |skip| {
+                    var screen: TestScreen = undefined;
+                    const window = screen.window(width, 14);
+                    window.fill(.{ .style = plain });
+                    const drawn = view.draw(window, .{ .row = @intCast(skip) }, true, colour, plain, colours);
+                    const measured = view.measure(.{ .width = width, .method = .unicode }, .{ .row = @intCast(skip) }, 14);
+                    try std.testing.expectEqual(measured.rows, drawn.rows);
+                    for (0..wrapped - skip) |row| {
+                        for (0..indent) |col| try std.testing.expectEqualStrings(" ", screen.screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+                        const from = (row + skip) * body_width;
+                        for (0..@min(body_width, content.len - from)) |col| {
+                            try std.testing.expectEqualStrings(content[from + col ..][0..1], screen.screen.readCell(@intCast(col + indent), @intCast(row)).?.char.grapheme);
+                        }
+                    }
+                    for (0..wrapped - skip + 1) |row| for (0..width) |col| {
+                        try std.testing.expectEqual(if (colour) colours.band else plain.bg, screen.screen.readCell(@intCast(col), @intCast(row)).?.style.bg);
+                    };
+                    try std.testing.expectEqual(plain.bg, screen.screen.readCell(0, @intCast(wrapped - skip + 1)).?.style.bg);
+                };
+            }
+        }
     }
 }

@@ -1223,6 +1223,56 @@ pub fn Answer(comptime Sink: type) type {
     };
 }
 
+test "answer table columns align in the viewport for every negotiated width and escaped cluster" {
+    const vaxis = @import("vaxis");
+    const Viewport = @import("ConversationViewport.zig");
+    const input = "| Value | X |\n| --- | --- |\n" ++
+        "| **\u{200b}** | X |\n| 雪 | X |\n| 🧑‍🌾 | X |\n" ++
+        "| 🧑‍🧑‍🧑‍🧑‍🧑 | X |\n| \u{feff} | X |\n| \u{ad} | X |\n" ++
+        "| \u{301} | X |\n| \x01 | X |\n| \x1b | X |\n| \u{202e} | X |\n" ++
+        "| e\u{301} | X |\n| \u{600} | X |\n| `a\tb` | X |\n" ++
+        "| e" ++ "\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}" ++ " | X |\n";
+    const Sink = struct {
+        document: *Viewport.Sized(4096, true),
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.document.append(bytes);
+        }
+    };
+    for (std.enums.values(Viewport.Method)) |method| for ([_]bool{ false, true }) |colour| {
+        for (0..input.len + 1) |split| {
+            var document: Viewport.Sized(4096, true) = .{ .width_method = method };
+            var answer: Answer(Sink) = undefined;
+            answer.init(.{ .document = &document }, "", colour, .{ .viewport = method });
+            try answer.feed(input[0..split]);
+            try answer.feed(input[split..]);
+            try answer.finish();
+            try document.prepare();
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\u{200b}") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\u{feff}") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\x01") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\x1b") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\u202e") != null);
+            var cells: [120 * 16]vaxis.Cell = @splat(.{});
+            var screen: vaxis.Screen = .{ .width = 120, .height = 16, .width_method = method, .buf = &cells };
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = 16, .screen = &screen };
+            const drawn = document.draw(window, .{}, true, colour, .{}, .{});
+            errdefer std.debug.print("method={s} colour={} split={d} text={s}\n", .{ @tagName(method), colour, split, document.text() });
+            try std.testing.expectEqual(@as(usize, 15), drawn.rows);
+            var column: ?u16 = null;
+            for (0..15) |row| {
+                var found: ?u16 = null;
+                for (0..120) |col| if (std.mem.eql(u8, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme, "X")) {
+                    try std.testing.expect(found == null);
+                    found = @intCast(col);
+                };
+                try std.testing.expect(found != null);
+                errdefer std.debug.print("row={d} marker={?d} wanted={?d}\n", .{ row, found, column });
+                if (column) |wanted| try std.testing.expectEqual(wanted, found.?) else column = found;
+            }
+        }
+    };
+}
+
 test "answer adapters pass NO_COLOR through inline names tables and fenced code" {
     const Sink = struct {
         output: *std.Io.Writer,
@@ -1230,7 +1280,7 @@ test "answer adapters pass NO_COLOR through inline names tables and fenced code"
             try self.output.writeAll(bytes);
         }
     };
-    for ([_]Destination{ .terminal, .viewport }) |destination| for ([_]bool{ false, true }) |colour| {
+    for ([_]Destination{ .terminal, .{ .viewport = .wcwidth } }) |destination| for ([_]bool{ false, true }) |colour| {
         var output = std.Io.Writer.Allocating.init(std.testing.allocator);
         defer output.deinit();
         var answer: Answer(Sink) = undefined;

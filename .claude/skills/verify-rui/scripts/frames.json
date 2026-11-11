@@ -242,6 +242,24 @@
       ]
     },
     {
+      "name": "markdown-wrapped",
+      "note": "12c-markdown-wrapped: code continuation retains its own indent",
+      "open": "Markdown retry",
+      "sizes": [
+        "46x30"
+      ],
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "expect": [
+        "return null; //\n    expired",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
       "name": "chat-working",
       "note": "13b-working",
       "open": "Fix retry deadline",
