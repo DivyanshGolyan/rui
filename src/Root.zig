@@ -6,6 +6,7 @@ const vxfw = vaxis.vxfw;
 const Split = @import("widgets/Split.zig");
 const Layer = @import("widgets/Layer.zig");
 const AppSettings = @import("app_settings.zig");
+const SignIn = @import("SignIn.zig");
 const TerminalApp = @import("TerminalApp.zig");
 const Self = @This();
 
@@ -19,6 +20,8 @@ divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
 settings_page: AppSettings = .{},
 settings_open: bool = false,
+sign_in_page: SignIn = .{},
+sign_in_open: bool = false,
 pasting: bool = false,
 frames: u64 = 0,
 size: vxfw.Size = .{},
@@ -36,14 +39,14 @@ pub fn listVisible(self: *const Self) bool {
 
 const Layout = struct {
     split: bool,
-    pane: enum { overview, session, settings },
+    pane: enum { overview, session, settings, sign_in },
 };
 
 /// One derived pane decision drives drawing, visibility and return focus.
 fn chooseLayout(self: *const Self) Layout {
     return .{
         .split = self.size.width >= split_at,
-        .pane = if (self.settings_open) .settings else if (self.session != null) .session else .overview,
+        .pane = if (self.sign_in_open) .sign_in else if (self.settings_open) .settings else if (self.session != null) .session else .overview,
     };
 }
 
@@ -158,6 +161,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .init => {
             try ctx.requestFocus(self.overview);
             try self.overview.handleEvent(ctx, .init);
+            if (self.sign_in_open) try ctx.requestFocus(self.sign_in_page.widget());
             try ctx.tick(16, self.widget());
             ctx.redraw = true;
         },
@@ -169,7 +173,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const first_command = ctx.cmds.items.len;
             try self.overview.handleEvent(ctx, .tick);
             if (self.session) |session| try session.handleEvent(ctx, .tick);
-            if (self.settings_open) {
+            if (self.settings_open or self.sign_in_open) {
                 // Hidden screens still settle their workers and consent state,
                 // but their presentation targets aren't in this focus tree.
                 // Retain every other command; a real openSession transition
@@ -181,8 +185,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     kept += 1;
                 }
                 ctx.cmds.items.len = kept;
-                try self.settings_page.widget().handleEvent(ctx, .tick);
+                if (self.settings_open) try self.settings_page.widget().handleEvent(ctx, .tick);
             }
+            try self.sign_in_page.widget().handleEvent(ctx, .tick);
             try ctx.tick(16, self.widget());
         },
         else => {},
@@ -194,11 +199,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.size = size;
     self.settings_page.narrow = size.width < split_at;
+    self.sign_in_page.show_title = size.width < split_at;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     const layout = self.chooseLayout();
     const pane = switch (layout.pane) {
         .overview => if (layout.split) self.compose else self.listWidget(),
         .session => self.session.?,
+        .sign_in => self.sign_in_page.widget(),
         .settings => try self.settingsLayer(ctx, if (layout.split) self.compose else self.listWidget()),
     };
     const child = if (layout.split) split: {
@@ -495,4 +502,52 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     ctx.cmds.clearRetainingCapacity();
     try root.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(ctx.cmds.items[0].request_focus.eql(hidden.widget()));
+}
+
+test "Sign-in frames keep the list at 140 columns and the code link and masked key at 46" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const empty: vxfw.Text = .{ .text = "" };
+    const list: vxfw.Text = .{ .text = " rui" };
+    var root: Self = .{ .overview = empty.widget(), .list = list.widget(), .compose = empty.widget(), .sign_in_open = true };
+    for ([_]u16{ 140, 46 }) |width| {
+        for ([_]@import("sign_in.zig").Stage{ .choice, .codex_waiting, .key_entry }) |stage| {
+            root.sign_in_page.state.stage = stage;
+            try root.sign_in_page.code.set("BDL9-KI88H");
+            const secret = "sk-secret";
+            @memcpy(root.sign_in_page.key.bytes[0..secret.len], secret);
+            root.sign_in_page.key.len = secret.len;
+            const surface = try root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
+            try std.testing.expectEqual(width >= split_at, root.listVisible());
+            var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
+            surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen }, root.widget());
+            var dump: std.Io.Writer.Allocating = .init(arena.allocator());
+            var linked: usize = 0;
+            for (0..12) |row| {
+                var line: std.Io.Writer.Allocating = .init(arena.allocator());
+                for (0..width) |col| {
+                    const cell = screen.readCell(@intCast(col), @intCast(row)).?;
+                    try line.writer.writeAll(cell.char.grapheme);
+                    if (cell.link.uri.len != 0) {
+                        try std.testing.expectEqualStrings("https://auth.openai.com/codex/device", cell.link.uri);
+                        linked += 1;
+                    }
+                }
+                try dump.writer.writeAll(std.mem.trimEnd(u8, line.written(), " "));
+                try dump.writer.writeByte('\n');
+            }
+            const text = dump.written();
+            try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
+            switch (stage) {
+                .choice => try std.testing.expect(std.mem.indexOf(u8, text, "[ChatGPT]   API key") != null),
+                .codex_waiting => {
+                    try std.testing.expect(std.mem.indexOf(u8, text, "BDL9-KI88H") != null);
+                    try std.testing.expectEqual(@as(usize, "auth.openai.com/codex/device".len), linked);
+                },
+                .key_entry => try std.testing.expect(std.mem.indexOf(u8, text, "•••••••••") != null),
+                else => unreachable,
+            }
+            std.debug.print("\nSIGN-IN {s} {d}x12\n{s}END SIGN-IN\n", .{ @tagName(stage), width, text });
+        }
+    }
 }

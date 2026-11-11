@@ -5,6 +5,91 @@
   ],
   "states": [
     {
+      "name": "first-run",
+      "note": "No credentials: sign-in choice occupies the input row",
+      "open": "overview",
+      "first_run": true,
+      "steps": [
+        {
+          "wait": "[ChatGPT]"
+        }
+      ],
+      "expect": [
+        "[ChatGPT]",
+        "API key",
+        "Sign in"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "Host stopped",
+        "Type a task"
+      ]
+    },
+    {
+      "name": "first-run-codex",
+      "note": "Fake device login: clickable link and code, no network",
+      "open": "overview",
+      "first_run": true,
+      "env": {
+        "RUI_TEST_LOGIN": "waiting"
+      },
+      "steps": [
+        {
+          "wait": "[ChatGPT]"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "BDL9-KI88H"
+        }
+      ],
+      "expect": [
+        "auth.openai.com/codex/device",
+        "BDL9-KI88H",
+        "Waiting for ChatGPT"
+      ],
+      "absent": [
+        "Provider: [c]"
+      ]
+    },
+    {
+      "name": "first-run-key",
+      "note": "API key entry is masked before publication",
+      "open": "overview",
+      "first_run": true,
+      "steps": [
+        {
+          "wait": "[ChatGPT]"
+        },
+        {
+          "keys": [
+            "Right",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "API key"
+        },
+        {
+          "text": "sk-secret"
+        },
+        {
+          "wait": "•••••••••"
+        }
+      ],
+      "expect": [
+        "•••••••••",
+        "esc back"
+      ],
+      "absent": [
+        "sk-secret",
+        "Provider: [c]"
+      ]
+    },
+    {
       "name": "start-empty",
       "note": "01-overview-empty",
       "open": "overview",
@@ -202,11 +287,27 @@
       "note": "chat draft and caret kept after Esc and reopening",
       "open": "Fix retry deadline",
       "steps": [
-        { "text": "Keep this chat draft" },
-        { "keys": ["Left", "Left", "Esc"] },
-        { "wait": "Type a task" },
-        { "keys": ["Enter"] },
-        { "wait": "Keep this chat draft" }
+        {
+          "text": "Keep this chat draft"
+        },
+        {
+          "keys": [
+            "Left",
+            "Left",
+            "Esc"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Keep this chat draft"
+        }
       ],
       "expect": "Keep this chat draft"
     },

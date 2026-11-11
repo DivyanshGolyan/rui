@@ -16,6 +16,7 @@ const vxfw = vaxis.vxfw;
 const TerminalApp = @import("TerminalApp.zig");
 const Root = @import("Root.zig");
 const AppSettings = @import("app_settings.zig");
+const SignIn = @import("SignIn.zig");
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
@@ -75,6 +76,7 @@ pub const Options = struct {
     model: ?[]const u8 = null,
     /// This terminal's own successful login, Unix seconds.
     login_at: ?u64 = null,
+    sign_in: bool = false,
     /// The launch's own `--store`, `--provider` and `--model`, as given.
     /// When it named all three, a start reads no saved defaults, the saved
     /// effort included. Otherwise a `/setup` that ran re-resolves the
@@ -94,6 +96,8 @@ pub const Hooks = struct {
     /// Runs between a start's capture and its send, as the CLI's other
     /// captures do.
     captured: *const fn (std.Io) anyerror!void,
+    activate: ?SignIn.Activate = null,
+    ready: ?SignIn.Ready = null,
 };
 
 /// What one Host read found, kept whole so neither part outlives the read
@@ -386,6 +390,7 @@ const Signals = struct {
 
 init: std.process.Init,
 options: Options,
+signed_in_store: protocol.Bounded(protocol.max_store_bytes) = .{},
 hooks: Hooks,
 ops: Operations,
 state: view.State,
@@ -487,6 +492,7 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
 /// Stops the open Session's workers and the overview's before App releases
 /// the terminal. A Session that failed to open has no frontend to stop.
 fn stopApp(self: *Self) void {
+    self.root.sign_in_page.cancel();
     if (self.app_session) |left| if (left.frontend) |frontend| frontend.stop();
     self.worker.cancel();
 }
@@ -560,6 +566,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .tick => {
             // A subsequent event is after App has replaced both the focus
             // path and mouse hit list, including their mouse_leave callbacks.
+            if (self.root.sign_in_open and self.state.default == null) return;
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -767,6 +774,7 @@ fn disposeSession(self: *Self, left: Left) void {
 }
 
 fn finishApp(self: *Self, ended: anyerror!void) !void {
+    const sign_in_ended = self.root.sign_in_page.stop();
     defer {
         for (self.retired.items) |retired| self.disposeSession(retired.left);
         self.retired.deinit(self.init.gpa);
@@ -798,8 +806,12 @@ fn finishApp(self: *Self, ended: anyerror!void) !void {
         kept catch |err| {
             left.ended = err;
         };
+        sign_in_ended catch |err| {
+            left.ended = err;
+        };
         return self.leave(left, {});
     }
+    try sign_in_ended;
     TerminalApp.detached(self.options.store, null, null);
     try ended;
     _ = try answered;
@@ -907,6 +919,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     self.caps.width = self.attention.vx.caps.unicode;
     self.caps.devanagari = std.mem.eql(u8, @import("theme.zig").wordmark(self.caps.unicode, self.attention.vx.terminalVersion(), self.init.environ_map.get("TERM_PROGRAM")), "रुई rui");
     const normal = @import("widget_style.zig").of(self.caps, .{});
+    self.root.sign_in_page.style = normal;
+    self.root.sign_in_page.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     const quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     self.app_screen.style = normal;
     var list: ?*GroupedList = null;
@@ -1018,7 +1032,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version } };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .sign_in_open = options.sign_in };
+    self.root.sign_in_page = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
     self.paintDivider();
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
@@ -1028,6 +1043,53 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
     return self;
+}
+
+fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (self.root.sign_in_page.task.thread != null) return;
+    self.root.sign_in_page.reset();
+    self.root.sign_in_page.selectors = self.options.selectors;
+    self.root.sign_in_page.selectors.store = self.options.store;
+    self.root.sign_in_open = true;
+    try ctx.requestFocus(self.root.sign_in_page.widget());
+    ctx.redraw = true;
+}
+
+fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    // With no sign-in the input remains the choice, not a task that cannot run.
+    if (self.state.default == null) return;
+    self.root.sign_in_open = false;
+    if (self.root.settings_open) {
+        try ctx.requestFocus(self.root.settings_page.widget());
+    } else try self.root.showMain(ctx);
+    ctx.redraw = true;
+}
+
+fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const effort = try self.savedEffort();
+    if (!std.mem.eql(u8, self.options.store, activation.store.slice())) {
+        // Only first-run selection can change the Store. Settings pins the
+        // current Store, whose ongoing readers retain their borrowed path.
+        std.debug.assert(self.worker.thread == null);
+        self.signed_in_store = activation.store;
+        self.options.store = self.signed_in_store.slice();
+    }
+    self.state.default = view.Default.of(activation.binding.provider.slice(), activation.binding.model.slice());
+    if (self.state.default) |*value| value.effort = effort;
+    self.state.login_at = self.realMs() / 1000;
+    self.state.next_list_ms = 0;
+    if (activation.default_failed) {
+        const text = "Sign-in saved; couldn't save default";
+        var notice: view.Notice = .{ .colour = .failure };
+        @memcpy(notice.bytes[0..text.len], text);
+        notice.len = text.len;
+        self.state.notice = notice;
+    }
+    self.root.sign_in_open = false;
+    try self.root.showMain(ctx);
+    try ctx.requestFocus(self.app_input.composer.widget());
 }
 
 /// Accept one typed preference edit. Only this owner writes its worker queue;
@@ -1077,11 +1139,14 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn run(raw: *anyopaque) ?upgrade_status.Run {
             return owner(raw).state.upgrade.run;
         }
+        fn signIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+            try owner(raw).openSignIn(ctx);
+        }
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .sign_in = Callbacks.signIn };
 }
 
 fn destroy(self: *Self) void {

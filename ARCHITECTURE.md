@@ -2310,7 +2310,9 @@ Inspection creates neither directory nor file.
 On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of unarchived Sessions in the Store; each row shows its Workspace.
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
-It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice offers each provider (Codex login, an OpenAI API key, or saving a ready one as the default) or deferral, without creating a Session.
+It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with ChatGPT and API key choices on the input row, without creating a Session.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable device-login link or masked key entry, and keeps failures on that row.
+After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.

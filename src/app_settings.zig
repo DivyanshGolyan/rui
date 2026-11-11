@@ -27,6 +27,7 @@ pub const Backend = struct {
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
     caps: *const fn (*anyopaque) view.Caps,
+    sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 
 backend: ?Backend = null,
@@ -124,7 +125,10 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         ctx.redraw = true;
         return;
     }
-    if (index == 3) return; // Sign-in stays selectable until its screen exists.
+    if (index == 3) {
+        if (backend.sign_in) |open| try open(backend.context, ctx);
+        return;
+    }
     try self.refresh();
     if (self.read_failed) return;
     switch (index) {
@@ -521,4 +525,30 @@ test "App settings refresh invalidates choices tied to the old saved snapshot" {
     try std.testing.expect(!page.hasChoice());
     try std.testing.expect(page.read_failed);
     try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
+}
+
+test "App settings Sign-in row opens the shared sign-in screen on Enter" {
+    const SignIn = struct {
+        opens: usize = 0,
+        fn open(raw: *anyopaque, _: *vxfw.EventContext) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.opens += 1;
+        }
+    };
+    var owner: SignIn = .{};
+    var fixture: Fixture = .{};
+    var backend = fixture.backend();
+    var page: Self = .{ .backend = backend };
+    try page.refresh();
+    // Other backend operations are not used by this row.
+    backend.context = &owner;
+    backend.sign_in = SignIn.open;
+    page.backend = backend;
+    page.panel.selected = 3;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), owner.opens);
+    try std.testing.expect(!page.hasChoice());
 }
