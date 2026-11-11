@@ -234,10 +234,10 @@ pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (info.descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
     const routes = info.routes;
-    if (info.doublewrite) |value|
-        try response.appendShape(protocol.host_info_mysql_reply, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused, value, routes.codex, routes.openai })
-    else
-        try response.appendShape(protocol.host_info_reply, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused, routes.codex, routes.openai });
+    const shape = protocol.host_info_reply;
+    try response.appendShape(shape.head, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused });
+    if (info.doublewrite) |value| try response.appendShape(shape.doublewrite, .{value});
+    try response.appendShape(shape.tail, .{ routes.codex, routes.openai });
 }
 
 pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
@@ -356,13 +356,15 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var host_info: protocol.ResponseBuffer = .{};
     const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .routes = protocol.routesAll(.chatgpt_device), .doublewrite = null };
     try host_info.render(renderHostInfo, .{worst_info});
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), host_info.len);
+    const shape = protocol.host_info_reply;
+    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.tail), host_info.len);
     host_info.len = 0;
-    var mysql_info = worst_info;
-    mysql_info.store = &@as([32]u8, @splat(0x01));
-    mysql_info.doublewrite = &@as([32]u8, @splat(0x01));
-    try host_info.render(renderHostInfo, .{mysql_info});
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_mysql_reply), host_info.len);
+    var with_diagnostic = worst_info;
+    // The public shape permits the full selector bound and the optional
+    // diagnostic together, not just a MySQL id's narrower runtime bound.
+    with_diagnostic.doublewrite = &@as([32]u8, @splat(0x01));
+    try host_info.render(renderHostInfo, .{with_diagnostic});
+    try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
     var configured = command_reply.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .configure = .{ .revision = max, .created = false } } };

@@ -186,6 +186,17 @@ class FramesTest(unittest.TestCase):
         self.assertIn({"wait": "Run the slow tests"}, state["steps"])
         self.assertEqual(state["expect"], ["Docs build", "Run the slow tests"])
 
+    def test_default_frames_use_plain_endings_and_active_tool_marks(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name, words in (("stopped", "■ Stopped"),
+                            ("chat-failed", "× Model reply unreadable")):
+            with self.subTest(state=name):
+                self.assertEqual(states[name]["steps"], [{"wait": words}])
+                self.assertEqual(states[name]["expect"], [words])
+        self.assertEqual(states["tools-running"]["expect"],
+                         ["⠹ Build the docs", "Run the slow tests", "ctrl+x stop"])
+
     def test_cumulative_cast_and_counted_labels(self):
         data = self.scenario()
         data["states"][1]["cast"].append({"label": "Batch {n}", "count": 3, "workspace": "code/batch",

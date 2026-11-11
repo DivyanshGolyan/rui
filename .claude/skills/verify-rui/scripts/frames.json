@@ -98,7 +98,7 @@
     },
     {
       "name": "start-busy",
-      "note": "03-overview-busy",
+      "note": "03-overview-busy: ⠹ counts active Sessions",
       "open": "overview",
       "steps": [
         {
@@ -289,7 +289,7 @@
     },
     {
       "name": "tools-running",
-      "note": "14-tools-running",
+      "note": "14-tools-running: ⠹ marks active tool calls",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -310,7 +310,7 @@
         }
       ],
       "expect": [
-        "• Build the docs",
+        "⠹ Build the docs",
         "Run the slow tests",
         "ctrl+x stop"
       ]
@@ -338,21 +338,21 @@
     },
     {
       "name": "stopped",
-      "note": "14d-stopped",
+      "note": "14d-stopped: one ■ Stopped line, without continuation advice",
       "open": "Fix retry deadline",
       "steps": [
         {
-          "wait": "Work ended: it was interrupted."
+          "wait": "■ Stopped"
         }
       ]
     },
     {
       "name": "chat-failed",
-      "note": "16-conversation-failed",
+      "note": "16-conversation-failed: × Model reply unreadable, without a saved code or provider report",
       "open": "Flaky upload test",
       "steps": [
         {
-          "wait": "malformed_provider_output"
+          "wait": "× Model reply unreadable"
         }
       ]
     },
