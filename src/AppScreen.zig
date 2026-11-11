@@ -19,6 +19,8 @@ fn Screen(comptime Content: type) type {
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
         host: ?vxfw.Widget = null,
+        /// One feed gutter in either shell layout; input keeps its own margin.
+        content_gutter: bool = false,
         marker: ?vxfw.Widget = null,
         overlay: ?vxfw.Widget = null,
         userdata: *anyopaque,
@@ -93,6 +95,11 @@ fn Screen(comptime Content: type) type {
                 count += 1;
             };
             lower.* = .{ .children = lower_children[0..count] };
+            const feed: vxfw.Widget = if (self.content_gutter) gutter: {
+                const padding = try ctx.arena.create(vxfw.Padding);
+                padding.* = .{ .child = lower.widget(), .padding = .{ .left = 1 } };
+                break :gutter padding.widget();
+            } else lower.widget();
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
@@ -100,7 +107,7 @@ fn Screen(comptime Content: type) type {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
             };
-            upper_children[count] = .{ .widget = lower.widget(), .sizing = .fill };
+            upper_children[count] = .{ .widget = feed, .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
             const column = try ctx.arena.create(Stack);
             const column_children = try ctx.arena.alloc(Stack.Child, if (part == .list) 1 else 2);

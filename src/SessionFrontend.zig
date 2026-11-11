@@ -11,7 +11,6 @@ const ActionConsent = @import("ActionConsent.zig");
 const PermissionCard = @import("PermissionCard.zig");
 const Palette = @import("Palette.zig");
 const SessionChrome = @import("SessionChrome.zig");
-const FactsRow = @import("FactsRow.zig");
 const viewport = @import("ConversationViewport.zig");
 const style = @import("widget_style.zig");
 const session_chrome = @import("session_chrome.zig");
@@ -424,7 +423,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     self.app_content = .{ .document = &screen.live, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
-    self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .userdata = self, .on_event = appEvent };
+    self.app_screen = .{ .content = &self.app_content, .input = &self.app_input, .content_gutter = true, .userdata = self, .on_event = appEvent };
 }
 
 /// The shell owns Host availability; the Session only reads it and forwards
@@ -810,7 +809,9 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const held = self.heldOriginal();
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
     const facts_buffer = try ctx.arena.create([session_chrome.facts_bytes]u8);
+    const list_visible = self.app_hooks.root.list_visible;
     chrome.place(&self.app_screen, .{
+        .list_visible = list_visible,
         .browsing = browsing,
         .new_entries = if (self.browsed_from) |from| self.live.entries - from else 0,
         .needs = send.needs,
@@ -818,7 +819,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         // A conversation reading itself again says so until Host requests go on.
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
-        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| FactsRow.text_column, self.app_caps.width),
+        .facts = session_chrome.factsRow(facts_buffer, self.line.facts(&self.hint, self.session), self.session, status_page.archiveBadge(self.line.archive_state), ctx.max.width.? -| SessionChrome.factsInset(list_visible), self.app_caps.width),
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
         .shortcuts = self.shortcuts_open,
@@ -826,6 +827,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .width = ctx.max.width.?,
     });
     self.app_preview.size = .{};
+    self.app_content.size = .{};
     self.app_screen.host = if (self.app_host) |host| host.notice(host.context) else null;
     var surface = try self.app_screen.widget().draw(ctx);
     const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
@@ -893,7 +895,7 @@ test "App Session retains the draft across a permission card arriving during pas
         var rendered: vaxis.Screen = try .init(arena.allocator(), .{ .rows = 24, .cols = 80, .x_pixel = 0, .y_pixel = 0 });
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 24, .screen = &rendered };
         surface.render(window, self.app_input.composer.widget());
-        const user = rendered.readCell(0, 0).?;
+        const user = rendered.readCell(1, 0).?;
         try std.testing.expectEqualStrings("t", user.char.grapheme);
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
         try std.testing.expect(!user.style.dim);
@@ -4189,39 +4191,39 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     held.self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .high };
     try held.self.line.model.set("gpt-5.5");
     try showStatus(held, true, "fix-safari-export");
-    try std.testing.expectEqualStrings(" › Effort          high  Session override", (try rowWith(held, "Effort ")).?);
-    try std.testing.expectEqualStrings("   Permissions     bypass · Bash and MCP run without asking", (try rowWith(held, "Permissions")).?);
+    try std.testing.expectEqualStrings("  › Effort          high  Session override", (try rowWith(held, "Effort ")).?);
+    try std.testing.expectEqualStrings("    Permissions     bypass · Bash and MCP run without asking", (try rowWith(held, "Permissions")).?);
     // Shift-Down scrolls as before; the mark stays.
     try sendKeys(&held.self, "\x1b[1;2B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, " › Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
     // Down reaches the Session's changeable Model before the defaults;
     // PageUp and PageDown still scroll.
     try sendKeys(&held.self, "\x1b[B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "   Effort"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Permissions")).?, " › Permissions"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "    Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Permissions")).?, "  › Permissions"));
     for (0..6) |_| try sendKeys(&held.self, "\x1b[B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, " › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, "  › Model"));
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqualStrings("/configure --model gpt-5.5", held.self.input.composition().bytes);
     held.self.input.clear();
     // Down skips only Store and Instructions, which remain fixed.
     try sendKeys(&held.self, "\x1b[B");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, " › Model"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "fixed for this Session")).?, "   Store"));
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "set from a shell")).?, "   Instructions"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, "  › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "fixed for this Session")).?, "    Store"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "set from a shell")).?, "    Instructions"));
     // A refresh, as the open page's next read, keeps the mark.
     try showStatus(held, false, "fix-safari-export");
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, " › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Rui default")).?, "  › Model"));
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, " › Model"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Model           gpt-5.5")).?, "  › Model"));
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, " › Headroom"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, "  › Headroom"));
     // Enter on Headroom drafts only its command, whose list offers
     // `default`: the model's default never becomes an override of its value.
     try sendKeys(&held.self, "\r");
@@ -4229,11 +4231,11 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     // With a draft, Up and Down keep their meaning: the mark stays.
     try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, " › Headroom"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Headroom")).?, "  › Headroom"));
     held.self.input.clear();
     for (0..8) |_| try sendKeys(&held.self, "\x1b[A");
     try held.settle();
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, " › Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
     // Enter on a choice row lists its choices; Down and Enter take one and run it.
     try sendKeys(&held.self, "\r");
     try std.testing.expectEqualStrings("/configure --reasoning-effort ", held.self.input.composition().bytes);
@@ -4246,7 +4248,7 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     var expected: [64]u8 = undefined;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/configure --reasoning-effort {s}", .{list.shown()[1].word}), held.self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
-    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, " › Effort"));
+    try std.testing.expect(std.mem.startsWith(u8, (try rowWith(held, "Effort ")).?, "  › Effort"));
 }
 
 test "a change run from the /status page replies under the page, which shows the new value on its row; a long failure opens as before" {
@@ -4275,7 +4277,7 @@ test "a change run from the /status page replies under the page, which shows the
         const readiness: preferences.Readinesses = .initFill(.missing);
         _ = try preferences.update(held.self.home, .{ .notifications = false }, &readiness);
         try showStatus(held, false, "fix-safari-export");
-        try std.testing.expectEqualStrings("   Notifications   on", (try rowWith(held, "Notifications")).?);
+        try std.testing.expectEqualStrings("    Notifications   on", (try rowWith(held, "Notifications")).?);
         for (0..3) |_| try sendKeys(&held.self, "\x1b[B");
         try sendKeys(&held.self, "\r");
         try std.testing.expectEqualStrings("/configure --label fix-safari-export", held.self.input.composition().bytes);
@@ -4304,11 +4306,11 @@ test "a change run from the /status page replies under the page, which shows the
             // The reply is the notice on the last row, under the page.
             try std.testing.expectEqualStrings("Configured.", (try rowWith(held, "Configured.")).?);
             // A command run over the page reads them again.
-            try std.testing.expectEqualStrings("   Notifications   off", (try rowWith(held, "Notifications")).?);
-            try std.testing.expectEqualStrings(" › Name            fix-safari-export", (try rowWith(held, "Name")).?);
+            try std.testing.expectEqualStrings("    Notifications   off", (try rowWith(held, "Notifications")).?);
+            try std.testing.expectEqualStrings("  › Name            fix-safari-export", (try rowWith(held, "Name")).?);
             // The open page's next read shows the new value, its mark where it was.
             try showStatus(held, false, "lane four");
-            try std.testing.expectEqualStrings(" › Name            lane four", (try rowWith(held, "Name")).?);
+            try std.testing.expectEqualStrings("  › Name            lane four", (try rowWith(held, "Name")).?);
         } else {
             try std.testing.expect((try rowWith(held, "--label is 1-100")) != null);
             try std.testing.expect((try rowWith(held, " Name ")) == null);
@@ -5056,6 +5058,49 @@ const ChromeFixture = struct {
     }
 };
 
+test "App Session shell gutter and back control follow list visibility through resize" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .left = 100, .label = .{} };
+    try self.line.label.?.set("demo");
+    try self.line.model.set("gpt-5.5");
+    _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
+    try fixture.screen.browsing.append("› Build the docs…\n✓ Build the docs\n");
+    try fixture.screen.browsing.prepare();
+    fixture.screen.browsing.top = .{};
+    fixture.screen.view = .transcript;
+    try fixture.root.openSession(&fixture.ctx, fixture.widget);
+    const arena = fixture.arena.allocator();
+    for ([_]u16{ 140, 46, 100, 99, 140, 46 }) |width| {
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = 26 }, .cell_size = .{} });
+        var screen: vaxis.Screen = try .init(arena, .{ .cols = width, .rows = 26, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 26, .screen = &screen };
+        frame.render(window, self.app_input.composer.widget());
+        const wide = width >= 100;
+        const start: u16 = if (wide) 41 else 0;
+        try std.testing.expectEqual(wide, fixture.root.list_visible);
+        if (wide) try std.testing.expectEqualStrings("│", screen.readCell(40, 0).?.char.grapheme);
+        // Exactly one shell-owned feed gutter, both beside the divider and alone.
+        try std.testing.expectEqualStrings(" ", screen.readCell(start, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("›", screen.readCell(start + 1, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("✓", screen.readCell(start + 1, 1).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
+        var facts: std.Io.Writer.Allocating = .init(arena);
+        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) " demo · gpt-5.5 · low · 100% left" else " ‹ demo · gpt-5.5 · low · 100% left", std.mem.trimEnd(u8, facts.written(), " "));
+        try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(viewport.Position{}, fixture.screen.browsing.top.?);
+    }
+    // The inset must remain bounded even when there is no room for feed text.
+    for ([_]vxfw.Size{ .{ .width = 0, .height = 0 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 1, .height = 26 } }) |size| {
+        const frame = try fixture.root.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
+        try std.testing.expectEqual(size, frame.size);
+    }
+}
+
 test "App Session shows running calls in order above the input, with +N more running and the work line below them" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
@@ -5286,7 +5331,7 @@ test "App Session's last row says a refused environment until the original goes,
     for (0..4) |_| try sendKeys(&held.self, "\x1b[6~");
     try held.settle();
     try std.testing.expect((try rowWith(held, "BIG_TOKEN")) != null);
-    try std.testing.expectEqualStrings("Unset or shorten them in another shell, then run rui request recover there.", (try rowWith(held, "rui request recover")).?);
+    try std.testing.expectEqualStrings(" Unset or shorten them in another shell, then run rui request recover there.", (try rowWith(held, "rui request recover")).?);
     try std.testing.expect((try rowWith(held, "Ctrl-R retries this exact original")) == null);
 }
 

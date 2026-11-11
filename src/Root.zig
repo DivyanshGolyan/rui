@@ -17,6 +17,8 @@ divider_style: vaxis.Style = .{},
 session: ?vxfw.Widget = null,
 pasting: bool = false,
 frames: u64 = 0,
+/// This frame's shell layout, published before drawing its Session.
+list_visible: bool = false,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .captureHandler = capture, .eventHandler = event, .drawFn = draw };
@@ -77,6 +79,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
+    self.list_visible = size.width >= split_at and size.height != 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     const child = if (size.width < split_at)
         try (self.session orelse self.overview).draw(ctx)
@@ -149,6 +152,7 @@ test "App root places list and compose or the open child at desktop and phone wi
             const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
             const surface = try root.widget().draw(ctx);
             try std.testing.expectEqual(size, surface.size);
+            try std.testing.expectEqual(size.width >= split_at and size.height != 0, root.list_visible);
             const layout = surface.children[0].surface;
             if (size.width >= 100 and size.height > 0) {
                 try std.testing.expectEqual(@as(usize, 3), layout.children.len);
