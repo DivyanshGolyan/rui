@@ -8,6 +8,7 @@
 //! declare.
 const std = @import("std");
 const document = @import("document.zig");
+const json = @import("../codecs/json.zig");
 const headers = @import("headers.zig");
 
 pub const Body = enum { json, event_stream };
@@ -87,55 +88,198 @@ pub const Message = union(enum) {
 /// notification.
 pub fn readMessage(bytes: []const u8, id: u64) (document.Error || Invalid)!Message {
     try document.check(bytes);
-    const object = std.mem.trim(u8, bytes, " \t\r\n");
-    const version = document.member(object, "jsonrpc") orelse return error.NotJsonRpc;
-    if (document.kind(version) != .string or !document.keyIs(document.contents(version), "2.0")) return error.NotJsonRpc;
-    const method = document.member(object, "method");
-    const found_id = document.member(object, "id");
-    if (method) |name| {
-        if (document.kind(name) != .string) return error.NotJsonRpc;
+    const object: Object = .whole(bytes);
+    return readEnvelope(object, .wholeMember(object, .@"error"), id);
+}
+
+/// The same field rules serve checked whole objects and valid retained prefixes.
+/// An unfinished value is present, not absent; defaults require a closed object.
+const Field = enum { jsonrpc, id, method, result, @"error", resultType, content, isError, structuredContent, code, message, data };
+const Value = struct {
+    bytes: []const u8,
+    complete: bool,
+
+    fn kind(self: Value) document.Kind {
+        return document.kind(self.bytes);
+    }
+
+    fn stringIs(self: Value, expected: []const u8) bool {
+        return self.complete and self.kind() == .string and document.keyIs(document.contents(self.bytes), expected);
+    }
+};
+const Object = struct {
+    checked: ?[]const u8 = null,
+    fields: [std.enums.values(Field).len]?Value = @splat(null),
+    closed: bool = false,
+
+    fn whole(bytes: []const u8) Object {
+        return .{ .checked = std.mem.trim(u8, bytes, " \t\r\n"), .closed = true };
+    }
+
+    fn wholeMember(parent: Object, field: Field) Object {
+        const value = parent.get(field) orelse return .{};
+        return if (value.kind() == .object) .whole(value.bytes) else .{};
+    }
+
+    fn get(self: *const Object, field: Field) ?Value {
+        if (self.checked) |bytes| {
+            const value = document.member(bytes, @tagName(field)) orelse return null;
+            return .{ .bytes = value, .complete = true };
+        }
+        return self.fields[@backingInt(field)];
+    }
+
+    fn defaulted(self: *const Object, field: Field) Invalid!?Value {
+        const value = self.get(field);
+        if (value == null and !self.closed) return error.InvalidResult;
+        return value;
+    }
+};
+
+fn readEnvelope(object: Object, failure: Object, id: u64) Invalid!Message {
+    const version = object.get(.jsonrpc) orelse return error.NotJsonRpc;
+    if (!version.stringIs("2.0")) return error.NotJsonRpc;
+    const found_id = object.get(.id);
+    if (object.get(.method)) |method| {
+        if (!method.complete or method.kind() != .string) return error.NotJsonRpc;
         return if (found_id == null) .notification else error.ServerRequest;
     }
     const answered = found_id orelse return error.NotJsonRpc;
-    const result = document.member(object, "result");
-    const failure = document.member(object, "error");
-    if ((result == null) == (failure == null)) return error.NotJsonRpc;
-    if (failure) |value| {
-        // A server that could not read the request answers with a null id.
-        if (!isId(answered, id) and document.kind(answered) != .null_value) return error.WrongId;
-        return .{ .rpc_error = try rpcError(value) };
+    const found = object.get(.result);
+    const err = object.get(.@"error");
+    if ((found == null) == (err == null)) return error.NotJsonRpc;
+    if (err) |value| {
+        if (!isId(answered, id) and !(answered.complete and answered.kind() == .null_value)) return error.WrongId;
+        if (value.kind() != .object) return error.NotJsonRpc;
+        return .{ .rpc_error = try rpcError(failure) };
     }
     if (!isId(answered, id)) return error.WrongId;
-    if (document.kind(result.?) != .object) return error.InvalidResult;
-    return .{ .result = result.? };
+    if (found.?.kind() != .object) return error.InvalidResult;
+    return .{ .result = found.?.bytes };
 }
 
-fn isId(value: []const u8, id: u64) bool {
+fn isId(value: Value, id: u64) bool {
     var text: [20]u8 = undefined;
-    return std.mem.eql(u8, value, std.fmt.bufPrint(&text, "{d}", .{id}) catch unreachable);
+    return value.complete and std.mem.eql(u8, value.bytes, std.fmt.bufPrint(&text, "{d}", .{id}) catch unreachable);
 }
 
-fn rpcError(value: []const u8) Invalid!RpcError {
-    if (document.kind(value) != .object) return error.NotJsonRpc;
-    const code = document.member(value, "code") orelse return error.NotJsonRpc;
-    const message = document.member(value, "message") orelse return error.NotJsonRpc;
-    if (document.kind(message) != .string) return error.NotJsonRpc;
+fn rpcError(object: Object) Invalid!RpcError {
+    const code = object.get(.code) orelse return error.NotJsonRpc;
+    const text = object.get(.message) orelse return error.NotJsonRpc;
+    if (!code.complete or !text.complete or text.kind() != .string) return error.NotJsonRpc;
     return .{
-        .code = std.fmt.parseInt(i64, code, 10) catch return error.NotJsonRpc,
-        .message = document.contents(message),
-        .data = document.member(value, "data"),
+        .code = std.fmt.parseInt(i64, code.bytes, 10) catch return error.NotJsonRpc,
+        .message = document.contents(text.bytes),
+        .data = if (object.get(.data)) |data| data.bytes else null,
     };
 }
 
-/// A result is complete when `resultType` is absent or "complete".
-fn checkComplete(result: []const u8) Invalid!void {
-    const value = document.member(result, "resultType") orelse return;
-    if (document.kind(value) != .string) return error.InvalidResult;
-    const name = document.contents(value);
-    if (document.keyIs(name, "complete")) return;
-    if (document.keyIs(name, "input_required")) return error.InputRequired;
+/// A result is complete when resultType is absent from a closed object or
+/// explicitly "complete". This applies equally to list and call results.
+fn checkComplete(object: Object) Invalid!void {
+    const value = (try object.defaulted(.resultType)) orelse return;
+    if (!value.complete or value.kind() != .string) return error.InvalidResult;
+    if (value.stringIs("complete")) return;
+    if (value.stringIs("input_required")) return error.InputRequired;
     return error.UnknownResultType;
 }
+
+pub const Code = enum { succeeded, failed, indeterminate };
+pub const Extent = enum { complete, cut };
+pub const Answer = struct {
+    bytes: []const u8,
+    id: u64,
+    status: u16 = 200,
+    /// SSE bytes are the current event's decoded data, not event framing.
+    format: ?Body = .json,
+    extent: Extent = .complete,
+};
+
+pub fn classify(outcome: CallOutcome) Code {
+    return switch (outcome) {
+        .waiting => unreachable,
+        .result => |result| if (result.is_error) .failed else .succeeded,
+        .server_error => .failed,
+        .refused => |failure| if (failure.status >= 400 and failure.status < 500) .failed else .indeterminate,
+    };
+}
+
+/// Judge complete and cut answers through the same envelope and result rules.
+/// Only a proven JSON-RPC outcome overrides the HTTP status. Unsupported or
+/// unfinished fields are not defaulted into success. No payload is allocated.
+pub fn judgeCall(answer: Answer) Code {
+    return classify(callAnswer(answer));
+}
+
+/// Complete callers may render the borrowed outcome. Cut callers use judgeCall
+/// instead: any result/content slices there may themselves be unfinished.
+pub fn readCallAnswer(answer: Answer) CallOutcome {
+    std.debug.assert(answer.extent == .complete);
+    return callAnswer(answer);
+}
+
+fn callAnswer(answer: Answer) CallOutcome {
+    const refused: CallOutcome = .{ .refused = .{ .status = answer.status, .body = answer.bytes } };
+    if (answer.format == null) return refused;
+    var fields: AnswerFields = .{ .bytes = answer.bytes };
+    var reader: json.Reader = undefined;
+    reader.read(answer.bytes, &fields) catch |err| {
+        if (err != error.UnexpectedJsonEnd or answer.extent != .cut) return refused;
+    };
+    return switch (readEnvelope(fields.envelope, fields.failure, answer.id) catch return refused) {
+        .notification => refused,
+        .rpc_error => |failure| .{ .server_error = failure },
+        .result => .{ .result = callResult(fields.result) catch return refused },
+    };
+}
+
+/// Syntax/ranges only, with no MCP validation. These first-member views have
+/// the same duplicate-key behavior as document.member on a complete object.
+const AnswerFields = struct {
+    bytes: []const u8,
+    envelope: Object = .{},
+    result: Object = .{},
+    failure: Object = .{},
+    active: [2]?Field = @splat(null),
+    starts: [2]usize = @splat(0),
+
+    fn object(self: *AnswerFields, depth: u8) ?*Object {
+        if (depth == 1) return &self.envelope;
+        if (depth != 2) return null;
+        return switch (self.active[0] orelse return null) {
+            .result => &self.result,
+            .@"error" => &self.failure,
+            else => null,
+        };
+    }
+
+    pub fn key(self: *AnswerFields, reader: *const json.Reader, depth: u8) void {
+        const target = self.object(depth) orelse return;
+        const field = std.meta.stringToEnum(Field, reader.text() orelse "");
+        self.active[depth - 1] = if (field != null and target.get(field.?) == null) field else null;
+    }
+
+    pub fn begin(self: *AnswerFields, reader: *const json.Reader, _: json.Kind, depth: u8) void {
+        const target = self.object(depth) orelse return;
+        const field = self.active[depth - 1] orelse return;
+        const start: usize = @intCast(reader.offset);
+        self.starts[depth - 1] = start;
+        target.fields[@backingInt(field)] = .{ .bytes = self.bytes[start..], .complete = false };
+    }
+
+    pub fn end(self: *AnswerFields, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
+        if (kind == .object) {
+            if (depth == 0) self.envelope.closed = true;
+            if (depth == 1) if (self.object(2)) |child| {
+                child.closed = true;
+            };
+        }
+        const target = self.object(depth) orelse return;
+        const field = self.active[depth - 1] orelse return;
+        const end_at: usize = @intCast(reader.offset + @as(u64, if (kind == .number) 0 else 1));
+        target.fields[@backingInt(field)] = .{ .bytes = self.bytes[self.starts[depth - 1]..end_at], .complete = true };
+    }
+};
 
 pub const ListPage = struct {
     /// The `tools` array; read it with `Tools`.
@@ -147,7 +291,7 @@ pub const ListPage = struct {
 };
 
 pub fn readList(result: []const u8) Invalid!ListPage {
-    try checkComplete(result);
+    try checkComplete(.whole(result));
     const tools = document.member(result, "tools") orelse return error.InvalidResult;
     if (document.kind(tools) != .array) return error.InvalidResult;
     const cursor: ?[]const u8 = if (document.member(result, "nextCursor")) |value| switch (document.kind(value)) {
@@ -225,15 +369,29 @@ pub const CallResult = struct {
 };
 
 pub fn readCall(result: []const u8) Invalid!CallResult {
-    try checkComplete(result);
-    const content = document.member(result, "content") orelse "[]";
-    if (document.kind(content) != .array) return error.InvalidResult;
-    const is_error = if (document.member(result, "isError")) |value| switch (document.kind(value)) {
-        .true_value => true,
-        .false_value => false,
-        else => return error.InvalidResult,
+    return callResult(.whole(result));
+}
+
+fn callResult(object: Object) Invalid!CallResult {
+    try checkComplete(object);
+    const content = try object.defaulted(.content);
+    if (content) |value| if (value.kind() != .array) {
+        return error.InvalidResult;
+    };
+    const flag = try object.defaulted(.isError);
+    const is_error = if (flag) |value| value: {
+        if (!value.complete) return error.InvalidResult;
+        break :value switch (value.kind()) {
+            .true_value => true,
+            .false_value => false,
+            else => return error.InvalidResult,
+        };
     } else false;
-    return .{ .is_error = is_error, .content = content, .structured = document.member(result, "structuredContent") };
+    return .{
+        .is_error = is_error,
+        .content = if (content) |value| value.bytes else "[]",
+        .structured = if (object.get(.structuredContent)) |value| value.bytes else null,
+    };
 }
 
 test "a body is read by its media type, and an error status only as JSON" {

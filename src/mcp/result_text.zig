@@ -13,156 +13,28 @@ pub const Ending = union(enum) {
     lost: anyerror,
     timed_out: struct { after_ms: u64, sent: bool },
     stopped: bool,
-    oversized: struct { prefix: []const u8, id: u64 },
+    oversized: reply.Answer,
 };
 
 /// The only owner of MCP resolution certainty. Ending variants encode whether
 /// any request byte was sent; an answer cannot exist on the not-sent side.
 pub fn classify(ending: Ending) Code {
     return switch (ending) {
-        .outcome => |outcome| switch (outcome) {
-            .waiting => unreachable,
-            .result => |result| if (result.is_error) .failed else .succeeded,
-            .server_error => .failed,
-            .refused => |failure| if (failure.status >= 400 and failure.status < 500) .failed else .indeterminate,
-        },
+        .outcome => |outcome| answerCode(reply.classify(outcome)),
         .not_sent => .spawn_failed,
         .lost => .indeterminate,
         .timed_out => |timeout| if (timeout.sent) .indeterminate else .spawn_failed,
         .stopped => |sent| if (sent) .indeterminate else .cancelled,
-        .oversized => |answer| oversizedCode(answer.prefix, answer.id),
+        .oversized => |answer| answerCode(reply.judgeCall(answer)),
     };
 }
 
-/// Do not infer an absent isError from an unfinished result. Explicit flags,
-/// a finished result (default false), or error code+message can establish the
-/// outcome before a large content/data value ends. Only a syntactically valid
-/// prefix with the matching JSON-RPC envelope counts; nested lookalikes do not.
-fn oversizedCode(prefix: []const u8, id: u64) Code {
-    var capture: AnswerPrefix = .{ .expected_id = id, .prefix = prefix };
-    var reader: json.Reader = undefined;
-    reader.read(prefix, &capture) catch |err| switch (err) {
-        error.UnexpectedJsonEnd => {},
-        else => return .indeterminate,
+fn answerCode(code: reply.Code) Code {
+    return switch (code) {
+        .succeeded => .succeeded,
+        .failed => .failed,
+        .indeterminate => .indeterminate,
     };
-    if (!capture.version or capture.conflict) return .indeterminate;
-    if ((capture.id or capture.null_id) and capture.error_code and capture.error_message) return .failed;
-    if (!capture.id or capture.result_invalid) return .indeterminate;
-    return capture.result_code orelse .indeterminate;
-}
-
-const json = @import("../codecs/json.zig");
-const AnswerPrefix = struct {
-    expected_id: u64,
-    prefix: []const u8,
-    version: bool = false,
-    id: bool = false,
-    null_id: bool = false,
-    version_seen: bool = false,
-    id_seen: bool = false,
-    flag_seen: bool = false,
-    root_key: enum { other, version, id, result, rpc_error } = .other,
-    result_key: bool = false,
-    error_key: enum { other, code, message } = .other,
-    result_object: bool = false,
-    error_object: bool = false,
-    result_seen: bool = false,
-    error_seen: bool = false,
-    conflict: bool = false,
-    result_code: ?Code = null,
-    result_invalid: bool = false,
-    error_code: bool = false,
-    error_message: bool = false,
-    error_code_seen: bool = false,
-    error_message_seen: bool = false,
-    number_start: usize = 0,
-
-    pub fn key(self: *AnswerPrefix, reader: *const json.Reader, depth: u8) void {
-        const name = reader.text() orelse "";
-        if (depth == 1) {
-            self.root_key = if (std.mem.eql(u8, name, "jsonrpc")) .version else if (std.mem.eql(u8, name, "id")) .id else if (std.mem.eql(u8, name, "result")) .result else if (std.mem.eql(u8, name, "error")) .rpc_error else .other;
-            if (std.mem.eql(u8, name, "method")) self.conflict = true;
-            if (self.root_key == .version) {
-                self.conflict = self.conflict or self.version_seen;
-                self.version_seen = true;
-            }
-            if (self.root_key == .id) {
-                self.conflict = self.conflict or self.id_seen;
-                self.id_seen = true;
-            }
-        } else if (depth == 2) {
-            if (self.result_object) {
-                self.result_key = std.mem.eql(u8, name, "isError");
-                if (self.result_key) {
-                    self.conflict = self.conflict or self.flag_seen;
-                    self.flag_seen = true;
-                }
-            }
-            if (self.error_object) {
-                self.error_key = if (std.mem.eql(u8, name, "code")) .code else if (std.mem.eql(u8, name, "message")) .message else .other;
-                switch (self.error_key) {
-                    .code => {
-                        self.conflict = self.conflict or self.error_code_seen;
-                        self.error_code_seen = true;
-                    },
-                    .message => {
-                        self.conflict = self.conflict or self.error_message_seen;
-                        self.error_message_seen = true;
-                    },
-                    .other => {},
-                }
-            }
-        }
-    }
-
-    pub fn begin(self: *AnswerPrefix, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
-        if (depth == 2) {
-            if (self.result_object and self.result_key and kind != .literal) self.result_invalid = true;
-            if (self.error_object and self.error_key == .code) self.number_start = @intCast(reader.offset);
-        }
-        if (depth != 1) return;
-        if (self.root_key == .result) {
-            self.conflict = self.conflict or self.result_seen or self.error_seen;
-            self.result_seen = true;
-            self.result_object = kind == .object;
-        } else if (self.root_key == .rpc_error) {
-            self.conflict = self.conflict or self.error_seen or self.result_seen;
-            self.error_seen = true;
-            self.error_object = kind == .object;
-        }
-    }
-
-    pub fn end(self: *AnswerPrefix, reader: *const json.Reader, kind: json.Kind, depth: u8) void {
-        if (depth == 1) switch (self.root_key) {
-            .version => self.version = kind == .string and std.mem.eql(u8, reader.text() orelse "", "2.0"),
-            .id => {
-                self.id = kind == .number and reader.integer != null and reader.integer.? == self.expected_id;
-                self.null_id = kind == .literal and reader.literalValue() == .null_value;
-            },
-            .result => {
-                if (kind == .object and self.result_code == null) self.result_code = .succeeded;
-                self.result_object = false;
-            },
-            .rpc_error => self.error_object = false,
-            else => {},
-        };
-        if (depth != 2) return;
-        if (self.result_object and self.result_key and kind == .literal) switch (reader.literalValue()) {
-            .true_value => self.result_code = .failed,
-            .false_value => self.result_code = .succeeded,
-            else => self.result_invalid = true,
-        };
-        if (self.error_object) switch (self.error_key) {
-            .code => self.error_code = kind == .number and validErrorCode(self.prefix[self.number_start..@intCast(reader.offset)]),
-            .message => self.error_message = kind == .string,
-            .other => {},
-        };
-    }
-};
-
-fn validErrorCode(bytes: []const u8) bool {
-    _ = std.fmt.parseInt(i64, bytes, 10) catch return false;
-    return true;
 }
 
 /// The server name accompanies the transport's ending, not its borrowed result.
@@ -286,7 +158,7 @@ fn render(out: *std.Io.Writer, ended: Ended) !Code {
             try out.print("The MCP server's answer was larger than the {d}-byte limit; the retained prefix follows.", .{max_answer_bytes});
             if (code == .indeterminate) try out.writeAll(" The call may or may not have run; it was not retried.");
             try out.writeByte('\n');
-            try out.writeAll(answer.prefix);
+            try out.writeAll(answer.bytes);
             return code;
         },
         .stopped => |sent| {
@@ -386,17 +258,25 @@ test "result_text classification covers every ending and certainty boundary" {
     const PrefixCase = struct { prefix: []const u8, code: Code };
     const envelope = "{\"jsonrpc\":\"2.0\",\"id\":7,";
     const prefixes = [_]PrefixCase{
-        .{ .prefix = envelope ++ "\"result\":{\"isError\":true,\"content\":[", .code = .failed },
-        .{ .prefix = envelope ++ "\"result\":{\"isError\":false,\"content\":[", .code = .succeeded },
-        .{ .prefix = envelope ++ "\"result\":{\"content\":[],\"isError\":true", .code = .failed },
-        .{ .prefix = envelope ++ "\"result\":{\"content\":[],\"isError\":false", .code = .succeeded },
+        .{ .prefix = envelope ++ "\"result\":{\"isError\":false,\"content\":[],\"resultType\":\"input_required\",\"padding\":\"", .code = .indeterminate },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":[{\"resultType\":\"input_required\",\"isError\":true}", .code = .succeeded },
+        .{ .prefix = envelope ++ "\"result\":{\"isError\":false,\"content\":[", .code = .indeterminate },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"isError\":false,", .code = .indeterminate },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":", .code = .indeterminate },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":[],\"resultType\":\"input_required\",\"padding\":\"", .code = .succeeded },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"input_required\",\"isError\":false,\"content\":[", .code = .indeterminate },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":\"", .code = .indeterminate },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"isError\":true,\"content\":[", .code = .failed },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":[", .code = .succeeded },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"content\":[],\"isError\":true", .code = .failed },
+        .{ .prefix = envelope ++ "\"result\":{\"resultType\":\"complete\",\"content\":[],\"isError\":false", .code = .succeeded },
         .{ .prefix = envelope ++ "\"result\":{\"content\":[]},\"padding\":\"", .code = .succeeded },
         .{ .prefix = envelope ++ "\"result\":{\"content\":[", .code = .indeterminate },
         .{ .prefix = envelope ++ "\"result\":{\"isError\":tru", .code = .indeterminate },
         .{ .prefix = envelope ++ "\"result\":{\"isError\":null,\"content\":[", .code = .indeterminate },
         .{ .prefix = envelope ++ "\"result\":{\"content\":[{\"isError\":true}],", .code = .indeterminate },
         .{ .prefix = envelope ++ "\"result\":{\"isError\":trueX", .code = .indeterminate },
-        .{ .prefix = envelope ++ "\"result\":{\"is\\u0045rror\":true,", .code = .failed },
+        .{ .prefix = envelope ++ "\"result\":{\"is\\u0045rror\":true},\"padding\":\"", .code = .failed },
         .{ .prefix = envelope ++ "\"error\":{\"code\":-32602,\"message\":\"bad\",\"data\":", .code = .failed },
         .{ .prefix = envelope ++ "\"error\":{\"code\":-32602,\"message\":\"bad", .code = .indeterminate },
         .{ .prefix = envelope ++ "\"error\":{\"code\":1.5,\"message\":\"bad\",\"data\":", .code = .indeterminate },
@@ -406,13 +286,13 @@ test "result_text classification covers every ending and certainty boundary" {
         .{ .prefix = envelope ++ "\"result\":{\"isError\":false},\"error\":{", .code = .indeterminate },
         .{ .prefix = envelope ++ "\"result\":{\"content\":[]},\"other\":{\"isError\":true,", .code = .succeeded },
         .{ .prefix = envelope ++ "\"result\":{\"isError\":true,\"content\":[]}}", .code = .failed },
-        .{ .prefix = envelope ++ "\"result\":{\"isError\":false,\"isError\":true,", .code = .indeterminate },
-        .{ .prefix = envelope ++ "\"id\":7,\"result\":{\"isError\":true,", .code = .indeterminate },
+        .{ .prefix = envelope ++ "\"result\":{\"isError\":false,\"isError\":true},\"padding\":\"", .code = .succeeded },
+        .{ .prefix = envelope ++ "\"id\":7,\"result\":{\"isError\":true},\"padding\":\"", .code = .failed },
         .{ .prefix = envelope ++ "\"method\":\"unexpected\",\"result\":{\"isError\":true,", .code = .indeterminate },
         .{ .prefix = envelope ++ "\"error\":{\"code\":null,\"code\":-32602,\"message\":\"bad\",", .code = .indeterminate },
     };
     for (prefixes) |case| {
-        const ending: Ending = .{ .oversized = .{ .prefix = case.prefix, .id = 7 } };
+        const ending: Ending = .{ .oversized = .{ .bytes = case.prefix, .id = 7, .extent = .cut } };
         var buffer: [1024]u8 = undefined;
         var out: std.Io.Writer = .fixed(&buffer);
         try std.testing.expectEqual(case.code, classify(ending));
@@ -420,6 +300,62 @@ test "result_text classification covers every ending and certainty boundary" {
         try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "larger than") != null);
         try std.testing.expect(std.mem.endsWith(u8, out.buffered(), case.prefix));
         if (case.code == .indeterminate) try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "not retried") != null);
+    }
+    // One reply domain: size, HTTP status, media and envelope correlation are
+    // independent inputs. The overflow is in padding, after the semantic object,
+    // so every observed field must have the same judgment as a fitting answer.
+    const AnswerCase = struct { payload: []const u8, code: reply.Code };
+    const answers = [_]AnswerCase{
+        .{ .payload = "\"result\":{}", .code = .succeeded },
+        .{ .payload = "\"result\":{\"resultType\":\"complete\",\"content\":[],\"isError\":false}", .code = .succeeded },
+        .{ .payload = "\"result\":{\"resultType\":\"complete\",\"content\":[],\"isError\":true}", .code = .failed },
+        .{ .payload = "\"result\":{\"resultType\":\"input_required\",\"content\":[],\"isError\":false}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"resultType\":\"later\",\"isError\":true}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"resultType\":7}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"content\":\"text\",\"isError\":false}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"content\":{},\"isError\":true}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"content\":null}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"content\":false}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"content\":42}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}", .code = .succeeded },
+        .{ .payload = "\"result\":{\"isError\":true}", .code = .failed },
+        .{ .payload = "\"result\":{\"isError\":null}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"isError\":1}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"isError\":\"false\"}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"content\":[],\"structuredContent\":{\"x\":1}}", .code = .succeeded },
+        .{ .payload = "\"result\":[]", .code = .indeterminate },
+        .{ .payload = "\"error\":{\"code\":-32602,\"message\":\"bad\",\"data\":{}}", .code = .failed },
+        .{ .payload = "\"error\":{\"code\":1.5,\"message\":\"bad\"}", .code = .indeterminate },
+        .{ .payload = "\"error\":{\"code\":1,\"message\":7}", .code = .indeterminate },
+        .{ .payload = "\"error\":{\"code\":1}", .code = .indeterminate },
+        .{ .payload = "\"result\":{},\"error\":{\"code\":1,\"message\":\"bad\"}", .code = .indeterminate },
+        .{ .payload = "\"method\":\"unexpected\",\"result\":{}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"isError\":false,\"isError\":true}", .code = .succeeded },
+        .{ .payload = "\"result\":{\"isError\":true,\"isError\":false}", .code = .failed },
+        .{ .payload = "\"result\":{\"resultType\":\"input_required\",\"resultType\":\"complete\"}", .code = .indeterminate },
+        .{ .payload = "\"result\":{\"is\\u0045rror\":true}", .code = .failed },
+    };
+    for (answers) |case| {
+        for ([_]u16{ 200, 400, 403, 429, 499, 500, 502, 599 }) |status| {
+            for ([_]bool{ false, true }) |is_json| {
+                for ([_]bool{ false, true }) |matches| {
+                    for ([_]reply.Extent{ .complete, .cut }) |extent| {
+                        var bytes: [1024]u8 = undefined;
+                        const body = try std.fmt.bufPrint(&bytes, "{{\"jsonrpc\":\"2.0\",\"id\":{d},{s},\"padding\":\"{s}", .{ @as(u64, if (matches) 7 else 8), case.payload, if (extent == .complete) "\"}" else "" });
+                        const answer: reply.Answer = .{ .bytes = body, .id = 7, .status = status, .format = if (is_json) .json else null, .extent = extent };
+                        const fallback: reply.Code = if (status >= 400 and status < 500) .failed else .indeterminate;
+                        const expected = if (is_json and matches and case.code != .indeterminate) case.code else fallback;
+                        errdefer std.debug.print("reply parity: HTTP {d}, json={}, matching={}, {s}, {s}\n", .{ status, is_json, matches, @tagName(extent), case.payload });
+                        try std.testing.expectEqual(expected, reply.judgeCall(answer));
+                        if (extent == .complete) {
+                            try std.testing.expectEqual(answerCode(expected), classify(.{ .outcome = reply.readCallAnswer(answer) }));
+                        } else {
+                            try std.testing.expectEqual(answerCode(expected), classify(.{ .oversized = answer }));
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

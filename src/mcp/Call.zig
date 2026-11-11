@@ -82,19 +82,14 @@ pub fn requestSent(self: *const Call) bool {
 
 /// Borrow the JSON message prefix retained when a reply exceeded its buffer.
 /// It is valid until deinit, just like an outcome's slices.
-pub fn answerPrefix(self: *const Call) struct { bytes: []const u8, id: u64 } {
-    return .{ .bytes = self.current.answer.buffered(), .id = self.current.id };
+pub fn answerPrefix(self: *const Call) reply.Answer {
+    return self.current.answerEvidence(.cut);
 }
 
 pub fn advance(self: *Call) Error!Outcome {
     return switch (try self.current.advance()) {
         .waiting => .waiting,
-        .failed => |failed| .{ .refused = .{ .status = failed.status, .body = failed.body } },
-        .answered => |message| switch (message) {
-            .notification => unreachable,
-            .rpc_error => |failure| .{ .server_error = failure },
-            .result => |found| .{ .result = reply.readCall(found) catch |err| return err },
-        },
+        .failed, .answered => reply.readCallAnswer(self.current.answerEvidence(.complete)),
     };
 }
 

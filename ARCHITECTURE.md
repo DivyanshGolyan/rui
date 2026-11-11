@@ -588,8 +588,10 @@ Accepted model output, call rejection and Action Resolution become available at 
 Historical visibility does not bypass pending-input applicability, expose an incomplete Tool Result group or change Conversation/tool-call order.
 
 If the transport answer exceeds 4 MiB, retain the received JSON prefix through the optional scratch path with a larger-than-limit note, not a claim that the complete answer was saved.
-`mcp/result_text.zig` owns MCP certainty: an unsent request is failed-not-run; a definite tool result follows `isError`, a JSON-RPC error or HTTP 4xx fails, and HTTP 5xx or a lost sent request is indeterminate, without retry.
-For an over-limit JSON answer, a matching JSON-RPC envelope and an explicit `isError`, a completed result object with the default false flag, or an error code and complete message establish the outcome; otherwise it is indeterminate.
+`mcp/reply.zig` judges complete and cut answers with the same envelope, result-type, content-shape, `isError` and JSON-RPC error rules; `mcp/result_text.zig` renders that judgment and classifies transport endings without an answer.
+HTTP status and media type accompany the retained bytes: a proven JSON-RPC outcome takes precedence, otherwise HTTP 4xx is a definite refusal and other statuses (including 5xx) are indeterminate, without retry.
+A cut result must establish each defaultable semantic field explicitly, or close its result object before missing fields take their defaults; an unread `resultType`, content shape or `isError` is not invented. A matching envelope and a valid error code with a complete message can establish a JSON-RPC error before its data finishes.
+An unsent request is failed-not-run; a lost sent request is indeterminate.
 Session stop before send cancels the call; after send, closing the connection leaves the remote outcome indeterminate.
 Shared Action settlement preserves MCP adapter evidence, including a definite answer when stop races settlement; Bash's confirmed local stop remains cancelled.
 

@@ -128,9 +128,8 @@ pub fn service(self: *Running, now_ms: u64, out: *std.Io.Writer) !?result_text.C
         return try self.finish(out, .{ .timed_out = .{ .after_ms = self.timeout_ms, .sent = sent } });
     }
     const outcome = self.call.advance() catch |err| {
-        const prefix = self.call.answerPrefix();
         const ending: result_text.Ending = if (err == error.AnswerTooLarge)
-            .{ .oversized = .{ .prefix = prefix.bytes, .id = prefix.id } }
+            .{ .oversized = self.call.answerPrefix() }
         else if (self.call.requestSent()) .{ .lost = err } else .{ .not_sent = err };
         return try self.finish(out, ending);
     };
@@ -201,6 +200,8 @@ test "Running resolves socket replies and a peer closing after the request" {
     const cases = [_]Case{
         .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}"), .code = .succeeded },
         .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[],\"isError\":true}}"), .code = .failed },
+        .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"input_required\",\"isError\":false,\"content\":[]}}"), .code = .indeterminate },
+        .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":\"text\"}}"), .code = .indeterminate },
         .{ .reply = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"bad\"}}"), .code = .failed },
         .{ .reply = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 4\r\n\r\ndown", .code = .indeterminate },
         .{ .reply = "HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\nnope", .code = .failed },
@@ -302,17 +303,22 @@ test "Running oversized JSON and SSE answers retain evidence and release the cal
     defer gpa.destroy(running);
     const response = try gpa.alloc(u8, max_answer_bytes + 1024);
     defer gpa.free(response);
-    const Case = struct { prefix: []const u8, code: result_text.Code };
+    const Case = struct { prefix: []const u8, code: result_text.Code, status: u16 = 200 };
     for ([_]bool{ false, true }) |sse| {
         for ([_]Case{
-            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"isError\":false,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .succeeded },
-            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .failed },
+            .{ .prefix = "not a JSON-RPC answer: ", .code = .failed, .status = 403 },
+            .{ .prefix = "not a JSON-RPC answer: ", .code = .indeterminate, .status = 502 },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{\"isError\":false,\"content\":[", .code = .failed, .status = 403 },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"input_required\",\"isError\":false,\"content\":[", .code = .indeterminate },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":\"", .code = .indeterminate },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"isError\":false,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .succeeded },
+            .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"resultType\":\"complete\",\"isError\":true,\"content\":[{\"type\":\"text\",\"text\":\"", .code = .failed },
             .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"", .code = .indeterminate },
             .{ .prefix = "{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\"message\":\"bad\",\"data\":\"", .code = .failed },
         }) |case| {
             var wire: std.Io.Writer = .fixed(response);
             const body_len = max_answer_bytes + 1;
-            try wire.print("HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ if (sse) "text/event-stream" else "application/json", body_len + @as(usize, if (sse) 6 else 0) });
+            try wire.print("HTTP/1.1 {d} Test\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n", .{ case.status, if (sse) "text/event-stream" else "application/json", body_len + @as(usize, if (sse) 6 else 0) });
             if (sse) try wire.writeAll("data: ");
             try wire.writeAll(case.prefix);
             try wire.splatByteAll('x', body_len - case.prefix.len);
@@ -333,7 +339,7 @@ test "Running oversized JSON and SSE answers retain evidence and release the cal
             defer gpa.free(saved);
             const prefix_start = std.mem.indexOf(u8, saved, case.prefix).?;
             try std.testing.expectEqualStrings(out.written()[0..result_text.excerpt_bytes], saved[0..result_text.excerpt_bytes]);
-            try std.testing.expectEqual(@as(usize, max_answer_bytes), saved.len - prefix_start);
+            try std.testing.expectEqual(@as(usize, max_answer_bytes - @as(usize, if (sse and case.status != 200) 6 else 0)), saved.len - prefix_start);
             try std.testing.expectEqual(@as(u64, saved.len), used.load(.acquire));
             queue.cleanupAll();
             try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
