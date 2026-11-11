@@ -1104,6 +1104,74 @@ pub const TestingRound = struct {
     }
 };
 
+test "buffered payload boundaries and streamed payloads preserve the same bytes under queue pressure" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const insert = rsql.Write(.{
+                .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
+                .Args = struct { id: u64, digest: [32]u8, length: u64, private: bool },
+                .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+            });
+            const chunk = store_schema.content_chunk_bytes;
+            const source = try std.testing.allocator.alloc(u8, 9 * chunk + 17);
+            defer std.testing.allocator.free(source);
+            // Nonuniform bytes expose chunk-index and boundary mistakes.
+            for (source, 0..) |*byte, i| byte.* = @truncate(i *% 31 + i / chunk);
+            var window: [4093]u8 = undefined;
+            for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, source.len }) |length| {
+                const bytes = source[0..length];
+                const entry = try store_core.enter(&storage, .none);
+                defer entry.release();
+                var a: store_access.Access(.write, error{}) = .open(&entry);
+                defer a.deinit();
+                errdefer a.abandon(.{}) catch {};
+                var ids: [2]u64 = undefined;
+                for (&ids, 0..) |*id, method| {
+                    id.* = try a.identity(.content_id);
+                    // A fixture key distinct from built-in empty content;
+                    // this test exercises raw bytes, not content admission.
+                    a.write(insert, .{ .id = id.*, .digest = protocol.contentDigest("adapter parity fixture"), .length = length, .private = method == 1 });
+                    if (method == 0) {
+                        // Existing writeContent callers need not record a
+                        // row or open the public sink to lower their bytes.
+                        a.writeContent(id.*, bytes);
+                    } else {
+                        a.recordContentRow(id.*);
+                        const sink = try a.contentSink(id.*, length);
+                        defer sink.close();
+                        var at: usize = 0;
+                        while (at < length) {
+                            const n = @min(window.len, length - at);
+                            try sink.write(bytes[at..][0..n], at);
+                            at += n;
+                        }
+                    }
+                }
+                try a.commit();
+                // Read bounded windows through the adapter, across every
+                // boundary, rather than trusting row counts or digests.
+                for (ids) |id| {
+                    var offset: usize = 0;
+                    while (offset < length) {
+                        const n = @min(window.len, length - offset);
+                        try a.readRaw(id, offset, window[0..n]);
+                        try std.testing.expectEqualSlices(u8, bytes[offset..][0..n], window[0..n]);
+                        offset += n;
+                    }
+                    try std.testing.expectEqual(length, try store_testing.queryU64(&storage, "SELECT byte_length FROM content WHERE content_id=?1", .{id}));
+                }
+                try std.testing.expect(!storage.engine.inTransaction());
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
 test "a content sink opens only on a content row its Access itself queued, in the same round" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -4079,7 +4147,7 @@ test "dispatch handoff refuses a stopped Attempt without invoking the launch cal
     }.run);
 }
 
-test "configuration pre-Workspace decisions preserve completeness and immutable binding" {
+test "configuration pre-Workspace decisions preserve completeness and allow model revisions" {
     const Case = struct {
         name: []const u8,
         has_current: bool,
@@ -4122,12 +4190,12 @@ test "configuration pre-Workspace decisions preserve completeness and immutable 
             .expected = null,
         },
         .{
-            .name = "different model is immutable",
+            .name = "different model is accepted",
             .has_current = true,
             .workspace_requested = true,
             .provider_requested = "codex",
             .model_requested = "model-b",
-            .expected = .model_is_immutable,
+            .expected = null,
         },
         .{
             .name = "same binding is accepted",
@@ -4264,9 +4332,16 @@ test "Store configuration requires model, Bash workspace and, on a Host serving 
             try different.key.set("binding-different");
             different.configuration.model.value.len = 0;
             try different.configuration.model.value.set("model-a ");
-            const rejected = try storage.configure(&different, .{});
-            try std.testing.expect(rejected == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.model_is_immutable, rejected.rejected.code);
+            const changed = try storage.configure(&different, .{});
+            try std.testing.expect(changed == .accepted);
+            try std.testing.expectEqual(@as(u64, 3), changed.accepted.revision);
+            try std.testing.expectEqualStrings("model-a ", (try storage.inspectSessionForTesting(session.slice())).model.slice());
+            var changes: protocol.ActivityPage = .{ .kinds = .initOne(.session_changed) };
+            changes.session = session;
+            const activity = try store_core.activityPageForTesting(&storage, changes);
+            try std.testing.expectEqual(@as(usize, 1), activity.count);
+            try std.testing.expectEqual(protocol.SessionField.model, activity.items[0].value.session_changed.field);
+            try std.testing.expectEqual(changed.accepted.revision, activity.items[0].value.session_changed.revision);
         }
     }.run);
 }
@@ -4470,6 +4545,56 @@ test "compactAt enforces only known context windows on create and update" {
             command.configuration.reasoning_effort.state = .explicit_null;
             try command.configuration.compaction_trigger.value.set("999999999");
             try std.testing.expect(try storage.configure(&command, .{}) == .accepted);
+        }
+    }.run);
+}
+
+test "model revisions validate retained effort and compactAt against the new catalog model" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+            const catalog = @import("../model_catalog.zig");
+            const known = catalog.find(catalog.shipped, "gpt-6.1-sol").?;
+            var create = try completeConfiguration("switch-catalog-create", "", workspace, "model-a");
+            create.configuration.reasoning_effort.state = .value;
+            try create.configuration.reasoning_effort.value.set("none");
+            var buffer: [20]u8 = undefined;
+            try create.configuration.compaction_trigger.value.set(try std.fmt.bufPrint(&buffer, "{d}", .{known.context_window.? + 1}));
+            const session = (try storage.configure(&create, .{})).accepted.session;
+            var patch: wire_request.ConfigureCommand = .{};
+            patch.session = session;
+            patch.configuration.model.state = .value;
+            try patch.configuration.model.value.set(known.id);
+            try patch.key.set("switch-catalog-window");
+            const window = try storage.configure(&patch, .{});
+            try std.testing.expect(window == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.compact_at_too_large, window.rejected.code);
+            try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
+            try patch.key.set("switch-catalog-effort");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("100");
+            const effort = try storage.configure(&patch, .{});
+            try std.testing.expect(effort == .rejected);
+            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, effort.rejected.code);
+            // D229/D137: an unlisted model carries the same effort through.
+            try patch.key.set("switch-catalog-unlisted");
+            try patch.configuration.model.value.set("model-b");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+            const unlisted = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .none), unlisted.reasoning_effort);
+            try patch.key.set("switch-catalog-listed");
+            try patch.configuration.model.value.set(known.id);
+            patch.configuration.reasoning_effort.state = .value;
+            try patch.configuration.reasoning_effort.value.set("low");
+            const listed = try storage.configure(&patch, .{});
+            try std.testing.expect(listed == .accepted);
+            try std.testing.expectEqual(@as(u64, 3), listed.accepted.revision);
         }
     }.run);
 }
@@ -4680,6 +4805,69 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         try std.testing.expectEqual(@as(?i64, if (case.created) null else 11), next.instructions_id);
         try std.testing.expectEqual(@as(?i64, if (case.created) null else 12), next.output_schema_id);
     }
+}
+
+test "historical model immutability rejections replay while fresh model switches are accepted" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "historical-model-initial");
+            const initial = try storage.inspectSessionForTesting(session.slice());
+
+            var update: wire_request.ConfigureCommand = .{};
+            try update.key.set("historical-model-configure");
+            update.session = session;
+            update.configuration.model.state = .value;
+            try update.configuration.model.value.set("model-b");
+            var message: wire_request.MessageCommand = .{};
+            try message.key.set("historical-model-message");
+            message.session = session;
+            message.text = try testingBytesContent(&tmp, "historical-model-body", "a previously refused Message");
+            defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+
+            // Seed the original answers, not current admission decisions. These
+            // literal codes and production digests model an older Store whose
+            // commands must remain replayable after its policy changes.
+            const sequence = try store_testing.queryU64(&storage, "SELECT coalesce(max(command_seq),0)+1 FROM core_command", .{});
+            const configure_digest = update.semanticDigest();
+            const message_digest = message.semanticDigest();
+            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,1,?2,?3,0,'model_is_immutable',0,0,?4)", .{ update.key.slice(), session.slice(), store_testing.Blob{ .bytes = &configure_digest }, sequence });
+            try store_testing.exec(&storage, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES(?1,2,?2,?3,0,'model_is_immutable',0,0,?4)", .{ message.key.slice(), session.slice(), store_testing.Blob{ .bytes = &message_digest }, sequence + 1 });
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+
+            const replay = try storage.configure(&update, .{});
+            try std.testing.expect(replay == .rejected and replay.rejected.replayed);
+            try std.testing.expectEqualStrings("model_is_immutable", @tagName(replay.rejected.code));
+            const unchanged = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(initial.revision, unchanged.revision);
+            try std.testing.expectEqualStrings(initial.model.slice(), unchanged.model.slice());
+
+            // The same requested model under a fresh key uses today's policy.
+            var fresh = update;
+            try fresh.key.set("fresh-model-configure");
+            const accepted = try storage.configure(&fresh, .{});
+            try std.testing.expect(accepted == .accepted and !accepted.accepted.replayed);
+            try std.testing.expectEqual(initial.revision + 1, accepted.accepted.revision);
+            try std.testing.expectEqualStrings(session.slice(), accepted.accepted.session.slice());
+            const old_again = try storage.configure(&update, .{});
+            try std.testing.expectEqual(replay, old_again);
+            const message_replay = storage.submitMessageWithModel(&message, null, .{});
+            try std.testing.expect(message_replay == .rejected and message_replay.rejected.replayed);
+            try std.testing.expectEqualStrings("model_is_immutable", @tagName(message_replay.rejected.code));
+            try std.testing.expectEqual(message.text.length, message_replay.rejected.content.length);
+            try std.testing.expectEqualSlices(u8, &message.text.digest, &message_replay.rejected.content.digest);
+            const changed = try storage.inspectSessionForTesting(session.slice());
+            try std.testing.expectEqual(accepted.accepted.revision, changed.revision);
+            try std.testing.expectEqualStrings("model-b", changed.model.slice());
+            try std.testing.expectEqual(@as(u64, 0), changed.pending_messages);
+            try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM core_command WHERE accepted=0 AND code='model_is_immutable'", .{}));
+        }
+    }.run);
 }
 
 test "configuration answers replay without reverting newer settings" {
@@ -8371,6 +8559,96 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
     }.run);
 }
 
+test "compaction pressure anchors only usage of the selected replay recipe across model visits" {
+    try store_testing.forEachEngine(struct {
+        const Base = enum { none, compatible, incompatible };
+        const usage = "{\"input_tokens\":1,\"output_tokens\":0}";
+
+        fn model(storage: *Store, session: []const u8, key: []const u8, name: []const u8, trigger: []const u8) !void {
+            var patch: wire_request.ConfigureCommand = .{};
+            try patch.key.set(key);
+            try patch.session.set(session);
+            patch.configuration.model.state = .value;
+            try patch.configuration.model.value.set(name);
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set(trigger);
+            patch.configuration.output_reservation.state = .value;
+            try patch.configuration.output_reservation.value.set("0");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+        }
+
+        fn answer(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, saved_usage: bool) !void {
+            const calls = [_]TestingCall{.{ .item_id = "small", .name = "unknown", .encoded_call_id = "small-call", .decoded_call_id = "small-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            try settleCallsForTestingWithFaults(storage, tmp, binding, "small-output", &calls, .{}, if (saved_usage) usage else null);
+        }
+
+        fn compact(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, key: []const u8, saved_usage: bool) !void {
+            try submitTestMessage(storage, tmp, key, key, session, "compact this prefix");
+            const overflowing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(overflowing));
+            try storage.settleModelAttemptFailure(overflowing, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
+            try settleCompactionForTesting(storage, tmp, base, &.{.compaction});
+            // This usage measures the newly selected base, unlike the usage of
+            // the compaction request which produced it.
+            const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try answer(storage, tmp, successor, saved_usage);
+        }
+
+        fn run(store_case: *store_testing.Case) !void {
+            for ([_]Base{ .none, .compatible, .incompatible }) |base| {
+                for ([_]bool{ false, true }) |returning| {
+                    for ([_]bool{ false, true }) |saved_usage| {
+                        errdefer std.debug.print("base={s}, returning={}, saved_usage={}\n", .{ @tagName(base), returning, saved_usage });
+                        var tmp = std.testing.tmpDir(.{});
+                        defer tmp.cleanup();
+                        var storage: Store = undefined;
+                        try store_testing.testingStore(store_case, &storage, &tmp, std.testing.io);
+                        defer storage.close() catch unreachable;
+                        const session = try configureTestSession(&storage, "config");
+                        // First visit: start in B, then visit A once. Return:
+                        // start in A, visit B, then switch back to A.
+                        try model(&storage, session.slice(), "seed-model", if (returning) "model-a" else "model-b", "1000000");
+                        try submitTestMessage(&storage, &tmp, "seed", "seed", session.slice(), "original");
+                        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        const prefix: [12000]u8 = @splat('x');
+                        const calls = [_]TestingCall{.{ .item_id = "large", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = &prefix, .decoded_arguments = &prefix }};
+                        try settleCallsForTestingWithFaults(&storage, &tmp, first, "large-output", &calls, .{}, if (saved_usage) usage else null);
+                        if (returning and base != .none) try compact(&storage, &tmp, session.slice(), "a-base", saved_usage);
+                        if (returning) {
+                            try model(&storage, session.slice(), "visit-b", "model-b", "1000000");
+                            try submitTestMessage(&storage, &tmp, "b", "b", session.slice(), "visit B");
+                            const b = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(b));
+                            try answer(&storage, &tmp, b, saved_usage);
+                        }
+                        if (base == .incompatible) try compact(&storage, &tmp, session.slice(), "b-base", saved_usage);
+                        if (!returning and base == .compatible) {
+                            try model(&storage, session.slice(), "first-a", "model-a", "1000000");
+                            try compact(&storage, &tmp, session.slice(), "a-base", saved_usage);
+                        }
+                        try model(&storage, session.slice(), "requested-a", "model-a", "1000");
+                        try submitTestMessage(&storage, &tmp, "next", "next", session.slice(), "next");
+                        const compacts = base != .compatible and !(base == .none and returning and saved_usage);
+                        // Both public readers of pressure must agree. In the
+                        // A-base -> B-base -> A case, the restored large prefix
+                        // cannot be hidden behind A's compact-recipe usage.
+                        const estimate = (try testingContextEstimate(&storage, &tmp, session.slice())).?;
+                        try std.testing.expectEqual(compacts, estimate >= 1000);
+                        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        try std.testing.expectEqual(if (compacts) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+                        var view: HistoricalView = undefined;
+                        storage.openHistoricalView(next, &view);
+                        defer view.close();
+                        try std.testing.expectEqual(base == .compatible, (try view.coverage()).anchor != null);
+                    }
+                }
+            }
+        }
+    }.run);
+}
+
 test "compaction pressure uses the latest accepted output even without usage" {
     try store_testing.forEachEngine(struct {
         fn run(store_case: *store_testing.Case) !void {
@@ -9556,13 +9834,15 @@ test "a prefix seal is recorded only while its Attempt is current" {
             var view: HistoricalView = undefined;
             storage.openHistoricalView(attempt.binding, &view);
             defer view.close();
-            try view.recordPrefixSeal(&TestingAttempt.seal);
-            try std.testing.expectEqualDeep(TestingAttempt.seal, (try storage.prefixSealForTesting(attempt.binding)).?);
+            var seal = TestingAttempt.seal;
+            seal.admission_position = try store_testing.queryU64(&storage, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{attempt.binding.operation_id});
+            try view.recordPrefixSeal(&seal);
+            try std.testing.expectEqualDeep(seal, (try storage.prefixSealForTesting(attempt.binding)).?);
             try storage.settleModelAttemptFailure(attempt.binding, .{ .uncorrelated = "provider_failure" }, .ordinary, .{});
-            var later = TestingAttempt.seal;
+            var later = seal;
             later.span_length = 1;
             try std.testing.expectError(error.StaleAttemptBinding, view.recordPrefixSeal(&later));
-            try std.testing.expectEqualDeep(TestingAttempt.seal, (try storage.prefixSealForTesting(attempt.binding)).?);
+            try std.testing.expectEqualDeep(seal, (try storage.prefixSealForTesting(attempt.binding)).?);
             try std.testing.expect(!storage.isFenced());
         }
     }.run);
@@ -11882,42 +12162,52 @@ test "a start_agent child works in its caller's Workspace with its provider" {
     }.run);
 }
 
-test "a null effort on a listed model refuses a mixed update before any changes" {
+test "explicit or retained null effort on a listed model refuses a mixed update before any changes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var create = try completeConfiguration("effort-null-spec", "", workspace, "gpt-6.1-sol");
-            const session = (try storage.configure(&create, .{})).accepted.session;
-            var patch: wire_request.ConfigureCommand = .{};
-            patch.session = session;
-            try patch.key.set("effort-set-low");
-            patch.configuration.reasoning_effort.state = .value;
-            try patch.configuration.reasoning_effort.value.set("low");
-            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
-            const before = try storage.inspectSessionForTesting(session.slice());
-            try patch.key.set("effort-clear-mixed");
-            patch.configuration.reasoning_effort.state = .explicit_null;
-            patch.configuration.tools = try .of(&.{});
-            patch.configuration.label.state = .value;
-            try patch.configuration.label.value.set("must not apply");
-            const bytes = "must not import these instructions";
-            patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
-            const refused = try storage.configure(&patch, .{});
-            try std.testing.expect(refused == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
-            const after = try storage.inspectSessionForTesting(session.slice());
-            try std.testing.expectEqual(before.revision, after.revision);
-            try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
-            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), after.reasoning_effort);
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+            for ([_]bool{ false, true }) |model_revision| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("effort-null-spec", "", workspace, if (model_revision) "model-a" else "gpt-6.1-sol");
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                var patch: wire_request.ConfigureCommand = .{};
+                patch.session = session;
+                if (!model_revision) {
+                    try patch.key.set("effort-set-low");
+                    patch.configuration.reasoning_effort.state = .value;
+                    try patch.configuration.reasoning_effort.value.set("low");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                }
+                const before = try storage.inspectSessionForTesting(session.slice());
+                try patch.key.set("effort-clear-mixed");
+                patch.configuration.reasoning_effort.state = if (model_revision) .omitted else .explicit_null;
+                if (model_revision) {
+                    patch.configuration.model.state = .value;
+                    try patch.configuration.model.value.set("gpt-6.1-sol");
+                }
+                patch.configuration.tools = try .of(&.{});
+                patch.configuration.label.state = .value;
+                try patch.configuration.label.value.set("must not apply");
+                const bytes = "must not import these instructions";
+                patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+                const refused = try storage.configure(&patch, .{});
+                try std.testing.expect(refused == .rejected);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
+                const after = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(before.revision, after.revision);
+                try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
+                try std.testing.expectEqual(before.reasoning_effort, after.reasoning_effort);
+                try std.testing.expectEqualStrings(before.model.slice(), after.model.slice());
+                try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+            }
         }
     }.run);
 }
@@ -11944,9 +12234,59 @@ test "null effort supports nonreasoning catalog entries but never clears assigne
         current.reasoning_effort = .low;
         try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex).?);
     }
-    try current.model.set("gpt-6.1-sol");
-    current.reasoning_effort = null;
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
+}
+
+test "configuration validates effective effort across retained requested and target model states" {
+    const catalog = @import("../model_catalog.zig");
+    const efforts = std.enums.values(protocol.ReasoningEffort);
+    // Required reasoning, no reasoning levels, and an unlisted binding.
+    for ([_][]const u8{ "gpt-5.5", "openai/whisper-1", "unlisted-target" }) |target| {
+        const known = catalog.find(catalog.shipped, target);
+        for (0..efforts.len + 1) |retained_index| {
+            const retained: ?protocol.ReasoningEffort = if (retained_index == 0) null else efforts[retained_index - 1];
+            // The retained value may be explicit or carried from a legacy
+            // null spec's latest Operation. Both must validate identically.
+            for ([_]bool{ false, true }) |legacy| {
+                for ([_]bool{ true, false }) |model_supplied| {
+                    var current: CurrentConfiguration = .{ .provider = .codex };
+                    try current.model.set(if (model_supplied) "unlisted-source" else target);
+                    current.reasoning_effort = if (legacy) null else retained;
+                    current.previous_reasoning_effort = if (legacy) retained else null;
+                    // Omitted, supplied null, and every closed-grammar value.
+                    for (0..efforts.len + 2) |request_index| {
+                        var requested: wire_request.Configuration = .{};
+                        if (model_supplied) {
+                            requested.model.state = .value;
+                            try requested.model.value.set(target);
+                        }
+                        if (request_index == 1) requested.reasoning_effort.state = .explicit_null;
+                        if (request_index >= 2) {
+                            requested.reasoning_effort.state = .value;
+                            try requested.reasoning_effort.value.set(@tagName(efforts[request_index - 2]));
+                        }
+                        const selected = if (request_index == 0) retained else if (request_index == 1) null else efforts[request_index - 2];
+                        // The independent oracle uses catalog facts, not the
+                        // configuration owner's capability or resolution code.
+                        const supported = if (known) |row|
+                            (if (selected) |value| row.efforts.contains(value) else row.efforts.count() == 0)
+                        else
+                            true;
+                        const clears = request_index == 1 and retained != null;
+                        const expected: ?protocol.ConfigurationRejection = if (supported and !clears) null else .unsupported_reasoning_effort;
+                        errdefer std.debug.print("target={s} retained={?s} legacy={} model_supplied={} request={s} value={?s}\n", .{
+                            target,
+                            if (retained) |value| @tagName(value) else null,
+                            legacy,
+                            model_supplied,
+                            @tagName(requested.reasoning_effort.state),
+                            if (selected) |value| @tagName(value) else null,
+                        });
+                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex));
+                    }
+                }
+            }
+        }
+    }
 }
 
 test "effective effort carries legacy history without inferring a fresh default" {

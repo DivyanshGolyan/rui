@@ -156,9 +156,7 @@ pub const Store = struct {
         return observation;
     }
 
-    /// Test fixture for a historical producing binding unavailable through
-    /// today's immutable Session configuration admission. Requires a newer
-    /// current revision, leaving that revision and its frozen inputs intact.
+    /// Reads the seal applicable to this frozen Operation's model.
     pub fn prefixSealForTesting(self: *Store, binding: AttemptBinding) !?PrefixSeal {
         return self.queue().run(prefixSealForTestingHeld, .{ self, binding });
     }
@@ -1185,16 +1183,9 @@ pub const Store = struct {
     fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        // SQLite's one-statement autocommit is already atomic. Network
-        // writes must include the ownership fence in the same transaction.
-        if (self.engine == .mysql) {
-            var access: Access(.write, error{}) = .open(&entry);
-            defer access.deinit();
-            return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
-        }
         var access: Access(.single, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.revokeActionSender(&access, binding));
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
@@ -2053,7 +2044,7 @@ pub fn commit(self: *Store) !void {
 /// (`recoverRerun`) is no longer armed and holds every write it held, so
 /// it commits at its end.
 pub fn commitsWithWrites(self: *Store) bool {
-    return self.engine == .mysql and self.batch == .first and self.engine.mysql.state.armed and !self.queue().writeWaiting();
+    return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2359,14 +2350,12 @@ fn IdentityCeiling(comptime column: Identity) type {
 }
 
 fn loadIdentities(self: *Store, columns: std.EnumSet(Identity)) !void {
-    if (self.engine == .mysql) {
+    if (self.engine.batches()) {
         inline for (comptime std.enums.values(Identity)) |column| if (columns.contains(column)) {
             const Ceiling = IdentityCeiling(column);
             try self.engine.bind(null, Ceiling, &.{}, 0);
         };
-        if (@import("builtin").is_test) {
-            if (columns.count() != 0) self.engine.mysql.state.testing_shape.identity_passes += 1;
-        }
+        if (columns.count() != 0) self.engine.notePass(.identity);
         try self.engine.startPass();
     }
     errdefer self.engine.finishPass() catch {};
