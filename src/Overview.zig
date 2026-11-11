@@ -471,6 +471,14 @@ fn paintCursor(self: *Self) !void {
     try self.attention.vx.setTerminalCursorColor(self.attention.out, colour);
 }
 
+fn paintGround(self: *Self) !void {
+    if (self.caps.depth != .direct) return;
+    const theme = @import("theme.zig");
+    const mode: theme.Mode = if (self.caps.skin() == .day) .light else .dark;
+    const colour = theme.background(mode, .direct, .ground).direct;
+    try self.attention.vx.setTerminalBackgroundColor(self.attention.out, colour);
+}
+
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
@@ -486,11 +494,13 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .color_report => |report| if (report.kind == .bg) {
             self.caps.background = report.value;
             try self.paintCursor();
+            try self.paintGround();
             if (self.app_session) |left| left.frontend.?.app_caps = self.caps;
             ctx.redraw = true;
         },
         .color_scheme => {
             const app = &self.app.?.app;
+            try app.tty.writer().writeAll(vaxis.ctlseqs.osc11_reset);
             try app.vx.queryColor(app.tty.writer(), .bg);
         },
         .tick => {
@@ -2060,6 +2070,21 @@ test "App cursor contrasts with the painted ground after terminal theme reports"
             var shown = try rig.shown(80, 24);
             defer shown.deinit();
             const ground = Check.rgb(shown.screen.readCell(79, 10).?.style.bg);
+            const background_prefix = "\x1b]11;rgb:";
+            if (depth == .direct) {
+                const background_start = std.mem.indexOf(u8, emitted, background_prefix);
+                try std.testing.expectEqual(true, background_start != null);
+                const background = emitted[background_start.? + background_prefix.len ..];
+                try std.testing.expect(background.len >= 14);
+                const painted: [3]u8 = .{
+                    try std.fmt.parseInt(u8, background[0..2], 16),
+                    try std.fmt.parseInt(u8, background[5..7], 16),
+                    try std.fmt.parseInt(u8, background[10..12], 16),
+                };
+                try std.testing.expectEqual(ground, painted);
+            } else {
+                try std.testing.expect(std.mem.indexOf(u8, emitted, "\x1b]11;") == null);
+            }
             const a = Check.luminance(cursor);
             const b = Check.luminance(ground);
             const contrast = (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
@@ -2068,7 +2093,9 @@ test "App cursor contrasts with the painted ground after terminal theme reports"
         }
     }
     try rig.screen.vx.resetState(&rig.out.writer);
-    try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]112\x1b\\") != null);
+    const reset = rig.signalled();
+    try std.testing.expect(std.mem.indexOf(u8, reset, "\x1b]112\x1b\\") != null);
+    try std.testing.expect(std.mem.indexOf(u8, reset, "\x1b]111\x1b\\") != null);
     rig.overview.caps.depth = .none;
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);

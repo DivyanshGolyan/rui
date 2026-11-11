@@ -665,6 +665,22 @@
       "expect": "Fix retry deadline"
     },
     {
+      "name": "mist-chat-scrolled",
+      "note": "light terminal with its own background, scrolled back",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "What I changed"
+        }
+      ],
+      "theme": "mist"
+    },
+    {
       "name": "no-color",
       "note": "72-no-color",
       "open": "Fix retry deadline",
