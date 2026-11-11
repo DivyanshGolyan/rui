@@ -2,7 +2,8 @@
 """Select existing build targets for fresh execution.
 
 A changed file selects the unit roots and process fixtures that reach it
-through literal imports (`Graph`), plus the targets its path rules name.
+through literal imports (`Graph`), plus the targets its path rules name and
+fixtures that assert text found in the changed production source.
 """
 import argparse
 import ast
@@ -312,6 +313,58 @@ class Graph:
 def tree_graph():
     tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z"]).decode().split("\0")
     return Graph([name for name in tracked if name and (ROOT / name).is_file()], lambda name: (ROOT / name).read_text())
+
+
+def script_literals(source, suffix):
+    """Literal text, including f-string constant parts, without executing scripts."""
+    if suffix == ".py":
+        return {node.value for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+    return {single or double for single, double in re.findall(
+        r''''((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"''', source)}
+
+
+def fixture_text(literal):
+    """Screen prose, rather than short fragments or identifier-like literals."""
+    text = literal.strip()
+    return text if len(text) >= 12 and " " in text else ""
+
+
+def source_strings(source):
+    """String bodies drawn by source: quoted strings and Zig multiline lines."""
+    tokens = re.finditer(r'//[^\n]*|"(?:\\.|[^"\\])*"|\\\\[^\n]*', source)
+    return "\n".join(token[1:-1] if token.startswith('"') else token[2:]
+                     for match in tokens if not (token := match.group()).startswith("//"))
+
+
+@cache
+def tree_fixture_literals():
+    return {target: {text for script in tree_graph().scripts(scripts)
+                     if Path(script).suffix in {".py", ".sh"} and (ROOT / script).is_file()
+                     for literal in script_literals((ROOT / script).read_text(), Path(script).suffix)
+                     if (text := fixture_text(literal))}
+            for target, (scripts, _, _) in FIXTURES.items()}
+
+
+@cache
+def tree_uncommon_texts(candidates):
+    """Count only prose found in changed source, once per production file.
+
+    Like the import graph, prevalence comes from the selector's working tree.
+    Stop searching for each candidate once three files contain it.
+    """
+    if not candidates:
+        return frozenset()
+    counts = dict.fromkeys(candidates, 0)
+    tracked = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-z", "src/"]).decode().split("\0")
+    for name in tracked:
+        if not name or matches(name, TEST_CODE) or not (ROOT / name).is_file():
+            continue
+        source = source_strings((ROOT / name).read_text())
+        for text, count in counts.items():
+            if count < 3 and text in source:
+                counts[text] += 1
+    return frozenset(text for text, count in counts.items() if count < 3)
 
 
 # The option grammar cli_args.zig used to hold: rules that name cli_args.zig
@@ -718,9 +771,14 @@ def live_mysql_suites(targets, mysql_suites):
     return suites
 
 
-def select(paths, phase, available, graph=None, contents=None):
-    """`contents` maps FIXTURE_TABLE, or a path a `CONTENT_RULES` entry matches,
-    to its (before, after) text; a path it leaves out counts as changed throughout."""
+def select(paths, phase, available, graph=None, contents=None, fixture_literals=None):
+    """`contents` maps source and content-rule paths to (before, after) text.
+
+    Missing content counts as changed throughout for CONTENT_RULES, but cannot
+    establish asserted-text ownership. `fixture_literals` maps targets to script
+    literals already filtered for prevalence; when omitted, tree readers find
+    the scripts and count only prose present in the changed source texts.
+    """
     graph = graph or tree_graph()
     paths = [BUILD_HUB if BUILD_MODULES.get(path) == BUILD_HUB else path for path in paths]
     contents = contents or {}
@@ -803,6 +861,22 @@ def select(paths, phase, available, graph=None, contents=None):
         targets.update(rows)
         native_targets.update(rows - LINUX_ONLY)
         reasons.add("Fixture table: the fixtures whose rows changed")
+    source_changes = [contents[path] for path in paths
+                      if path.startswith("src/") and not matches(path, TEST_CODE) and path in contents]
+    if source_changes:
+        literals = tree_fixture_literals() if fixture_literals is None else fixture_literals
+        texts = {text for strings in literals.values() for literal in strings if (text := fixture_text(literal))}
+        sources = {source for change in source_changes for source in change if source}
+        drawn = "\n".join(source_strings(source) for source in sources)
+        present = {text for text in texts if text in drawn}
+        if fixture_literals is None:
+            present = tree_uncommon_texts(tuple(sorted(present)))
+        asserted = {target for target, strings in literals.items()
+                    if any(fixture_text(literal) in present for literal in strings)}
+        if asserted:
+            targets.update(asserted)
+            native_targets.update(asserted - LINUX_ONLY)
+            reasons.add("Asserted text: a fixture waits for text this file draws")
     # The unit roots review runs on Linux, before `check` absorbs them: drafts
     # run these too. Process fixtures among UNIT_ROOTS keep their own rules.
     unit_roots = targets & ({"test"} | UNIT_ROOTS.keys()) - FIXTURES.keys()
@@ -902,7 +976,8 @@ def main():
     result = select(paths, args.phase, available,
                     contents={path: (revision_text(base, path), revision_text(head, path))
                               for path in paths
-                              if path == FIXTURE_TABLE or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
+                              if path.startswith("src/") or path == FIXTURE_TABLE
+                              or any(matches(path, patterns) for patterns, _ in CONTENT_RULES.values())})
     result["base"] = base
     result["head"] = head
     print(json.dumps(result, indent=2))

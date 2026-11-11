@@ -34,6 +34,7 @@ const ConsentPolicy = @import("session_consent.zig");
 const reader_policy = @import("session_reading.zig");
 const session_notice = @import("session_notice.zig");
 const session_id = @import("session_id.zig");
+const session_drafts = @import("session_drafts.zig");
 const session_keys = @import("session_keys.zig");
 const stderr = @import("stderr.zig");
 const TerminalText = @import("TerminalText.zig");
@@ -450,6 +451,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
 }
 
 pub const AppHooks = struct {
+    drafts: ?*session_drafts.Drafts = null,
     root: *Root,
     context: *anyopaque,
     leave: *const fn (*anyopaque, *vxfw.EventContext, Outcome) anyerror!void,
@@ -461,6 +463,10 @@ pub const AppHooks = struct {
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
+    if (hooks.drafts) |drafts| if (drafts.take(self.init.gpa, self.session)) |draft| {
+        defer draft.deinit(self.init.gpa);
+        self.input.restore(draft.snapshot);
+    };
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = "shift+↓" };
@@ -566,7 +572,7 @@ fn follow(self: *Self, ctx: *vxfw.EventContext, id: []const u8) !void {
     const screen = self.screen;
     const action = screen.action_view != null or self.live.work.first_action != null or self.reading.prepared_action != null;
     const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
-    switch (session_notice.follow(original, self.submission.published(), self.input.composition().bytes.len == 0, action, self.commandActive())) {
+    switch (session_notice.follow(original, self.submission.published(), self.draftSafeToLeave(), action, self.commandActive())) {
         .stay => |why| {
             self.notice = why;
             ctx.redraw = true;
@@ -756,6 +762,9 @@ fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.leaving) |outcome| {
         const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
         if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
+        if (self.app_hooks.drafts) |drafts| {
+            try drafts.put(self.init.gpa, self.session, self.input.snapshot());
+        }
         self.app_consent.withdraw();
         self.app_card.ready_pending = false;
         self.stop();
@@ -1432,6 +1441,12 @@ test "App Session Ctrl-O follows the lowest drawn peer name, or opens the lower 
     // The Session leaves once: the screen opens the peer on that leave, so
     // a second one would leave the peer too.
     try std.testing.expectEqual(@as(usize, 1), Hooks.leaves);
+}
+
+/// The legacy leave policy protects text that would otherwise be lost.
+/// An attached draft owner gives non-empty text the same safe departure.
+fn draftSafeToLeave(self: *const Self) bool {
+    return self.input.composition().bytes.len == 0 or self.app_hooks.drafts != null;
 }
 
 /// A Session's input starts empty, and no frame of it has drawn a list yet:
@@ -2413,7 +2428,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             screen.moveRow(.selector);
             if (action == .close and self.settledView()) {
                 const original: ?Submission.State = if (self.submission.view()) |submission| submission.state else null;
-                switch (session_notice.close(original, self.submission.published(), self.input.composition().bytes.len == 0)) {
+                switch (session_notice.close(original, self.submission.published(), self.draftSafeToLeave())) {
                     .leave => {
                         self.leaving = .returned;
                         return;
@@ -3379,6 +3394,10 @@ const HeldFrontend = struct {
     size: vxfw.MaxSize = .{ .width = 80, .height = 24 },
 
     fn create() !*HeldFrontend {
+        return createWithDrafts("unused", null);
+    }
+
+    fn createWithDrafts(id: []const u8, drafts: ?*session_drafts.Drafts) !*HeldFrontend {
         const held = try std.testing.allocator.create(HeldFrontend);
         errdefer std.testing.allocator.destroy(held);
         const screen = try std.testing.allocator.create(Screen);
@@ -3392,12 +3411,12 @@ const HeldFrontend = struct {
         var lender = quiet_overview;
         lender.context = held;
         lender.upgrade = shownUpgrade;
-        held.self.begin(init, "unused", "unused", held.directory[0..directory], undefined, undefined, undefined, undefined, screen, &held.interrupted, lender);
+        held.self.begin(init, "unused", id, held.directory[0..directory], undefined, undefined, undefined, undefined, screen, &held.interrupted, lender);
         held.self.reading.opening = false;
         // No read is due: a test hands the frontend what a read would.
         held.self.poll_at = std.math.maxInt(i96);
         held.self.submission.environment = .empty;
-        _ = held.self.attach(.{ .root = &held.root, .context = held, .leave = onLeave, .copy = onCopy, .on_open = onOpen }, .{ .depth = .none });
+        _ = held.self.attach(.{ .drafts = drafts, .root = &held.root, .context = held, .leave = onLeave, .copy = onCopy, .on_open = onOpen }, .{ .depth = .none });
         return held;
     }
 
@@ -3543,6 +3562,178 @@ fn barShows(held: *HeldFrontend) ![]const u8 {
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     const held: *HeldFrontend = @fieldParentPtr("self", frontend);
     try held.keys(bytes);
+}
+
+test "App Session draft storage still guards pending originals Actions and commands" {
+    for ([_]enum { original, action, command }{ .original, .action, .command }) |pending| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(std.testing.allocator);
+        const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+        defer a.destroy();
+        try a.keys("kept");
+        switch (pending) {
+            .original => {
+                a.self.submission.intent = .{ .decision = .{ .action = 1, .decision = .deny } };
+                a.self.submission.state = .submitting;
+            },
+            .action => a.self.live.work.first_action = 1,
+            .command => a.self.inspection.command_running = true,
+        }
+        defer {
+            a.self.submission.intent = null;
+            a.self.live.work.first_action = null;
+            a.self.inspection.command_running = false;
+        }
+        var ctx = a.context();
+        try a.self.openPeer(&ctx, "bbbbbb");
+        try std.testing.expect(a.left == null);
+        try std.testing.expectEqualStrings("kept", a.self.input.composition().bytes);
+        try std.testing.expect(drafts.take(std.testing.allocator, "aaaaaa") == null);
+    }
+}
+
+test "App Session draft save failure retains the active text and does not leave" {
+    var drafts: session_drafts.Drafts = .{};
+    defer drafts.deinit(std.testing.allocator);
+    const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+    defer a.destroy();
+    try a.keys("kept\x1b[D");
+    var space: [0]u8 = .{};
+    var failing: std.heap.FixedBufferAllocator = .init(&space);
+    a.self.init.gpa = failing.allocator();
+    defer a.self.init.gpa = std.testing.allocator;
+    try std.testing.expectError(error.OutOfMemory, a.keys("\x07"));
+    try std.testing.expect(a.left == null);
+    try std.testing.expectEqualStrings("kept", a.self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 3), a.self.input.composition().cursor);
+    try std.testing.expect(drafts.take(std.testing.allocator, "aaaaaa") == null);
+}
+
+test "App Session draft handoff preserves valid overflow-rejected and malformed-rejected input" {
+    const Open = struct {
+        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+    };
+    const gpa = std.testing.allocator;
+    const full = try gpa.alloc(u8, Input.capacity);
+    defer gpa.free(full);
+    @memset(full, 'x');
+    const cases = [_]struct { bytes: []const u8, rejected: ?keymap.Refusal }{
+        .{ .bytes = "first\nαbeta", .rejected = null },
+        .{ .bytes = full, .rejected = .overflow },
+        .{ .bytes = "first\nαbeta", .rejected = .invalid },
+        .{ .bytes = "", .rejected = .invalid },
+    };
+    for (cases) |case| {
+        for ([_]enum { back, peer, detached }{ .back, .peer, .detached }) |path| {
+            var drafts: session_drafts.Drafts = .{};
+            defer drafts.deinit(gpa);
+            const cursor = case.bytes.len - @min(case.bytes.len, 2);
+            {
+                const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+                defer a.destroy();
+                try a.keys(case.bytes);
+                try a.keys("\x1b[D\x1b[D");
+                if (case.rejected) |why| try a.keys(if (why == .overflow) "x" else "\xff");
+                try std.testing.expectEqualStrings(case.bytes, a.self.input.composition().bytes);
+                try std.testing.expectEqual(cursor, a.self.input.composition().cursor);
+                try std.testing.expectEqual(case.rejected, a.self.input.snapshot().rejected);
+                switch (path) {
+                    .back => try a.keys("\x07"),
+                    .peer => {
+                        a.self.app_hooks.on_open = Open.peer;
+                        var ctx = a.context();
+                        try a.self.openPeer(&ctx, "bbbbbb");
+                    },
+                    .detached => try a.keys("\x03"),
+                }
+                try std.testing.expectEqual(if (path == .detached) Outcome.detached else Outcome.returned, a.left.?);
+            }
+            {
+                const b = try HeldFrontend.createWithDrafts("bbbbbb", &drafts);
+                defer b.destroy();
+                try std.testing.expectEqualStrings("", b.self.input.composition().bytes);
+                try b.keys("other\x1b[D\x07");
+            }
+            {
+                const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+                defer a.destroy();
+                try std.testing.expectEqualStrings(case.bytes, a.self.input.composition().bytes);
+                try std.testing.expectEqual(cursor, a.self.input.composition().cursor);
+                // Assert the boundary outcome, not just the restored flag.
+                try a.keys("\r");
+                try std.testing.expectEqual(@as(u64, if (case.rejected == null) 1 else 0), a.self.admission.sent);
+                if (case.rejected) |why| try std.testing.expectEqualStrings(refusedNotice(why), a.self.shown_notice.current(a.self.nowMs()).?);
+                try std.testing.expectEqualStrings("", a.self.input.composition().bytes);
+            }
+            {
+                const b = try HeldFrontend.createWithDrafts("bbbbbb", &drafts);
+                defer b.destroy();
+                try std.testing.expectEqualStrings("other", b.self.input.composition().bytes);
+                try std.testing.expectEqual(@as(usize, 4), b.self.input.composition().cursor);
+            }
+        }
+    }
+}
+
+test "App Session drafts survive switching chats with their caret and sending removes only that chat's draft" {
+    const Open = struct {
+        fn peer(_: *anyopaque, _: *vxfw.EventContext, _: *const [session_id.bytes]u8) !void {}
+    };
+    for ([_]enum { back, peer, detached }{ .back, .peer, .detached }) |path| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(std.testing.allocator);
+        {
+            const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+            defer a.destroy();
+            try a.keys("first\nαbeta\x1b[D\x1b[D");
+            try std.testing.expectEqualStrings("first\nαbeta", a.self.input.composition().bytes);
+            try std.testing.expectEqual(@as(usize, "first\nαbe".len), a.self.input.composition().cursor);
+            switch (path) {
+                .back => try a.keys("\x07"),
+                .peer => {
+                    a.self.app_hooks.on_open = Open.peer;
+                    var ctx = a.context();
+                    try a.self.openPeer(&ctx, "bbbbbb");
+                },
+                .detached => try a.keys("\x03"),
+            }
+            try std.testing.expectEqual(if (path == .detached) Outcome.detached else Outcome.returned, a.left.?);
+        }
+        {
+            const b = try HeldFrontend.createWithDrafts("bbbbbb", &drafts);
+            defer b.destroy();
+            try std.testing.expectEqualStrings("", b.self.input.composition().bytes);
+            try b.keys("second\x1b[D\x07");
+            try std.testing.expectEqual(Outcome.returned, b.left.?);
+        }
+        {
+            const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+            defer a.destroy();
+            try std.testing.expectEqualStrings("first\nαbeta", a.self.input.composition().bytes);
+            try std.testing.expectEqual(@as(usize, "first\nαbe".len), a.self.input.composition().cursor);
+            // Taking, rather than copying, leaves no stale saved draft while active.
+            try std.testing.expect(drafts.take(std.testing.allocator, "aaaaaa") == null);
+            try a.keys("\r");
+            try std.testing.expectEqual(@as(u64, 1), a.self.admission.sent);
+            try std.testing.expectEqualStrings("", a.self.input.composition().bytes);
+            try a.keys("\x03");
+            try std.testing.expectEqual(Outcome.detached, a.left.?);
+            try std.testing.expect(drafts.take(std.testing.allocator, "aaaaaa") == null);
+        }
+        {
+            const a = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+            defer a.destroy();
+            try std.testing.expectEqualStrings("", a.self.input.composition().bytes);
+            try std.testing.expectEqual(@as(usize, 0), a.self.input.composition().cursor);
+            const b = try HeldFrontend.createWithDrafts("bbbbbb", &drafts);
+            defer b.destroy();
+            try std.testing.expectEqualStrings("second", b.self.input.composition().bytes);
+            try std.testing.expectEqual(@as(usize, 5), b.self.input.composition().cursor);
+            const fresh = try HeldFrontend.createWithDrafts("cccccc", &drafts);
+            defer fresh.destroy();
+            try std.testing.expectEqualStrings("", fresh.self.input.composition().bytes);
+        }
+    }
 }
 
 test "a history page read for an earlier transcript never joins the current one" {

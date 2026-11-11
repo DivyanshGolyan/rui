@@ -8,7 +8,8 @@
 //! engine lowers binds into its outgoing batch. A pass runs on queue or
 //! packet pressure, before rebinding an in-process statement, when an
 //! in-process sink needs its row, before position compare-and-sets, and at
-//! `run`. The queue stays bounded (eight slots, sixteen for a survey).
+//! `run`. The queue stays bounded (eight slots, sixteen for a survey or a
+//! settlement).
 //! In-process passes cost no round trip; network passes send a batch.
 //! Until the pass that steps a read, `Found` is `.pending` and Debug/test
 //! builds poison its destination (`Access.read` says what that catches).
@@ -30,6 +31,9 @@ pub const Mode = enum {
     /// Opens the transaction before its first statement and ends it with
     /// `commit`, or with `abandon` when it finds no work or fails.
     write,
+    /// A write Access whose pass holds more statements: a model output's
+    /// settlement, whose rows for one answer outnumber a write's queue.
+    settlement,
     /// One domain write: SQLite autocommit under the Entry lock, or an
     /// ownership-fenced transaction on a batching engine. It takes no
     /// identities or positions; `commit` runs exactly one queued write.
@@ -184,9 +188,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         const Self = @This();
         pub const Error = Guards || Failure;
         const reads_only = mode == .read or mode == .survey;
+        /// A transaction of any number of writes.
+        const transacts = mode == .write or mode == .settlement;
         /// The statements one engine pass steps at most. Accesses sit on
-        /// the deepest stack chains, so only a survey's queue is wide.
-        const max_queued = if (mode == .survey) 16 else 8;
+        /// the deepest stack chains, so only a survey's and a settlement's
+        /// queue is wide.
+        const max_queued = if (mode == .survey or mode == .settlement) 16 else 8;
 
         store: *Store,
         /// `opened` once `ensureOpen` tried to begin, whether or not the
@@ -271,6 +278,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// An Access under `entry`'s lock.
         pub fn open(entry: *const store_core.Entry) Self {
             return .{ .store = entry.store };
+        }
+
+        /// `open` in place, for an Access over 1 KiB: a returned one is
+        /// built in its caller's frame and then copied.
+        pub fn init(a: *Self, entry: *const store_core.Entry) void {
+            a.* = .{ .store = entry.store };
         }
 
         /// Queues a read; `destination` is defined once the round runs.
@@ -571,7 +584,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// COMMIT. A SQLite `.single` uses its one write's autocommit;
         /// a batching engine keeps its ownership fence in the transaction.
         pub fn commit(a: *Self) Error!void {
-            comptime std.debug.assert(mode == .write or mode == .single);
+            comptime std.debug.assert(transacts or mode == .single);
             if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
             if (mode == .single and a.failure == null and a.queued != 1)
                 @panic("a single Access commits exactly one write");
@@ -596,7 +609,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// committed or abandoned, it does nothing, so a replay that
         /// abandoned and then failed is not rolled back twice.
         pub fn abandon(a: *Self, faults: store_core.Faults) Error!void {
-            comptime std.debug.assert(mode == .write or mode == .single);
+            comptime std.debug.assert(transacts or mode == .single);
             if (a.phase == .ended) return;
             const opened = a.phase == .opened;
             const discarded = a.resetQueued();
@@ -611,7 +624,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// no exit leaves the transaction open; a failed rollback takes the
         /// error's place, and the Entry fences on it.
         pub fn end(a: *Self, faults: store_core.Faults, result: anytype) @TypeOf(result) {
-            comptime std.debug.assert(mode == .write or mode == .single);
+            comptime std.debug.assert(transacts or mode == .single);
             _ = result catch |err| {
                 a.abandon(faults) catch |failed| return failed;
                 return err;
@@ -645,7 +658,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
             const commits = a.bindCommit();
-            if (commits and mode == .write) store_core.commitWithSurvey(a.store, a) else a.pass();
+            if (commits and transacts) store_core.commitWithSurvey(a.store, a) else a.pass();
             a.claimed = 0;
             if (commits) {
                 if (a.store.engine.settleCommit()) |_| {
@@ -661,13 +674,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// A single domain write still needs the network ownership fence
         /// and every transaction exit, including abandon and failed rollback.
         fn transactional(a: *const Self) bool {
-            return mode == .write or (mode == .single and a.store.engine.batches());
+            return transacts or (mode == .single and a.store.engine.batches());
         }
 
         /// The pass that sends this Access's last writes and COMMIT, with
         /// `tail`'s reads after them.
         pub fn passCommit(a: *Self, tail: ?Tail) void {
-            comptime std.debug.assert(mode == .write);
+            comptime std.debug.assert(transacts);
             a.passWith(tail);
         }
 

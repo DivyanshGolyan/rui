@@ -7,13 +7,59 @@ const Error = error{ InvalidCatalog, OutOfMemory };
 /// Scratch owns the returned entries and their IDs; release it after use.
 /// Only unique, valid IDs are copied out of the body. No JSON value tree.
 pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry {
+    return parseRecords(false, scratch, body);
+}
+
+/// Generator-only metadata. Runtime catalog reads keep just `catalog.Entry`.
+/// Strings, including the ID, are owned by the supplied scratch allocator.
+pub const Generated = struct {
+    model: catalog.Entry,
+    kind: ?[]const u8 = null,
+    family: ?[]const u8 = null,
+    input_text: bool = false,
+    output_text: bool = false,
+
+    pub fn canChat(self: Generated) bool {
+        return std.mem.eql(u8, self.kind orelse "chat", "chat") and self.input_text and self.output_text;
+    }
+
+    pub fn deinit(self: Generated, scratch: std.mem.Allocator) void {
+        scratch.free(self.model.id);
+        releaseMetadata(true, scratch, self);
+    }
+};
+
+/// Use the same ID validation, precedence and ordering for generation, while
+/// retaining the type, family and text-modality facts omitted at runtime.
+pub fn parseForGeneration(scratch: std.mem.Allocator, body: []const u8) Error![]Generated {
+    return parseRecords(true, scratch, body);
+}
+
+fn Record(comptime generation: bool) type {
+    return if (generation) Generated else catalog.Entry;
+}
+
+fn entryOf(comptime generation: bool, record: anytype) *catalog.Entry {
+    return if (generation) &record.model else record;
+}
+
+fn releaseMetadata(comptime generation: bool, scratch: std.mem.Allocator, record: anytype) void {
+    if (generation) {
+        if (record.kind) |kind| scratch.free(kind);
+        if (record.family) |family| scratch.free(family);
+    }
+}
+
+fn parseRecords(comptime generation: bool, scratch: std.mem.Allocator, body: []const u8) Error![]Record(generation) {
     var parser: Parser = .{ .scanner = .initCompleteInput(scratch, body), .scratch = scratch };
     defer parser.scanner.deinit();
-    var models: std.StringHashMap(catalog.Entry) = .init(scratch);
+    var models: std.StringHashMap(Record(generation)) = .init(scratch);
     defer models.deinit();
     errdefer {
         var keys = models.keyIterator();
         while (keys.next()) |key| scratch.free(key.*);
+        var values = models.valueIterator();
+        while (values.next()) |value| releaseMetadata(generation, scratch, value.*);
     }
     try parser.expect(.object_begin);
     var openai_seen = false;
@@ -38,39 +84,44 @@ pub fn parse(scratch: std.mem.Allocator, body: []const u8) Error![]catalog.Entry
                 }
                 const previous = models.getPtr(id);
                 if (previous) |kept| {
-                    if (!openai or kept.openai_listed) {
+                    if (!openai or entryOf(generation, kept).openai_listed) {
                         try parser.skip();
                         continue;
                     }
                 }
-                var entry = try parser.model();
+                var record = try parser.model(generation);
+                errdefer releaseMetadata(generation, scratch, record);
+                const entry = entryOf(generation, &record);
                 if (previous) |kept| {
-                    entry.id = kept.id;
+                    entry.id = entryOf(generation, kept).id;
                     entry.openai_listed = true;
-                    kept.* = entry;
+                    releaseMetadata(generation, scratch, kept.*);
+                    kept.* = record;
                 } else {
                     const owned = try scratch.dupe(u8, id);
                     errdefer scratch.free(owned);
                     entry.id = owned;
                     entry.openai_listed = openai;
-                    try models.put(owned, entry);
+                    try models.put(owned, record);
                 }
             }
         }
     }
     try parser.expect(.end_of_document);
     if (!openai_seen) return error.InvalidCatalog;
-    const entries = try scratch.alloc(catalog.Entry, models.count());
+    const entries = try scratch.alloc(Record(generation), models.count());
     var values = models.valueIterator();
     for (entries) |*entry| entry.* = values.next().?.*;
     // IDs are unique: stability adds nothing. Block sort keeps a 16 KiB
     // temporary on the execution stack; pdqsort uses bounded small frames.
-    std.mem.sortUnstable(catalog.Entry, entries, {}, lessThan);
+    std.mem.sortUnstable(Record(generation), entries, {}, struct {
+        fn lessThan(_: void, a: Record(generation), b: Record(generation)) bool {
+            const left = if (generation) a.model.id else a.id;
+            const right = if (generation) b.model.id else b.id;
+            return std.mem.order(u8, left, right) == .lt;
+        }
+    }.lessThan);
     return entries;
-}
-
-fn lessThan(_: void, a: catalog.Entry, b: catalog.Entry) bool {
-    return std.mem.order(u8, a.id, b.id) == .lt;
 }
 
 fn text(token: std.json.Token) []const u8 {
@@ -122,18 +173,72 @@ const Parser = struct {
         }
     }
 
-    fn model(self: *Parser) Error!catalog.Entry {
+    fn model(self: *Parser, comptime generation: bool) Error!Record(generation) {
         try self.expect(.object_begin);
-        var entry: catalog.Entry = .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false };
+        const empty: catalog.Entry = .{ .id = "", .context_window = null, .efforts = .{}, .openai_listed = false };
+        var record: Record(generation) = if (generation) .{ .model = empty } else empty;
+        errdefer releaseMetadata(generation, self.scratch, record);
+        const entry = entryOf(generation, &record);
         while (try self.key()) |member| {
             defer self.release(member);
             if (std.mem.eql(u8, text(member), "limit")) {
                 entry.context_window = try self.limit();
             } else if (std.mem.eql(u8, text(member), "reasoning_options")) {
                 entry.efforts = try self.reasoningOptions();
+            } else if (generation) {
+                if (std.mem.eql(u8, text(member), "type")) {
+                    const kind = try self.ownedString();
+                    if (record.kind) |old| self.scratch.free(old);
+                    record.kind = kind;
+                } else if (std.mem.eql(u8, text(member), "family")) {
+                    const family = try self.ownedString();
+                    if (record.family) |old| self.scratch.free(old);
+                    record.family = family;
+                } else if (std.mem.eql(u8, text(member), "modalities")) {
+                    const modalities = try self.textModalities();
+                    record.input_text = modalities.input;
+                    record.output_text = modalities.output;
+                } else try self.skip();
             } else try self.skip();
         }
-        return entry;
+        return record;
+    }
+
+    fn ownedString(self: *Parser) Error![]const u8 {
+        const token = try self.next();
+        defer self.release(token);
+        if (token != .string and token != .allocated_string) return error.InvalidCatalog;
+        return self.scratch.dupe(u8, text(token));
+    }
+
+    const TextModalities = struct { input: bool = false, output: bool = false };
+
+    fn textModalities(self: *Parser) Error!TextModalities {
+        try self.expect(.object_begin);
+        var modalities: TextModalities = .{};
+        while (try self.key()) |member| {
+            defer self.release(member);
+            if (std.mem.eql(u8, text(member), "input")) {
+                modalities.input = try self.hasText();
+            } else if (std.mem.eql(u8, text(member), "output")) {
+                modalities.output = try self.hasText();
+            } else try self.skip();
+        }
+        return modalities;
+    }
+
+    fn hasText(self: *Parser) Error!bool {
+        try self.expect(.array_begin);
+        var found = false;
+        while (true) {
+            const token = try self.next();
+            defer self.release(token);
+            switch (token) {
+                .array_end => return found,
+                .string, .allocated_string => found = found or std.mem.eql(u8, text(token), "text"),
+                else => return error.InvalidCatalog,
+            }
+        }
     }
 
     fn limit(self: *Parser) Error!?u32 {
@@ -312,4 +417,87 @@ test "models dev owns escaped ids and releases temporary tokens and failed parse
     try std.testing.expectError(error.InvalidCatalog, parse(allocator,
         \\{"other":{"models":{"a\/b":{}}}}
     ));
+}
+
+test "models dev generation keeps chat metadata under the same provider precedence" {
+    const body =
+        \\{"earlier":{"models":{
+        \\  "overridden":{"type":"image","family":"old","modalities":{"input":["text"],"output":["image"]}},
+        \\  "first":{"type":"embedding","family":"embed","modalities":{"input":["text"],"output":["text"]}}
+        \\}},"openai":{"models":{
+        \\  "overridden":{"type":"chat","family":"gpt","limit":{"context":42},"modalities":{"input":["text","image"],"output":["text"]}},
+        \\  "escaped":{"type":"ima\u0067e","type":"cha\u0074","family":"old","family":"a\/b",
+        \\    "modalities":{"input":["image"],"output":["text"]},"modalities":{"input":["text"],"output":["text"]}}
+        \\}},"later":{"models":{
+        \\  "first":{"type":"chat","modalities":{"input":["text"],"output":["text"]}},
+        \\  "overridden":{"type":"video","modalities":{"input":["text"],"output":["video"]}}
+        \\}}}
+    ;
+    const scratch = std.testing.allocator;
+    const records = try parseForGeneration(scratch, body);
+    defer scratch.free(records);
+    defer for (records) |record| record.deinit(scratch);
+    try std.testing.expectEqual(@as(usize, 3), records.len);
+    try std.testing.expectEqualStrings("escaped", records[0].model.id);
+    try std.testing.expectEqualStrings("chat", records[0].kind.?);
+    try std.testing.expectEqualStrings("a/b", records[0].family.?);
+    try std.testing.expect(records[0].canChat());
+    try std.testing.expectEqualStrings("first", records[1].model.id);
+    try std.testing.expectEqualStrings("embedding", records[1].kind.?);
+    try std.testing.expect(!records[1].model.openai_listed and !records[1].canChat());
+    try std.testing.expectEqualStrings("overridden", records[2].model.id);
+    try std.testing.expectEqualStrings("gpt", records[2].family.?);
+    try std.testing.expect(records[2].model.openai_listed and records[2].canChat());
+    const runtime = try parse(scratch, body);
+    defer scratch.free(runtime);
+    defer for (runtime) |entry| scratch.free(entry.id);
+    for (runtime, records) |entry, record| {
+        try std.testing.expectEqualStrings(entry.id, record.model.id);
+        try std.testing.expectEqual(entry.context_window, record.model.context_window);
+        try std.testing.expectEqual(entry.efforts, record.model.efforts);
+        try std.testing.expectEqual(entry.openai_listed, record.model.openai_listed);
+    }
+}
+
+test "models dev generation classifies every text modality combination and releases failed metadata" {
+    const scratch = std.testing.allocator;
+    for ([_]?[]const u8{ null, "chat", "image", "embedding", "realtime", "speech", "transcription", "video", "reranking", "" }, 0..) |kind, at| {
+        // Only the absent/chat kind admits the fourth text-modality state.
+        const expected = if (at < 2) [4]bool{ false, false, false, true } else [4]bool{ false, false, false, false };
+        for (0..4) |modalities| {
+            var body: std.Io.Writer.Allocating = .init(scratch);
+            defer body.deinit();
+            try body.writer.writeAll("{\"openai\":{\"models\":{\"m\":{");
+            if (kind) |value| try body.writer.print("\"type\":\"{s}\",", .{value});
+            try body.writer.print("\"modalities\":{{\"input\":[\"{s}\"],\"output\":[\"{s}\"]}}}}}}}}}}", .{
+                if (modalities & 1 != 0) "text" else "audio",
+                if (modalities & 2 != 0) "text" else "image",
+            });
+            const records = try parseForGeneration(scratch, body.written());
+            defer scratch.free(records);
+            defer for (records) |record| record.deinit(scratch);
+            try std.testing.expectEqual(expected[modalities], records[0].canChat());
+        }
+    }
+    const missing = try parseForGeneration(scratch, "{\"openai\":{\"models\":{\"m\":{}}}}");
+    defer scratch.free(missing);
+    defer for (missing) |record| record.deinit(scratch);
+    try std.testing.expect(!missing[0].canChat());
+    for ([_][]const u8{
+        \\{"earlier":{"models":{"m":{"type":"image","family":"old"}}},"openai":{"models":{"m":{"type":"chat","family":"new"},"bad":{"type":"image","family":null}}}}
+        ,
+        \\{"openai":{"models":{"m":{"type":"image","family":"f","modalities":{"input":["text"],"output":[{}]}}}}}
+        ,
+        \\{"openai":{"models":{"m":{"type":"image","family":"f","modalities":[]}}}}
+        ,
+        \\{"openai":{"models":{"m":{"type":"image","family":"f"}}}}
+        \\trailing
+        ,
+        \\{"other":{"models":{"m":{"type":"image","family":"f"}}}}
+    }) |body| try std.testing.expectError(error.InvalidCatalog, parseForGeneration(scratch, body));
+    // Generation's extra validation does not tighten runtime catalog reads.
+    const runtime = try parse(scratch, "{\"openai\":{\"models\":{\"m\":{\"type\":[],\"family\":null,\"modalities\":42}}}}");
+    defer scratch.free(runtime);
+    defer for (runtime) |entry| scratch.free(entry.id);
+    try std.testing.expectEqual(@as(usize, 1), runtime.len);
 }

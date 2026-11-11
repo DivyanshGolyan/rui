@@ -401,6 +401,7 @@ app_input: InputArea = undefined,
 /// What can fill the list's place, each its own widget: the screen shows
 /// the one the core names. Only the Sessions hear a press.
 app_sessions: GroupedList = .{},
+session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_panel: GroupedList = .{},
 app_picker: GroupedList = .{},
 /// The counts line and its bands, which take the view-name click.
@@ -662,7 +663,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
+    const child = frontend.attach(.{ .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -921,7 +922,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 const words = view.pickerWords(self.composerDraft().bytes);
                 const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
                 const rows = try ctx.arena.create(PickerRows);
-                rows.* = .{ .models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read) };
+                rows.* = .{ .models = try model_picker_view.rowsIn(ctx.arena, &self.state.menu, words, defaults, choice, size.width, view.layout(&self.state).list.len(), self.caps.width, self.caps.unicode, self.state.menu_read) };
                 self.app_picker.selected = rows.models.selected;
                 self.app_picker.rows = .{ .userdata = rows, .count = @intCast(rows.models.count), .rowFn = PickerRows.row };
                 break :picker &self.app_picker;
@@ -1084,6 +1085,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
 }
 
 fn destroy(self: *Self) void {
+    self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
     self.upgrade_job.deinit();
     if (self.upgrade_report) |*report| report.deinit();
@@ -2387,22 +2389,31 @@ test "/model filters choices as the composer is edited" {
     }
 }
 
-test "/model shows loading and Host read failure in the list" {
+test "/model keeps unread and unanswered lists empty without shell instructions" {
+    const Check = struct {
+        fn screen(rig: *Rig, read: model_picker_view.Read) !void {
+            const state = &rig.overview.state;
+            try std.testing.expectEqual(read, state.menu_read);
+            var shown = try rig.shown(80, 24);
+            defer shown.deinit();
+            const rows = try model_picker_view.rows(shown.arena.allocator(), &state.menu, "", view.pickerDefaults(state), state.picker.?.choice, 80, .unicode, true, read);
+            try std.testing.expectEqual(@as(usize, 0), rows.count);
+            try std.testing.expect(rows.selected == null);
+            const text = try shown.text();
+            try std.testing.expect(std.mem.indexOf(u8, text, "/model") != null);
+            for ([_][]const u8{ "Loading models", "Models unavailable", "Known to Rui", "From your API key" }) |prose|
+                try std.testing.expect(std.mem.indexOf(u8, text, prose) == null);
+            for (std.enums.values(model_picker.Provider)) |provider|
+                try std.testing.expect(std.mem.indexOf(u8, text, provider.login()) == null);
+        }
+    };
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
     try std.testing.expect(try rig.press("/model ") == null);
-    {
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        try std.testing.expectEqual(true, std.mem.indexOf(u8, try shown.text(), "Loading models") != null);
-    }
+    try Check.screen(rig, .unread);
     _ = try view.step(&rig.overview.state, .{ .models = .unanswered });
-    {
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        try std.testing.expectEqual(true, std.mem.indexOf(u8, try shown.text(), "Models unavailable: the Host did not answer") != null);
-    }
+    try Check.screen(rig, .unanswered);
 }
 
 test "/model opens while typing its filter without submitting" {

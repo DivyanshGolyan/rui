@@ -368,7 +368,7 @@ fn unreadable(out: *std.Io.Writer, err: anyerror) !?[]const u8 {
     return null;
 }
 
-/// Names `tools` in catalog order, with spaces for underscores, or "none".
+/// Names `tools` in built-in declaration order, with spaces for underscores, or "none".
 fn writeTools(out: *std.Io.Writer, tools: built_in_tool.Selection) !void {
     if (tools.count() == 0) return out.writeAll("none");
     var named = false;
