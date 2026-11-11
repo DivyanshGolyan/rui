@@ -397,7 +397,7 @@ fn writeTokens(out: *std.Io.Writer, tokens: u64) !void {
 }
 
 /// `value` with a comma between each group of three digits.
-fn writeGrouped(out: *std.Io.Writer, value: u64) !void {
+pub fn writeGrouped(out: *std.Io.Writer, value: u64) !void {
     var digits: [20]u8 = undefined;
     const text = std.fmt.bufPrint(&digits, "{d}", .{value}) catch unreachable;
     for (text, 0..) |digit, index| {

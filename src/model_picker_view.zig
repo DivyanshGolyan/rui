@@ -163,6 +163,20 @@ fn lines(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u8, 
     return .{ .rows = result, .selected = plan.selected };
 }
 
+/// A field choice uses the picker's model row without its overview status
+/// sentences or effort/sign-in controls. Width is the full field-choice width.
+pub fn modelLine(arena: std.mem.Allocator, entry: picker.Entry, row: picker.Row, id_width: usize, width: usize) !Line {
+    const buffer = try arena.alloc(u8, @max(entry.id.len, id_width) + 256);
+    var columns: Columns = .{};
+    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, true).text) > width) columns.context = false;
+    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, true).text) > width) columns.all_sign_ins = false;
+    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, true).text) > width) columns.other_effort = false;
+    const reserved = cells(format(buffer, entry, row, false, 0, columns, .unicode, true).text);
+    const formatted = format(buffer, entry, row, false, @min(id_width, width -| reserved), columns, .unicode, true);
+    const text = try arena.dupe(u8, formatted.text);
+    return .{ .text = text, .segments = try segments(arena, text, formatted) };
+}
+
 fn needed(buffer: []u8, menu: *const picker.Menu, query: picker.Query, defaults: picker.Defaults, choice: ?Choice, id_width: usize, columns: Columns, method: gwidth.Method, unicode: bool) usize {
     var max: usize = 0;
     for (menu.entries, 0..) |entry, index| {

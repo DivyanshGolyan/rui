@@ -1076,11 +1076,15 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn run(raw: *anyopaque) ?upgrade_status.Run {
             return owner(raw).state.upgrade.run;
         }
+        fn models(raw: *anyopaque) ?*const model_picker.Menu {
+            const state = &owner(raw).state;
+            return if (state.menu.entries.len == 0 and state.menu_read != .read) null else &state.menu;
+        }
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = Callbacks.models };
 }
 
 fn destroy(self: *Self) void {
@@ -1105,6 +1109,9 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
+    // The field borrows this menu. Invalidate it before the core replaces and
+    // frees entries, so a saved frame cannot pick a different model by index.
+    if (value == .models and self.root.settings_page.model_choice.active) self.root.settings_page.cancelChoice();
     const effects = try view.step(&self.state, value);
     var next: ?Next = null;
     var refused: ?keymap.Refusal = null;
@@ -5727,4 +5734,22 @@ test "App settings typed queued saves settle on departure and retain failures" {
         }
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
     }
+}
+
+test "App settings backend lends the picker menu and invalidates choices before replacement" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    const backend = overview.root.settings_page.backend.?;
+    try std.testing.expect(backend.models.?(backend.context) == null);
+    try std.testing.expect(try rig.press("/model ") == null);
+    try std.testing.expect(try rig.settle() == null);
+    const menu = backend.models.?(backend.context).?;
+    try std.testing.expect(menu == &overview.state.menu);
+    overview.root.settings_page.model_choice.open(menu, .codex, "gpt-5.5");
+    try std.testing.expect(overview.root.settings_page.hasChoice());
+    try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } }}) } }) == null);
+    try std.testing.expect(!overview.root.settings_page.hasChoice());
+    try std.testing.expectEqualStrings("gpt-6.1-sol", backend.models.?(backend.context).?.entries[0].id);
 }

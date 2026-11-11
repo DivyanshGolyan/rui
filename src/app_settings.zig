@@ -4,6 +4,8 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
+const ModelChoice = @import("model_choice.zig");
+const picker = @import("model_picker.zig");
 const Footer = @import("widgets/Footer.zig");
 const preferences = @import("preferences.zig");
 const catalog = @import("model_catalog.zig");
@@ -27,6 +29,7 @@ pub const Backend = struct {
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
     caps: *const fn (*anyopaque) view.Caps,
+    models: ?*const fn (*anyopaque) ?*const picker.Menu = null,
 };
 
 backend: ?Backend = null,
@@ -34,6 +37,7 @@ narrow: bool = false,
 values: preferences.Values = .{},
 read_failed: bool = false,
 panel: Panel = .{ .title = "Rui" },
+model_choice: ModelChoice = .{},
 fields: [5]Panel.Field = undefined,
 /// The row awaiting the backend's answer. Displayed values always come from
 /// the saved file, including uncertain saves.
@@ -50,11 +54,13 @@ pub fn widget(self: *Self) vxfw.Widget {
 }
 
 pub fn hasChoice(self: *const Self) bool {
-    return self.panel.choice != null;
+    return self.panel.choice != null or self.model_choice.active;
 }
 
 pub fn cancelChoice(self: *Self) void {
     self.panel.closeChoice();
+    self.model_choice.cancel();
+    self.panel.custom_choice = null;
 }
 
 pub fn refresh(self: *Self) !void {
@@ -88,6 +94,9 @@ fn bind(self: *Self) void {
     self.panel.userdata = self;
     self.panel.on_activate = activate;
     self.panel.on_pick = pick;
+    self.model_choice.userdata = self;
+    self.model_choice.on_pick = pickModel;
+    self.panel.custom_choice = if (self.model_choice.active) .{ .field = 0, .widget = self.model_choice.widget() } else null;
     self.fields = .{
         .{ .label = "Model", .value = if (self.read_failed) "unavailable" else self.model(), .tail = self.failures[0] },
         .{ .label = "Effort", .value = if (self.read_failed) "unavailable" else if (self.values.reasoning_effort) |effort| @tagName(effort) else "model default", .tail = self.failures[1] },
@@ -103,6 +112,9 @@ fn bind(self: *Self) void {
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
+    self.model_choice.ground = self.panel.ground;
+    self.model_choice.selection = self.panel.selection;
+    self.model_choice.quiet = self.panel.quiet;
 }
 
 fn versionTail(self: *Self) ?[]const u8 {
@@ -133,14 +145,9 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
                 self.failures[0] = " · sign-in unavailable";
                 return;
             }
-            // Both supported sign-ins use the catalog's OpenAI chat models.
-            // Account-specific Host discovery remains the overview picker's job.
-            var current: ?usize = null;
-            for (catalog.openai_ids, 0..) |id, at| if (std.mem.eql(u8, id, self.model())) {
-                current = at;
-                break;
-            };
-            self.panel.openChoice(&catalog.openai_ids, current);
+            const menu = if (backend.models) |read_models| read_models(backend.context) else null;
+            self.model_choice.open(menu, self.provider().?, self.model());
+            if (!self.model_choice.active) self.failures[0] = " · models unavailable";
         },
         1 => {
             self.effort_choices[0] = "model default";
@@ -163,13 +170,14 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     ctx.redraw = true;
 }
 
+fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, model_id: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.save(ctx, 0, .{ .provider = .{ .set = @tagName(self.provider().?) }, .model = .{ .set = model_id } });
+}
+
 fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     const edit: preferences.Edit = switch (field) {
-        0 => .{
-            .provider = .{ .set = @tagName(self.provider().?) },
-            .model = .{ .set = catalog.openai_ids[choice] },
-        },
         1 => .{
             .reasoning_effort = if (choice == 0) .clear else .{
                 .set = std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_choices[choice]).?,
@@ -288,8 +296,8 @@ test "App settings choices submit typed edits and show saved values after the ba
     try page.refresh();
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
-    const next = (page.panel.choice.?.selected + 1) % catalog.openai_ids.len;
-    page.panel.choice.?.selected = next;
+    const next = (page.model_choice.selected.? + 1) % catalog.openai_ids.len;
+    page.model_choice.selected = next;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
     const model_edit = fixture.last_edit.?;
