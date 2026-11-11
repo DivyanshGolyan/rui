@@ -58,6 +58,9 @@ pub const State = struct {
     /// a server error, which stops the message before it. `settleCommit`
     /// ends whatever is left.
     inline_commit: enum { none, buffered, sent } = .none,
+    /// Whether the open batch holds a write that needs a guard and has
+    /// none (`guard`): COMMIT then takes a message of its own.
+    unguarded: bool = false,
     sink: content.SinkState = .{},
     doublewrite: Bounded(32) = .{},
     store_id: [32]u8 = undefined,
@@ -278,11 +281,16 @@ const guard_text = "DO (SELECT 1 FROM (SELECT 1 AS x UNION ALL SELECT 2) g WHERE
 /// in the same message (`appendCommit`) never saves a write whose count
 /// was wrong. True when the guard was bound, and its OK follows the
 /// write's; false for a write sent alone as a long query, or one the
-/// batch had no room to guard, whose count only its step checks.
+/// batch had no room to guard, whose count only its step checks: no
+/// COMMIT joins either (`appendCommit`).
 pub fn guard(self: *Mysql, comptime at_most: bool, rows: u64) bool {
     const s = self.state;
-    if (s.long_query or s.begin == .none or guard_bytes > s.connection.batchRoom()) return false;
-    s.connection.batch().print(guard_text ++ "ROW_COUNT()" ++ (if (at_most) ">" else "<>") ++ "{d});", .{rows}) catch return false;
+    if (s.long_query or s.begin == .none) return false;
+    if (guard_bytes > s.connection.batchRoom()) {
+        s.unguarded = true;
+        return false;
+    }
+    s.connection.batch().print(guard_text ++ "ROW_COUNT()" ++ (if (at_most) ">" else "<>") ++ "{d});", .{rows}) catch unreachable;
     return true;
 }
 
@@ -413,6 +421,7 @@ fn committed(self: *Mysql) void {
 
 pub fn finishPass(self: *Mysql) Failure!void {
     defer {
+        self.state.unguarded = false;
         self.state.long_query = false;
         self.state.prefix_results = 0;
         self.state.fence_result = 0;
@@ -439,6 +448,7 @@ pub fn discardBatch(self: *Mysql) Failure!void {
     if (self.state.replacement == .buffered) self.state.replacement = .pending;
     if (self.state.begin == .buffered) self.state.begin = .pending;
     self.state.connection.writer.end = 0;
+    self.state.unguarded = false;
     self.state.long_query = false;
     self.state.prefix_results = 0;
     self.state.fence_result = 0;
@@ -602,7 +612,7 @@ pub fn queueCommit(self: *Mysql) Failure!void {
 pub fn appendCommit(self: *Mysql) bool {
     const s = self.state;
     std.debug.assert(s.inline_commit == .none);
-    if (s.failure != null or s.long_query or s.commit_result != 0) return false;
+    if (s.failure != null or s.long_query or s.unguarded or s.commit_result != 0) return false;
     if (s.begin == .none or s.begin == .pending or 8 > s.connection.batchRoom()) return false;
     s.connection.batch().writeAll("COMMIT;") catch return false;
     s.commit_end = s.connection.writer.end;
@@ -728,6 +738,7 @@ pub fn recover(self: *Mysql) bool {
     s.committing = false;
     s.commit_result = 0;
     s.inline_commit = .none;
+    s.unguarded = false;
     s.rerunnable = false;
     s.failure = null;
     return true;

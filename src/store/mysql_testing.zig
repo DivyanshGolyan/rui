@@ -990,6 +990,48 @@ test "store.mysql live a lone write sends its transaction, its writes and its CO
     try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000402", .{}));
 }
 
+/// `insertTouching`, with the insert sent before the touch is bound, and
+/// the touch bound into a batch with `room` bytes.
+fn insertThenTouch(storage: *Store, id: u64, other: u64, room: usize) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
+    var count: live_count.Result = undefined;
+    access.read(live_count, .{ .id = id }, &count);
+    try entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.run()));
+    const wire_connection = &storage.engine.mysql.state.connection;
+    const limit = wire_connection.batch_limit;
+    defer wire_connection.batch_limit = limit;
+    wire_connection.batch_limit = limit - (wire_connection.batchRoom() - room);
+    access.write(live_touch, .{ .id = other });
+    return entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.commit()));
+}
+
+test "store.mysql live a write the batch cannot guard never shares its message with COMMIT" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    // The touch is 59 bytes: from a batch too small for it, which sends it
+    // alone, through one with room for it and no guard, to one that holds
+    // both.
+    var room: usize = 40;
+    var id: u64 = 9000700;
+    while (room <= 280) : (room += 24) {
+        // A wrong count saves nothing, wherever COMMIT would have gone.
+        try std.testing.expectError(error.LiveGuard, storage.queue().write(insertThenTouch, .{ &storage, id, 9000799, room }));
+        try std.testing.expect(!storage.isFenced());
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+        // A right one saves.
+        try storage.queue().write(insertThenTouch, .{ &storage, id, id, room });
+        try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=?1", .{id}));
+        id += 1;
+    }
+}
+
 test "store.mysql live a lone write saved with every answer lost still counts as a change" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
