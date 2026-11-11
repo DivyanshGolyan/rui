@@ -73,6 +73,9 @@ pub const Error = error{
 pub const OpenError = Error || mysql.OptionsError || tls.ContextError || error{
     /// The server refused the login; its error went to `refusal`.
     LoginRefused,
+    /// The server refused the connection before login, or failed the handshake
+    /// for a reason other than credentials or access rules.
+    ServerRefused,
     /// No address of the host took the connection.
     ConnectFailed,
     HostNotFound,
@@ -86,6 +89,8 @@ pub const Connection = struct {
     deadline_ms: u32,
     client: mysql.Client,
     lost: bool,
+    /// A handshake response went out: server errors can now concern login.
+    login_sent: bool,
     /// The cause of the last `error.WriteFailed` from `writer`.
     write_error: ?Error,
     /// COM_QUERY packets sent, for tests that count round trips.
@@ -118,9 +123,9 @@ pub const Connection = struct {
     cipher_len: usize,
     cipher_out: [tls.max_record_bytes]u8,
 
-    /// Connects and logs in. When the server refuses the login, writes its
-    /// error (`mysql.Event.format`) to `refusal` and returns
-    /// `error.LoginRefused`. On any error the connection is closed.
+    /// Connects and logs in. A server error goes to `refusal`
+    /// (`mysql.Event.format`); credential/access refusals return LoginRefused,
+    /// other server errors ServerRefused. On any error the connection is closed.
     pub fn open(self: *Connection, options: Options, refusal: *std.Io.Writer) OpenError!void {
         defer if (options.password_to_wipe) |bytes| std.crypto.secureZero(u8, bytes);
         self.context = null;
@@ -143,6 +148,7 @@ pub const Connection = struct {
         self.fd = -1;
         self.deadline_ms = options.deadline_ms;
         self.lost = false;
+        self.login_sent = false;
         self.write_error = null;
         self.queries = 0;
         self.in_start = 0;
@@ -178,10 +184,10 @@ pub const Connection = struct {
         }
         const event = try self.next();
         if (event == .ready) return;
-        // The refusal is a diagnostic: LoginRefused is the outcome whether
-        // or not it could be written.
+        // Keep the server code until classification; writing a diagnostic
+        // must not change the outcome. `next` only returns ready/err at login.
         refusal.print("{f}", .{event}) catch {};
-        return error.LoginRefused;
+        return loginError(event.err.code, self.login_sent);
     }
 
     /// Sends COM_QUIT when the client is ready, then closes. Nothing is
@@ -210,7 +216,10 @@ pub const Connection = struct {
             const step = try self.client.read(self.inbox[self.in_start..self.in_end], &self.handshake);
             self.in_start += step.consumed;
             if (step.event) |event| switch (event) {
-                .send => |n| try self.transmit(self.handshake[0..n]),
+                .send => |n| {
+                    try self.transmit(self.handshake[0..n]);
+                    self.login_sent = true;
+                },
                 .start_tls => |n| try self.startTls(n),
                 // A setting the server refuses leaves the message's
                 // statements on a session unlike the one they were written for.
@@ -540,6 +549,20 @@ pub const Connection = struct {
     }
 };
 
+/// Classify once, where the connection still has both the server code and
+/// whether it sent credentials. Even an access error instead of a greeting
+/// cannot mean credentials were checked. During auth, 1130 is LoginRefused:
+/// "host is not allowed to connect" is an access rule, unlike 1129's blocked
+/// host (or 1040's capacity limit), which credentials cannot fix.
+fn loginError(code: u16, login_sent: bool) error{ LoginRefused, ServerRefused } {
+    if (!login_sent) return error.ServerRefused;
+    return switch (code) {
+        1044, 1045, 1130, 1698 => error.LoginRefused, // Database/user/host access.
+        1251, 1524 => error.LoginRefused, // Unsupported/unloaded auth plugin.
+        else => error.ServerRefused,
+    };
+}
+
 // Tests replay the client's captured exchanges (`mysql.Capture`) through a
 // peer thread on a real socket. The peer checks every byte the connection
 // sends against the capture and records what went wrong before it closes,
@@ -787,6 +810,72 @@ test "a refused login reports the server's error and closes" {
     try peer.join();
     try std.testing.expectError(error.LoginRefused, opened);
     try std.testing.expectEqualStrings("err 1045 28000 Access denied for user 'rui'@'localhost' (using password: YES)", refusal.written());
+    try std.testing.expectEqual(-1, connection.fd);
+}
+
+test "handshake server errors distinguish connection refusals from login refusals" {
+    const Case = struct { code: u16, login_sent: bool, expected: OpenError };
+    const cases = [_]Case{
+        .{ .code = 1040, .login_sent = false, .expected = error.ServerRefused },
+        .{ .code = 1045, .login_sent = false, .expected = error.ServerRefused },
+        .{ .code = 1130, .login_sent = false, .expected = error.ServerRefused },
+        .{ .code = 1045, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1044, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1698, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1251, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1524, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1130, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1040, .login_sent = true, .expected = error.ServerRefused },
+        .{ .code = 1129, .login_sent = true, .expected = error.ServerRefused },
+        .{ .code = 1105, .login_sent = true, .expected = error.ServerRefused },
+    };
+    for (cases) |case| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path_buffer: [128]u8 = undefined;
+        const path = try tmpSocket(&tmp, &path_buffer);
+        var packet = [_]u8{ 0, 0, 0, 0, 0xff, 0, 0 } ++ "#HY000server refusal".*;
+        std.mem.writeInt(u24, packet[0..3], packet.len - 4, .little);
+        packet[3] = if (case.login_sent) 2 else 0;
+        std.mem.writeInt(u16, packet[5..7], case.code, .little);
+        const steps = [_]Peer.Step{ cached_login[0], cached_login[1], .{ .send = &packet } };
+        var peer: Peer = try .unix(path, if (case.login_sent) &steps else steps[2..]);
+        try peer.start();
+        const connection = try std.testing.allocator.create(Connection);
+        defer std.testing.allocator.destroy(connection);
+        var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer refusal.deinit();
+        const opened = connection.open(.{
+            .address = .{ .unix_socket = path },
+            .user = "rui",
+            .password = mysql.cached_tcp.password,
+            .database = "rui",
+            .deadline_ms = 10_000,
+        }, &refusal.writer);
+        try peer.join();
+        try std.testing.expectError(case.expected, opened);
+        var expected_buffer: [128]u8 = undefined;
+        const expected = try std.fmt.bufPrint(&expected_buffer, "err {d} HY000 server refusal", .{case.code});
+        try std.testing.expectEqualStrings(expected, refusal.written());
+        try std.testing.expectEqual(-1, connection.fd);
+    }
+}
+
+test "an unsupported auth switch remains an auth method refusal" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buffer: [128]u8 = undefined;
+    const path = try tmpSocket(&tmp, &path_buffer);
+    const payload = "\xfemysql_native_password\x00";
+    const packet = [_]u8{ payload.len, 0, 0, 2 } ++ payload.*;
+    const steps = [_]Peer.Step{ cached_login[0], cached_login[1], .{ .send = &packet } };
+    var peer: Peer = try .unix(path, &steps);
+    try peer.start();
+    const connection = try std.testing.allocator.create(Connection);
+    defer std.testing.allocator.destroy(connection);
+    const opened = openCached(connection, path, 10_000);
+    try peer.join();
+    try std.testing.expectError(error.AuthMethodRefused, opened);
     try std.testing.expectEqual(-1, connection.fd);
 }
 

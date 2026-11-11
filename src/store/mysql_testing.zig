@@ -378,6 +378,34 @@ test "store.mysql fixture drain attributes write OKs even before failure" {
     try std.testing.expectEqual(std.math.maxInt(i64), changes);
 }
 
+test "store.mysql live open preserves a refused login" {
+    const config = try dialect.rootConfig() orelse return error.SkipZigTest;
+    var wrong: [32]u8 = undefined;
+    std.testing.io.random(&wrong);
+    const password = std.fmt.bytesToHex(wrong, .lower);
+    try std.testing.expectError(error.LoginRefused, Mysql.open(std.testing.io, .{
+        .address = .{ .unix_socket = config.socket },
+        .user = "root",
+        .password = &password,
+        .database = "mysql",
+    }, "/mysql-refusal-probe", .{}));
+}
+
+test "store.mysql open preserves an unreachable socket" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const length = try tmp.dir.realPath(std.testing.io, &directory);
+    var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&path, "{s}/missing.sock", .{directory[0..length]});
+    try std.testing.expectError(error.ConnectFailed, Mysql.open(std.testing.io, .{
+        .address = .{ .unix_socket = missing },
+        .user = "root",
+        .password = "not-sent",
+        .database = "mysql",
+    }, "/mysql-refusal-probe", .{}));
+}
+
 test "store.mysql live admission refuses read_only" {
     try refusesGlobal("read_only", "1", error.MysqlReadOnly);
 }
@@ -387,13 +415,13 @@ test "store.mysql live admission refuses super_read_only" {
 }
 
 test "store.mysql live admission refuses weak InnoDB commit flush" {
-    try refusesGlobal("innodb_flush_log_at_trx_commit", "2", error.MysqlDurabilityTooWeak);
+    try refusesGlobal("innodb_flush_log_at_trx_commit", "2", error.MysqlFlushLogUnsafe);
 }
 
 test "store.mysql live admission refuses weak binlog sync" {
     // CI starts with log_bin enabled. log_bin itself is not dynamic, and
     // the pure refusal test covers the disabled-binlog combinations.
-    try refusesGlobal("sync_binlog", "0", error.MysqlDurabilityTooWeak);
+    try refusesGlobal("sync_binlog", "0", error.MysqlSyncBinlogUnsafe);
 }
 
 test "store.mysql live admission refuses statement binlogging" {

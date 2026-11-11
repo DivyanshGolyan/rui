@@ -1766,14 +1766,13 @@ const scratch_align = @max(@alignOf(configuration_domain.ConfigurationReads), @a
 const accepted_settlement_growth = 14352;
 
 comptime {
-    // The settlement batch is the larger use: 19240 bytes, the original
-    // 14480 plus 4760 for per-batch call names, membership flags and their
-    // lookup visitor. The creation reads use 14968, including command/Message
-    // facts, saved parent reference and the saved tool and loaded names a
-    // subset update reads, the skills a Message bound and the one retained
-    // validation plan. This uses existing scratch, with no resident growth.
+    // The settlement batch keeps the request's offered names and borrows
+    // existing content identities for withdrawn names. Binding transient
+    // history arguments avoids retaining a second copy of every call name.
+    // Its 19032 bytes are below the previous 19240-byte resident ceiling;
+    // configuration reads reuse saved_tools for parent names and stay 14968.
     // Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 14968 or scratch_bytes != 19240)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 14968 or scratch_bytes != 19032)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -1782,8 +1781,8 @@ comptime {
 /// which the kernel faults in only as they are written: an idle Host keeps
 /// none of the ring's 88 KiB resident. A configure, a creating Message or
 /// a success settlement writes the scratch's pages once, and they stay
-/// resident for the Store's life: at most 19240 bytes, a settlement
-/// batch's size; a configure uses 13552.
+/// resident for the Store's life: at most 19032 bytes, a settlement
+/// batch's size; a configure uses 14968.
 /// Not `Allocator.create`, whose ReleaseSafe 0xAA fill would write every
 /// page now.
 fn createRing() error{OutOfMemory}!*change_ring.Ring {

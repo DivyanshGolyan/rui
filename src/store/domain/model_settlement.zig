@@ -550,19 +550,27 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
     return true;
 }
 
-/// What settling a success reads beside its Attempt: the Operation's
-/// frozen tools, null when its revision row is missing (main's
-/// `StaleAttemptBinding`), the tools of every revision up to it, the
-/// Session's permission mode and revision, and the last Conversation
-/// ordinal.
+const builtin_names_sql = blk: {
+    var names: []const u8 = "";
+    for (std.enums.values(tool_record.Tool), 0..) |tool, index| {
+        names = names ++ (if (index == 0) "" else ",") ++ "'" ++ @tagName(tool) ++ "'";
+    }
+    break :blk names;
+};
+
+/// The Operation's frozen offered names and set id (null for a missing
+/// revision), owner validity, the Session's permission mode and revision,
+/// and the last Conversation ordinal. Earlier names are checked per batch.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT CASE WHEN r.tool_set_id IS NULL THEN NULL ELSE " ++ tool_set.maskSql("coalesce(r.loaded_tool_set_id,r.tool_set_id)") ++ " END AS tools_mask," ++
-        tool_set.everMaskSql("o.session_ref", "o.settings_revision") ++ " AS ever_mask,s.permission_mode,s.revision," ++
+    .sql = "SELECT r.tool_set_id,coalesce(" ++ tool_set.namesSql(tool_set.offeredSetSql("r")) ++ ",'') AS tool_names," ++
+        "EXISTS(SELECT 1 FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner<>'mcp') AS invalid_owner," ++
+        "s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { tools_mask: ?u8, ever_mask: u8, permission_mode: bool, revision: rsql.Positive, entry_base: u64 },
+    .Row = struct { tool_set_id: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
     .cardinality = .optional,
 });
 
@@ -592,7 +600,7 @@ fn runSettlement(a: anytype) !void {
         if (a.failedOn(pending_messages)) return error.SessionStopReadFailed;
         if (a.failedOn(content_batch) or a.failedOn(content_batch_wide) or a.failedOn(content_domain.lookup_content) or
             a.failedOn(duplicate_items) or a.failedOn(duplicate_items_wide) or
-            a.failedOn(duplicate_calls) or a.failedOn(duplicate_calls_wide) or a.failedOn(historical_mcp)) return error.OutputReadFailed;
+            a.failedOn(duplicate_calls) or a.failedOn(duplicate_calls_wide) or a.failedOn(historical_names)) return error.OutputReadFailed;
         return err;
     };
 }
@@ -818,10 +826,12 @@ const batch_items = 64;
 const narrow_width = 16;
 /// The digests one wide `content_batch` statement binds.
 const lookup_width = batch_items;
-/// The most distinct content identities one batch looks up, in four wide
-/// `content_batch` statements: a call imports at most four (its name,
-/// call_id, arguments and rejection text), so 64 calls always fit.
-const batch_identities = 4 * lookup_width;
+/// The most distinct content identities one batch looks up: a call imports
+/// at most four (its name,
+/// call_id, arguments and rejection text). Unknown calls also look up the
+/// shared removed-tool text, before history decides which result applies.
+/// The final narrow lookup pads temporary arguments, not resident storage.
+const batch_identities = 4 * lookup_width + 1;
 /// The identities left above which a lookup takes a wide statement:
 /// measured on digests the Store lacks, 48 took 369 steps in three narrow
 /// statements and 395 in one wide one padded to 64 values, and 49 took
@@ -891,12 +901,12 @@ const DuplicateVisitor = struct {
     }
 };
 
-const historical_mcp = rsql.Read(.{
-    .sql = "SELECT tool.name,max(CASE WHEN r.revision=o.settings_revision THEN 1 ELSE 0 END) AS offered FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision<=o.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=coalesce(r.loaded_tool_set_id,r.tool_set_id) JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE o.operation_id=?1 AND tool.owner='mcp' AND tool.name IN (" ++ parameters(2, batch_items) ++ ") GROUP BY tool.name",
+const historical_names = rsql.Read(.{
+    .sql = "SELECT DISTINCT tool.name FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision<o.settings_revision " ++
+        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
+        "WHERE o.operation_id=?1 AND tool.name IN (" ++ parameters(2, batch_items) ++ ")",
     .Args = NameArgs(),
-    .Row = struct { name: Bounded(tool_record.max_name_bytes), offered: bool },
+    .Row = struct { name: Bounded(tool_record.max_name_bytes) },
     .cardinality = .each,
 });
 
@@ -914,12 +924,12 @@ fn NameArgs() type {
 
 const HistoryVisitor = struct {
     batch: *Batch,
-    pub fn visit(visitor: *HistoryVisitor, row: *const historical_mcp.Row) bool {
+    pub fn visit(visitor: *HistoryVisitor, row: *const historical_names.Row) bool {
         const batch = visitor.batch;
-        for (batch.names()[0..batch.digest_count], 0..) |*name, index| {
-            if (!std.mem.eql(u8, name.slice(), row.name.slice())) continue;
-            batch.ever_mcp[index] = true;
-            batch.offered_mcp[index] = row.offered;
+        const digest = content_string.digest(row.name.slice());
+        for (batch.identities[0..batch.identity_count], batch.identity_digests[0..batch.identity_count], 0..) |*identity, *candidate, index| {
+            if (identity.row.private or identity.length != row.name.len or !std.mem.eql(u8, candidate, &digest)) continue;
+            batch.withdrawn[index] = true;
         }
         return true;
     }
@@ -930,9 +940,10 @@ const HistoryVisitor = struct {
 /// Every row a batch writes binds its values by value, so the next batch is
 /// collected into the same table as soon as this one's rows are queued.
 pub const Batch = struct {
-    offered_mcp: [batch_items]bool,
-    ever_mcp: [batch_items]bool,
-    history_args: historical_mcp.Args,
+    /// The names read with success facts, retained through every batch.
+    offered_names: Bounded(tool_set.max_names_bytes),
+    /// History flags share the identities' indices; no second name copy.
+    withdrawn: [batch_identities]bool,
     history_visitor: HistoryVisitor,
     history_needed: bool,
     kind: enum { items, calls },
@@ -956,25 +967,44 @@ pub const Batch = struct {
     lookup_count: u8,
     duplicates: DuplicateVisitor,
 
-    /// The fixed SQL fields also own the stable names selected call facts borrow.
-    fn names(batch: *Batch) *[batch_items]Bounded(tool_record.max_name_bytes) {
+    /// Names are needed only while binding history's fixed-value Args.
+    /// Noinline keeps this 4.6 KB window off the import frame; Access copies
+    /// every Bounded argument before returning, so none borrows this frame.
+    noinline fn queueHistory(batch: *Batch, a: anytype, operation_id: u64, output: *const ValidatedOutput, io: std.Io) !void {
         @setEvalBranchQuota(20_000);
         const Name = Bounded(tool_record.max_name_bytes);
         comptime {
-            std.debug.assert(@sizeOf(historical_mcp.Args) == @sizeOf(u64) + batch_items * @sizeOf(Name));
+            std.debug.assert(@sizeOf(historical_names.Args) == @sizeOf(u64) + batch_items * @sizeOf(Name));
             for (0..batch_items) |index| {
-                std.debug.assert(@offsetOf(historical_mcp.Args, std.fmt.comptimePrint("n{d}", .{index})) == @offsetOf(historical_mcp.Args, "n0") + index * @sizeOf(Name));
+                std.debug.assert(@offsetOf(historical_names.Args, std.fmt.comptimePrint("n{d}", .{index})) == @offsetOf(historical_names.Args, "n0") + index * @sizeOf(Name));
             }
         }
-        return @ptrCast(&batch.history_args.n0);
+        var args: historical_names.Args = undefined;
+        args.operation_id = operation_id;
+        const names: *[batch_items]Name = @ptrCast(&args.n0);
+        for (names) |*name| name.len = 0;
+        var reader = try OutputMetadataReader.init(io, output.metadata, output.item_count);
+        reader.offset = batch.start;
+        var index: usize = 0;
+        while (index < batch.digest_count) {
+            const record = try reader.next() orelse return error.CorruptOutputMetadata;
+            switch (record.tag) {
+                .name => if (record.decoded_length <= tool_record.max_name_bytes) {
+                    var buffer: [tool_record.max_name_bytes]u8 = undefined;
+                    try names[index].set(try excerpt(io, output.source, record, &buffer));
+                },
+                .arguments => index += 1,
+                else => {},
+            }
+        }
+        batch.history_visitor = .{ .batch = batch };
+        a.readEachFrom(historical_names, &args, batch_items, &batch.history_visitor);
     }
 
     fn reset(batch: *Batch, kind: @FieldType(Batch, "kind"), start: u64) void {
         batch.kind = kind;
-        batch.ever_mcp = @splat(false);
-        batch.offered_mcp = @splat(false);
+        batch.withdrawn = @splat(false);
         batch.history_needed = false;
-        for (batch.names()) |*name| name.len = 0;
         batch.start = start;
         batch.end = start;
         batch.stopped = null;
@@ -1011,11 +1041,10 @@ pub const Batch = struct {
         return true;
     }
 
-    /// Queues content lookups from `first_new`. Include at most fifteen
-    /// preceding identities so the fixed-width padding stays in unused slots
-    /// even when a second pass starts at an unaligned identity index.
-    fn queueContentReads(batch: *Batch, a: anytype, first_new: u16) void {
-        var first = first_new - first_new % narrow_width;
+    /// Queues the batch's content lookups, padding only unused slots.
+    /// Keep the final window's padding off the history-argument call chain.
+    noinline fn queueContentReads(batch: *Batch, a: anytype) void {
+        var first: u16 = 0;
         while (first < batch.identity_count) {
             const left = batch.identity_count - first;
             const count = @min(@as(u16, if (left > wide_lookup_above) lookup_width else narrow_width), left);
@@ -1032,11 +1061,17 @@ pub const Batch = struct {
             visitor.* = .{ .batch = batch, .limit = 2 * distinct };
             batch.lookup_count += 1;
             const limit = 2 * @as(u64, distinct) + 1;
-            // Runs start on a 16-slot boundary. A wide view is used only
-            // with more than 48 identities left, so its 64 slots fit; a
-            // short last run pads only unused slots below batch_identities.
+            // A wide view is used only with more than 48 identities left,
+            // so its 64 slots fit. The last narrow run may need padding past
+            // resident storage: fixed digest Args are copied when queued.
             if (count <= narrow_width) {
-                a.readEachFrom(content_batch, digestArgs(content_batch, narrow_width, batch.identity_digests[first..][0..narrow_width], count), limit, visitor);
+                if (first + narrow_width <= batch_identities) {
+                    a.readEachFrom(content_batch, digestArgs(content_batch, narrow_width, batch.identity_digests[first..][0..narrow_width], count), limit, visitor);
+                } else {
+                    var padded: [narrow_width][32]u8 = undefined;
+                    @memcpy(padded[0..count], chunk);
+                    a.readEachFrom(content_batch, digestArgs(content_batch, narrow_width, &padded, count), limit, visitor);
+                }
             } else {
                 a.readEachFrom(content_batch_wide, digestArgs(content_batch_wide, lookup_width, batch.identity_digests[first..][0..lookup_width], count), limit, visitor);
             }
@@ -1045,15 +1080,11 @@ pub const Batch = struct {
     }
 
     /// Queues content, historical membership and duplicate reads together.
-    fn queueReads(batch: *Batch, a: anytype, operation_id: u64) void {
+    fn queueReads(batch: *Batch, a: anytype, operation_id: u64, output: *const ValidatedOutput, io: std.Io) !void {
         @setEvalBranchQuota(20_000);
-        batch.queueContentReads(a, 0);
+        batch.queueContentReads(a);
         if (batch.digest_count == 0) return;
-        if (batch.kind == .calls and batch.history_needed) {
-            batch.history_args.operation_id = operation_id;
-            batch.history_visitor = .{ .batch = batch };
-            a.readEachFrom(historical_mcp, &batch.history_args, batch_items, &batch.history_visitor);
-        }
+        if (batch.kind == .calls and batch.history_needed) try batch.queueHistory(a, operation_id, output, io);
         batch.ids.operation_id = operation_id;
         if (batch.digest_count <= narrow_width) {
             const args = batch.ids.args(duplicate_items, narrow_width, batch.digest_count);
@@ -1109,8 +1140,9 @@ fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
 /// empty answer's included. A first item whose identities do not all fit
 /// is taken alone; the rest are looked up when written
 /// (`Settlement.content`). Never fails: a metadata read failure stops the
-/// batch there, for the write walk to return.
-fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64) void {
+/// batch there, for the write walk to return. Keep scan scratch off the
+/// orchestration frame that later queues SQL.
+noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64) void {
     batch.reset(.items, start);
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
     reader.offset = start;
@@ -1154,11 +1186,12 @@ fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
 
 /// Collects the next calls from `start`, as `collectItems` does items:
 /// each call's name, call_id and arguments, and, when the catalog rejects
-/// it, its rejection text. A call imports at most four identities, so
-/// `batch_items` calls always fit `batch_identities`.
-fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_record.Offered) void {
+/// it, its rejection text. Unknown names collect both possible results before
+/// the history read, so deciding withdrawn versus unknown adds no round.
+/// Noinline keeps call inspection scratch off the subsequent SQL call chain.
+noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start: u64, offered: *const tool_record.Offered) void {
     @setEvalBranchQuota(20_000);
-    comptime std.debug.assert(batch_identities >= 4 * batch_items);
+    comptime std.debug.assert(batch_identities >= 4 * batch_items + 1);
     batch.reset(.calls, start);
     var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch |err| return batch.stop(err, start);
     reader.offset = start;
@@ -1187,53 +1220,11 @@ fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.Io, start
                 // collecting only needs the text's identity.
                 if (inspectOutputCall(io, output.source, name_record, record, offered)) |facts| {
                     const provisional = facts.tool == null and !facts.removed;
-                    if (provisional) batch.history_needed = true;
-                    if (!provisional) if (tool_catalog.classifyCall(&facts)) |code| {
-                        var buffer: [192]u8 = undefined;
-                        if (rejectionText(io, output, code, &facts, name_record, &buffer)) |text| {
-                            const fits = batch.add(.ofBytes(text, false));
-                            std.debug.assert(fits);
-                        } else |_| {}
-                    };
-                } else |_| {}
-                var name_buffer: [tool_record.max_name_bytes]u8 = undefined;
-                const call_name = excerpt(io, output.source, name_record, &name_buffer) catch |err| return batch.stop(err, record_start);
-                if (name_record.decoded_length <= tool_record.max_name_bytes) {
-                    batch.names()[batch.digest_count].set(call_name) catch unreachable;
-                }
-                batch.ids.digests[batch.digest_count] = call_id_record.content_digest;
-                batch.digest_count += 1;
-                name = null;
-                call_id = null;
-                if (batch.digest_count == batch_items) {
-                    batch.end = reader.offset;
-                    return;
-                }
-            },
-            else => {},
-        }
-    }
-}
-
-/// After the membership lookup, collect final rejections into the fourth
-/// identity slot reserved for each call. Failures stay with the write walk,
-/// which reports them in call order rather than during speculative collection.
-/// Noinline: inspection scratch must not grow the import frame that drains
-/// queued writes and opens SQLite content sinks.
-noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput, io: std.Io, offered: *const tool_record.Offered) void {
-    var reader = OutputMetadataReader.init(io, output.metadata, output.item_count) catch return;
-    reader.offset = batch.start;
-    var name: ?OutputMetadataRecord = null;
-    var index: u8 = 0;
-    while (reader.offset < batch.end and index < batch.digest_count) {
-        const record = (reader.next() catch return) orelse return;
-        switch (record.tag) {
-            .name => name = record,
-            .arguments => {
-                const name_record = name orelse return;
-                if (inspectOutputCall(io, output.source, name_record, record, offered)) |initial| {
-                    var facts = initial;
-                    if (facts.tool == null and batch.ever_mcp[index]) facts.removed = true;
+                    if (provisional) {
+                        batch.history_needed = true;
+                        const fits = batch.add(.ofBytes(tool_catalog.removed_tool_result, false));
+                        std.debug.assert(fits);
+                    }
                     if (tool_catalog.classifyCall(&facts)) |code| {
                         var buffer: [192]u8 = undefined;
                         if (rejectionText(io, output, code, &facts, name_record, &buffer)) |text| {
@@ -1242,8 +1233,14 @@ noinline fn collectFinalRejections(batch: *Batch, output: *const ValidatedOutput
                         } else |_| {}
                     }
                 } else |_| {}
-                index += 1;
+                batch.ids.digests[batch.digest_count] = call_id_record.content_digest;
+                batch.digest_count += 1;
                 name = null;
+                call_id = null;
+                if (batch.digest_count == batch_items) {
+                    batch.end = reader.offset;
+                    return;
+                }
             },
             else => {},
         }
@@ -1292,10 +1289,11 @@ fn validateCandidate(io: std.Io, output: *const ValidatedOutput, purpose: ModelO
 pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, output: *const ValidatedOutput, faults: Faults) !void {
     const batch = a.store.settlementBatch();
     var facts: attempt_facts.Result = undefined;
-    var success: success_facts.Result = undefined;
+    var success: success_facts.Row = .{ .tool_names = &batch.offered_names };
+    var success_found: store_access.Found = .missing;
     var pending: pending_messages.Result = undefined;
     a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = true }, &facts);
-    a.read(success_facts, .{ .operation_id = binding.operation_id }, &success);
+    a.readInto(success_facts, .{ .operation_id = binding.operation_id }, &success, &success_found);
     a.read(pending_messages, .{ .operation_id = binding.operation_id }, &pending);
     // BEGIN IMMEDIATE ran when the first read was queued.
     if (a.failure == null) if (faults.settlement_trace) |trace| {
@@ -1303,12 +1301,14 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         trace.mark(.transaction_active);
     };
     collectItems(batch, output, io, 0);
-    batch.queueReads(a, binding.operation_id);
+    try batch.queueReads(a, binding.operation_id, output, io);
     try runSettlement(a);
     const row = try currentAttempt(&facts, binding);
     // The Operation was found, so only its revision row can be missing.
-    const settling = success orelse return error.CorruptStore;
-    const tools_mask = settling.tools_mask orelse return error.StaleAttemptBinding;
+    if (!success_found.get()) return error.CorruptStore;
+    const settling = success;
+    if (settling.tool_set_id == null) return error.StaleAttemptBinding;
+    if (settling.invalid_owner) return error.CorruptStore;
     const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
     // Main checked the candidate before any output read.
     try validateCandidate(io, output, purpose);
@@ -1325,12 +1325,10 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .positions = positions,
         .first_item_position = try positions.take(output.item_count),
         .purpose = purpose,
-        .tools = .since(try configuration_domain.toolSet(tools_mask), try configuration_domain.toolSet(settling.ever_mask)),
+        .tools = .{ .names = batch.offered_names.slice(), .historical_digests = &batch.identity_digests, .withdrawn = &batch.withdrawn },
         .settling = settling,
         .call_items = try OutputMetadataReader.init(io, output.metadata, output.item_count),
     };
-    settlement.tools.mcp_names = batch.names();
-    settlement.tools.mcp_offered = &batch.offered_mcp;
     settlement.call_item = try settlement.call_items.nextItem();
     try settlement.importBatches(batch);
 
@@ -1407,16 +1405,6 @@ fn Settlement(comptime A: type) type {
                         } else collectItems(batch, s.output, s.io, batch.end);
                     },
                     .calls => {
-                        if (batch.history_needed) {
-                            const first_added = batch.identity_count;
-                            collectFinalRejections(batch, s.output, s.io, &s.tools);
-                            if (batch.identity_count != first_added) {
-                                batch.lookup_count = 0;
-                                batch.queueContentReads(s.a, first_added);
-                                try runSettlement(s.a);
-                                try batch.checkReads();
-                            }
-                        }
                         try s.writeCalls(batch);
                         if (batch.last) break;
                         collectCalls(batch, s.output, s.io, batch.end, &s.tools);
@@ -1424,7 +1412,7 @@ fn Settlement(comptime A: type) type {
                 }
                 // A batch with nothing to read has nothing to write.
                 if (batch.identity_count != 0 or batch.digest_count != 0) {
-                    batch.queueReads(s.a, s.binding.operation_id);
+                    try batch.queueReads(s.a, s.binding.operation_id, s.output, s.io);
                     try runSettlement(s.a);
                     try batch.checkReads();
                 }
@@ -1464,8 +1452,9 @@ fn Settlement(comptime A: type) type {
 
         /// Walks the batch's records in main's order: each item's ordinal,
         /// its duplicate check, its parts and bags, its row, and a visible
-        /// message's entry; the usage record where it lies.
-        fn writeItems(s: *Self, batch: *Batch) !void {
+        /// message's entry; the usage record where it lies. Keep import scratch
+        /// separate from the next batch's read-argument construction.
+        noinline fn writeItems(s: *Self, batch: *Batch) !void {
             var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
             reader.offset = batch.start;
             var region_start = batch.start;
@@ -1674,8 +1663,9 @@ fn Settlement(comptime A: type) type {
 
         /// Walks the batch's records for calls in main's order: each
         /// call's fields, its duplicate check, its classification, its
-        /// row and, when runnable, its Action.
-        fn writeCalls(s: *Self, batch: *Batch) !void {
+        /// row and, when runnable, its Action. Keep call scratch separate
+        /// from the next batch's read-argument construction.
+        noinline fn writeCalls(s: *Self, batch: *Batch) !void {
             var reader = try OutputMetadataReader.init(s.io, s.output.metadata, s.output.item_count);
             reader.offset = batch.start;
             var name_record: ?OutputMetadataRecord = null;
@@ -1718,8 +1708,7 @@ fn Settlement(comptime A: type) type {
             const call_id_content_id = try s.importDecoded(batch, call_id);
             const arguments_content_id = try s.importDecoded(batch, record);
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
-            var call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
-            if (call_facts.tool == null and batch.ever_mcp[index]) call_facts.removed = true;
+            const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
             const rejection_code = tool_catalog.classifyCall(&call_facts);
             const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
                 var buffer: [192]u8 = undefined;

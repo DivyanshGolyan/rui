@@ -32,6 +32,7 @@ It travels in the launch frame, not argv or the environment; do not add `--provi
 The path must be nonempty, contain no NUL bytes and fit the platform's path limit; relative paths use the Host's working directory, and a file that cannot be loaded or a peer that cannot be verified fails without falling back to system trust.
 `database` accepts a SQLite directory or a `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE` URL.
 For a Unix socket, use its percent-encoded absolute path in place of HOST; TCP verifies TLS.
+For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 The MySQL database must already contain the DDL from `rui store schema --engine mysql`.
 The key, tokens and MySQL URL never reach the child's argv, environment or disk.
 Readiness discovers the MySQL Store's stable opaque id, which the client uses on requests instead of the URL.

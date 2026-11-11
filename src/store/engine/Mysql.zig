@@ -106,7 +106,8 @@ const Replacement = enum { none, pending, buffered };
 const unserved = provider_route.all(.unserved);
 
 /// A copy of the open-time login, so a reconnect needs nothing the caller
-/// wiped. Only system TLS trust is kept: a CA file path is not.
+/// wiped. Trust is already loaded in the connection and is never borrowed
+/// from this login; reconnect options do not retain a CA file path.
 const Login = struct {
     address: enum { unix_socket, tcp_tls, tcp },
     host: Bounded(253) = .{ .len = 0 },
@@ -124,7 +125,6 @@ const Login = struct {
                 login.host.set(path) catch return null;
             },
             .tcp_tls => |t| {
-                if (t.trust != .system) return null;
                 login.address = .tcp_tls;
                 login.host.set(t.host) catch return null;
                 login.port = t.port;
@@ -145,6 +145,7 @@ const Login = struct {
         return .{
             .address = switch (self.address) {
                 .unix_socket => .{ .unix_socket = self.host.slice() },
+                // `reopen` uses its retained TLS context, not this trust value.
                 .tcp_tls => .{ .tcp_tls = .{ .host = self.host.slice(), .port = self.port, .trust = .system } },
                 .tcp => .{ .tcp = .{ .host = self.host.slice(), .port = self.port } },
             },
@@ -648,7 +649,7 @@ fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
         s.connection.reopen(login.options(), &refusal) catch continue;
         const owner = mysql_open.reclaim(&s.connection, login.database.slice(), &s.store_id, s.epoch, s.connection_id) catch |err| switch (err) {
             // Another server, Store or owner, or one admission refuses: no retry helps.
-            error.WrongStoreIdentity, error.OwnershipLost, error.StoreLocked, error.UnsupportedMysqlVersion, error.MysqlReadOnly, error.MysqlDurabilityTooWeak, error.MysqlStatementBinlog => return error.StoreConnectionLost,
+            error.WrongStoreIdentity, error.OwnershipLost, error.StoreLocked, error.MysqlTooOld, error.MysqlIsMariadb, error.MysqlReadOnly, error.MysqlFlushLogUnsafe, error.MysqlSyncBinlogUnsafe, error.MysqlStatementBinlog => return error.StoreConnectionLost,
             else => continue,
         };
         s.connection_id = owner.connection_id;
@@ -843,4 +844,27 @@ test "MySQL content query shape counts causes independently of wire sends" {
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.prefix_only);
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.access_passes);
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.identity_passes);
+}
+
+test {
+    _ = mysql_open;
+}
+
+test "mysql reconnect login owns its credentials even with ssl-ca trust" {
+    var login = copied: {
+        const url = try @import("../../mysql_url.zig").create(std.testing.allocator, "mysql://u:secret@db.example.com:3307/db?ssl-ca=/private/ca.pem");
+        defer url.destroy();
+        const login = Login.of(url.options()) orelse return error.TestUnexpectedResult;
+        url.wipe();
+        break :copied login;
+    };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&login));
+    const options = login.options();
+    try std.testing.expectEqualStrings("db.example.com", options.address.tcp_tls.host);
+    try std.testing.expectEqual(@as(u16, 3307), options.address.tcp_tls.port);
+    try std.testing.expectEqualStrings("u", options.user);
+    try std.testing.expectEqualStrings("secret", options.password);
+    try std.testing.expectEqualStrings("db", options.database);
+    // The connection, not these options, owns the trust used by `reopen`.
+    try std.testing.expect(options.address.tcp_tls.trust == .system);
 }
