@@ -108,6 +108,19 @@ pub fn comparedPressure(facts: CompactionFacts) ?u64 {
     return (facts.usage_tokens orelse 0) +| (facts.uncovered_bytes / 4) +| facts.output_reservation;
 }
 
+/// The fewest uncovered bytes whose pressure reaches the trigger, so a
+/// caller that knows the other facts can decide the purpose without the
+/// count: `nextPurpose` compacts from this many on. Null when no count
+/// changes the purpose it gives for none.
+pub fn compactingBytes(facts: CompactionFacts) ?u64 {
+    var none = facts;
+    none.uncovered_bytes = 0;
+    const pressure = comparedPressure(none) orelse return null;
+    const trigger = facts.trigger.?;
+    if (pressure >= trigger) return null;
+    return std.math.mul(u64, trigger - pressure, 4) catch null;
+}
+
 test "output facts do not encode the Turn continuation decision" {
     for ([_]Purpose{ .assistant_response, .compaction }) |purpose| {
         for ([_]u64{ 0, 2 }) |calls| {
@@ -174,5 +187,10 @@ test "a compared pressure decides compaction exactly when it reaches the trigger
             try std.testing.expectEqual(bytes / 4, value);
             try std.testing.expectEqual(value >= trigger.?, nextPurpose(facts) == .compaction);
         }
+        // The byte count alone moves the purpose only at `compactingBytes`.
+        var none = facts;
+        none.uncovered_bytes = 0;
+        const compacts = nextPurpose(none) == .compaction or if (compactingBytes(facts)) |limit| bytes >= limit else false;
+        try std.testing.expectEqual(compacts, nextPurpose(facts) == .compaction);
     };
 }

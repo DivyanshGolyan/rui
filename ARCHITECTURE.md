@@ -180,6 +180,14 @@ Enabling Bash later runs it in the saved Workspace, which a later configure cann
 Creation atomically establishes Session, baseline, Workspace bookkeeping, access scope and request answer.
 The CLI and TUI send their own explicit creation defaults: Bash and web search, `bypass`, a supported saved effort or the product's effort choice, and the provider's compactAt default as described under [Supported model IDs](#supported-model-ids).
 Addressed configure preserves every omitted setting; provider and Workspace remain immutable, while the model may change within the provider (D192).
+A creating spec may also name `parent`, a Session ID relation, never a revisioned setting (D178).
+The child inherits that Session's Workspace and provider and may only narrow its configured tool names and Permission Mode, through the same admission owner as `start_agent` (D122, D140).
+Naming provider or Workspace, even equal values, is refused, as is a wider tool set or bypass under an asking parent; refusals name the field and never silently intersect the spec.
+Missing parents and parents with an archive intent are refused as `unknown_session`; an update naming `parent` is refused as `parent_on_update`.
+A native configure creation admits no task Message. Child approval forwarding and ending Messages use the saved parent relation as for attached agents.
+`parent` participates in the creation request digest only when present, retaining every earlier configuration digest and the existing Store format.
+
+
 A creation-only `preset` seeds configure from a connect-time spec: supplied values or nulls override it, omissions inherit it, and resolved answers bind the resolved configuration for idempotent replay (D22).
 Preset lookup/update rejections instead bind the original request, including the preset name, and replay that saved rejection even if the Host can later resolve the preset.
 
@@ -768,6 +776,8 @@ A stored null threshold uses a fixed 115,200-token safety threshold independent 
 The CLI resolves `--compaction-trigger default` to a concrete token count before capture.
 Pressure uses eligible usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without same-recipe usage it estimates retained context.
 The threshold fires at equality.
+Admission reads its Session's facts with its selection, inside the Store hold and before its transaction, and does not read the appended bytes: where only their count decides the purpose it writes an assistant call whose first write is a guard that the count is under the policy's limit, and a failed guard rolls back and admits the compaction instead.
+On a network Store the admitted Attempt's request starts in the same message: its settings read follows COMMIT, whole or not at all, and a request whose settings did not ride reads them in a round of its own.
 The assistant successor of a compaction applies pending input even if the estimate remains above the threshold.
 Provider-reported overflow still permits recovery without a configured trigger; unchanged context after an accepted base, or overflow during compaction itself, fails with `ResourceExceeded` instead of repeating compaction.
 
@@ -1448,6 +1458,7 @@ The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send p
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
+The step to 63 drops `model_operation.usage_content_id`, rebuilding `model_operation` on SQLite, and deletes each saved raw usage report no other row references; the four counts are unchanged, and the file keeps the freed pages until it is vacuumed.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1484,7 +1495,7 @@ Provider failure classes preserve ordinary, context-overflow and retryable facts
 Provider adapters own grammar and interpretation.
 The Store owns identity, provenance, proposal authentication and atomic publication of immutable neutral items and provider bags with certified public text; tool classification is a pure decision invoked inside that transaction.
 
-Usage counts sit beside the retained private raw usage report, which keeps provider detail such as reasoning tokens.
+Usage counts are the only usage the Store keeps; the provider's raw usage report is not retained.
 The provider parser admits only counts within SQLite's signed integer range, and their sum saturates at its maximum, preserving every compaction-threshold decision.
 Served-model observations are one opaque bounded `model_evidence` BLOB: version byte `1`, followed by three little-endian unsigned 16-bit byte lengths and their exact UTF-8 bytes, in body, `openai-model`, `x-openai-model` order.
 A zero length means that source was absent; requested identity is never substituted.
@@ -1844,6 +1855,7 @@ An environment over 64 KiB is refused before connecting, naming its size, the li
 The Host refuses before admission a Message with no header (400 `environment_required`), one over 64 KiB (413 `environment_too_large`, from the header alone) and malformed entries, a repeated name, a repeated or unreadable header, a header that claims the whole body (a record is never empty) or the header on another route (400 `invalid_environment`).
 It strips any `RUI_` name the entries still hold.
 Configure, stop, interruption and permission-decision exchanges carry no environment.
+A creation with `parent`, like `start_agent`, snapshots the parent's Host-memory environment through `child_environment.zig` and installs it only after the real creation COMMIT, before the Store releases its lock (D169, D176, D178). Replays and refusals install nothing; a missing saved environment keeps the normal fallback.
 The environment never enters the Store, caller request records, digests, logs or diagnostics, and `rui request recover` sends the recovering process's environment.
 
 The Host keeps one environment per Session in a [capped register](#resident-memory-invariant) (`src/SessionEnvironments.zig`).
@@ -3785,6 +3797,9 @@ This preserves waitable child identities until their signaling owners retire.
 Host startup then owns lease acquisition, recovery and readiness.
 Competing launchers may create candidates, but one holds the lease.
 All probe the winning Host for up to ten seconds from readiness-check start, without killing an unconfirmed owner.
+A Host that migrates its Store announces the migration's start and end on its startup channel, and the launcher that started it runs no deadline between the two, because the backup takes time proportional to the Store's size; ten seconds follow the end (`HostStartupWait`).
+The interactive launcher shows the start announcement as it arrives.
+A launcher that still has no readiness reports `host_starting`, a wait, never an internal fault.
 Each Host-info probe uses the lesser of remaining readiness time and its one-second response deadline, including connection.
 These readiness deadlines are separate from [ordinary transport inactivity](#client-transport-and-observations).
 Credentials are not required for managed readiness.

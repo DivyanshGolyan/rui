@@ -3501,7 +3501,7 @@ test "real SQLite full during import publishes no canonical prefix" {
             defer entry.release();
             var a: store_access.Access(.write, error{SessionUpdateFailed}) = .open(&entry);
             defer a.deinit();
-            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, std.heap.c_allocator, .{}));
+            break :configure a.end(.{}, configuration_domain.configure(&a, storage.io, storage.served, &command, null, null, null, std.heap.c_allocator, null, .{}));
         },
     );
     try std.testing.expectEqual(@as(c_int, 1), c.sqlite3_get_autocommit(storage.sqliteDatabase()));
@@ -7579,11 +7579,13 @@ test "a Current report's presentation reads answer their list's name" {
 
 test "a failed context read answers its reader's name and fences" {
     // The report's `admission_context` names a failed step CorruptStore,
-    // as main named the estimate's. Admission reads the context within
-    // `admission_facts`, whose failed step is SessionReadFailed. The second
+    // as main named the estimate's. Admission reads the context with its
+    // facts in selection's round, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
-    // weighs the context, and the report estimates it. Both readers name a
-    // failed uncovered-byte read CorruptStore, after selecting the recipe.
+    // weighs the context, and the report estimates it. The report names a
+    // failed uncovered-byte read CorruptStore, after selecting the recipe;
+    // admission counts the bytes in its guard write, whose failed step is
+    // a write's StatementFailed.
     for ([_]struct { report: bool, bytes: bool }{
         .{ .report = false, .bytes = false },
         .{ .report = true, .bytes = false },
@@ -7607,18 +7609,20 @@ test "a failed context read answers its reader's name and fences" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = if (case.bytes)
+        var fault: TestingStatementFault = .{ .sql = if (case.bytes and !report)
+            model_admission_domain.within_pressure_sql
+        else if (case.bytes)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, " AS uncovered_bytes")
         else if (report)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
         else
-            model_admission_domain.admission_facts_sql };
+            model_admission_domain.selected_context_sql };
         fault.arm(storage.sqliteDatabase());
         defer fault.disarm(storage.sqliteDatabase());
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(if (case.bytes) error.CorruptStore else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(if (case.bytes) error.StatementFailed else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }

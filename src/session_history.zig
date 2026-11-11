@@ -647,8 +647,6 @@ test "history tool suffix authenticates discarded prefixes through the productio
             @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
             self.length += bytes.len;
         }
-        pub fn item(_: *@This(), _: protocol.ActivityItem) void {}
-        pub fn drew(_: *@This(), _: u64) void {}
         pub fn excluding(_: *@This(), _: u64) void {}
     };
     const Source = struct {
@@ -700,7 +698,7 @@ test "history tool suffix authenticates discarded prefixes through the productio
                 _ = stagePage(requests.io, page, scratch, Source{ .requests = requests, .root = root }) catch |err| break :blk err;
                 break :blk {};
             } else blk: {
-                _ = View.render(requests, root, "09azvw", &activity, null, &sink, false, &compact, .{ .drawn = .{}, .from = null }, "", .terminal) catch |err| break :blk err;
+                _ = View.render(requests, root, "09azvw", activity.facts.items[0], .{}, false, &sink, false, &compact, "", .terminal) catch |err| break :blk err;
                 break :blk {};
             };
             peer.join();
