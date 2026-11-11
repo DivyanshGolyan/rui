@@ -1297,8 +1297,8 @@ pub const full_revisions = rsql.Page(.{
 /// first holder as instructions (2*revision) and as an output schema
 /// (2*revision+1). NULL where `r` holds no such content.
 fn owner_column(comptime field: []const u8) []const u8 {
-    const as_instructions = "(SELECT min(revision)*2 FROM session_revision WHERE session_ref=?1 AND instructions_content_id=r." ++ field ++ "_content_id)";
-    const as_output_schema = "(SELECT min(revision)*2+1 FROM session_revision WHERE session_ref=?1 AND output_schema_content_id=r." ++ field ++ "_content_id)";
+    const as_instructions = "(SELECT min(revision)*2 FROM session_revision @index(session_revision_instructions) WHERE session_ref=?1 AND instructions_content_id=r." ++ field ++ "_content_id)";
+    const as_output_schema = "(SELECT min(revision)*2+1 FROM session_revision @index(session_revision_output_schema) WHERE session_ref=?1 AND output_schema_content_id=r." ++ field ++ "_content_id)";
     const own = if (std.mem.eql(u8, field, "instructions")) as_instructions else as_output_schema;
     const other = if (std.mem.eql(u8, field, "instructions")) as_output_schema else as_instructions;
     return "min(" ++ own ++ ",coalesce(" ++ other ++ "," ++ own ++ "))";
