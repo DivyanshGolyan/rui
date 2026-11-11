@@ -54,7 +54,7 @@ pub const rows = std.enums.EnumArray(Setting, Row).init(.{
     // the model's default into an override of the same number.
     .compact_at = .{ .group = .session, .label = "Compact at", .change = .{ .choice = "/configure --compaction-trigger " } },
     .headroom = .{ .group = .session, .label = "Headroom", .change = .{ .choice = "/configure --output-reservation " } },
-    .model = .{ .group = .session, .label = "Model", .change = .fixed },
+    .model = .{ .group = .session, .label = "Model", .change = .{ .typed = "/configure --model " } },
     .store = .{ .group = .session, .label = "Store", .change = .fixed },
     .instructions = .{ .group = .session, .label = "Instructions", .change = .fixed },
     // A saved model needs a saved provider, so the draft names both.
@@ -331,7 +331,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
         .model => {
             try writeText(out, session.model.slice());
             try out.print(" · {s}", .{session.provider.signIn()});
-            return "fixed for this Session";
+            return null;
         },
         .store => {
             try writePath(out, facts.home, facts.store);
@@ -424,6 +424,7 @@ pub fn draft(setting: Setting, facts: Facts, buffer: *[max_draft_bytes]u8) ?[]co
     const value: []const u8 = switch (setting) {
         .name => facts.session.label.slice(),
         .folder => facts.session.workspace.slice(),
+        .model => facts.session.model.slice(),
         .default_model => model: {
             const saved = facts.defaults.* catch break :model "";
             const provider = saved.provider catch break :model "";
@@ -435,7 +436,7 @@ pub fn draft(setting: Setting, facts: Facts, buffer: *[max_draft_bytes]u8) ?[]co
             const store = saved.store catch break :store "";
             break :store store.slice();
         },
-        .effort, .permissions, .tools, .compact_at, .headroom, .model, .store, .instructions, .default_effort, .notifications => unreachable,
+        .effort, .permissions, .tools, .compact_at, .headroom, .store, .instructions, .default_effort, .notifications => unreachable,
     };
     for (value) |byte| if (byte < 0x20 or byte == 0x7f) return out.buffered();
     if (value.len != 0) command_value.write(&out, value) catch unreachable;
@@ -519,7 +520,7 @@ test "the page shows the approved rows, `›` on the selected one, then the work
             "   Folder          ~/code/rui\n" ++
             "   Compact at      245,000 tokens · now 31,200" ++ grey ++ "model default" ++ end ++
             "   Headroom        0 tokens" ++ grey ++ "model default" ++ end ++
-            "   Model           gpt-6.1-sol · ChatGPT" ++ grey ++ "fixed for this Session" ++ end ++
+            "   Model           gpt-6.1-sol · ChatGPT\n" ++
             "   Store           ~/.local/share/rui/store" ++ grey ++ "fixed for this Session" ++ end ++
             "   Instructions    set from a shell\n" ++
             " New Sessions\n" ++
@@ -676,8 +677,9 @@ test "defaults that cannot be read say why on their rows, never a blank" {
 test "Up and Down step over fixed rows and stop at either end" {
     try std.testing.expectEqual(Setting.effort, step(.effort, false));
     try std.testing.expectEqual(Setting.permissions, step(.effort, true));
-    try std.testing.expectEqual(Setting.default_model, step(.headroom, true));
-    try std.testing.expectEqual(Setting.headroom, step(.default_model, false));
+    try std.testing.expectEqual(Setting.model, step(.headroom, true));
+    try std.testing.expectEqual(Setting.default_model, step(.model, true));
+    try std.testing.expectEqual(Setting.model, step(.default_model, false));
     try std.testing.expectEqual(Setting.default_store, step(.default_store, true));
     for (std.enums.values(Setting)) |setting| for ([_]bool{ false, true }) |down| {
         try std.testing.expect(rows.get(step(setting, down)).change != .fixed or step(setting, down) == setting);
@@ -696,7 +698,7 @@ test "a row's draft is its command, with a typed row's value as the command read
         // The list offers `default`; a number is typed.
         .{ .compact_at, "/configure --compaction-trigger " },
         .{ .headroom, "/configure --output-reservation " },
-        .{ .model, null },
+        .{ .model, "/configure --model gpt-6.1-sol" },
         .{ .store, null },
         .{ .instructions, null },
         .{ .default_model, "/setup --provider codex --model gpt-6.1-sol" },

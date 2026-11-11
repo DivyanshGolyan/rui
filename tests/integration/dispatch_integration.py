@@ -1927,14 +1927,14 @@ def main(mode="all", correlation_case="all"):
         before_model_change = command(
             "session", "inspect", "--store", success_store, "--session", success_session
         )["session"]
-        incompatible_args = (
+        model_change_args = (
             "session", "configure",
             "--store",
             success_store,
             "--record",
-            state / "incompatible-model.json",
+            state / "changed-model.json",
             "--key",
-            "incompatible-model",
+            "changed-model",
             "--session",
             success_session,
             "--model",
@@ -1942,26 +1942,25 @@ def main(mode="all", correlation_case="all"):
             "--tools",
             "bash",
         )
-        incompatible = command(*incompatible_args, expect=3)
-        assert incompatible["answer"]["status"] == "rejected", incompatible
-        assert incompatible["answer"]["code"] == "model_is_immutable", incompatible
-        replayed_incompatible = command(
+        model_change = command(*model_change_args, expect=0)
+        assert model_change["answer"]["status"] == "accepted", model_change
+        replayed_model_change = command(
             "request", "recover",
             "--store",
             success_store,
             "--record",
-            state / "incompatible-model.json",
+            state / "changed-model.json",
             "--kind",
             "configure",
-            expect=3,
+            expect=0,
         )
-        assert replayed_incompatible["answer"]["status"] == "rejected", replayed_incompatible
-        assert replayed_incompatible["answer"]["replayed"] is True, replayed_incompatible
+        assert replayed_model_change["answer"]["status"] == "accepted", replayed_model_change
+        assert replayed_model_change["answer"]["replayed"] is True, replayed_model_change
         after_model_change = command(
             "session", "inspect", "--store", success_store, "--session", success_session
         )["session"]
-        assert after_model_change["model"] == "gpt-6-sol", after_model_change
-        assert after_model_change["revision"] == before_model_change["revision"], (
+        assert after_model_change["model"] == "gpt-6.1-sol", after_model_change
+        assert int(after_model_change["revision"]) == int(before_model_change["revision"]) + 1, (
             before_model_change,
             after_model_change,
         )
@@ -1981,11 +1980,9 @@ def main(mode="all", correlation_case="all"):
         assert history(first_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
         ]
-        expected_reasoning = dict(first_reasoning)
-        expected_reasoning.pop("created_by")
+        assert second_request["model"] == "gpt-6.1-sol", second_request
         assert history(second_request["input"]) == [
             {"role": "user", "content": [{"type": "input_text", "text": "first question"}]},
-            expected_reasoning,
             first_message_item,
             {"role": "user", "content": [{"type": "input_text", "text": "second question"}]},
         ], history(second_request["input"])
@@ -3443,15 +3440,14 @@ def main(mode="all", correlation_case="all"):
             "gpt-6.1-sol",
             "--tools",
             "none",
-            expect=3,
+            expect=0,
         ))
-        assert active_model_change["answer"]["status"] == "rejected", active_model_change
-        assert active_model_change["answer"]["code"] == "model_is_immutable"
+        assert active_model_change["answer"]["status"] == "accepted", active_model_change
         active_settings = frozen_peers.call("inspect", lambda: command(
             "session", "inspect", "--store", store, "--session", main_session
         ))["session"]
-        assert active_settings["model"] == "gpt-6-sol", active_settings
-        assert active_settings["tools"] == ["bash"], active_settings
+        assert active_settings["model"] == "gpt-6.1-sol", active_settings
+        assert active_settings["tools"] == [], active_settings
         frozen_peers.call("message", lambda: message(state, store, "message-b", main_session, "later message"))
         assert len(endpoint.requests) == 1
         resources = frozen_peers.call("inspect", lambda: command(
@@ -3502,10 +3498,9 @@ def main(mode="all", correlation_case="all"):
             "gpt-6.1-sol",
             "--permission-mode",
             "bypass",
-            expect=3,
+            expect=0,
         ))
-        assert post_failure_model_change["answer"]["status"] == "rejected"
-        assert post_failure_model_change["answer"]["code"] == "model_is_immutable"
+        assert post_failure_model_change["answer"]["status"] == "accepted"
         # The queued Message starts its own Turn once the first one fails.
         successor_deadline = time.monotonic() + 8
         wait_for(
@@ -3597,7 +3592,7 @@ def main(mode="all", correlation_case="all"):
         ]
         assert successor["input"] == later_input, successor
         assert successor["instructions"] == model_instructions(ROOT, "A", store=store, session=main_session), successor
-        assert successor["model"] == "gpt-6-sol", successor
+        assert successor["model"] == "gpt-6.1-sol", successor
         assert successor["tools"] == [], successor
         assert successor["text"] == {"verbosity": "low"}, successor
 
@@ -3612,7 +3607,7 @@ def main(mode="all", correlation_case="all"):
             {"role": "user", "content": [{"type": "input_text", "text": "after restart"}]}
         ], restarted
         assert restarted["instructions"] == successor["instructions"], restarted
-        assert restarted["model"] == "gpt-6-sol", restarted
+        assert restarted["model"] == "gpt-6.1-sol", restarted
         assert restarted["tools"] == [], restarted
         assert restarted["text"] == {"verbosity": "low"}, restarted
         wait_for(lambda: observe(store, "message-c").get("result", {}).get("code") == "provider_http_422", "post-restart successor failure")

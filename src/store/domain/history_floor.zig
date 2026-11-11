@@ -19,6 +19,7 @@
 //! counted. The newest unit is always kept: it is the work in hand.
 
 const std = @import("std");
+const output_item = @import("../../output_item.zig");
 const model_capability = @import("../../model_capability.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const rsql = @import("../rsql.zig");
@@ -103,12 +104,13 @@ const floor_facts = rsql.Read(.{
     .sql = "SELECT current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
         "coalesce((SELECT min(first.session_position) FROM conversation_entry first @index(conversation_entry_history) " ++
         "WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) AS first_message," ++
-        "current.output_reservation,r.model FROM model_operation current " ++
+        "current.output_reservation,r.model,base_revision.model AS base_model FROM model_operation current " ++
         "JOIN session_revision r ON r.session_ref=current.session_ref AND r.revision=current.settings_revision " ++
         "LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
         "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
         "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position " ++
         "ORDER BY selected.admission_position DESC LIMIT 1) " ++
+        "LEFT JOIN session_revision base_revision ON base_revision.session_ref=base.session_ref AND base_revision.revision=base.settings_revision " ++
         "WHERE current.operation_id=?1 AND current.purpose=1",
     .Args = struct { operation: u64 },
     .Row = struct {
@@ -120,6 +122,7 @@ const floor_facts = rsql.Read(.{
         first_message: u64,
         output_reservation: u64,
         model: Bounded(model_capability.max_model_bytes),
+        base_model: ?Bounded(model_capability.max_model_bytes),
     },
     .cardinality = .one,
 });
@@ -170,21 +173,24 @@ const units = rsql.Read(.{
 
 /// The floor of the Session ?1's newest compaction base below position ?2.
 const base_floor_read = rsql.Read(.{
-    .sql = "SELECT history_floor FROM model_operation @index(model_operation_compaction_bases) WHERE session_ref=?1 AND purpose=1 AND " ++
-        store_schema.resolutionIs("resolution_code", .compacted) ++ " AND admission_position<?2 ORDER BY admission_position DESC LIMIT 1",
+    .sql = "SELECT base.history_floor,r.model FROM model_operation base @index(model_operation_compaction_bases) " ++
+        "JOIN session_revision r ON r.session_ref=base.session_ref AND r.revision=base.settings_revision " ++
+        "WHERE base.session_ref=?1 AND base.purpose=1 AND " ++
+        store_schema.resolutionIs("base.resolution_code", .compacted) ++ " AND base.admission_position<?2 ORDER BY base.admission_position DESC LIMIT 1",
     .Args = struct { session: []const u8, boundary: u64 },
-    .Row = struct { history_floor: ?rsql.Positive },
+    .Row = struct { history_floor: ?rsql.Positive, model: Bounded(model_capability.max_model_bytes) },
     .cardinality = .optional,
 });
 
 /// The floor a compaction that makes no room keeps: its base's, so a
 /// later base drops what the one it replaces dropped. A failed step is
 /// `CorruptStore`.
-pub fn inheritedFloor(a: anytype, session: []const u8, boundary: u64) !?u64 {
+pub fn inheritedFloor(a: anytype, session: []const u8, boundary: u64, model: []const u8) !?u64 {
     var found: base_floor_read.Result = undefined;
     a.read(base_floor_read, .{ .session = session, .boundary = boundary }, &found);
     try store_access.runAs(a, error.CorruptStore);
     const row = found orelse return null;
+    if (!output_item.Kind.compaction.replayableTo(row.model.slice(), model, .selected_base)) return null;
     return if (row.history_floor) |floor| floor.get() else null;
 }
 
@@ -202,7 +208,8 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Room {
     try store_access.runAs(a, error.CorruptStore);
     const from: u8 = facts.history_level orelse 0;
     if (from >= levels) return null;
-    const base_floor: u64 = if (facts.base_floor) |floor| floor.get() else 0;
+    const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
+    const base_floor: u64 = if (compatible) (if (facts.base_floor) |floor| floor.get() else 0) else 0;
     const previous: u64 = if (facts.history_floor) |floor| floor.get() else base_floor;
     var walk: Walk = .init(model_capability.contextWindow(facts.model.slice()), facts.output_reservation, facts.admission_position.get());
     while (!walk.done()) {
@@ -212,7 +219,7 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Room {
             .below = walk.cursor,
             .above = base_floor,
             .first_message = facts.first_message,
-            .frontier = facts.frontier,
+            .frontier = if (compatible) facts.frontier else 0,
         }, page_rows, &walk);
         try store_access.runAs(a, error.CorruptStore);
         if (walk.page_rows < page_rows) break;
