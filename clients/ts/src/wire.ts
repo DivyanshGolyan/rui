@@ -3196,7 +3196,7 @@ export interface components {
         StartError: {
             rui_start_error: {
                 /** @enum {string} */
-                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version_unsupported" | "mysql_durability_unsafe" | "mysql_read_only" | "mysql_binlog_unsafe" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision";
+                code: "launch_frame_invalid" | "invalid_preset" | "store_locked" | "store_schema_missing" | "store_schema_behind" | "mysql_version" | "mariadb" | "read_only_replica" | "durability_innodb_flush_log_at_trx_commit" | "durability_sync_binlog" | "binlog_statement" | "mysql_unreachable" | "mysql_login" | "store_fenced" | "runtime_dir_unusable" | "tool_name_collision";
                 message: string;
             };
         };
