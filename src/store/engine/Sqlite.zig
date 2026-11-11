@@ -277,6 +277,11 @@ pub inline fn endStatement(statement: ?Statement) void {
     if (statement) |stepped| sqlite.resetCached(@ptrCast(stepped));
 }
 
+/// SQLite defers the blob write until preceding queued rows have stepped.
+pub fn queuePayload(_: *Sqlite, content_id: u64, bytes: []const u8, host: anytype) void {
+    host.payload(content_id, bytes);
+}
+
 pub fn writePayload(self: *Sqlite, content_id: u64, bytes: []const u8) Failure!void {
     var blob: ?*c.sqlite3_blob = null;
     if (c.sqlite3_blob_open(self.database, "main", "content", "payload", @intCast(content_id), 1, &blob) != c.SQLITE_OK) return error.ContentWriteFailed;

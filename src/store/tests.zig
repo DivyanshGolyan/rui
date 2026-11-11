@@ -1104,6 +1104,74 @@ pub const TestingRound = struct {
     }
 };
 
+test "buffered payload boundaries and streamed payloads preserve the same bytes under queue pressure" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const insert = rsql.Write(.{
+                .sql = "INSERT INTO content(content_id,digest,byte_length,payload,private) VALUES(?1,?2,?3,zeroblob(?3),?4)",
+                .Args = struct { id: u64, digest: [32]u8, length: u64, private: bool },
+                .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
+            });
+            const chunk = store_schema.content_chunk_bytes;
+            const source = try std.testing.allocator.alloc(u8, 9 * chunk + 17);
+            defer std.testing.allocator.free(source);
+            // Nonuniform bytes expose chunk-index and boundary mistakes.
+            for (source, 0..) |*byte, i| byte.* = @truncate(i *% 31 + i / chunk);
+            var window: [4093]u8 = undefined;
+            for ([_]usize{ 0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk + 17, source.len }) |length| {
+                const bytes = source[0..length];
+                const entry = try store_core.enter(&storage, .none);
+                defer entry.release();
+                var a: store_access.Access(.write, error{}) = .open(&entry);
+                defer a.deinit();
+                errdefer a.abandon(.{}) catch {};
+                var ids: [2]u64 = undefined;
+                for (&ids, 0..) |*id, method| {
+                    id.* = try a.identity(.content_id);
+                    // A fixture key distinct from built-in empty content;
+                    // this test exercises raw bytes, not content admission.
+                    a.write(insert, .{ .id = id.*, .digest = protocol.contentDigest("adapter parity fixture"), .length = length, .private = method == 1 });
+                    if (method == 0) {
+                        // Existing writeContent callers need not record a
+                        // row or open the public sink to lower their bytes.
+                        a.writeContent(id.*, bytes);
+                    } else {
+                        a.recordContentRow(id.*);
+                        const sink = try a.contentSink(id.*, length);
+                        defer sink.close();
+                        var at: usize = 0;
+                        while (at < length) {
+                            const n = @min(window.len, length - at);
+                            try sink.write(bytes[at..][0..n], at);
+                            at += n;
+                        }
+                    }
+                }
+                try a.commit();
+                // Read bounded windows through the adapter, across every
+                // boundary, rather than trusting row counts or digests.
+                for (ids) |id| {
+                    var offset: usize = 0;
+                    while (offset < length) {
+                        const n = @min(window.len, length - offset);
+                        try a.readRaw(id, offset, window[0..n]);
+                        try std.testing.expectEqualSlices(u8, bytes[offset..][0..n], window[0..n]);
+                        offset += n;
+                    }
+                    try std.testing.expectEqual(length, try store_testing.queryU64(&storage, "SELECT byte_length FROM content WHERE content_id=?1", .{id}));
+                }
+                try std.testing.expect(!storage.engine.inTransaction());
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
 test "a content sink opens only on a content row its Access itself queued, in the same round" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
