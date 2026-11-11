@@ -90,13 +90,22 @@ jobs:
       - name: Start detached, then install, save real work, reinstall and restart the same Store
         # Each check's only copy; steps.py records the failed ones for a promotion to replay.
         timeout-minutes: 45
+        env:
+          # A PR's Selected suites already run host-launch-integration on the PR
+          # build whenever the change reaches it. Promotion and manual runs
+          # repeat it here on the shipped build, which costs a second LLVM compile.
+          HOST_LAUNCH: ${{ github.event_name != 'pull_request' }}
         run: |
           set -euo pipefail
           uname -sm
           git rev-parse HEAD
           zig version
+          startup=()
+          if [ "$HOST_LAUNCH" = true ]; then
+            startup=('startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all')
+          fi
           python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/rui-upgrade-data" \
-            'startup=RUI_FAILURE_ARTIFACTS="$RUNNER_TEMP/rui-failure-artifacts" zig build host-launch-integration -j2 --summary all' \
+            ${startup[@]+"${startup[@]}"} \
             'current-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py . .' \
             'previous-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'
       - name: Retain bounded failed-fixture diagnostics
