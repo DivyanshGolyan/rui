@@ -12401,30 +12401,6 @@ test "explicit or retained null effort on a listed model refuses a mixed update 
     }.run);
 }
 
-test "a null effort is refused for listed reasoning models and admitted for unlisted models" {
-    var requested: wire_request.Configuration = .{};
-    requested.reasoning_effort.state = .explicit_null;
-    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
-    try current.model.set("gpt-6.1-sol");
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex).?);
-    try current.model.set("model-a");
-    try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex) == null);
-}
-
-test "null effort supports nonreasoning catalog entries but never clears assigned effort" {
-    var requested: wire_request.Configuration = .{};
-    requested.reasoning_effort.state = .explicit_null;
-    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
-    for ([_][]const u8{ "openai/whisper-1", "unlisted-model" }) |model| {
-        try current.model.set(model);
-        current.reasoning_effort = null;
-        try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex) == null);
-        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
-        current.reasoning_effort = .low;
-        try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_defs.built_in_tool_set, &current, &requested, .codex).?);
-    }
-}
-
 test "configuration validates effective effort across retained requested and target model states" {
     const catalog = @import("../model_catalog.zig");
     const efforts = std.enums.values(protocol.ReasoningEffort);
