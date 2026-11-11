@@ -481,6 +481,44 @@ pub fn parseHostInfoForProfile(body: []const u8, store: []const u8, profile: Hos
     };
 }
 
+test "Host information parses omitted and bounded string diagnostics with one selector bound" {
+    const host_reply = @import("host_reply.zig");
+    for ([_][]const u8{ "/sqlite", "0123456789abcdef0123456789abcdef", &@as([protocol.max_store_bytes]u8, @splat('s')) }) |selector| {
+        var info: host_reply.HostInfo = .{
+            .store = selector,
+            .instance = @splat(1),
+            .active_capacity = 2,
+            .intake_capacity = 100,
+            .descriptor_soft_limit = 1024,
+            .started_at = 1792918800,
+            .custody_occupied = 0,
+            .paused = false,
+            .routes = protocol.routesAll(.unserved),
+            .doublewrite = null,
+        };
+        var response: protocol.ResponseBuffer = .{};
+        try response.render(host_reply.renderHostInfo, .{info});
+        const omitted = try parseHostInfo(response.slice(), selector);
+        try std.testing.expect(omitted.ready.innodb_doublewrite == null);
+        try std.testing.expect(std.mem.indexOf(u8, response.slice(), "innodb_doublewrite") == null);
+        // Exercise every admitted width, including JSON escaping at the bound.
+        const escaped = @as([32]u8, @splat(1));
+        for (0..escaped.len + 1) |len| {
+            response.len = 0;
+            info.doublewrite = escaped[0..len];
+            try response.render(host_reply.renderHostInfo, .{info});
+            const present = try parseHostInfo(response.slice(), selector);
+            try std.testing.expectEqualStrings(escaped[0..len], present.ready.innodb_doublewrite.?.slice());
+        }
+        response.len = 0;
+        info.doublewrite = "";
+        try response.render(host_reply.renderHostInfo, .{info});
+        const oversized = try std.mem.replaceOwned(u8, std.testing.allocator, response.slice(), "\"innodb_doublewrite\":\"\"", "\"innodb_doublewrite\":\"" ++ (&@as([33]u8, @splat('x'))) ++ "\"");
+        defer std.testing.allocator.free(oversized);
+        try std.testing.expectError(error.ValueTooLong, parseHostInfo(oversized, selector));
+    }
+}
+
 test "Host information is bounded and rejects ambiguous identities and capacity" {
     const golden = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}";
     const result = try parseHostInfo(golden, "/one");

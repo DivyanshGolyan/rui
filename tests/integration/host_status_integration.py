@@ -7,15 +7,20 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+from urllib.parse import quote
 
 import host_process
 from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
+import live_engines
+import launch_frame_fixture
 from host_status_fixture import ACTOR, RUI, complete_response, socket_path, status
 
 
@@ -338,8 +343,71 @@ def discovery_body_deadline(root):
         stop_process(host)
 
 
+def mysql_host_info():
+    socket = os.environ.get(live_engines.MYSQL_SOCKET)
+    password = os.environ.get(live_engines.MYSQL_ROOT_PASSWORD)
+    if not socket or not password:
+        assert "mysql" not in os.environ.get(live_engines.REQUIRE, "").split(","), "required MySQL host-info fixture has no server"
+        print("MySQL host-info: skipped (no RUI_TEST_MYSQL_* server)")
+        return
+    admin = pathlib.Path(sys.argv[3]).resolve()
+    database = "rui_host_info_" + secrets.token_hex(6)
+
+    def sql(text):
+        return subprocess.run([admin], input=text, text=True, capture_output=True, check=True, timeout=20).stdout.strip()
+
+    with tempfile.TemporaryDirectory(prefix="rui-host-info-mysql-") as root:
+        root = canonical_fixture_root(root)
+        runtime = root / "run"
+        runtime.mkdir(mode=0o700)
+        child = None
+        try:
+            sql(f"CREATE DATABASE {database} CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin")
+            ddl = subprocess.run([RUI, "store", "schema", "--engine", "mysql"], check=True, capture_output=True, text=True, timeout=20).stdout
+            sql(f"USE {database};" + ddl)
+            url = f"mysql://root:{quote(password, safe='')}@{quote(socket, safe='')}/{database}"
+            # Credentials travel only through the launch frame, never argv or
+            # the child's environment. The Host answers with its opaque id.
+            child = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     env={key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ})
+            child.stdin.write(launch_frame_fixture.frame({
+                "v": 1, "store": url, "runtimeDir": str(runtime), "activeCapacity": 2,
+                "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-host-info-test"},
+            }))
+            child.stdin.flush()
+            sock = runtime / "rui.sock"
+            try:
+                launch_frame_fixture.wait_for_host(sock, "", child)
+            except AssertionError:
+                if child.poll() is None:
+                    raise
+                out, err = launch_frame_fixture.output(child)
+                raise AssertionError(f"MySQL Host exited {child.returncode} before readiness: stdout={out!r} stderr={err!r}") from None
+            discovered = launch_frame_fixture.host_info(sock, "")
+            selector = discovered["store"]
+            assert re.fullmatch(r"[0-9a-f]{32}", selector), discovered
+            info = launch_frame_fixture.host_info(sock, selector)
+            diagnostic = info["innodb_doublewrite"]
+            assert isinstance(diagnostic, str) and len(diagnostic.encode()) <= 32, info
+            assert diagnostic == sql("SELECT @@global.innodb_doublewrite"), info
+            # The same neutral common fields as SQLite; only this optional
+            # member differs. No engine-specific reply variant is introduced.
+            assert set(info) == {"version", "type", "store", "instance", "active_capacity", "intake_capacity",
+                                 "descriptor_limit", "started_at", "custody_occupied", "paused", "capabilities", "innodb_doublewrite"}, info
+            assert info["type"] == "host_info" and info["version"] == host_process.WIRE_VERSION, info
+            print(f"MySQL host-info passed: opaque selector, bounded non-null diagnostic={diagnostic}")
+        finally:
+            dispose_all(
+                lambda: host_process.close_stdin(child) if child is not None else None,
+                lambda: stop_process(child) if child is not None else None,
+                lambda: sql(f"DROP DATABASE IF EXISTS {database}"),
+            )
+
+
 def main():
     prove_fragmented_request()
+    mysql_host_info()
     with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root:
         root = canonical_fixture_root(root)
         protected_saturation(root)
@@ -588,6 +656,7 @@ def main():
             head, body = exchange("host_info", lambda: raw_info(stale, store.resolve()), 5).split(b"\r\n\r\n", 1)
             assert head.startswith(b"HTTP/1.1 200 OK\r\n")
             assert f"Content-Length: {len(body)}".encode() in head.split(b"\r\n")
+            assert "innodb_doublewrite" not in json.loads(body), body
             assert json.loads(body) == {
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3",
