@@ -435,7 +435,7 @@ noinline fn submitCreating(
         .invalid_session_reference
     else if (!sender_valid)
         .invalid_sender_handle
-    else if (command.require_model and !configuration_domain.servesProviderOf(served, configuration, null))
+    else if (command.require_model and !configuration_domain.servesProviderOf(served, configuration, if (creation.inherits_parent and creation.parent_found.get()) creation.inherited.provider else null))
         .model_capability_unavailable
     else
         null;
@@ -669,13 +669,6 @@ pub const AgentStart = enum {
 
 /// The calling Session's settings a `start_agent` call inherits or may
 /// only narrow. Its Workspace fills the creating Configuration in place.
-const parent_settings = rsql.Read(.{
-    .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1",
-    .Args = struct { session: []const u8 },
-    .Row = struct { workspace: *Bounded(workspace_path.max_bytes), provider: provider_name.Provider, tools: *Bounded(tool_set.max_names_bytes), permission_mode: u8 },
-    .cardinality = .optional,
-});
-
 /// Runs a `start_agent` call as one core command (D24, D122): creates a
 /// Session with `configuration` in the caller's Workspace and with its
 /// provider (D122, D221), as its child when `attached`, admits `task` to it
@@ -703,41 +696,33 @@ pub fn startAgent(
     a.read(action_domain.core_facts, names.args(.{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }), &facts);
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
-    configuration.workspace = .{ .state = .value, .value = .{ .len = 0 } };
+    configuration.parent.state = .value;
+    try configuration.parent.value.set(caller);
     // Over 4.6 KB, so held where the Store owns it, as a configure does.
     const creation = a.store.configurationReads();
     creation.* = .{ .next = .{ .workspace = .{ .len = 0 }, .model = .{ .len = 0 } } };
-    var parent: parent_settings.Row = .{ .workspace = &configuration.workspace.value, .provider = undefined, .tools = &creation.saved_tools.names, .permission_mode = undefined };
-    var parent_found: store_access.Found = .missing;
-    a.readInto(parent_settings, .{ .session = caller }, &parent, &parent_found);
+    creation.attach_parent = attached;
     configuration_domain.prepareConfiguration(a, "", configuration, creation);
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
-    if (!parent_found.get() or !std.mem.eql(u8, &found.session.ref, caller)) return error.CorruptStore;
+    if (!std.mem.eql(u8, &found.session.ref, caller)) return error.CorruptStore;
     if (found.stopped) {
         try a.abandon(.{});
         return .stopped;
     }
+    if (!creation.parent_found.get()) return error.CorruptStore;
     var result_buffer: [192]u8 = undefined;
     const refusal: ?[]const u8 = refusal: {
         if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
-        var requested = configuration.tools.iterator();
-        while (requested.next()) |name| {
-            var allowed = std.mem.splitScalar(u8, parent.tools.slice(), ',');
-            while (allowed.next()) |member| {
-                if (std.mem.eql(u8, name, member)) break;
-            } else break :refusal std.fmt.bufPrint(&result_buffer, "spec.tools: {s} is not one of your tools. Nothing was started.", .{name}) catch unreachable;
+        if (try configuration_domain.inheritParent(configuration, creation)) |code| {
+            if (creation.parent_failure) |failure| break :refusal failure.text(&result_buffer, "started");
+            break :refusal std.fmt.bufPrint(&result_buffer, "Rui could not start the agent ({s}). Nothing was started.", .{@tagName(code)}) catch unreachable;
         }
-        if (try configuration_domain.permissionMode(parent.permission_mode) == .ask and !configuration.permission_mode.value.eql("ask"))
-            break :refusal "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was started.";
         // The Host bound the task's `/name` words to the new Session's skills.
         if (captured) |value| if (value.* == .failed)
             break :refusal std.fmt.bufPrint(&result_buffer, "{s} Nothing was started.", .{value.failed.bytes[0..@min(value.failed.bytes.len, 150)]}) catch unreachable;
         break :refusal null;
     };
-    configuration.provider = .{ .state = .value, .value = .{ .len = 0 } };
-    configuration.provider.value.set(@tagName(parent.provider)) catch unreachable;
-    if (attached) creation.parent = found.session.ref;
     const application: ?configuration_domain.Application = if (refusal == null)
         try configuration_domain.applyConfiguration(a, io, "", configuration, initial_skills, faults, creation)
     else
@@ -1765,8 +1750,8 @@ const permission_target = rsql.Read(.{
 /// Round 1 reads the saved command. Its kind picks what round 2 reads,
 /// keyed on the command alone: a dependent round, one more network round
 /// trip, run only for a kind that saved more than its answer. A queued or
-/// processing Message's progress is its Session's work, read in the rounds
-/// after (`readMessageWork`).
+/// processing Message's progress is its Session's work, which round 1
+/// reads too while a Turn is active (`readMessageWork`).
 pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
@@ -1774,7 +1759,11 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
     // reads the Message it accepted: both are keyed by the command key.
     var message: message_observation.Result = undefined;
     a.read(message_observation, .{ .key = key }, &message);
-    try a.run();
+    // A pending Message's progress is its Session's work, whose active
+    // Turn is keyed by the command too.
+    var work: report_domain.WorkRead = .{ .session = "" };
+    work.queuePending(a, key);
+    try store_access.runNamed(a, report_domain.pending_failures, error.StatementFailed);
     const command = try savedAnswer(&saved) orelse {
         observation.* = .{ .status = .absent };
         return;
@@ -1796,7 +1785,7 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             observation.kind.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
             if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
             switch (queue.state) {
-                .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, command.target.slice(), row.created_at.get(), queue.state),
+                .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, &work, command.target.slice(), row.created_at.get(), queue.state),
                 else => {},
             }
         },
@@ -1870,11 +1859,13 @@ fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
 }
 
 /// A pending Message's progress is its Session's work: its own active
-/// Turn, or the work ahead of it in the queue. Its rounds follow the
-/// observation's, whose row says whether the Message is pending.
-fn readMessageWork(a: *report_domain.ReadAccess, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !session_work.Work {
-    var read: report_domain.WorkRead = .{ .session = session_ref };
-    try report_domain.readWorks(a, (&read)[0..1]);
+/// Turn, or the work ahead of it in the queue. The observation's round
+/// read an active Turn (`queuePending`); with none, the stop and queue
+/// stages follow in their own rounds.
+fn readMessageWork(a: *report_domain.ReadAccess, read: *report_domain.WorkRead, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !session_work.Work {
+    read.session = session_ref;
+    try read.advance();
+    try report_domain.readWorks(a, read[0..1]);
     const work = try read.work(created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
     if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
     return work;

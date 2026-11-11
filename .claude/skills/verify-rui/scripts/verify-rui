@@ -1941,6 +1941,13 @@ def frame_expectations(state):
     return value
 
 
+def frame_absences(state):
+    value = state.get("absent", [])
+    if not isinstance(value, list) or not all(isinstance(text, str) and text and "\0" not in text for text in value):
+        raise ValueError(f"{state['name']}: absent must be a list of nonempty text markers")
+    return value
+
+
 def cast_entries(entries):
     for entry in entries:
         for n in range(1, entry.get("count", 1) + 1):
@@ -2014,7 +2021,8 @@ def validate_scenario(data, sizes=None):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
-        normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state)})
+        normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state),
+                                  "absent": frame_absences(state)})
     return {**data, "sizes": override or default_sizes, "states": normalized_states}
 
 
@@ -2167,6 +2175,9 @@ def frame_capture(run, target, out, state, size, reason):
     missing = next((text for text in frame_expectations(state) if text not in plain), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
+    unexpected = next((text for text in frame_absences(state) if text in plain), None)
+    if unexpected is not None and reason is None:
+        reason = f"unexpected on screen: {unexpected}"
     info = run.tmux("display-message", "-p", "-t", target,
                     "#{cursor_x} #{cursor_y} #{cursor_flag}").stdout.split()
     cx, cy, visible = map(int, info)
@@ -2282,8 +2293,12 @@ def cmd_frames(args):
                 frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
             except (Exception, SystemExit) as error:
                 reason = str(error)
-                failed = True
-                print(f"verify-rui: {state['name']}: {reason}", file=sys.stderr)
+                if state["name"] in selected:
+                    failed = True
+                    print(f"verify-rui: {state['name']}: {reason}", file=sys.stderr)
+                else:
+                    print(f"verify-rui: warning: {state['name']}: {reason} "
+                          "(not selected; its failure does not fail this run)", file=sys.stderr)
                 if opened and state["name"] in selected:
                     try:
                         failure_capture = frame_capture(run, target, out, state, state_sizes[0], reason)

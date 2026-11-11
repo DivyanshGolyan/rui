@@ -624,7 +624,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
     switch (event) {
-        .init, .focus_in => try ctx.requestFocus(if (self.app_input.permission) |card| card.widget() else self.app_input.composer.widget()),
+        .init, .focus_in => try ctx.requestFocus(if (self.app_input.permission != null and self.app_consent.row == .selector) self.app_card.widget() else self.app_input.composer.widget()),
         .tick => {
             _ = try self.update();
             // An Upgrade's hold shows no choice: nothing decided could be
@@ -663,15 +663,50 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
             self.shown_notice.dismiss();
-            const question = event == .key_press and !pasting and typesQuestion(event.key_press);
+            const question = self.app_consent.request == null and event == .key_press and !pasting and typesQuestion(event.key_press);
             const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
             self.shortcuts_open = shortcut == .open;
             if (shortcut == .open) {
                 // The key types nothing.
             } else if (self.app_consent.request != null) {
-                if (event == .key_press and !pasting) if (Editor.selectKey(conversation_keys, event.key_press) == .action) {
-                    try self.perform(Editor.selectKey(conversation_keys, event.key_press).action);
+                // Choice classification has no authority over draft editing.
+                // Only Esc and Enter bypass the normal editor on that row.
+                const selected = if (self.app_consent.row == .selector) Editor.selectEvent(conversation_keys, event, pasting) else .none;
+                const row_key: ActionConsent.RowKey = if (self.app_consent.row == .draft)
+                    if (event == .key_press and !pasting) key: {
+                        if (Editor.isEnter(event.key_press)) break :key .enter;
+                        if (Editor.named(event.key_press)) |named| if (named == .escape or named == .ctrl_g) break :key .escape;
+                        break :key .other;
+                    } else .other
+                else switch (selected) {
+                    .text => if (event == .paste_start or pasting) .paste else if (event == .invalid_key) .other else .printable,
+                    .enter => .enter,
+                    .left, .right => .arrows,
+                    .action => |action| if (action == .close) .escape else .screen,
+                    else => .other,
                 };
+                const previous = self.app_consent.row;
+                switch (self.app_consent.route(row_key)) {
+                    .screen => if (selected == .action) {
+                        try self.perform(selected.action);
+                    },
+                    .selector => try self.app_card.widget().handleEvent(ctx, event),
+                    .blocked => if (row_key == .enter) {
+                        self.notice = "Not sent: this Action needs a decision";
+                    },
+                    .draft => switch (self.input.appEvent(conversation_keys, event, pasting, false)) {
+                        .busy => self.notice = "Not sent: this Action needs a decision",
+                        .editor => |outcome| switch (outcome) {
+                            .action => |action| try self.perform(action),
+                            .refused => |why| self.notice = refusedNotice(why),
+                            .none, .append, .redraw, .submit => {},
+                        },
+                        .message, .command => unreachable, // Sending is disabled while consent waits.
+                    },
+                }
+                if (self.app_consent.request != null and previous != self.app_consent.row) {
+                    try ctx.requestFocus(if (self.app_consent.row == .selector) self.app_card.widget() else self.app_input.composer.widget());
+                }
             } else {
                 self.notice = null;
                 // One submission at a time: a decision or Message in flight,
@@ -932,6 +967,144 @@ test "App Session retains the draft across a permission card arriving during pas
     _ = try widget_.draw(draw_context);
     try std.testing.expectEqual(null, self.app_input.permission);
     try std.testing.expectEqual(null, self.submission.task.thread);
+}
+
+test "App Session approval keeps typed abc through Esc and Allow once with its caret" {
+    for ([_]bool{ false, true }) |existing_draft| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        if (existing_draft) {
+            _ = self.input.append("leftTAIL");
+            self.input.editors[self.input.active].cursor = 4;
+        }
+        const file = try held.adopt(3);
+        defer file.close(std.testing.io);
+        try std.testing.expectEqual(ConsentPolicy.Row.selector, self.app_consent.row);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") != null);
+        try held.keys("abc");
+        try std.testing.expectEqual(ConsentPolicy.Row.draft, self.app_consent.row);
+        const expected = if (existing_draft) "leftabcTAIL" else "abc";
+        const caret: usize = if (existing_draft) 7 else 3;
+        try std.testing.expectEqualStrings(expected, self.input.composition().bytes);
+        try std.testing.expectEqual(caret, self.input.composition().cursor);
+        const drafting = try held.shown();
+        try std.testing.expect(std.mem.indexOf(u8, drafting, expected) != null);
+        try std.testing.expect(std.mem.indexOf(u8, drafting, "row 000") != null);
+        try std.testing.expect(std.mem.indexOf(u8, drafting, "Allow once") == null);
+        try held.keys("\r"); // Draft Enter sends and decides nothing.
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(@as(?u64, 0xa), self.app_consent.request);
+        try std.testing.expectEqualStrings("Not sent: this Action needs a decision", self.shown_notice.current(self.nowMs()).?);
+        try held.keys("\x1b");
+        try std.testing.expectEqual(ConsentPolicy.Row.selector, self.app_consent.row);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "Allow once") != null);
+        try held.keys("\r");
+        try std.testing.expect(self.app_input.permission == null);
+        try std.testing.expect(self.app_consent.request == null);
+        try std.testing.expectEqual(Submission.Intent{ .decision = .{ .action = 0xa, .decision = .allow_once } }, self.submission.intent.?);
+        try std.testing.expectEqualStrings(expected, self.input.composition().bytes);
+        try std.testing.expectEqual(caret, self.input.composition().cursor);
+        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), expected) != null);
+    }
+}
+
+test "App Session approval pastes into the kept draft and draft arrows never move the choice" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    _ = self.input.append("leftTAIL");
+    self.input.editors[self.input.active].cursor = 4;
+    const file = try held.adopt(3);
+    defer file.close(std.testing.io);
+    try held.keys("\x1b[200~abc\r\nxyz\x1b[201~");
+    try std.testing.expectEqual(ConsentPolicy.Row.draft, self.app_consent.row);
+    try std.testing.expectEqualStrings("leftabc\nxyzTAIL", self.input.composition().bytes);
+    try std.testing.expectEqual(@as(usize, 11), self.input.composition().cursor);
+    try held.keys("\x1b[D");
+    try std.testing.expectEqual(@as(usize, 10), self.input.composition().cursor);
+    try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, self.app_consent.highlight);
+    try std.testing.expect(self.submission.intent == null);
+    try held.keys("\x03");
+    try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
+    try std.testing.expectEqualStrings("leftabc\nxyzTAIL", self.input.composition().bytes);
+}
+
+test "App Session approval routing gives the draft editor first refusal for single and multiline keys" {
+    const Key = enum { up, down, home, end, left, right, delete_next };
+    const Case = struct { key: Key, bytes: []const u8, press: vaxis.Key };
+    const cases = [_]Case{
+        .{ .key = .up, .bytes = "\x1b[A", .press = .{ .codepoint = vaxis.Key.up } },
+        .{ .key = .down, .bytes = "\x1b[B", .press = .{ .codepoint = vaxis.Key.down } },
+        .{ .key = .home, .bytes = "\x1b[H", .press = .{ .codepoint = vaxis.Key.home } },
+        .{ .key = .end, .bytes = "\x1b[F", .press = .{ .codepoint = vaxis.Key.end } },
+        .{ .key = .left, .bytes = "\x1b[D", .press = .{ .codepoint = vaxis.Key.left } },
+        .{ .key = .right, .bytes = "\x1b[C", .press = .{ .codepoint = vaxis.Key.right } },
+        .{ .key = .delete_next, .bytes = "\x04", .press = .{ .codepoint = 'd', .mods = .{ .ctrl = true } } },
+    };
+    const Draft = struct { text: []const u8, cursor: usize, carets: [cases.len]usize, deleted: []const u8, multiline: bool };
+    for ([_]Draft{
+        .{ .text = "alpha\nbravo\ncharlie", .cursor = 8, .carets = .{ 2, 14, 6, 11, 7, 9, 8 }, .deleted = "alpha\nbrvo\ncharlie", .multiline = true },
+        .{ .text = "alphabet", .cursor = 3, .carets = .{ 3, 3, 0, 8, 2, 4, 3 }, .deleted = "alpabet", .multiline = false },
+    }) |draft| for ([_]ConsentPolicy.Row{ .selector, .draft }) |row| for (cases, 0..) |case, index| {
+        errdefer std.debug.print("row={s}, key={s}, multiline={}\n", .{ @tagName(row), @tagName(case.key), draft.multiline });
+        const normal = try std.testing.allocator.create(Input);
+        defer std.testing.allocator.destroy(normal);
+        normal.init();
+        _ = normal.appEvent(conversation_keys, .paste_start, true, true);
+        _ = normal.appEvent(conversation_keys, .{ .key_press = .{ .codepoint = 0, .text = draft.text } }, true, true);
+        _ = normal.appEvent(conversation_keys, .paste_end, false, true);
+        try std.testing.expectEqualStrings(draft.text, normal.composition().bytes);
+        normal.editors[normal.active].cursor = draft.cursor;
+        const outcome = normal.appEvent(conversation_keys, .{ .key_press = case.press }, false, true);
+        const vertical = case.key == .up or case.key == .down;
+        const falls_through = vertical and !draft.multiline;
+        if (falls_through) {
+            try std.testing.expectEqual(Input.Event(ConversationAction){ .editor = .{ .action = if (case.key == .up) .previous else .next } }, outcome);
+        } else {
+            try std.testing.expectEqual(Input.Event(ConversationAction){ .editor = .redraw }, outcome);
+        }
+        try std.testing.expectEqual(draft.carets[index], normal.composition().cursor);
+        const expected_text = if (case.key == .delete_next) draft.deleted else draft.text;
+        try std.testing.expectEqualStrings(expected_text, normal.composition().bytes);
+
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try held.keys("\x1b[200~");
+        try held.keys(draft.text);
+        try held.keys("\x1b[201~");
+        try std.testing.expectEqualStrings(draft.text, self.input.composition().bytes);
+        self.input.editors[self.input.active].cursor = draft.cursor;
+        const file = try held.adopt(100);
+        defer file.close(std.testing.io);
+        if (row == .draft) try held.keys("x\x7f"); // Enter the draft row without changing its contents.
+        try held.keys("\x1b[6~"); // Leave room to scroll in either direction.
+        _ = try held.draw();
+        const before = self.app_preview.first;
+        try held.keys(case.bytes);
+        if (row == .draft) {
+            try std.testing.expectEqualStrings(normal.composition().bytes, self.input.composition().bytes);
+            try std.testing.expectEqual(normal.composition().cursor, self.input.composition().cursor);
+            try std.testing.expectEqual(ConsentPolicy.Row.draft, self.app_consent.row);
+            try std.testing.expectEqual(ConsentPolicy.Choice.allow_once, self.app_consent.highlight);
+            try std.testing.expect(self.leaving == null);
+        } else {
+            try std.testing.expectEqualStrings(draft.text, self.input.composition().bytes);
+            try std.testing.expectEqual(draft.cursor, self.input.composition().cursor);
+            if (case.key == .delete_next) {
+                try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
+                continue;
+            }
+            const highlight: ConsentPolicy.Choice = if (case.key == .right) .deny else .allow_once;
+            try std.testing.expectEqual(highlight, self.app_consent.highlight);
+        }
+        _ = try held.draw();
+        const scroll_order: std.math.Order = if (vertical and (row == .selector or falls_through)) if (case.key == .up) .lt else .gt else .eq;
+        try std.testing.expectEqual(scroll_order, self.app_preview.first.order(before));
+        try std.testing.expect(self.submission.intent == null);
+        try std.testing.expectEqual(@as(?u64, 0xa), self.app_consent.request);
+    };
 }
 
 test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps the hidden draft" {

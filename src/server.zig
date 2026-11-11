@@ -5,6 +5,7 @@ const os = @import("os/os.zig");
 const socket_os = @import("os/socket.zig");
 const pages = @import("os/pages.zig");
 const HostDiagnostics = @import("HostDiagnostics.zig");
+const HostStartupWait = @import("HostStartupWait.zig");
 const TerminalText = @import("TerminalText.zig");
 const TestObservation = @import("TestObservation.zig");
 const bash = @import("bash.zig");
@@ -1233,12 +1234,14 @@ noinline fn openStoreForHost(
 ) !void {
     var found_schema_version: u32 = store_module.schema_version;
     var identity_mismatch: store_module.IdentityMismatch = .{};
+    var migration: StartupMigration = .{ .diagnostics = diagnostics };
     const store_options: store_module.OpenOptions = .{
         .served = served.routes(),
         .cache_spill = limits.sqlite_cache_spill,
         .cache_kib = limits.sqlite_cache_kib,
         .found_schema_version = &found_schema_version,
         .identity_mismatch = &identity_mismatch,
+        .migration_notice = .{ .context = &migration, .notify = StartupMigration.notify },
         // With MCP servers the catalog is saved below, once they are listed.
         .catalog = if (!has_mcp) &tools.built_in else null,
     };
@@ -1261,6 +1264,67 @@ noinline fn openStoreForHost(
         return err;
     };
     lease.paths.store.set(storage.storeId()) catch unreachable;
+}
+
+/// Announces a startup migration on the startup channel, where a launcher
+/// waits through it (`HostStartupWait`), and in the startup records.
+const StartupMigration = struct {
+    diagnostics: ?*HostDiagnostics,
+
+    fn notify(context: *anyopaque, event: store_module.MigrationNotice.Event) void {
+        const self: *StartupMigration = @ptrCast(@alignCast(context));
+        var message: [256]u8 = undefined;
+        var detail: [32]u8 = undefined;
+        const text, const phase, const format = switch (event) {
+            .begin => |from| .{
+                std.fmt.bufPrint(&message, "rui: backing up this Store and migrating it from format {d} to {d}; a large Store takes longer " ++ HostStartupWait.migrating_tag, .{ from, store_module.schema_version }) catch unreachable,
+                "migrating",
+                from,
+            },
+            .end => .{
+                std.fmt.bufPrint(&message, "rui: Store migrated to format {d} " ++ HostStartupWait.migrated_tag, .{store_module.schema_version}) catch unreachable,
+                "migrated",
+                store_module.schema_version,
+            },
+        };
+        // `serve` holds stderr custody from before the Store opens through
+        // readiness, so this writes under it. One nonblocking try, so a
+        // foreground Host whose stderr nobody drains never stalls holding the
+        // Store. A launcher drains the channel, so its notices arrive; a
+        // dropped one leaves it to the ordinary wait, and readiness or exit
+        // still ends the wait.
+        _ = stderr.writeHeld(text);
+        if (self.diagnostics) |writer| writer.record(phase, std.fmt.bufPrint(&detail, "format_{d}", .{format}) catch unreachable);
+    }
+};
+
+test "migration notices reach the launcher while serve holds stderr custody" {
+    var pipe: [2]c_int = undefined;
+    if (std.c.pipe(&pipe) != 0) return error.SystemResources;
+    defer for (pipe) |fd| {
+        _ = std.c.close(fd);
+    };
+    const saved = std.c.dup(2);
+    if (saved < 0 or std.c.dup2(pipe[1], 2) < 0) return error.TestUnexpectedResult;
+    // As `serve` holds it from before the Store opens through readiness.
+    try std.testing.expect(stderr.tryExclude());
+    var migration: StartupMigration = .{ .diagnostics = null };
+    StartupMigration.notify(&migration, .{ .begin = store_module.schema_version - 1 });
+    StartupMigration.notify(&migration, .end);
+    stderr.release();
+    _ = std.c.dup2(saved, 2);
+    _ = std.c.close(saved);
+    var buffer: [1024]u8 = undefined;
+    const count = std.c.read(pipe[0], &buffer, buffer.len);
+    try std.testing.expect(count > 0);
+    const output = buffer[0..@intCast(count)];
+    var wait = HostStartupWait.init(0);
+    const begin_end = std.mem.indexOf(u8, output, HostStartupWait.migrating_tag).? + HostStartupWait.migrating_tag.len;
+    wait.observe(output[0..begin_end], 1);
+    try std.testing.expect(!wait.expired(HostStartupWait.readiness_ns * 10));
+    wait.observe(output, HostStartupWait.readiness_ns * 10);
+    try std.testing.expect(!wait.expired(HostStartupWait.readiness_ns * 10 + 1));
+    try std.testing.expect(wait.expired(HostStartupWait.readiness_ns * 11));
 }
 
 noinline fn reportStoreIdentityMismatch(saved_selector: []const u8, actual_selector: []const u8) !void {
@@ -1524,6 +1588,16 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
     const initial_skills = prepared.initial;
     const captured_skill = prepared.captured;
     const faults = host.hooks.storeFaults(.command);
+    if (command.configuration) |*configuration| if (configuration.parent.state == .value) {
+        // A creating child inherits, rather than treating the caller's task
+        // environment as a new person's environment for that child.
+        var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| {
+            if (host.store.isFenced()) return .infrastructure_failure;
+            return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
+        };
+        defer inheritance.deinit(host.allocator);
+        return host.store.submitMessageCapturedSkills(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
+    };
     const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
         environments: *SessionEnvironments,
@@ -1598,7 +1672,12 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
         @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), &command.configuration, host.bash_facts.home) catch |err| return configureFailure(host, err)
     else
         null;
-    return host.store.configureWithCapturedSkills(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, host.hooks.storeFaults(.command));
+    var inheritance = if (command.session.len == 0 and command.configuration.parent.state == .value)
+        @import("child_environment.zig").Inheritance.init(host.environments, command.configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| return configureFailure(host, err)
+    else
+        @import("child_environment.zig").Inheritance{ .environments = null };
+    defer inheritance.deinit(host.allocator);
+    return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
 }
 
 /// `client_environment` holds a Message's checked environment.
@@ -4676,4 +4755,63 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
         try std.testing.expect(std.mem.startsWith(u8, status, "HTTP/1.1 503 "));
     }
     try std.testing.expect(fail_index > 0);
+}
+
+test "configure parent inherits the Host environment only after a fresh creation" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store.set("s");
+    var storage: store_module.Store = undefined;
+    try store_module.testing.testingSqliteStore(&storage, &tmp, io);
+    defer storage.close() catch unreachable;
+    var environments: SessionEnvironments = undefined;
+    try environments.init(io, allocator);
+    defer environments.deinit();
+    var host: Host = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
+    var create = try store_module.testing.completeConfiguration("env-parent", "", root, "model-a");
+    create.configuration.tools = try .of(&.{"bash"});
+    const parent = (try storage.configure(&create, .{})).accepted.session;
+    var offer = try SessionEnvironments.Offer.init(allocator, 4);
+    defer offer.deinit(allocator);
+    @memcpy(offer.room(), "A=1\x00");
+    environments.offer(parent.slice(), .{ .origin = .person, .admission = 1 }, &offer);
+    var child: wire_request.ConfigureCommand = .{};
+    try child.key.set("env-child");
+    child.configuration = (try store_module.testingCompleteConfiguration("unused", "", root, "model-a")).configuration;
+    child.configuration.workspace.state = .omitted;
+    child.configuration.provider.state = .omitted;
+    child.configuration.tools = try .of(&.{"bash"});
+    try child.configuration.permission_mode.value.set("ask");
+    child.configuration.parent.state = .value;
+    try child.configuration.parent.value.set(parent.slice());
+    const result = try submitConfigure(&host, &child);
+    try std.testing.expect(result == .accepted);
+    const session = result.accepted.session;
+    const copied = (try environments.copy(session.slice(), allocator)).?;
+    defer allocator.free(copied);
+    try std.testing.expectEqualStrings("A=1\x00", copied);
+    const count = environments.len;
+    var newer = try SessionEnvironments.Offer.init(allocator, 4);
+    defer newer.deinit(allocator);
+    @memcpy(newer.room(), "B=2\x00");
+    environments.offer(parent.slice(), .{ .origin = .person, .admission = 2 }, &newer);
+    const replay = try submitConfigure(&host, &child);
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+    const retained = (try environments.copy(session.slice(), allocator)).?;
+    defer allocator.free(retained);
+    try std.testing.expectEqualStrings("A=1\x00", retained);
+    try child.key.set("env-child-refused");
+    child.configuration.provider.state = .value;
+    try child.configuration.provider.value.set("codex");
+    const refusal = try submitConfigure(&host, &child);
+    try std.testing.expect(refusal == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
+    try std.testing.expectEqual(count, environments.len);
 }
