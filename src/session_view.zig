@@ -8,6 +8,7 @@ const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
+const marks = @import("marks.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
@@ -611,21 +612,29 @@ test "a long user Message shows two non-blank lines and what it hides" {
 }
 
 fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, suffix: []const u8, style: Style } {
-    return switch (code) {
-        .unresolved => .{ .glyph = "•", .suffix = "", .style = .quiet },
-        .pending_permission => .{ .glyph = "?", .suffix = "", .style = .attention },
-        .succeeded => .{ .glyph = "✓", .suffix = "", .style = .normal },
-        .denied => .{ .glyph = "•", .suffix = " — Denied", .style = .normal },
-        .unknown_tool => .{ .glyph = "•", .suffix = " — Rejected: unknown tool", .style = .normal },
-        .invalid_arguments => .{ .glyph = "•", .suffix = " — Rejected: invalid arguments", .style = .normal },
-        .failed => .{ .glyph = "!", .suffix = " — Failed", .style = .failure },
-        .timed_out => .{ .glyph = "!", .suffix = " — Timed out", .style = .failure },
-        .indeterminate => .{ .glyph = "!", .suffix = " — Outcome unknown; may have run", .style = .failure },
-        .storage_failed => .{ .glyph = "!", .suffix = " — Output capture failed", .style = .failure },
-        .spawn_failed => .{ .glyph = "!", .suffix = " — Could not start", .style = .failure },
-        .cancelled => .{ .glyph = "!", .suffix = " — Cancelled", .style = .failure },
-        .infrastructure_shutdown => .{ .glyph = "!", .suffix = " — Host stopped; outcome unknown", .style = .failure },
+    const state: struct { mark: marks.Mark, suffix: []const u8 } = switch (code) {
+        .unresolved => .{ .mark = .active, .suffix = "" },
+        .pending_permission => .{ .mark = .needs_you, .suffix = "" },
+        .succeeded => .{ .mark = .finished, .suffix = "" },
+        .denied => .{ .mark = .stopped, .suffix = " — Denied" },
+        .unknown_tool => .{ .mark = .failed, .suffix = " — Rejected: unknown tool" },
+        .invalid_arguments => .{ .mark = .failed, .suffix = " — Rejected: invalid arguments" },
+        .failed => .{ .mark = .failed, .suffix = " — Failed" },
+        .timed_out => .{ .mark = .failed, .suffix = " — Timed out" },
+        .indeterminate => .{ .mark = .failed, .suffix = " — Outcome unknown; may have run" },
+        .storage_failed => .{ .mark = .failed, .suffix = " — Output capture failed" },
+        .spawn_failed => .{ .mark = .failed, .suffix = " — Could not start" },
+        .cancelled => .{ .mark = .stopped, .suffix = " — Cancelled" },
+        .infrastructure_shutdown => .{ .mark = .failed, .suffix = " — Host stopped; outcome unknown" },
     };
+    const shown = marks.marks.get(state.mark);
+    return .{ .glyph = shown.unicode, .suffix = state.suffix, .style = switch (shown.tone) {
+        .ink => .user,
+        .quiet => .quiet,
+        .attention => .attention,
+        .failure => .failure,
+        .normal => .normal,
+    } };
 }
 
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {
@@ -669,7 +678,7 @@ pub const Live = struct {
     // clock.
     pub const line_bytes = Text.max_bytes_per_byte * protocol.max_tool_description_bytes + 96;
     comptime {
-        std.debug.assert("• ".len + work_line.max_clock_bytes <= line_bytes - Text.max_bytes_per_byte * protocol.max_tool_description_bytes);
+        std.debug.assert(marks.marks.get(.active).unicode.len + " ".len + work_line.max_clock_bytes <= line_bytes - Text.max_bytes_per_byte * protocol.max_tool_description_bytes);
     }
 
     /// The call's row; `running` is the clock after the words of the
@@ -1276,19 +1285,19 @@ test "tool header hides all body lines for every outcome and first-line split" {
         "Capture may be incomplete.\nstdout tail:\nhidden\nstderr tail:\n\x1b[2Jhidden\n" ++
         "[earlier output omitted]\nFull stdout: /secret\n/details for full output.\n";
     const cases = .{
-        .{ protocol.ToolPresentation.Code.unresolved, "• Tool call" },
+        .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
-        .{ protocol.ToolPresentation.Code.failed, "! Tool call — Failed (exit 7)" },
-        .{ protocol.ToolPresentation.Code.timed_out, "! Tool call — Timed out" },
-        .{ protocol.ToolPresentation.Code.indeterminate, "! Tool call — Outcome unknown; may have run" },
-        .{ protocol.ToolPresentation.Code.storage_failed, "! Tool call — Output capture failed" },
-        .{ protocol.ToolPresentation.Code.spawn_failed, "! Tool call — Could not start" },
-        .{ protocol.ToolPresentation.Code.cancelled, "! Tool call — Cancelled" },
-        .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "! Tool call — Host stopped; outcome unknown" },
-        .{ protocol.ToolPresentation.Code.denied, "• Tool call — Denied" },
-        .{ protocol.ToolPresentation.Code.unknown_tool, "• Tool call — Rejected: unknown tool" },
-        .{ protocol.ToolPresentation.Code.invalid_arguments, "• Tool call — Rejected: invalid arguments" },
+        .{ protocol.ToolPresentation.Code.failed, "× Tool call — Failed (exit 7)" },
+        .{ protocol.ToolPresentation.Code.timed_out, "× Tool call — Timed out" },
+        .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call — Outcome unknown; may have run" },
+        .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call — Output capture failed" },
+        .{ protocol.ToolPresentation.Code.spawn_failed, "× Tool call — Could not start" },
+        .{ protocol.ToolPresentation.Code.cancelled, "■ Tool call — Cancelled" },
+        .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "× Tool call — Host stopped; outcome unknown" },
+        .{ protocol.ToolPresentation.Code.denied, "■ Tool call — Denied" },
+        .{ protocol.ToolPresentation.Code.unknown_tool, "× Tool call — Rejected: unknown tool" },
+        .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call — Rejected: invalid arguments" },
     };
     try std.testing.expectEqual(std.enums.values(protocol.ToolPresentation.Code).len, cases.len);
     inline for (cases) |case| {
@@ -1304,9 +1313,10 @@ test "tool header hides all body lines for every outcome and first-line split" {
                 try expected.feed("\n");
                 const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
                 if (colour) try expected.feed(switch (case[0]) {
-                    .unresolved => "\x1b[90m",
+                    .unresolved => "\x1b[94m",
                     .pending_permission => "\x1b[33m",
-                    .succeeded, .denied, .unknown_tool, .invalid_arguments => "\x1b[39m",
+                    .succeeded => "\x1b[90m",
+                    .denied, .cancelled => "\x1b[39m",
                     else => "\x1b[91m",
                 });
                 try expected.feed(case[1][0..glyph_end]);
@@ -1678,7 +1688,7 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, .{}, &sink, false, &compact);
     }
     try std.testing.expectEqualStrings(
-        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n! Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
+        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n× Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
         sink.bytes[0..sink.length],
     );
 }

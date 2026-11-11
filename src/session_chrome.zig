@@ -382,13 +382,13 @@ fn scalars(text: []const u8) usize {
 }
 
 /// The marks a Session shows, as /help lists them.
-pub const marks =
-    \\✓  done                 •  running
-    \\!  failed or needs a look
-    \\?  an Action waits for Allow or Deny
-    \\◌  waiting its turn
-    \\
-;
+pub const marks = blk: {
+    const table = @import("marks.zig").marks;
+    break :blk table.get(.finished).unicode ++ "  done                 " ++ table.get(.active).unicode ++ "  running\n" ++
+        table.get(.failed).unicode ++ "  failed               " ++ table.get(.stopped).unicode ++ "  stopped\n" ++
+        table.get(.needs_you).unicode ++ "  an Action waits for Allow or Deny\n" ++
+        table.get(.queued).unicode ++ "  waiting its turn\n";
+};
 
 /// The /help page's Marks and Keys sections, one key per line. The
 /// screen's commands follow them.

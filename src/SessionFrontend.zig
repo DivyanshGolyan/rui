@@ -4936,22 +4936,22 @@ test "App Session shows running calls in order above the input, with +N more run
     self.live.view.total = 5;
     self.live.work.state = .{ .working = .{ .since = ChromeFixture.now() / 1000 - 12 } };
     const shown = try fixture.rows();
-    const first = ChromeFixture.find(&shown, "• Read src/overview_view.zig").?;
-    try std.testing.expectEqualStrings("• Run zig build test", shown[first + 1]);
-    try std.testing.expectEqualStrings("• Read docs/using-rui.md", shown[first + 2]);
+    const first = ChromeFixture.find(&shown, "⠹ Read src/overview_view.zig").?;
+    try std.testing.expectEqualStrings("⠹ Run zig build test", shown[first + 1]);
+    try std.testing.expectEqualStrings("⠹ Read docs/using-rui.md", shown[first + 2]);
     try std.testing.expectEqualStrings("+2 more running · /status", shown[first + 3]);
     // No shown call carries the clock, so the work line follows, once.
-    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "• Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "• Waiting · 13s"));
+    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 13s"));
     // The tail sits right above the input's top rule.
     try std.testing.expect(std.mem.startsWith(u8, shown[first + 5], "─"));
     var waiting: usize = 0;
-    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "• Waiting"));
+    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Waiting"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
     // Work ends: the tail goes, and history reaches the rule again.
     self.live.view = .{};
     self.live.work.state = .{ .idle = .{ .since = 0 } };
     const idle = try fixture.rows();
-    try std.testing.expect(ChromeFixture.find(&idle, "•") == null and ChromeFixture.find(&idle, "+") == null);
+    try std.testing.expect(ChromeFixture.find(&idle, "⠹") == null and ChromeFixture.find(&idle, "+") == null);
 }
 
 test "App Session shows the newest waiting Message as ◌ [N ·] its first line, without the word queued" {
@@ -4967,7 +4967,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     const row = ChromeFixture.find(&three, "◌").?;
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     // The waiting row is the tail's last, under the work line.
-    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "• Waiting"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Waiting"));
     try std.testing.expect(std.mem.startsWith(u8, three[row + 1], "─"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
     // One waiting: no count. A first line read for an older Message shows nothing.

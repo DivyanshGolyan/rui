@@ -141,7 +141,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     try document.append("› Port the overview\nI'll start.\n");
     var transcript: @import("Transcript.zig") = .{ .document = document };
     var screen: AppScreen.Session = .{ .content = &transcript, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
-    self.activity.work = .{ .mark = "•", .tone = .normal, .words = "Waiting", .clock = .{ .elapsed = 12 } };
+    self.activity.work = .{ .mark = "⠹", .tone = .normal, .words = "Waiting", .clock = .{ .elapsed = 12 } };
     self.activity.live.count = 0;
     self.activity.live.total = 5;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
