@@ -199,6 +199,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         failed_sql: ?[*:0]const u8 = null,
         queue: [max_queued]Queued = undefined,
         queued: u8 = 0,
+        /// The queued writes a guard's answer follows (`Mysql.guard`), a
+        /// bit for each queue slot.
+        guarded: u16 = 0,
         /// Engine passes. Rounds, each one round trip on a network
         /// engine, count on the Store (`testing_content_work.rounds` for
         /// `run` and `commit`, `.content_rounds` for `readRaw`).
@@ -609,7 +612,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// The queued writes, then one compare-and-set per claiming
         /// Session, in the round that commits. The compare-and-sets are
-        /// bound only once the writes stepped without a failure.
+        /// bound only once the writes stepped without a failure. A
+        /// network engine's COMMIT rides the same round when the write is
+        /// its batch's only one (`store_core.commitsWithWrites`): each
+        /// write's guard stops the round before it (`Mysql.appendCommit`).
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
             if (a.store.engine == .sqlite) a.pass();
@@ -618,9 +624,30 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 const expected = claim.head.next_position.get();
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
+            const commits = a.bindCommit();
             a.pass();
             a.claimed = 0;
+            if (commits) {
+                if (a.store.engine.mysql.settleCommit()) |_| {
+                    // Saved, though the connection was lost on the way.
+                    if (a.failure) |err| if (err == error.CommitOutcomeUnknown) {
+                        a.failure = null;
+                    };
+                } else |err| a.failure = err;
+            }
             if (a.failure) |err| return err;
+        }
+
+        /// Binds COMMIT after the round's writes and queues its step; false
+        /// when COMMIT takes a round of its own.
+        fn bindCommit(a: *Self) bool {
+            if (a.failure != null or !store_core.commitsWithWrites(a.store)) return false;
+            const slot = a.reserve() orelse return false;
+            if (!a.store.engine.mysql.appendCommit()) return false;
+            slot.* = .{ .statement = null, .run = runCommit, .target = .{ .none = {} } };
+            slot.borrowed = .of(struct {}, &.{});
+            a.queued += 1;
+            return true;
         }
 
         /// Opens the transaction of a write Access before its first
@@ -677,6 +704,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 return false;
             };
             slot.borrowed = .of(S.Args, args);
+            if (comptime S.kind == .write and mode == .write and S.guarded) if (a.store.engine == .mysql) {
+                const mysql = &a.store.engine.mysql;
+                const bound = switch (S.expect) {
+                    .exact => |exact| mysql.guard(false, exact.rows),
+                    .at_most => |rows| mysql.guard(true, rows),
+                    .counted => mysql.guard(false, target.counted),
+                };
+                if (bound) a.guarded |= @as(u16, 1) << @intCast(a.queued);
+            };
             a.queued += 1;
             return true;
         }
@@ -704,6 +740,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         fn resetQueued(a: *Self) Failure!void {
             for (a.queue[0..a.queued]) |entry| a.store.engine.discard(entry.statement);
             a.queued = 0;
+            a.guarded = 0;
             try a.store.engine.discardBatch();
         }
 
@@ -807,8 +844,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                         .at_most => |rows| if (changed > rows) return error.CorruptStore,
                         .counted => |guard| if (changed != entry.target.counted) return comptime @as(Error, @errorCast(guard.otherwise)),
                     }
+                    const slot = entry - @as([*]const Queued, &a.queue);
+                    if (a.guarded >> @intCast(slot) & 1 != 0) _ = try a.store.engine.stepWrite(entry.statement);
                 }
             }.run);
+        }
+
+        /// The COMMIT `finishWrites` bound after the round's writes.
+        fn runCommit(a: *Self, _: *const Queued) Error!void {
+            try a.store.engine.mysql.stepCommit();
         }
 
         /// A sink's chunk INSERT (`queueChunk`): one row.

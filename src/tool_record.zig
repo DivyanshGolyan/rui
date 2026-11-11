@@ -270,22 +270,45 @@ pub const Runner = enum {
     pub fn of(tool: *const Record) Runner {
         if (tool.owner == .mcp) return .mcp;
         if (tool.owner == .provider) return .provider;
-        const core = std.mem.eql(u8, tool.name, find_tools_record.name) or std.mem.eql(u8, tool.name, message_agent_record.name) or std.mem.eql(u8, tool.name, read_transcript_record.name) or std.mem.eql(u8, tool.name, start_agent_record.name) or std.mem.eql(u8, tool.name, skill_record.name);
-        return if (core) .core else .bash;
+        for (built_in_rows.values) |row| {
+            if (std.mem.eql(u8, tool.name, row.record.name)) return row.runner;
+        }
+        return .bash;
     }
 };
 
+/// One row per BuiltInTool, in its name order. This is the authority for
+/// each built-in's record and runner; EnumArray requires every tag once.
+pub const BuiltInRow = struct { record: *const Record, runner: Runner };
+pub const built_in_rows = std.enums.EnumArray(Tool, BuiltInRow).init(.{
+    .bash = .{ .record = &bash_record, .runner = .bash },
+    .find_tools = .{ .record = &find_tools_record, .runner = .core },
+    .message_agent = .{ .record = &message_agent_record, .runner = .core },
+    .read_transcript = .{ .record = &read_transcript_record, .runner = .core },
+    .skill = .{ .record = &skill_record, .runner = .core },
+    .start_agent = .{ .record = &start_agent_record, .runner = .core },
+    .web_search = .{ .record = &web_search_record, .runner = .provider },
+});
+
+/// Core tools in table order. The Host's exhaustive dispatch switch over
+/// this generated enum requires a runner arm for every core row.
+pub const CoreTool = blk: {
+    var names: []const []const u8 = &.{};
+    for (built_in_rows.values) |row| {
+        if (row.runner == .core) names = names ++ .{row.record.name};
+    }
+    var values: [names.len]u8 = undefined;
+    for (&values, 0..) |*value, i| value.* = @intCast(i);
+    break :blk @Enum(u8, .exhaustive, names, &values);
+};
+
+pub fn coreTool(name: []const u8) ?CoreTool {
+    return std.meta.stringToEnum(CoreTool, name);
+}
+
 /// The built-in record of each tool `Tool` names: the text a new set saves.
 pub fn record(tool: Tool) *const Record {
-    return switch (tool) {
-        .bash => &bash_record,
-        .find_tools => &find_tools_record,
-        .message_agent => &message_agent_record,
-        .read_transcript => &read_transcript_record,
-        .start_agent => &start_agent_record,
-        .skill => &skill_record,
-        .web_search => &web_search_record,
-    };
+    return built_in_rows.get(tool).record;
 }
 
 /// The built-ins, as the catalog of a Host with no other tools.
@@ -314,6 +337,7 @@ test "the built-in catalog is valid and finds each built-in by name" {
 comptime {
     for (std.enums.values(Tool)) |tool| {
         const r = record(tool);
+        if (built_in_rows.get(tool).runner == .mcp) @compileError("built-in MCP runner");
         if (!std.mem.eql(u8, r.name, @tagName(tool)) or r.name.len > max_name_bytes) @compileError("tool record name");
     }
 }
@@ -352,3 +376,11 @@ pub fn builtIn(name: []const u8) ?Tool {
 pub const ToolSet = built_in_tool.Selection;
 
 pub const Description = Bounded(tool_presentation.max_description_bytes);
+
+test "every built-in runner matches its table row" {
+    for (std.enums.values(Tool)) |tool| {
+        const row = built_in_rows.get(tool);
+        try std.testing.expectEqual(row.runner, Runner.of(record(tool)));
+        try std.testing.expectEqual(row.runner == .core, coreTool(row.record.name) != null);
+    }
+}

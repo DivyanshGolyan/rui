@@ -2595,8 +2595,8 @@ test "Store entry points queue and fence only through canonical access" {
             try std.testing.expect(std.mem.indexOf(u8, body, "entry.finish") != null);
         }
     }
-    // The Store's queue: `release`, `closing`, `take`, and its tests' `waitQueued`.
-    try std.testing.expectEqual(@as(usize, 4), locks);
+    // The Store's queue: `release`, `closing`, `writeWaiting`, `take`, and its tests' `waitQueued`.
+    try std.testing.expectEqual(@as(usize, 5), locks);
     try std.testing.expectEqual(@as(usize, 1), fence_stores);
     try std.testing.expectEqual(@as(usize, 1), fence_loads);
     try std.testing.expect(entered > 0);
@@ -6631,6 +6631,78 @@ const WorkParity = struct {
     }
 };
 
+test "core tool table routes every built-in to its sole action selector" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const records = @import("../tool_record.zig");
+            for (std.enums.values(records.Tool)) |tool| {
+                errdefer std.debug.print("table routing failed for {s}\n", .{@tagName(tool)});
+                const row = records.built_in_rows.get(tool);
+                // Independent expectations pin the pre-table runner domain.
+                const expected: records.Runner = switch (tool) {
+                    .bash => .bash,
+                    .web_search => .provider,
+                    else => .core,
+                };
+                try std.testing.expectEqual(expected, row.runner);
+                try std.testing.expectEqual(row.runner, records.Runner.of(records.record(tool)));
+                // A provider name sent as a function call is rejected by
+                // classification, so it must reach neither selector.
+
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var command = try completeConfiguration("table-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                command.configuration.tools = try .of(&.{@tagName(tool)});
+                const configured = try storage.configure(&command, .{});
+                try std.testing.expect(configured == .accepted);
+                const session = configured.accepted.session;
+                try submitTestMessage(&storage, &tmp, "table-input", "table-input", session.slice(), "call");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const arguments = switch (tool) {
+                    .bash => "{\"cmd\":\"true\",\"description\":\"Run table check\"}",
+                    .message_agent => "{\"id\":\"zzzzzz\",\"text\":\"hi\"}",
+                    else => "{}",
+                };
+                var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer encoded.deinit();
+                try std.json.Stringify.value(arguments, .{}, &encoded.writer);
+                const quoted = encoded.written();
+                const calls = [_]TestingCall{.{
+                    .item_id = "table-item",
+                    .name = @tagName(tool),
+                    .encoded_call_id = "table-call",
+                    .decoded_call_id = "table-call",
+                    .encoded_arguments = quoted[1 .. quoted.len - 1],
+                    .decoded_arguments = arguments,
+                }};
+                try settleCallsForTesting(&storage, &tmp, binding, "table-calls", &calls);
+                const core = try storage.nextCoreWork();
+                const bash = try storage.admitNextActionAttempt(300_000, .{});
+                try std.testing.expectEqual(expected == .core, core != null);
+                try std.testing.expectEqual(expected == .bash, bash != null);
+                if (core) |work| {
+                    const call = work.action;
+                    try std.testing.expectEqualStrings(@tagName(tool), @tagName(call.tool));
+                    try std.testing.expectEqual(binding.operation_id, call.binding.parent_operation_id);
+                    try std.testing.expectEqual(binding.turn_id, call.binding.turn_id);
+                    try std.testing.expectEqualStrings(session.slice(), call.session.slice());
+                    // Selection is a read, not an Attempt or a resolution.
+                    try std.testing.expectEqual(call.binding.action_id, (try storage.nextCoreWork()).?.action.binding.action_id);
+                }
+                if (bash) |attempted| {
+                    try std.testing.expectEqual(binding.operation_id, attempted.permit.binding.parent_operation_id);
+                    try std.testing.expect((try storage.nextCoreWork()) == null);
+                    try std.testing.expect((try storage.admitNextActionAttempt(300_000, .{})) == null);
+                }
+            }
+        }
+    }.run);
+}
+
 test "the dispatch work read answers as each admission owner does, in every state a Turn passes through" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -9310,6 +9382,19 @@ test "Full revision queries bound the rows MySQL must drain after a streaming st
             }
         }
     }.run);
+}
+
+test "Full revision owners pin both covering indexes in both dialects" {
+    const full_revisions = report_domain.full_revisions;
+    inline for (.{ "instructions", "output_schema" }) |field| {
+        const index = "session_revision_" ++ field;
+        try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, full_revisions.sql, "INDEXED BY " ++ index));
+        try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, comptime full_revisions.mysql.prepared(), "FORCE INDEX (" ++ index ++ ")"));
+        const own_instructions = "SELECT min(revision)*2 FROM session_revision INDEXED BY session_revision_instructions WHERE session_ref=?1 AND instructions_content_id=r." ++ field ++ "_content_id";
+        const own_schema = "SELECT min(revision)*2+1 FROM session_revision INDEXED BY session_revision_output_schema WHERE session_ref=?1 AND output_schema_content_id=r." ++ field ++ "_content_id";
+        try std.testing.expect(std.mem.indexOf(u8, full_revisions.sql, own_instructions) != null);
+        try std.testing.expect(std.mem.indexOf(u8, full_revisions.sql, own_schema) != null);
+    }
 }
 
 test "Full revisions show each content whole where it first occurs" {
@@ -12585,12 +12670,13 @@ test "model fact refresh reads existence once before batched writes" {
                 std.debug.print("model facts: {d} entries, {d} Access rounds\n", .{ count, rounds.taken() });
                 try std.testing.expectEqual(@as(u16, 2), rounds.taken());
                 if (case.engine == .mysql) {
-                    // Both reads share one pass. Access queues eight writes
-                    // per pass, source last; COMMIT is the sole control send.
-                    const write_passes = (count + 1 + 7) / 8;
+                    // Both reads share one pass. Access queues eight
+                    // statements per pass: the writes, source last, then
+                    // COMMIT in the last pass, so no control is sent.
+                    const write_passes = (count + 2 + 7) / 8;
                     try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.access_passes);
-                    try std.testing.expectEqual(@as(u64, 1), shape.controls);
-                    try std.testing.expectEqual(@as(u64, 2 + write_passes), shape.queries);
+                    try std.testing.expectEqual(@as(u64, 0), shape.controls);
+                    try std.testing.expectEqual(@as(u64, 1 + write_passes), shape.queries);
                     try std.testing.expectEqual(shape.expected(), shape.queries);
                 }
                 try std.testing.expectEqual(@as(u64, refresh + 1), (try storage.readModelCatalogSource()).?.generation);
