@@ -86,16 +86,10 @@ def private_reasoning_count(store, operation):
         ).fetchone()[0]
 
 
-def reasoning_token_count(store, operation):
+def output_token_count(store, operation):
     with sqlite3.connect(f"file:{store / 'rui.sqlite3'}?mode=ro", uri=True) as db:
-        row = db.execute(
-            "SELECT usage.payload FROM model_operation op LEFT JOIN content usage "
-            "ON usage.content_id=op.usage_content_id WHERE op.operation_id=?",
-            (operation,),
-        ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        return (json.loads(row[0]).get("output_tokens_details") or {}).get("reasoning_tokens")
+        row = db.execute("SELECT usage_output_tokens FROM model_operation WHERE operation_id=?", (operation,)).fetchone()
+        return None if row is None else row[0]
 
 
 def run(model, external_credential=None):
@@ -203,8 +197,8 @@ def run(model, external_credential=None):
 
         stop()  # committed result, not an interrupted Bash effect; SQLite reads only after exit
         reasoning_counts = [private_reasoning_count(store, record["operation"]) for record in first_observations]
-        reasoning_tokens = [reasoning_token_count(store, record["operation"]) for record in first_observations]
-        print(f"Pre-restart reasoning: private item counts={reasoning_counts}, token usage={reasoning_tokens}", flush=True)
+        output_tokens = [output_token_count(store, record["operation"]) for record in first_observations]
+        print(f"Pre-restart reasoning: private item counts={reasoning_counts}, output tokens={output_tokens}", flush=True)
         assert reasoning_counts[0] > 0, "no accepted private reasoning to replay; live qualification incomplete"
         assert first_observations[0]["operation"] == reasoning["binding"]["operation"]
         before = evidence(store)

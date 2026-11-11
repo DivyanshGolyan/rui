@@ -1448,6 +1448,7 @@ The step to 58 moves saved wire 9 metadata to wire 10 for nullable failed-send p
 The step to 59 adds immutable skill catalog metadata and its ordinary turnless instruction provenance, retaining unreleased wire 10 without rewriting earlier Conversation content.
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
+The step to 63 drops `model_operation.usage_content_id`, rebuilding `model_operation` on SQLite, and deletes each saved raw usage report no other row references; the four counts are unchanged, and the file keeps the freed pages until it is vacuumed.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1484,7 +1485,7 @@ Provider failure classes preserve ordinary, context-overflow and retryable facts
 Provider adapters own grammar and interpretation.
 The Store owns identity, provenance, proposal authentication and atomic publication of immutable neutral items and provider bags with certified public text; tool classification is a pure decision invoked inside that transaction.
 
-Usage counts sit beside the retained private raw usage report, which keeps provider detail such as reasoning tokens.
+Usage counts are the only usage the Store keeps; the provider's raw usage report is not retained.
 The provider parser admits only counts within SQLite's signed integer range, and their sum saturates at its maximum, preserving every compaction-threshold decision.
 Served-model observations are one opaque bounded `model_evidence` BLOB: version byte `1`, followed by three little-endian unsigned 16-bit byte lengths and their exact UTF-8 bytes, in body, `openai-model`, `x-openai-model` order.
 A zero length means that source was absent; requested identity is never substituted.
