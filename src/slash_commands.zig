@@ -136,7 +136,6 @@ const ConversationName = enum {
     archive,
     configure,
     copy,
-    details,
     discard,
     effort,
     exit,
@@ -162,7 +161,6 @@ pub const conversation = Commands(ConversationName, .{
     .archive = .{ .description = "stop active work and archive this Session" },
     .configure = .{ .argument = .{ .options = live_options }, .description = "change this Session's settings" },
     .copy = .{ .argument = .{ .choice = copy_words }, .description = "copy the last answer; code its last block, file saves it here" },
-    .details = .{ .description = "saved tool output" },
     .discard = .{ .description = "release rejected input, retaining the draft", .listed = false },
     .effort = .{ .argument = .effort, .description = "this Session's effort, also the default for new ones" },
     .exit = .{ .description = "detach; Host work continues, unsent draft is lost" },
@@ -790,7 +788,7 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },

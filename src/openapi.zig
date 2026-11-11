@@ -1422,6 +1422,21 @@ test "replies the Host renders conform to their schemas" {
     const a = arena.allocator();
     var out: std.Io.Writer.Allocating = .init(a);
 
+    // Render the real request refusal, including its advisory server names.
+    const reply = @import("command_reply.zig");
+    const host_reply = @import("host_reply.zig");
+    var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
+    var host_tool_set = @import("tools.zig").built_in_tool_set;
+    host_tool_set.configured_servers = &.{"notes"};
+    configured.rejected.message = host_tool_set.missingTool("lookup");
+    try host_reply.renderConfigureReply(.{ .writer = &out.writer }, "", configured);
+    try Case.check(schemas, "ConfigureReply", out.written(), a);
+    out.clearRetainingCapacity();
+    const message: reply.MessageReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = .{ .length = 4, .digest = protocol.contentDigest("task") } } };
+    try host_reply.renderMessageReply(.{ .writer = &out.writer }, "", message);
+    try Case.check(schemas, "MessageReply", out.written(), a);
+    out.clearRetainingCapacity();
+
     // The model list is written in code, not as a shape.
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);

@@ -20,7 +20,7 @@ const model_catalog = @import("../../model_catalog.zig");
 const model_facts = @import("model_facts.zig");
 const model_capability = @import("../../model_capability.zig");
 const product_defaults = @import("../../product_defaults.zig");
-const tool_catalog = @import("../../tool_record.zig");
+const tool_defs = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const command_domain = @import("command.zig");
@@ -74,13 +74,27 @@ fn defaultProvider(routes: provider_route.Routes) ?provider_name.Provider {
 }
 
 /// Why `tools` cannot be saved for a Session of `provider`: a name the
-/// Host's catalog lacks, or a tool some provider runs that `provider`
+/// Host tool set lacks, or a tool some provider runs that `provider`
 /// does not.
-fn toolsRejection(catalog: *const tool_catalog.Catalog, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
+fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provider_name.Provider, tools: *const command_input.ToolsField) ?configuration_admission.Rejection {
     var names = tools.iterator();
     while (names.next()) |name| {
-        const index = catalog.find(name) orelse return .unknown_tool;
-        if (catalog.records[index].owner == .provider and !provider.runsTool(name)) return .provider_tool_missing;
+        const index = switch (host_tool_set.resolve(name)) {
+            .found => |index| index,
+            .unknown_tool => return .unknown_tool,
+            .mcp_server_unavailable => return .mcp_server_unavailable,
+        };
+        if (host_tool_set.records[index].owner == .provider and !provider.runsTool(name)) return .provider_tool_missing;
+    }
+    return null;
+}
+
+/// Rejection codes are durable; this advisory detail describes the current
+/// Host's launch-only MCP configuration, also on replay. No Store read is needed.
+pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, tools: *const command_input.ToolsField) ?tool_defs.HostToolSet.MissingTool {
+    var names = tools.iterator();
+    while (names.next()) |name| {
+        if (host_tool_set.resolve(name) != .found) return host_tool_set.missingTool(name);
     }
     return null;
 }
@@ -112,9 +126,9 @@ pub const CurrentConfiguration = struct {
     provider: provider_name.Provider = undefined,
     model: Bounded(model_capability.max_model_bytes) = .{},
     instructions_id: ?i64 = null,
-    /// The saved tool set; 0 until a creation saves its first.
+    /// Configured name intent; 0 until a creation saves its first.
     tool_set_id: u64 = 0,
-    /// Null means every configured tool is loaded.
+    /// Loaded name intent. Null means every configured name.
     loaded_tool_set_id: ?u64 = null,
     permission_mode: u8 = 0,
     output_schema_id: ?i64 = null,
@@ -194,7 +208,7 @@ fn tokenCount(text: []const u8, allow_zero: bool) !u64 {
 
 pub fn configurationBeforeWorkspace(
     selected_facts: []const model_catalog.Entry,
-    catalog: *const tool_catalog.Catalog,
+    host_tool_set: *const tool_defs.HostToolSet,
     current: ?*const CurrentConfiguration,
     requested: *const content_custody.Configuration,
     default_provider: ?provider_name.Provider,
@@ -227,7 +241,7 @@ pub fn configurationBeforeWorkspace(
         }
     }
     if (requested.label.state == .value and !tool_presentation.validLabel(requested.label.value.slice())) return .invalid_label;
-    if (requested.tools.state == .value) if (toolsRejection(catalog, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
+    if (requested.tools.state == .value) if (toolsRejection(host_tool_set, provider orelse (if (current) |existing| existing.provider else default_provider.?), &requested.tools)) |rejection| return rejection;
     const model = if (requested.model.state == .value) requested.model.value.slice() else current.?.model.slice();
     // D166: an unlisted model has no known window to enforce.
     if (compact_at) |tokens| if (model_catalog.find(selected_facts, model)) |known| {
@@ -524,6 +538,8 @@ pub const creation_hint = rsql.Read(.{
 });
 
 /// Parent inheritance has one admission owner for start_agent and native create.
+/// Its ceiling is configured intent, not loaded intent or an Operation offer;
+/// the ordinary configuration validation still checks Host tool set availability.
 const parent_settings = rsql.Read(.{
     .sql = "SELECT workspace,provider,coalesce(" ++ tool_set.namesSql("session.tool_set_id") ++ ",'') AS tools,permission_mode FROM session WHERE session_ref=?1 " ++
         "AND NOT EXISTS(SELECT 1 FROM session_archive archived WHERE archived.session_ref=session.session_ref AND archived.command_key IS NOT NULL)",
@@ -556,14 +572,16 @@ fn prepareParent(a: anytype, reference: []const u8, reads: *ConfigurationReads) 
 
 /// Consumes the parent read from the existing first round, without a query or
 /// a second path-sized configuration. Nothing is silently intersected.
-pub fn inheritParent(configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
+pub fn inheritParent(host_tool_set: *const tool_defs.HostToolSet, configuration: *const content_custody.Configuration, reads: *ConfigurationReads) !?configuration_admission.Rejection {
     if (!reads.inherits_parent) return null;
     if (!reads.parent_found.get()) return .unknown_session;
     if (reads.parent_checked) return if (reads.parent_failure) |failure| failure.code else null;
-    reads.parent_checked = true;
     const failure: ?ParentFailure = refusal: {
         if (configuration.workspace.state != .omitted) break :refusal .{ .code = .parent_workspace_forbidden };
         if (configuration.provider.state != .omitted) break :refusal .{ .code = .parent_provider_forbidden };
+        // Missing tool names keep the same refusal at both child doors,
+        // before narrowing known tools against the parent's saved selection.
+        if (toolsRejection(host_tool_set, reads.inherited.provider, &configuration.tools)) |code| return code;
         var requested = configuration.tools.iterator();
         while (requested.next()) |name| {
             var allowed = std.mem.splitScalar(u8, reads.inherited.tools.slice(), ',');
@@ -576,6 +594,7 @@ pub fn inheritParent(configuration: *const content_custody.Configuration, reads:
             break :refusal .{ .code = .permission_mode_wider_than_parent };
         break :refusal null;
     };
+    reads.parent_checked = true;
     reads.parent_failure = failure;
     if (failure) |refused| return refused.code;
     reads.next.provider = reads.inherited.provider;
@@ -614,7 +633,7 @@ pub const ConfigurationReads = struct {
     /// The rows `lookupPair` found, when round 1 needed two lookups.
     pair: ?content_domain.Pair = null,
     /// The tool set a creation or a `tools` change saves, when it does;
-    /// null too when the catalog lacks a name, which the configure refuses.
+    /// null too when the Host tool set lacks a name, which the configure refuses.
     tools: ?tool_set.Selection = null,
     loaded_tools: ?tool_set.Selection = null,
     /// Saved names for narrowing an existing loaded subset. A child creation
@@ -794,7 +813,7 @@ pub fn prepareConfiguration(a: anytype, session: []const u8, configuration: *con
     if (!creating) readSaved(a, session, &reads.next, &reads.found);
     if (creating and configuration.parent.state == .value) prepareParent(a, configuration.parent.value.slice(), reads);
     if (creating or configuration.tools.state == .value) {
-        reads.tools = .of(a.store.catalog().catalog, requestedNames(configuration));
+        reads.tools = .of(a.store.hostTools().host_tool_set, requestedNames(configuration));
         if (reads.tools) |*tools| tool_set.lookupSelection(a, tools);
     }
     const instructions: ?*content_domain.Import = if (configuration.instructions.state == .value) requested: {
@@ -817,7 +836,7 @@ const selected_names = rsql.Read(.{
     .sql = "SELECT tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=?1 ORDER BY tool.name",
     .Args = struct { set: u64 },
-    .Row = struct { name: Bounded(tool_catalog.max_name_bytes) },
+    .Row = struct { name: Bounded(tool_defs.max_name_bytes) },
     .cardinality = .each,
 });
 
@@ -881,7 +900,7 @@ fn prepareLoadedTools(a: anytype, creating: bool, requested: *const content_cust
     if (loadedToolsRejection(tools, loaded)) |rejection| return rejection;
     if (loaded.count == tools.count) return null;
     reads.loaded_tools = if (creating or requested.tools.state == .value)
-        tool_set.Selection.of(a.store.catalog().catalog, loaded) orelse return error.CorruptStore
+        tool_set.Selection.of(a.store.hostTools().host_tool_set, loaded) orelse return error.CorruptStore
     else
         try tool_set.Selection.ofSaved(a, reads.next.tool_set_id, loaded);
     tool_set.lookupSelection(a, &reads.loaded_tools.?);
@@ -958,12 +977,12 @@ pub fn validateConfiguration(
     if (reads.found.get()) try checkSaved(next);
     const current_configuration: ?*const CurrentConfiguration = if (reads.found.get()) next else null;
     if (!creating and configuration.parent.state != .omitted) return .{ .rejected = .parent_on_update };
-    if (creating) if (try inheritParent(configuration, reads)) |code| return .{ .rejected = code };
+    if (creating) if (try inheritParent(a.store.hostTools().host_tool_set, configuration, reads)) |code| return .{ .rejected = code };
     const default_provider = if (reads.inherits_parent) reads.next.provider else defaultProvider(a.store.served);
     var selected: model_facts.Model = .{};
     selected.read(a, if (configuration.model.state == .value) configuration.model.value.slice() else next.model.slice());
     try a.run();
-    if (configurationBeforeWorkspace(selected.facts(), a.store.catalog().catalog, current_configuration, configuration, default_provider)) |rejection| {
+    if (configurationBeforeWorkspace(selected.facts(), a.store.hostTools().host_tool_set, current_configuration, configuration, default_provider)) |rejection| {
         return .{ .rejected = rejection };
     }
 
@@ -1048,9 +1067,9 @@ pub fn applyValidatedConfiguration(a: anytype, io: std.Io, session: []const u8, 
         .clear => next.output_schema_id = null,
     }
     if (creating or configuration.tools.state == .value) {
-        // configurationBeforeWorkspace refused a name the catalog lacks.
+        // configurationBeforeWorkspace refused a name the Host tool set lacks.
         const tools = &(reads.tools orelse return error.CorruptStore);
-        next.tool_set_id = try tool_set.finishSelection(a, tools, a.store.catalog().set_id);
+        next.tool_set_id = try tool_set.finishSelection(a, tools, a.store.hostTools().set_id);
     }
     if (reads.loaded_tools) |*loaded| {
         next.loaded_tool_set_id = try tool_set.finishSelection(a, loaded, next.tool_set_id);

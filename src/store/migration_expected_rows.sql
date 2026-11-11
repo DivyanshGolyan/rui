@@ -52,9 +52,9 @@ INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admis
 ('fixture-stop','rhvzwc',NULL,1,0,1793781720);
 INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation_id) VALUES
 ('fixture-interrupt','d8mv7p','1','1');
-INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at) VALUES
-(1,1,'d8mv7p',1,1,3,0,115200,0,NULL,1,1,0,NULL,NULL,'answer',5,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720),
-(2,2,'brhkcj',1,2,3,0,115200,0,NULL,2,1,0,NULL,NULL,'tool_proposals',NULL,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720);
+INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,tool_set_id) VALUES
+(1,1,'d8mv7p',1,1,3,0,115200,0,NULL,1,1,0,NULL,NULL,'answer',5,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,4),
+(2,2,'brhkcj',1,2,3,0,115200,0,NULL,2,1,0,NULL,NULL,'tool_proposals',NULL,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,2);
 INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,source_item_ordinal,content_id,recorded_at) VALUES
 ('brhkcj',1,2,1,2,2,NULL,NULL,NULL,6,1793781720),
 ('d8mv7p',1,2,1,1,1,NULL,NULL,NULL,2,1793781720),
@@ -68,7 +68,7 @@ INSERT INTO model_output_part(operation_id,item_ordinal,part_ordinal,part_array,
 INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,description,field_metadata,rejection_code,rejection_content_id,acceptance_position,action_kind) VALUES
 (2,'brhkcj',0,0,9,10,11,'Run first command',X'0400000000000000a0fbca0ae84c22252231e4bffa4714809c6d0949720b266767b8fce2aae5055706000000000000005e2ab58aab1f361a7463d83515ae4f2519f54468f5dbc37e1a30c35f7b6defed4100000000000000f1a4d9bc3bf8c59e61a8111bc926dbd19ecd2adb95e7879a75e598dc0876b115',NULL,NULL,NULL,1),
 (2,'brhkcj',1,1,9,12,13,'Run second command',X'0400000000000000a0fbca0ae84c22252231e4bffa4714809c6d0949720b266767b8fce2aae5055706000000000000002424a1124da95105ad0cae02f8974290bcdfa6b8f722ab0a9010a03d85dc70aa4200000000000000218db1eed2b15d82d37c2be4440ff39e46365886bd914326b0bf6fceee17f4d1',NULL,NULL,NULL,1);
-INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,attempt_ordinal,bash_timeout_override_ms,bash_timeout_ms,sender_handle,resolution_code,resolution_content_id,acceptance_position,attempt_at,decided_at,resolved_at,approval_position) VALUES
+INSERT INTO action_operation(action_id,parent_operation_id,call_ordinal,session_ref,tool_kind,permission_revision,authorized,attempt_ordinal,bash_timeout_override_ms,attempt_timeout_ms,sender_handle,resolution_code,resolution_content_id,acceptance_position,attempt_at,decided_at,resolved_at,approval_position) VALUES
 (1,2,0,'brhkcj',1,1,1,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,NULL,4),
 (2,2,1,'brhkcj',1,1,0,0,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,5);
 INSERT INTO permission_decision_command(command_key,action_id,decision) VALUES

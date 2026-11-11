@@ -9,6 +9,7 @@ const message_admission = @import("../../message_admission.zig");
 const workspace_path = @import("../../workspace_path.zig");
 const outcome_code = @import("../../outcome_code.zig");
 const content_string = @import("../../content_string.zig");
+const tool_defs = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
@@ -711,10 +712,17 @@ pub fn startAgent(
         return .stopped;
     }
     if (!creation.parent_found.get()) return error.CorruptStore;
-    var result_buffer: [192]u8 = undefined;
+    var result_buffer: [tool_defs.HostToolSet.max_refusal_message_bytes]u8 = undefined;
     const refusal: ?[]const u8 = refusal: {
         if (saved != null) break :refusal "Rui could not start the agent: its command key is already taken. Nothing was started.";
-        if (try configuration_domain.inheritParent(configuration, creation)) |code| {
+        if (try configuration_domain.inheritParent(a.store.hostTools().host_tool_set, configuration, creation)) |code| {
+            if (code == .unknown_tool or code == .mcp_server_unavailable) {
+                const detail = configuration_domain.missingToolMessage(a.store.hostTools().host_tool_set, &configuration.tools).?;
+                var writer = std.Io.Writer.fixed(&result_buffer);
+                try detail.write(&writer);
+                try writer.print(" ({s}). Nothing was started.", .{@tagName(code)});
+                break :refusal writer.buffered();
+            }
             if (creation.parent_failure) |failure| break :refusal failure.text(&result_buffer, "started");
             break :refusal std.fmt.bufPrint(&result_buffer, "Rui could not start the agent ({s}). Nothing was started.", .{@tagName(code)}) catch unreachable;
         }
@@ -1750,8 +1758,8 @@ const permission_target = rsql.Read(.{
 /// Round 1 reads the saved command. Its kind picks what round 2 reads,
 /// keyed on the command alone: a dependent round, one more network round
 /// trip, run only for a kind that saved more than its answer. A queued or
-/// processing Message's progress is its Session's work, read in the rounds
-/// after (`readMessageWork`).
+/// processing Message's progress is its Session's work, which round 1
+/// reads too while a Turn is active (`readMessageWork`).
 pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservation) !void {
     var saved: saved_command.Result = undefined;
     lookupCommand(a, key, &saved);
@@ -1759,7 +1767,11 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
     // reads the Message it accepted: both are keyed by the command key.
     var message: message_observation.Result = undefined;
     a.read(message_observation, .{ .key = key }, &message);
-    try a.run();
+    // A pending Message's progress is its Session's work, whose active
+    // Turn is keyed by the command too.
+    var work: report_domain.WorkRead = .{ .session = "" };
+    work.queuePending(a, key);
+    try store_access.runNamed(a, report_domain.pending_failures, error.StatementFailed);
     const command = try savedAnswer(&saved) orelse {
         observation.* = .{ .status = .absent };
         return;
@@ -1781,7 +1793,7 @@ pub fn observeCommand(a: anytype, key: []const u8, observation: *CommandObservat
             observation.kind.message = .{ .content = .{ .length = row.input_length, .digest = row.input_digest }, .queue = queue, .admitted_at = row.admitted_at.get() };
             if (row.has_recovery) try readRecovery(a, key, &observation.kind.message.?.recovery);
             switch (queue.state) {
-                .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, command.target.slice(), row.created_at.get(), queue.state),
+                .queued, .processing => observation.kind.message.?.work = try readMessageWork(a, &work, command.target.slice(), row.created_at.get(), queue.state),
                 else => {},
             }
         },
@@ -1855,11 +1867,13 @@ fn messageQueue(row: *const message_observation.Row) !AcceptedMessageQueue {
 }
 
 /// A pending Message's progress is its Session's work: its own active
-/// Turn, or the work ahead of it in the queue. Its rounds follow the
-/// observation's, whose row says whether the Message is pending.
-fn readMessageWork(a: *report_domain.ReadAccess, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !session_work.Work {
-    var read: report_domain.WorkRead = .{ .session = session_ref };
-    try report_domain.readWorks(a, (&read)[0..1]);
+/// Turn, or the work ahead of it in the queue. The observation's round
+/// read an active Turn (`queuePending`); with none, the stop and queue
+/// stages follow in their own rounds.
+fn readMessageWork(a: *report_domain.ReadAccess, read: *report_domain.WorkRead, session_ref: []const u8, created_at: u64, state: AcceptedMessageQueue.State) !session_work.Work {
+    read.session = session_ref;
+    try read.advance();
+    try report_domain.readWorks(a, read[0..1]);
     const work = try read.work(created_at, std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
     if (state == .processing and work.turn != state.processing.turn_id) return error.CorruptStore;
     return work;

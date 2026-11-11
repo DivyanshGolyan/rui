@@ -15,7 +15,7 @@ def smoke():
     """The harness itself: an empty Store's overview opens and says so."""
     from overview_fixture import world
     with world("smoke") as w, w.overview() as screen:
-        shown = screen.contains("No unarchived Sessions")
+        shown = screen.contains("+ New Session")
         assert "rui" in shown.split("\n", 1)[0], shown
     print("overview smoke: an empty Store's overview opens on a PTY", flush=True)
 

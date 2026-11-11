@@ -3,6 +3,7 @@
 //! not import the frontend, so no worker can read or write it.
 
 const std = @import("std");
+const tool_fold = @import("tool_fold.zig");
 const socket_os = @import("os/socket.zig");
 const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
@@ -40,13 +41,14 @@ pub const Boundaries = Transcript.Boundaries;
 pub const Marks = Transcript.Marks;
 const readEnd = Transcript.readEnd;
 
-pub const Command = *const fn (std.process.Init, client.Requests, []const u8, []const u8, []u8) anyerror!void;
+pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
 /// Writes /requests' recovery handles, and offers each saved Message among
 /// them to the page's list.
-pub const Requests = *const fn (std.process.Init, client.Requests, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
+pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, *std.Io.Writer, *SavedRequests) anyerror!void;
 /// The saved Messages a /requests page offers, under the Store's key bound.
 pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
-/// Takes what /status reports of the Session from one Current capture, whose
+/// Local-only adapter: consumes an already-read Current and files, never
+/// Host transport. Takes what /status reports of the Session, whose
 /// attention rows are in the first file, into the Session given. True when
 /// it differs from the shown one (always without one): the second file then
 /// lists its Actions awaiting approval, as the page shows them.
@@ -210,6 +212,7 @@ pub const Target = union(enum) {
     listing: Listing,
     /// This collapsed block's Message, in full.
     message: View.Collapsed,
+    tool: tool_fold.Reference,
 };
 
 pub const Job = struct {
@@ -413,7 +416,9 @@ const RecallStaging = struct {
 /// through its own descriptor. No command reads terminal input.
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = .{ .io = task.io, .cancellation = job.interrupted }, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
+    var read = task.readContext();
+    read.cancellation = job.interrupted;
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -425,7 +430,7 @@ pub fn runCommand(raw: *anyopaque, task: *Task) !void {
 pub const CommandRun = struct {
     command: Command,
     init: std.process.Init,
-    requests: client.Requests,
+    requests: client.ReadContext,
     store: []const u8,
     session: []const u8,
     /// Decoded in place.
@@ -458,7 +463,12 @@ pub const CommandRun = struct {
         const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, self.requests, self.store, self.session, self.line);
         const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
         const stderr_restored = std.c.dup2(saved[1], 2) >= 0;
-        return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = if (!stdout_restored or !stderr_restored) error.TerminalCleanupFailed else result };
+        if (!stdout_restored or !stderr_restored) {
+            // Restoration replaced the command's outcome with a local failure.
+            self.requests.origin.* = .local;
+            return .{ .rendering = true, .stderr_restored = stderr_restored, .outcome = error.TerminalCleanupFailed };
+        }
+        return .{ .rendering = true, .stderr_restored = true, .outcome = result };
     }
 };
 
@@ -571,20 +581,18 @@ pub fn writeSubmission(view: ?Submission.View, failure: ?[]const u8, out: *std.I
 
 pub fn history(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
-    const latest = job.phase == .details;
-    if (!latest) switch (job.target) {
+    switch (job.target) {
         .older => {},
         .listing => |step| return list(job, task, step),
-        .message => unreachable,
-    };
-    const prepared = try History.prepare(task.requests(), job.store, job.session, if (latest) .{ .end = 0 } else job.older.?, job.files.scratch);
+        .message, .tool => unreachable,
+    }
+    const prepared = try History.prepare(task.requests(), job.store, job.session, job.older.?, job.files.scratch);
     // Joined errors before this point retain the cursor without visible content.
     job.result.rendering = true;
     try job.files.inspection.setLength(task.io, 0);
     var output: DisplayCapture = .{ .task = task, .file = job.files.inspection, .blocks = &job.result.collapsed };
-    if (latest) try output.feed("\nRecent conversation — tool details\n");
-    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, if (latest) .details else .transcript, job.colour, job.home, .{ .viewport = job.width_method });
-    if (!latest) job.result.history_cursor = prepared.page.continuation();
+    try prepared.render(task.io, job.files.scratch, job.store, job.session, &output, job.colour, job.home, .{ .viewport = job.width_method });
+    job.result.history_cursor = prepared.page.continuation();
 }
 
 /// Renders one listed Message, bound to its item's length and digest, and
@@ -794,6 +802,10 @@ const DisplayCapture = struct {
         self.lowest = @min(self.lowest orelse position, position);
     }
 
+    pub fn tool(self: *@This(), reference: tool_fold.Reference) !void {
+        try tool_fold.marker(reference, self);
+    }
+
     pub fn collapsed(self: *@This(), value: View.Collapsed) !void {
         if (self.blocks) |blocks| blocks.add(value);
     }
@@ -824,6 +836,22 @@ const DisplayCapture = struct {
         return self.messages;
     }
 };
+
+/// Authenticate the selected Tool Result unchanged, then stage only its
+/// bounded literal stored text. No envelope or stream-content parsing occurs.
+pub fn fullTool(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const requests = task.requests();
+    const target = job.target.tool;
+    const output = try job.init.gpa.create(tool_fold.Output);
+    defer job.init.gpa.destroy(output);
+    output.* = .{};
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = target.content.length, .digest = target.content.digest };
+    if (try requests.readConversationContent(job.store, job.session, target.position, target.ordinal, reference, output)) |failure| return requests.failRead(failure);
+    try job.files.inspection.setLength(task.io, 0);
+    var capture: DisplayCapture = .{ .task = task, .file = job.files.inspection };
+    try output.finish(&capture);
+}
 
 /// The Ctrl-O page. The Message's length, digest and end are validated
 /// before anything shows; its full text then follows at column 0.
@@ -1076,7 +1104,7 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
         try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
     } else {
         std.debug.assert(job.inspection_kind == .requests);
-        try job.requests(job.init, task.requests(), job.store, job.session, &output.interface, &job.result.requests);
+        try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);
         try writeSubmission(job.inspection_submission, null, &output.interface);
     }
     try output.flush();
@@ -1134,7 +1162,7 @@ test "a Host command writes its page and inherits no saved terminal descriptor" 
             return open;
         }
 
-        fn command(_: std.process.Init, _: client.Requests, _: []const u8, _: []const u8, _: []u8) anyerror!void {
+        fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) anyerror!void {
             for (inheritable(), before, 0..) |now, was, fd| if (now and !was) {
                 leaked = @intCast(fd);
             };

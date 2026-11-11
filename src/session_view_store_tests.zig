@@ -2,13 +2,13 @@ const std = @import("std");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
 const protocol_reply = @import("protocol_reply.zig");
-const tool_catalog = @import("tools.zig");
+const tool_defs = @import("tools.zig");
 const store = @import("store.zig");
 
 test "MCP ask approval uses the frozen server after its Session offer changes" {
     const Store = store.Store;
-    const testingStoreCatalog = store.testing.testingStoreCatalog;
-    const catalogRecordsWith = store.testing.catalogRecordsWith;
+    const testingStoreToolSet = store.testing.testingStoreToolSet;
+    const hostToolRecordsWith = store.testing.hostToolRecordsWith;
     const submitTestMessage = store.testingSubmitMessage;
     const settleCallsForTesting = store.settleCallsForTesting;
     const ContentReader = store.ContentReader;
@@ -16,8 +16,8 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
     const canonicalCwd = store.testingCanonicalCwd;
     const completeConfiguration = store.testingCompleteConfiguration;
     const View = @import("session_view.zig");
-    const tools = tool_catalog;
-    const records = comptime catalogRecordsWith(&.{.{
+    const tools = tool_defs;
+    const records = comptime hostToolRecordsWith(&.{.{
         .name = "fetch_page",
         .owner = .mcp,
         .server = "docs",
@@ -30,11 +30,11 @@ test "MCP ask approval uses the frozen server after its Session offer changes" {
         for (&records, &out) |*record, *digest| digest.* = tools.recordDigest(record);
         break :blk out;
     };
-    const catalog: tools.Catalog = .{ .records = &records, .digests = &digests };
+    const host_tool_set: tools.HostToolSet = .{ .records = &records, .digests = &digests };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
-    try testingStoreCatalog(&storage, &tmp, std.testing.io, &catalog);
+    try testingStoreToolSet(&storage, &tmp, std.testing.io, &host_tool_set);
     defer storage.close() catch unreachable;
     var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
     var command = try completeConfiguration("approval-mcp", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
