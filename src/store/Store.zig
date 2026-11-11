@@ -444,7 +444,7 @@ pub const Store = struct {
             try self.readCatalogText(row.schema_id.get(), schema);
             if (!std.mem.eql(u8, &content_string.digest(description), &row.description_digest) or
                 !std.mem.eql(u8, &content_string.digest(schema), &row.schema_digest)) return error.CorruptStore;
-            out.* = .{ .name = name, .owner = row.owner, .server = server, .description = description, .input_schema = schema };
+            out.* = .{ .name = name, .owner = row.owner, .server = server, .read_only = row.read_only, .description = description, .input_schema = schema };
             digest.* = tool_catalog.recordDigest(out);
         }
         if (!saved.catalog().valid()) return error.CorruptStore;
@@ -1292,6 +1292,13 @@ pub const Store = struct {
     }
 
     fn dispatchWorkHeld(self: *Store, paused: bool) !DispatchWork {
+        const survey = self.identities().survey;
+        const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
+        self.identities().survey.kept = .none;
+        self.identities().survey.asked = asked;
+        // Nothing committed since the survey ran, right after its COMMIT.
+        if (survey.kept == .ready and survey.asked == asked and !self.isFenced())
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -1936,6 +1943,7 @@ pub const Entry = struct {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
+            store.identities().survey.kept = if (store.identities().survey.kept == .fresh) .ready else .none;
             store.changes.record(generation, &store.touched);
             if (store.commitWake().load(.acquire)) |wake| wake.set(store.io);
         }
@@ -2045,6 +2053,44 @@ pub fn commit(self: *Store) !void {
 /// it commits at its end.
 pub fn commitsWithWrites(self: *Store) bool {
     return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
+}
+
+/// Sends `writer`'s last writes and COMMIT, which it bound, with the
+/// dispatch survey's reads after them: the Host asks for that survey
+/// after every commit (`dispatchWork`), and here it costs no round trip
+/// of its own. The reads follow COMMIT, so they run in autocommit and see
+/// what it saved. The writer sends the message; the survey is in it whole
+/// or not at all, so one whose reads do not fit after COMMIT is dropped
+/// before the send, as is one the Host has not asked for yet. Its answer
+/// is kept only beside a writer that did not fail, and only when that one
+/// round gave it: checks that need more rounds are left to the Host's own
+/// `dispatchWork`. A read that fails after COMMIT fences, as it does when
+/// the Host asks, and the commit stands.
+pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
+    const kept = &self.identities().survey;
+    if (kept.asked == .never) return writer.passCommit(null);
+    kept.kept = .none;
+    var reads: store_access.Access(.survey, error{}) = .{ .store = self, .tail = true };
+    defer reads.deinit();
+    var survey: model_admission_domain.DispatchSurvey = .{};
+    survey.queue(&reads, kept.asked == .paused);
+    if (reads.failure != null) {
+        self.engine.dropTail();
+        return writer.passCommit(null);
+    }
+    writer.passCommit(reads.asTail());
+    if (writer.failure != null) return;
+    const answer: anyerror!?DispatchWork = if (reads.failure) |err| err else survey.work();
+    const found = (answer catch |err| {
+        @as(anyerror!void, fence(self, err)) catch {};
+        return;
+    }) orelse return;
+    kept.core = found.core;
+    kept.mcp = found.mcp;
+    kept.bash = found.bash;
+    kept.message = found.message;
+    kept.tool_continuation = found.tool_continuation;
+    kept.kept = .fresh;
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2291,6 +2337,25 @@ const HostValues = struct {
     /// (`Store.admitted`): one per write at most.
     admitted: [Queue.drain_limit + 1]Admitted = undefined,
     admitted_len: u8 = 0,
+    /// How the Host last asked `dispatchWork`, with new Turns held or not;
+    /// until it asks, no commit carries the survey. With it, the dispatch
+    /// survey a commit's message carried
+    /// (`commitWithSurvey`), for the `dispatchWork` that asks before
+    /// anything else commits: `fresh` until its writer's entry point ends
+    /// and advances the generation, then `ready` until the next advance.
+    /// It fits the padding after `admitted_len`.
+    survey: Survey = .{},
+};
+
+const Survey = packed struct(u16) {
+    asked: enum(u2) { never, running, paused } = .never,
+    kept: enum(u2) { none, fresh, ready } = .none,
+    core: bool = false,
+    mcp: bool = false,
+    bash: bool = false,
+    message: bool = false,
+    tool_continuation: bool = false,
+    _: u7 = 0,
 };
 
 const Admitted = struct {

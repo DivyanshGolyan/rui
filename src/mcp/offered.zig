@@ -67,6 +67,7 @@ pub noinline fn merge(arena: std.mem.Allocator, saved: ?*const tools.Catalog, so
                 .input_schema = entry.input_schema,
                 .owner = .mcp,
                 .server = source.server,
+                .read_only = entry.read_only,
             } });
         } else if (saved) |catalog| {
             for (catalog.records) |record| {
@@ -270,4 +271,23 @@ test "a saved tool of an unreachable server can collide with a fresh one" {
         .{ .server = "down", .listed = null },
         .{ .server = "up", .listed = &found },
     }, &collision));
+}
+
+test "MCP read-only hints survive listing and unavailable-server fallback" {
+    var memory = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer memory.deinit();
+    var collision: Collision = .{};
+    var read = listed("read_page");
+    read.read_only = true;
+    const found = [_]Listing.Entry{ read, listed("write_page") };
+    const saved = try merge(memory.allocator(), null, &.{.{ .server = "docs", .listed = &found }}, &collision);
+    try std.testing.expect(saved.records[saved.find("read_page").?].read_only);
+    try std.testing.expect(!saved.records[saved.find("write_page").?].read_only);
+    const fallback = try merge(memory.allocator(), &saved, &.{.{ .server = "docs", .listed = null }}, &collision);
+    try std.testing.expect(fallback.records[fallback.find("read_page").?].read_only);
+    try std.testing.expectEqualSlices(u8, &saved.digests[saved.find("read_page").?], &fallback.digests[fallback.find("read_page").?]);
+    read.read_only = false;
+    const replaced = try merge(memory.allocator(), &saved, &.{.{ .server = "docs", .listed = &.{read} }}, &collision);
+    try std.testing.expect(!replaced.records[replaced.find("read_page").?].read_only);
+    try std.testing.expect(!std.mem.eql(u8, &saved.digests[saved.find("read_page").?], &replaced.digests[replaced.find("read_page").?]));
 }
