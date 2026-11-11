@@ -293,8 +293,8 @@
     },
     {
       "name": "chat-working",
-      "note": "13b-working",
-      "open": "Fix retry deadline",
+      "note": "13b-working: owns its slow Turn; leaves the retry transcript unchanged",
+      "open": "Explain the retry change",
       "steps": [
         {
           "text": "Explain the change again, a slow walk through is fine."
@@ -314,13 +314,34 @@
       "expect": [
         "Waiting",
         "ctrl+x stop"
+      ],
+      "cast": [
+        {
+          "label": "Explain the retry change",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
       ]
     },
     {
       "name": "chat-queued",
-      "note": "13d-queued-message",
-      "open": "Fix retry deadline",
+      "note": "13d-queued-message: owns its slow Turn instead of borrowing chat-working work",
+      "open": "Queue a follow-up",
       "steps": [
+        {
+          "send": {
+            "to": "Queue a follow-up",
+            "text": "Explain the change in a slow walk through.",
+            "wait": false
+          }
+        },
+        {
+          "wait": "Waiting"
+        },
         {
           "wait": "ctrl+x stop"
         },
@@ -335,16 +356,27 @@
         {
           "wait": "◌ and one more thing"
         }
+      ],
+      "cast": [
+        {
+          "label": "Queue a follow-up",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
       ]
     },
     {
       "name": "tools-running",
-      "note": "14-tools-running: ⠹ marks active tool calls",
-      "open": "Fix retry deadline",
+      "note": "14-tools-running: ⠹ marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
+      "open": "Run parallel checks",
       "steps": [
         {
           "send": {
-            "to": "Fix retry deadline",
+            "to": "Run parallel checks",
             "text": "Now build the docs and run the slow tests as parallel bash jobs.",
             "wait": false
           }
@@ -363,15 +395,44 @@
         "⠹ Build the docs",
         "Run the slow tests",
         "ctrl+x stop"
+      ],
+      "cast": [
+        {
+          "label": "Run parallel checks",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
       ]
     },
     {
-      "name": "stopping",
-      "note": "14c-stop-asked: transient; capture immediately at one size before it settles",
-      "open": "Fix retry deadline",
+      "name": "stop",
+      "note": "14c-stop-asked: after stop, no stale Stopping line; owns its slow Bash call",
+      "open": "Stop the slow job",
+      "cast": [
+        {
+          "label": "Stop the slow job",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
       "steps": [
         {
-          "wait": "Build the docs"
+          "send": {
+            "to": "Stop the slow job",
+            "text": "long bash",
+            "wait": false
+          }
+        },
+        {
+          "wait": "⠹ Sleep eight seconds"
         },
         {
           "keys": [
@@ -379,17 +440,19 @@
           ]
         },
         {
-          "wait": "Stopping"
+          "wait": "■ Stopped",
+          "timeout": 60
         }
       ],
-      "sizes": [
-        "140x40"
+      "expect": "■ Stopped",
+      "absent": [
+        "Stopping"
       ]
     },
     {
       "name": "stopped",
-      "note": "14d-stopped: one ■ Stopped line, without continuation advice",
-      "open": "Fix retry deadline",
+      "note": "14d-stopped: one ■ Stopped line, without continuation advice; independently seeded with settle: stop",
+      "open": "Profile the Host under load",
       "steps": [
         {
           "wait": "■ Stopped"
