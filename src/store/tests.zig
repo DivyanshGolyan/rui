@@ -11944,71 +11944,107 @@ test "a start_agent child works in its caller's Workspace with its provider" {
     }.run);
 }
 
-test "a null effort on a listed model refuses a mixed update before any changes" {
+test "explicit or retained null effort on a listed model refuses a mixed update before any changes" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var create = try completeConfiguration("effort-null-spec", "", workspace, "gpt-6.1-sol");
-            const session = (try storage.configure(&create, .{})).accepted.session;
-            var patch: wire_request.ConfigureCommand = .{};
-            patch.session = session;
-            try patch.key.set("effort-set-low");
-            patch.configuration.reasoning_effort.state = .value;
-            try patch.configuration.reasoning_effort.value.set("low");
-            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
-            const before = try storage.inspectSessionForTesting(session.slice());
-            try patch.key.set("effort-clear-mixed");
-            patch.configuration.reasoning_effort.state = .explicit_null;
-            patch.configuration.tools = try .of(&.{});
-            patch.configuration.label.state = .value;
-            try patch.configuration.label.value.set("must not apply");
-            const bytes = "must not import these instructions";
-            patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
-            const refused = try storage.configure(&patch, .{});
-            try std.testing.expect(refused == .rejected);
-            try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
-            const after = try storage.inspectSessionForTesting(session.slice());
-            try std.testing.expectEqual(before.revision, after.revision);
-            try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
-            try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), after.reasoning_effort);
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
-            try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+            for ([_]bool{ false, true }) |model_revision| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("effort-null-spec", "", workspace, if (model_revision) "model-a" else "gpt-6.1-sol");
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                var patch: wire_request.ConfigureCommand = .{};
+                patch.session = session;
+                if (!model_revision) {
+                    try patch.key.set("effort-set-low");
+                    patch.configuration.reasoning_effort.state = .value;
+                    try patch.configuration.reasoning_effort.value.set("low");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                }
+                const before = try storage.inspectSessionForTesting(session.slice());
+                try patch.key.set("effort-clear-mixed");
+                patch.configuration.reasoning_effort.state = if (model_revision) .omitted else .explicit_null;
+                if (model_revision) {
+                    patch.configuration.model.state = .value;
+                    try patch.configuration.model.value.set("gpt-6.1-sol");
+                }
+                patch.configuration.tools = try .of(&.{});
+                patch.configuration.label.state = .value;
+                try patch.configuration.label.value.set("must not apply");
+                const bytes = "must not import these instructions";
+                patch.configuration.instructions = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = protocol.contentDigest(bytes) };
+                const refused = try storage.configure(&patch, .{});
+                try std.testing.expect(refused == .rejected);
+                try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
+                const after = try storage.inspectSessionForTesting(session.slice());
+                try std.testing.expectEqual(before.revision, after.revision);
+                try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
+                try std.testing.expectEqual(before.reasoning_effort, after.reasoning_effort);
+                try std.testing.expectEqualStrings(before.model.slice(), after.model.slice());
+                try std.testing.expect((try storage.configure(&patch, .{})).rejected.replayed);
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
+            }
         }
     }.run);
 }
 
-test "a null effort is refused for listed reasoning models and admitted for unlisted models" {
-    var requested: wire_request.Configuration = .{};
-    requested.reasoning_effort.state = .explicit_null;
-    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
-    try current.model.set("gpt-6.1-sol");
-    try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
-    try current.model.set("model-a");
-    try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex) == null);
-}
-
-test "null effort supports nonreasoning catalog entries but never clears assigned effort" {
-    var requested: wire_request.Configuration = .{};
-    requested.reasoning_effort.state = .explicit_null;
-    var current: CurrentConfiguration = .{ .reasoning_effort = null, .provider = .codex };
-    for ([_][]const u8{ "openai/whisper-1", "unlisted-model" }) |model| {
-        try current.model.set(model);
-        current.reasoning_effort = null;
-        try std.testing.expect(configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex) == null);
-        try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
-        current.reasoning_effort = .low;
-        try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex).?);
+test "configuration validates effective effort across retained requested and target model states" {
+    const catalog = @import("../model_catalog.zig");
+    const efforts = std.enums.values(protocol.ReasoningEffort);
+    // Required reasoning, no reasoning levels, and an unlisted binding.
+    for ([_][]const u8{ "gpt-5.5", "openai/whisper-1", "unlisted-target" }) |target| {
+        const known = catalog.find(catalog.shipped, target);
+        for (0..efforts.len + 1) |retained_index| {
+            const retained: ?protocol.ReasoningEffort = if (retained_index == 0) null else efforts[retained_index - 1];
+            // The retained value may be explicit or carried from a legacy
+            // null spec's latest Operation. Both must validate identically.
+            for ([_]bool{ false, true }) |legacy| {
+                for ([_]bool{ true, false }) |model_supplied| {
+                    var current: CurrentConfiguration = .{ .provider = .codex };
+                    try current.model.set(if (model_supplied) "unlisted-source" else target);
+                    current.reasoning_effort = if (legacy) null else retained;
+                    current.previous_reasoning_effort = if (legacy) retained else null;
+                    // Omitted, supplied null, and every closed-grammar value.
+                    for (0..efforts.len + 2) |request_index| {
+                        var requested: wire_request.Configuration = .{};
+                        if (model_supplied) {
+                            requested.model.state = .value;
+                            try requested.model.value.set(target);
+                        }
+                        if (request_index == 1) requested.reasoning_effort.state = .explicit_null;
+                        if (request_index >= 2) {
+                            requested.reasoning_effort.state = .value;
+                            try requested.reasoning_effort.value.set(@tagName(efforts[request_index - 2]));
+                        }
+                        const selected = if (request_index == 0) retained else if (request_index == 1) null else efforts[request_index - 2];
+                        // The independent oracle uses catalog facts, not the
+                        // configuration owner's capability or resolution code.
+                        const supported = if (known) |row|
+                            (if (selected) |value| row.efforts.contains(value) else row.efforts.count() == 0)
+                        else
+                            true;
+                        const clears = request_index == 1 and retained != null;
+                        const expected: ?protocol.ConfigurationRejection = if (supported and !clears) null else .unsupported_reasoning_effort;
+                        errdefer std.debug.print("target={s} retained={?s} legacy={} model_supplied={} request={s} value={?s}\n", .{
+                            target,
+                            if (retained) |value| @tagName(value) else null,
+                            legacy,
+                            model_supplied,
+                            @tagName(requested.reasoning_effort.state),
+                            if (selected) |value| @tagName(value) else null,
+                        });
+                        try std.testing.expectEqual(expected, configuration_domain.configurationBeforeWorkspace(&tool_catalog.built_in, &current, &requested, .codex));
+                    }
+                }
+            }
+        }
     }
-    try current.model.set("gpt-6.1-sol");
-    current.reasoning_effort = null;
-    try std.testing.expectEqual(@as(?protocol.ReasoningEffort, null), configuration_domain.effectiveReasoningEffort(&current));
 }
 
 test "effective effort carries legacy history without inferring a fresh default" {

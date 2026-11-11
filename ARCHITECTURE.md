@@ -465,6 +465,7 @@ This preserves exact-model syntax without guessing capabilities from model famil
 
 A listed model with effort levels takes one of those values; explicit `null` is accepted only for an unlisted model or a catalog entry with no effort levels.
 On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
+Configuration validates the effective requested-or-retained effort against the effective requested-or-current model, including null effort on a model revision.
 The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
 The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.

@@ -231,22 +231,22 @@ pub fn configurationBeforeWorkspace(
         if (known.context_window) |window| if (tokens > window) return .compact_at_too_large;
     };
     if (compact_at) |tokens| if (tokens > std.math.maxInt(i64)) return .invalid_compaction_trigger;
-    // A listed model with effort levels requires one of them. Models with no
-    // listed efforts can omit reasoning, but v2 cannot clear an assigned effort.
-    if (requested.reasoning_effort.state == .explicit_null) {
-        if (model_catalog.find(model_catalog.shipped, model)) |known| {
-            if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
-        }
-        if (current) |existing| if (effectiveReasoningEffort(existing) != null) return .unsupported_reasoning_effort;
-    }
-    if (requested.reasoning_effort.state == .value) {
-        const effort = std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
-            return .unsupported_reasoning_effort;
-        if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
-    } else if (requested.model.state == .value and requested.reasoning_effort.state == .omitted) {
-        if (current) |existing| if (effectiveReasoningEffort(existing)) |effort| {
-            if (!model_capability.supportsReasoningEffort(model, effort)) return .unsupported_reasoning_effort;
-        };
+    // Resolve the settings once: omission retains the effective historical
+    // effort, while a supplied value (including null) overrides it. Validate
+    // that result even when only the model, or neither setting, was supplied.
+    const retained_effort = if (current) |existing| effectiveReasoningEffort(existing) else null;
+    const effort = switch (requested.reasoning_effort.state) {
+        .omitted => retained_effort,
+        .explicit_null => null,
+        .value => std.meta.stringToEnum(model_capability.ReasoningEffort, requested.reasoning_effort.value.slice()) orelse
+            return .unsupported_reasoning_effort,
+    };
+    // The codec cannot encode a boundary back to unspecified effort.
+    if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
+    if (effort) |value| {
+        if (!model_capability.supportsReasoningEffort(model, value)) return .unsupported_reasoning_effort;
+    } else if (model_catalog.find(model_catalog.shipped, model)) |known| {
+        if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
     }
     return null;
 }
