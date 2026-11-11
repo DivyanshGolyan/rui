@@ -420,7 +420,7 @@ test "history reopened transcript keeps only the failed numeric header" {
     const prepared = try stagePage(io, page, scratch, Bytes{});
     var sink: Sink = .{};
     try prepared.render(io, scratch, "store", "09azvw", &sink, .transcript, false, "");
-    try std.testing.expectEqualStrings("\n× Run check · 7\n", sink.bytes[0..sink.length]);
+    try std.testing.expectEqualStrings("\n× Run check · exit 7\n", sink.bytes[0..sink.length]);
 }
 
 test "history preparation binds wire and staged bytes before exposure" {

@@ -658,7 +658,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try escaped.finish();
     try indented.feed(state.suffix);
     if (presentation.code == .failed and exit.len != 0) {
-        try indented.feed(" · ");
+        try indented.feed(" · exit ");
         try indented.feed(exit);
     }
     try indented.finish();
@@ -1289,7 +1289,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
-        .{ protocol.ToolPresentation.Code.failed, "× Tool call · 7" },
+        .{ protocol.ToolPresentation.Code.failed, "× Tool call · exit 7" },
         .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
         .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
         .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
@@ -1328,6 +1328,23 @@ test "tool header hides all body lines for every outcome and first-line split" {
                 try std.testing.expectEqual(case[0] == .succeeded, compact);
             }
         }
+    }
+}
+
+test "failed tool exit status is named rather than read as a count" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    for ([_][]const u8{ "1", "7", "127" }) |exit| {
+        var buffer: [128]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        var sink: Sink = .{ .out = &out };
+        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit);
+        var expected: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n× Tool call · exit {s}\n", .{exit}), out.buffered());
     }
 }
 
