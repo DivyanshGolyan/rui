@@ -289,21 +289,7 @@ pub const Requests = struct {
         try body.appendShape(protocol.model_list_request, .{paths.store.slice()});
         const fd = try openRead(self, &paths, "/v1/model-list", body.slice());
         defer closeSocket(self.io, fd);
-        const Sink = struct {
-            bytes: std.ArrayList(u8) = .empty,
-            gpa: std.mem.Allocator,
-            pub fn feed(s: *@This(), bytes: []const u8) !void {
-                if (s.bytes.items.len + bytes.len > protocol.model_list_reply.max_bytes) return error.ResponseTooLarge;
-                try s.bytes.appendSlice(s.gpa, bytes);
-            }
-        };
-        var sink: Sink = .{ .gpa = gpa };
-        errdefer sink.bytes.deinit(gpa);
-        var buffer: ReplyBuffer = .{};
-        return switch (try readReportResponse(self, fd, &sink, &buffer)) {
-            .report => try sink.bytes.toOwnedSlice(gpa),
-            .command => error.InvalidResponse,
-        };
+        return readModelListResponse(self, fd, gpa);
     }
 
     /// Bounded owned metadata only; scope strings are borrowed until return.
@@ -2347,6 +2333,26 @@ fn readResultResponseSink(
     return .{ .answer = .{ .bytes = head.content_length } };
 }
 
+/// The Host bounds a catalog reply from its selected generation. A client
+/// cannot infer that size from its own shipped snapshot; retain the complete
+/// framed body in the caller's allocation rather than applying a stale cap.
+fn readModelListResponse(requests: Requests, fd: std.posix.fd_t, gpa: std.mem.Allocator) ![]u8 {
+    const Sink = struct {
+        bytes: std.ArrayList(u8) = .empty,
+        gpa: std.mem.Allocator,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.bytes.appendSlice(self.gpa, bytes);
+        }
+    };
+    var sink: Sink = .{ .gpa = gpa };
+    errdefer sink.bytes.deinit(gpa);
+    var buffer: ReplyBuffer = .{};
+    return switch (try readReportResponse(requests, fd, &sink, &buffer)) {
+        .report => try sink.bytes.toOwnedSlice(gpa),
+        .command => error.InvalidResponse,
+    };
+}
+
 fn readReportResponse(
     requests: Requests,
     fd: std.posix.fd_t,
@@ -4098,6 +4104,59 @@ test "result response streams 100,000 bytes into an explicit file" {
     }
     try std.testing.expectEqual(expected_hash.finalResult(), actual_hash.finalResult());
     try std.testing.expect(context.failure == null);
+}
+
+test "runtime catalog model list client accepts a reply larger than its shipped snapshot bound" {
+    const allocator = std.testing.allocator;
+    const count = protocol.model_list_reply.max_bytes / protocol.max_model_bytes + 1;
+    var body: std.Io.Writer.Allocating = .init(allocator);
+    defer body.deinit();
+    try body.writer.writeAll(protocol.model_list_reply.head);
+    try body.writer.writeAll("[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[");
+    for (0..count) |index| {
+        var digits_buffer: [20]u8 = undefined;
+        const digits = try std.fmt.bufPrint(&digits_buffer, "{d}", .{index});
+        try body.writer.print("{s}{{\"id\":\"", .{if (index == 0) "" else ","});
+        try body.writer.splatByteAll('0', protocol.max_model_bytes - digits.len);
+        try body.writer.print("{s}\",\"known\":true}}", .{digits});
+    }
+    try body.writer.writeAll("]}]");
+    try body.writer.writeAll(protocol.model_list_reply.tail);
+    try std.testing.expect(body.written().len > protocol.model_list_reply.max_bytes);
+    const response = try std.fmt.allocPrint(
+        allocator,
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n{s}",
+        .{ body.written().len, body.written() },
+    );
+    defer allocator.free(response);
+    const descriptors = try testPipe();
+    const Peer = struct {
+        fd: std.posix.fd_t,
+        response: []const u8,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            writeTestResponse(self.fd, self.response) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var peer: Peer = .{ .fd = descriptors[1], .response = response };
+    const thread = try std.Thread.spawn(.{}, Peer.run, .{&peer});
+    var joined = false;
+    defer {
+        closeTestDescriptor(descriptors[0]);
+        if (!joined) thread.join();
+    }
+    const received = try readModelListResponse(.{ .io = std.testing.io }, descriptors[0], allocator);
+    defer allocator.free(received);
+    thread.join();
+    joined = true;
+    try std.testing.expect(peer.failure == null);
+    try std.testing.expectEqualStrings(body.written(), received);
+    var menu = try @import("model_picker.zig").read(allocator, try protocol_reply.modelListProviders(received));
+    defer menu.deinit(allocator);
+    try std.testing.expectEqual(count, menu.entries.len);
+    for (menu.entries) |entry| try std.testing.expect(entry.known);
 }
 
 test "Session list client streams a page larger than the resident reply buffer" {

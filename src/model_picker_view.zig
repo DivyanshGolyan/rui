@@ -1,6 +1,7 @@
 //! Value decisions for the overview's /model picker. The screen owns the
 //! Menu and draft; selection stores only an index into that Menu.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const gwidth = @import("terminal_width");
 const picker = @import("model_picker.zig");
 const capability = @import("model_capability.zig");
@@ -223,7 +224,7 @@ fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, highlighted: bool,
         for (entry.id.len..id_width) |_| out.writeByte(' ') catch unreachable;
     }
     if (columns.context) {
-        const window = if (entry.known) capability.contextWindow(entry.id) else product_defaults.unlisted_context_window;
+        const window = if (entry.known) capability.contextWindow(model_catalog.shipped, entry.id) else product_defaults.unlisted_context_window;
         const start = gwidth.gwidth(out.buffered(), method);
         if (window >= 1_000_000) {
             const hundredths = (window + 5_000) / 10_000;

@@ -2248,7 +2248,13 @@ pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;
 pub const model_list_reply = struct {
     pub const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_list\",\"providers\":";
     pub const tail = "}";
-    pub const max_bytes = head.len + model_list.max_providers_bytes + tail.len;
+    /// Offline fixtures use the shipped bound. A Host sizes from the selected
+    /// generation: saved catalogs are not bounded by the snapshot's ID count.
+    pub const max_bytes = maxBytes(@import("model_catalog.zig").shipped);
+
+    pub fn maxBytes(facts: []const @import("model_catalog.zig").Entry) usize {
+        return head.len + model_list.providersBytes(facts) + tail.len;
+    }
 };
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 /// Hole: whether new Turns are now paused.

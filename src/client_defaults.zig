@@ -6,7 +6,7 @@ const defaults = @import("product_defaults.zig");
 const Provider = @import("provider_name.zig").Provider;
 
 pub fn compactionTrigger(provider: Provider, model: []const u8) u64 {
-    const model_trigger = capability.contextWindow(model) * defaults.compaction_trigger_percent / 100;
+    const model_trigger = capability.contextWindow(catalog.shipped, model) * defaults.compaction_trigger_percent / 100;
     const provider_trigger = for (defaults.provider_compaction_triggers) |entry| {
         if (std.mem.eql(u8, entry.provider, @tagName(provider))) break entry.tokens;
     } else model_trigger;
@@ -15,7 +15,7 @@ pub fn compactionTrigger(provider: Provider, model: []const u8) u64 {
 
 pub fn startEffort(model: []const u8, saved: ?catalog.ReasoningEffort) ?catalog.ReasoningEffort {
     const preferred = comptime std.meta.stringToEnum(catalog.ReasoningEffort, defaults.reasoning_effort).?;
-    return capability.startEffort(saved, model) orelse capability.startEffort(preferred, model) orelse blk: {
+    return capability.startEffort(catalog.shipped, saved, model) orelse capability.startEffort(catalog.shipped, preferred, model) orelse blk: {
         const row = catalog.find(catalog.shipped, model) orelse break :blk null;
         var efforts = row.efforts.iterator();
         break :blk efforts.next();
