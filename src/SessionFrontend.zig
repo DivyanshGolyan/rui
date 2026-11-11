@@ -82,8 +82,7 @@ app_preview: Transcript = undefined,
 app_consent: ActionConsent = .{},
 app_card: PermissionCard = undefined,
 app_palette: Palette = undefined,
-app_host: ?HostAccess = null,
-app_hooks: AppHooks = undefined,
+app_hooks: AppHooks = .{ .root = undefined, .context = undefined, .leave = undefined, .copy = undefined, .on_open = undefined },
 app_caps: overview_view.Caps = .{},
 /// Stops when the caller is signalled; a running command stops with it.
 interrupted: *client.Cancellation = undefined,
@@ -450,7 +449,6 @@ pub const AppHooks = struct {
 
 pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widget {
     self.app_hooks = hooks;
-    self.app_host = hooks.host;
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = "shift+↓" };
@@ -608,12 +606,12 @@ pub fn hostStartKey(key: vaxis.Key) bool {
 }
 
 fn hostHeld(self: *const Self) bool {
-    const host = self.app_host orelse return false;
+    const host = self.app_hooks.host orelse return false;
     return host.held(host.context);
 }
 
 fn hostFailure(self: *Self, err: anyerror) bool {
-    const host = self.app_host orelse return false;
+    const host = self.app_hooks.host orelse return false;
     if (!client.hostUnreachable(err)) return false;
     host.lost(host.context);
     self.dirty = true;
@@ -662,7 +660,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
-            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_host) |host| {
+            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_hooks.host) |host| {
                 if (try host.start(host.context, ctx)) {
                     ctx.consumeEvent();
                     return;
@@ -829,7 +827,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     });
     self.app_preview.size = .{};
     self.app_content.size = .{};
-    self.app_screen.host = if (self.app_host) |host| host.notice(host.context) else null;
+    self.app_screen.host = if (self.app_hooks.host) |host| host.notice(host.context) else null;
     var surface = try self.app_screen.widget().draw(ctx);
     const visible = if (self.app_consent.request != null) &self.app_preview else &self.app_content;
     screen.height = visible.size.height;
@@ -2607,8 +2605,8 @@ fn settleReader(self: *Self) !void {
     else
         false;
     const host_lost = if (end == .failed) self.hostFailure(end.failed.err) else false;
-    if (fenced and self.app_host != null) self.app_host.?.lost(self.app_host.?.context);
-    if (host_lost or (fenced and self.app_host != null)) {
+    if (fenced and self.app_hooks.host != null) self.app_hooks.host.?.lost(self.app_hooks.host.?.context);
+    if (host_lost or (fenced and self.app_hooks.host != null)) {
         // A joined failed read has published no staged output. Keep its
         // cursor, opening state, documents, draft and scroll for the next scan.
         self.reading.pending_diagnostic = null;
@@ -4911,7 +4909,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     for (std.enums.values(ReadPhase)) |phase| {
         for ([_]anyerror{ error.FileNotFound, error.ConnectionRefused, error.UnixConnectFailed, error.ConnectionResetByPeer, error.BrokenPipe, error.TruncatedResponse }) |failure| {
             var fault: Fault = .{ .failure = failure };
-            self.app_host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+            self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
             self.reading.phase = phase;
             self.reading.opening = true;
             self.inspection.command_running = phase == .inspection;
@@ -4926,7 +4924,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
         }
     }
     var fenced: Fault = .{ .failure = error.HostInvocationFailed, .fenced = true };
-    self.app_host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+    self.app_hooks.host = .{ .context = &fenced, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
     self.reading.phase = .activity;
     try self.reader.start(std.testing.io, &fenced, Fault.run);
     try self.settleReader();
@@ -4935,7 +4933,7 @@ test "Host recovery joins unavailable reads in every phase without losing the Se
     // A canonical or unrelated failure still has its original fatal boundary.
     for ([_]anyerror{ error.CanonicalStoreFailure, error.AccessDenied }) |failure| {
         var fault: Fault = .{ .failure = failure };
-        self.app_host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
+        self.app_hooks.host = .{ .context = &fault, .held = Fault.held, .lost = Fault.lose, .start = Fault.start, .notice = Fault.notice };
         self.reading.phase = .activity;
         try self.reader.start(std.testing.io, &fault, Fault.run);
         try std.testing.expectError(failure, self.settleReader());

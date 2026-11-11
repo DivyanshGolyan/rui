@@ -103,18 +103,29 @@ pub const HostStartNotice = enum {
 
     fn words(self: HostStartNotice) []const u8 {
         return switch (self) {
-            .invalid_openai_base_url => "OpenAI unavailable: invalid base URL",
+            .invalid_openai_base_url => "OpenAI URL invalid",
         };
     }
 };
 
-/// What one Host read found, kept whole so neither part outlives the read
-/// that took it.
+/// One discovery observation, not a UI phase or a launch outcome. A pause
+/// belongs only to a reachable Host; a free Store lease proves it stopped.
+const HostObservation = union(enum) {
+    ready: struct { facts: view.Host, paused: bool = false },
+    stopped,
+    unavailable,
+
+    fn facts(self: HostObservation) ?view.Host {
+        return switch (self) {
+            .ready => |ready| ready.facts,
+            else => null,
+        };
+    }
+};
+
+/// One worker read supplies availability, admission and counts together.
 pub const HostRead = struct {
-    paused: bool = false,
-    stopped: bool = false,
-    /// Null when no Host is ready.
-    facts: ?view.Host = null,
+    observation: HostObservation = .unavailable,
     /// This TUI's memory, with the Host's and its tools' while one runs;
     /// null when the read sampled none.
     memory: ?view.Memory = null,
@@ -128,9 +139,6 @@ pub const Operations = struct {
     /// One Host read: host-info's facts and the memory sampled with them.
     host: *const fn (*Self) HostRead,
     start_host: *const fn (*Self, *?HostStartNotice) anyerror!void,
-    /// Whether no Host owns the Store: it stopped, rather than failing to
-    /// answer discovery.
-    stopped: *const fn (*Self) bool,
     /// Reads one `session list` page into `page`, or returns the Host's
     /// failure.
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
@@ -159,7 +167,7 @@ pub const Operations = struct {
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .stopped = hostStopped, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .save_default = saveDefault, .command = runCommand, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .save_default = saveDefault, .command = runCommand, .open = openSession };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -407,11 +415,11 @@ worker: ClientTask = .{},
 upgrade_job: UpgradeJob = .{},
 /// The serving Host's pid, read once per Host start.
 host_process: ?struct { started_at: u64, pid: i32 } = null,
-/// Only this owner changes Host availability or admits a manual start.
-host_availability: HostAvailability = .ready,
-/// Admission hold is meaningful only for a reachable Host. It never holds
-/// the Session's reads, Messages or permission decisions.
-host_paused: bool = false,
+/// Last discovery observation, invalidated by a Session transport loss.
+/// Counts in the view core are a projection of this same read, not a probe.
+host_observation: HostObservation = .unavailable,
+/// A past outcome, not a copy of the queued/running launch job.
+host_start_failed: bool = false,
 /// Launcher feedback survives success or failure without writing under App.
 host_start_notice: ?HostStartNotice = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
@@ -562,8 +570,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
-            if (input == .key_press and !self.root.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and self.hostState().canStart()) {
-                _ = try requestHostStart(self, ctx);
+            if (input == .key_press and !self.root.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and try requestHostStart(self, ctx)) {
                 ctx.consumeEvent();
                 return;
             }
@@ -1022,7 +1029,14 @@ const Next = union(enum) { leave, open: view.Reference };
 /// Steps the core with one event and queues the jobs it asks for. Opening a
 /// Session and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
+    const held_host = self.state.holdsHost();
     const effects = try view.step(&self.state, value);
+    if (held_host and !self.state.holdsHost()) {
+        // An observation from the swap cannot authorize a start after the
+        // Upgrade releases custody. Discover the new owner first.
+        self.host_observation = .unavailable;
+        self.queueHost();
+    }
     var next: ?Next = null;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
@@ -1131,7 +1145,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     self.job = next;
     self.worker.start(self.init.io, self, work) catch |err| {
         if (next != .start_host) return err;
-        self.host_availability = .retry;
+        self.host_start_failed = true;
     };
 }
 
@@ -1147,11 +1161,11 @@ fn work(raw: *anyopaque, task: *ClientTask) !void {
 fn runJob(self: *Self, requests: client.Requests) !void {
     std.debug.assert(self.answer == .none);
     switch (self.job) {
-        .host => self.answer = .{ .host = self.readHost() },
+        .host => self.answer = .{ .host = self.ops.host(self) },
         .start_host => {
             self.answer = .{ .start_host = .{} };
             try self.ops.start_host(self, &self.answer.start_host.notice);
-            self.answer.start_host.read = self.readHost();
+            self.answer.start_host.read = self.ops.host(self);
         },
         .list => {
             self.answer = .{ .page = undefined };
@@ -1249,18 +1263,13 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
         .start_host => {
             self.host_start_notice = if (answer.* == .start_host) answer.start_host.notice else null;
             outcome catch {
-                self.host_availability = .retry;
+                self.host_start_failed = true;
                 return null;
             };
-            self.takeHostRead(answer.start_host.read, true);
-            if (answer.start_host.read.memory) |memory| _ = try self.event(.{ .memory = memory });
-            return self.event(.{ .host = answer.start_host.read.facts });
+            self.host_start_failed = answer.start_host.read.observation == .stopped;
+            return self.takeHostRead(answer.start_host.read);
         },
-        .host => {
-            if (self.host_availability != .starting) self.takeHostRead(answer.host, false);
-            if (answer.host.memory) |memory| _ = try self.event(.{ .memory = memory });
-            return self.event(.{ .host = answer.host.facts });
-        },
+        .host => return self.takeHostRead(answer.host),
         .list => {
             outcome catch return self.event(.{ .list = .failed });
             var rows: [view.max_page_rows]view.Listed = undefined;
@@ -1596,15 +1605,20 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
     };
 }
 
-/// Reachability and the person's launch attempt, not admission policy.
-const HostAvailability = enum { ready, unavailable, stopped, starting, retry };
+/// The same observation feeds the notice, Session service and core counts.
+fn takeHostRead(self: *Self, read: HostRead) !?Next {
+    self.host_observation = read.observation;
+    if (read.observation == .ready) self.host_start_failed = false;
+    if (read.memory) |memory| _ = try self.event(.{ .memory = memory });
+    return self.event(.{ .host = read.observation.facts() });
+}
 
-fn takeHostRead(self: *Self, read: HostRead, started: bool) void {
-    self.host_paused = read.facts != null and read.paused;
-    self.host_availability = if (read.facts != null) .ready else if (read.stopped)
-        (if (started or self.host_availability == .retry) .retry else .stopped)
-    else
-        .unavailable;
+/// Starting is the effect's actual custody, including a queued job and a
+/// finished worker whose result the UI has not joined. No mirrored phase.
+fn hostStarting(self: *const Self) bool {
+    if (self.worker.thread != null and self.job == .start_host) return true;
+    for (self.jobs[0..self.job_count]) |job| if (job == .start_host) return true;
+    return false;
 }
 
 /// All Host ending words and their optional key live beside their one owner.
@@ -1621,7 +1635,7 @@ const HostState = enum {
 
     fn line(self: HostState) struct { mark: marks.Mark, words: []const u8, key: []const u8 = "" } {
         return switch (self) {
-            .ready => .{ .mark = .stopped, .words = "" },
+            .ready => .{ .mark = .failed, .words = "Host ready" },
             .stopped => .{ .mark = .stopped, .words = "Host stopped", .key = "r start" },
             .paused => .{ .mark = .stopped, .words = "Host paused" },
             .starting => .{ .mark = .active, .words = "Host starting" },
@@ -1633,24 +1647,23 @@ const HostState = enum {
 fn hostState(self: *const Self) HostState {
     // The upgrade owns the swap and reobservation. A stale pre-swap read
     // cannot offer a start while that transition still owns the Host.
-    if (self.state.upgrade.held()) return .paused;
-    return switch (self.host_availability) {
-        .ready => if (self.host_paused) .paused else .ready,
+    if (self.state.holdsHost()) return .paused;
+    if (self.hostStarting()) return .starting;
+    return switch (self.host_observation) {
+        .ready => |ready| if (ready.paused) .paused else .ready,
         .unavailable => .paused,
-        .stopped => .stopped,
-        .starting => .starting,
-        .retry => .retry,
+        .stopped => if (self.host_start_failed) .retry else .stopped,
     };
 }
 
 fn hostHeld(raw: *anyopaque) bool {
     const self: *Self = @ptrCast(@alignCast(raw));
-    return self.host_availability != .ready;
+    return self.host_observation != .ready;
 }
 
 fn hostLost(raw: *anyopaque) void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.host_availability == .ready) self.host_availability = .unavailable;
+    if (self.host_observation == .ready) self.host_observation = .unavailable;
     if (self.state.upgrading()) return;
     if (self.worker.thread != null and self.job == .host) return;
     self.queueHost();
@@ -1664,7 +1677,7 @@ fn queueHost(self: *Self) void {
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (!self.hostState().canStart()) return false;
-    self.host_availability = .starting;
+    self.host_start_failed = false;
     self.host_start_notice = null;
     self.queue(.start_host);
     try self.dispatch(if (self.root.session == null) .all else .lent);
@@ -1688,11 +1701,11 @@ fn hostNoticeEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) 
 fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const line = self.hostState().line();
-    const mark = marks.marks.get(if (self.hostState() == .ready) .failed else line.mark);
+    const mark = marks.marks.get(line.mark);
     const notice = if (self.host_start_notice) |value| value.words() else "";
     const text = try std.fmt.allocPrint(ctx.arena, "{s} {s}{s}{s}{s}{s}", .{
         if (self.caps.unicode) mark.unicode else mark.ascii,
-        if (self.hostState() == .ready) "Host ready" else line.words,
+        line.words,
         if (notice.len == 0) "" else " · ",
         notice,
         if (line.key.len == 0) "" else " · ",
@@ -1710,20 +1723,8 @@ fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     return surface;
 }
 
-/// Runs only on the existing overview worker. Neither a failed read nor a
-/// tick starts a Host; only requestHostStart can enqueue that effect.
-fn readHost(self: *Self) HostRead {
-    var read = self.ops.host(self);
-    if (read.facts == null) read.stopped = self.ops.stopped(self);
-    return read;
-}
-
 fn startHost(self: *Self, notice: *?HostStartNotice) !void {
     try self.hooks.start_host(self.init, self.options.store, notice);
-}
-
-fn hostStopped(self: *Self) bool {
-    return client.hostStatus(self.init.io, self.options.store) == .unavailable;
 }
 
 fn hostFacts(self: *Self) HostRead {
@@ -1733,8 +1734,10 @@ fn hostFacts(self: *Self) HostRead {
         else => null,
     };
     return .{
-        .paused = if (ready) |host| host.paused else false,
-        .facts = if (ready) |host| .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied } else null,
+        .observation = if (ready) |host| .{ .ready = .{
+            .facts = .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied },
+            .paused = host.paused,
+        } } else if (status == .unavailable) .stopped else .unavailable,
         // The same read samples the counts line's memory.
         .memory = self.liveMemory(if (ready) |host| host.started_at else null),
     };
@@ -1937,14 +1940,9 @@ const fake_operations: Operations = .{
     .host = struct {
         fn host(_: *Self) HostRead {
             Seen.now.hosts += 1;
-            return .{ .facts = .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } };
+            return .{ .observation = .{ .ready = .{ .facts = .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } } } };
         }
     }.host,
-    .stopped = struct {
-        fn stopped(_: *Self) bool {
-            return false;
-        }
-    }.stopped,
     .list = struct {
         fn list(self: *Self, _: client.Requests, cursor: protocol_reply.SessionListCursor, page: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
             Seen.now.lists += 1;
@@ -3775,16 +3773,16 @@ const HostRecovery = struct {
         files = 0;
         var ops = fake_operations;
         ops.host = host;
-        ops.stopped = stopped;
         ops.start_host = start;
         ops.open = openSession;
         return ops;
     }
     fn host(_: *Self) HostRead {
-        return .{ .paused = availability == .paused, .facts = if (availability == .stopped or availability == .stopping) null else .{ .started_at = test_now_s, .slots = 4, .slots_in_use = 0 } };
-    }
-    fn stopped(_: *Self) bool {
-        return availability == .stopped;
+        return .{ .observation = switch (availability) {
+            .ready, .paused => .{ .ready = .{ .facts = .{ .started_at = test_now_s, .slots = 4, .slots_in_use = 0 }, .paused = availability == .paused } },
+            .stopped => .stopped,
+            .stopping => .unavailable,
+        } };
     }
     fn start(overview: *Self, notice: *?HostStartNotice) !void {
         notice.* = start_notice;
@@ -3940,7 +3938,7 @@ test "Host recovery paused shutting down and upgrading offer no start gesture" {
         overview.queue(.host);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expect(hostNotice(overview) == null);
-        overview.host_availability = .stopped;
+        overview.host_observation = .stopped;
         overview.state.upgrade.after = .blocked;
         try std.testing.expectEqual(HostState.paused, overview.hostState());
         try std.testing.expect(!try requestHostStart(overview, &ctx));
@@ -3979,6 +3977,8 @@ test "Host recovery availability is independent of admission pause for the whole
         frontend.live.queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 9, .newest_position = 30 };
         try frontend.files.action.writePositionalAll(std.testing.io, "pending permission\n", 0);
         frontend.reading.prepared_action = 0xa;
+        overview.queue(.host);
+        try rig.lend();
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         const child = overview.root.session.?;
@@ -4034,7 +4034,7 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     // start. The Upgrade owns that transition until reobservation finishes.
     try std.testing.expect(overview.state.upgrade.start());
     HostRecovery.availability = .stopped;
-    overview.takeHostRead(overview.readHost(), false);
+    try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
     try std.testing.expect(hostHeld(overview));
     try std.testing.expectEqual(HostState.paused, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
@@ -4042,24 +4042,86 @@ test "Host recovery waits across upgrade swap and reobservation before offering 
     overview.state.upgrade.after = .reobserving;
     try std.testing.expectEqual(HostState.paused, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
+    // The successful reobservation releases the Upgrade, but must not
+    // expose the free-lease sample from the swap as a start gesture.
+    overview.state.listing = true;
+    overview.state.listing_archive = overview.state.archive;
+    try std.testing.expect(try overview.event(.{ .list = .{ .page = .{ .rows = &.{}, .answer = .{ .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 } } } } }) == null);
+    try std.testing.expect(!overview.state.holdsHost());
+    try std.testing.expectEqual(HostState.paused, overview.hostState());
+    try std.testing.expect(!try requestHostStart(overview, &ctx));
     // An owner with an unavailable listener is not an admission pause, and
     // not a stopped Host either. No start while it still owns the Store.
     HostRecovery.availability = .stopping;
-    overview.takeHostRead(overview.readHost(), false);
-    overview.state.upgrade.reobserved();
+    try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(hostHeld(overview));
-    try std.testing.expect(!overview.host_paused);
+    try std.testing.expectEqual(std.meta.Tag(HostObservation).unavailable, std.meta.activeTag(overview.host_observation));
     try std.testing.expectEqual(HostState.paused, overview.hostState());
     try std.testing.expect(!try requestHostStart(overview, &ctx));
     HostRecovery.availability = .ready;
-    overview.takeHostRead(overview.readHost(), false);
+    try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
     try std.testing.expect(!hostHeld(overview));
     try std.testing.expect(hostNotice(overview) == null);
     // Outside the swap, only confirmed absence of the owner offers start.
     HostRecovery.availability = .stopped;
-    overview.takeHostRead(overview.readHost(), false);
+    try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
     try std.testing.expectEqual(HostState.stopped, overview.hostState());
     try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
+}
+
+test "Host recovery derives launch progress from job custody without copying reachability" {
+    const Busy = struct {
+        fn run(_: *anyopaque, task: *ClientTask) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            return error.Cancelled;
+        }
+    };
+    const ops = HostRecovery.operations();
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    HostRecovery.availability = .stopped;
+    try std.testing.expect(try overview.takeHostRead(overview.ops.host(overview)) == null);
+    // Another job owns the sole worker. Starting is already true in the
+    // queue, not just once the launch worker gets its thread.
+    try overview.worker.start(std.testing.io, overview, Busy.run);
+    defer {
+        overview.worker.cancel();
+        overview.worker.join() catch {};
+    }
+    try std.testing.expect(try requestHostStart(overview, &ctx));
+    try std.testing.expect(overview.hostStarting());
+    try std.testing.expectEqual(HostState.starting, overview.hostState());
+    try std.testing.expect(!try requestHostStart(overview, &ctx));
+    try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
+    // A discovery read is independently authoritative even with a launch
+    // queued. One sample supplies pause, reachability and counts together.
+    for ([_]HostRecovery.Availability{ .paused, .ready }) |availability| {
+        HostRecovery.availability = availability;
+        const read = overview.ops.host(overview);
+        try std.testing.expect(try overview.takeHostRead(read) == null);
+        try std.testing.expectEqual(read.observation.facts(), overview.state.host);
+        try std.testing.expect(!hostHeld(overview));
+        try std.testing.expect(overview.hostStarting());
+        try std.testing.expectEqual(HostState.starting, overview.hostState());
+        try std.testing.expect(!try requestHostStart(overview, &ctx));
+    }
+    overview.worker.cancel();
+    overview.worker.join() catch {};
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+    try std.testing.expect(!overview.hostStarting());
+    try std.testing.expectEqual(HostState.ready, overview.hostState());
+    // A transport hint invalidates only discovery; it is not proof that
+    // the lease is free, and cannot start anything without a fresh sample.
+    hostLost(overview);
+    try std.testing.expect(hostHeld(overview));
+    try std.testing.expectEqual(HostState.paused, overview.hostState());
+    try std.testing.expect(!try requestHostStart(overview, &ctx));
+    try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
 }
 
 test "Host recovery presents launcher diagnostics in its line on success and failure" {
@@ -4078,13 +4140,15 @@ test "Host recovery presents launcher diagnostics in its line on success and fai
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(?HostStartNotice, .invalid_openai_base_url), overview.host_start_notice);
         try std.testing.expectEqual(fails, hostHeld(overview));
-        var shown = try rig.shown(140, 26);
-        defer shown.deinit();
-        const text = try shown.text();
-        try std.testing.expect(std.mem.indexOf(u8, text, "OpenAI unavailable: invalid base URL") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, if (fails) "Host stopped" else "Host ready") != null);
-        try std.testing.expectEqual(fails, std.mem.indexOf(u8, text, "r retry") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "rui host") == null);
+        for ([_]u16{ 140, 46 }) |width| {
+            var shown = try rig.shown(width, 26);
+            defer shown.deinit();
+            const text = try shown.text();
+            try std.testing.expect(std.mem.indexOf(u8, text, "OpenAI URL invalid") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, if (fails) "Host stopped" else "Host ready") != null);
+            try std.testing.expectEqual(fails, std.mem.indexOf(u8, text, "r retry") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "rui host") == null);
+        }
     }
 }
 
@@ -5036,14 +5100,14 @@ test "memory counts this TUI alone while no Host runs, at open and after a Host 
     defer rig.close();
     const overview = rig.overview;
     const first = overview.hostFacts();
-    try std.testing.expect(first.facts == null);
+    try std.testing.expect(first.observation.facts() == null);
     const alone = first.memory orelse return error.TestUnexpectedResult;
     try std.testing.expect(alone.rui > 0 and alone.tools == null);
     // As after one good sample of a Host and its tools, which then stopped:
     // the read after it carries nothing over from that sample.
     overview.host_process = .{ .started_at = 1, .pid = std.c.getpid() };
     const second = overview.hostFacts();
-    try std.testing.expect(second.facts == null);
+    try std.testing.expect(second.observation.facts() == null);
     try std.testing.expect(overview.host_process == null);
     const after = second.memory orelse return error.TestUnexpectedResult;
     try std.testing.expect(after.rui > 0 and after.tools == null);

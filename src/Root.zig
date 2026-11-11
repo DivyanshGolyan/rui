@@ -81,7 +81,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.list_visible = size.width >= split_at and size.height != 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    const child = if (size.width < split_at)
+    const child = if (!self.list_visible)
         try (self.session orelse self.overview).draw(ctx)
     else wide: {
         const split = try ctx.arena.create(Split);
@@ -89,7 +89,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             .left = self.list,
             .right = self.session orelse self.compose,
             .left_width = list_width,
-            .min_width = split_at,
+            // Root has already selected this frame's wide layout.
+            .min_width = 0,
             .narrow = .right,
             .divider = .{ .style = self.divider_style },
         };

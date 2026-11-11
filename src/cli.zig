@@ -870,9 +870,9 @@ fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bo
         else => return error.StoreAccessFailed,
     };
     switch (if (resolved) |*paths| client.hostStatusAt(io, paths, null) else @as(protocol_reply.HostStatus, .unavailable)) {
-        .ready => |ready| return if (feedback == .terminal) reportStartedHost(io, &resolved.?, ready, quiet, capacity) else {},
+        .ready => |ready| return feedback.started(io, &resolved.?, ready, quiet, capacity),
         .incompatible => {
-            if (feedback == .terminal) stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
+            feedback.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{});
             return error.IncompatibleHost;
         },
         .access_failure => return error.StoreAccessFailed,
@@ -927,7 +927,7 @@ fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bo
             notice.print("\nrui: detached Host launch reported OS error {d}. Execution and readiness are unconfirmed.\nCheck this Store: rui host status --store ", .{launched}) catch break :notice;
             TerminalText.writeShellWord(&notice, paths.store.slice()) catch break :notice;
             notice.writeByte('\n') catch break :notice;
-            if (feedback == .terminal) _ = @import("stderr.zig").write(notice.buffered());
+            feedback.write(notice.buffered());
         }
         return error.HostLaunchFailed;
     }
@@ -950,11 +950,11 @@ fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bo
                 try path_text.feed(&header, paths.store.slice());
                 try path_text.finish(&header);
                 try header.writeAll(":\n");
-                if (feedback == .terminal) _ = @import("stderr.zig").write(header.buffered());
-                if (feedback == .terminal) _ = @import("stderr.zig").write(startup);
-                if (startup_length == 0 and feedback == .terminal) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
+                feedback.write(header.buffered());
+                feedback.write(startup);
+                if (startup_length == 0) feedback.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
                 if (startup_length == startup_bytes.len) {
-                    if (feedback == .terminal) stderr.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
+                    feedback.diagnostic("Startup output exceeded 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
                     return error.HostReadinessUnconfirmed;
                 }
                 if (std.mem.endsWith(u8, startup, "[store_identity_mismatch]\n")) return error.StoreIdentityMismatch;
@@ -971,9 +971,9 @@ fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bo
                 const notices = startup_bytes[0..startup_length];
                 // A competing launcher lost to this ready owner; its expected
                 // lease refusal is not a warning about the running Host.
-                if (feedback == .terminal and startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
-                    _ = @import("stderr.zig").write(notices);
-                return if (feedback == .terminal) reportStartedHost(io, &paths, ready, quiet, capacity) else {};
+                if (startup_length != 0 and std.mem.indexOf(u8, notices, "[store_locked]\n") == null)
+                    feedback.write(notices);
+                return feedback.started(io, &paths, ready, quiet, capacity);
             },
             .incompatible => return error.IncompatibleHost,
             .access_failure => return error.StoreAccessFailed,
@@ -982,8 +982,8 @@ fn startHostWithFeedback(init: std.process.Init, selected: []const u8, quiet: bo
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 100 * std.time.ns_per_ms))), .awake);
     }
-    if (startup_length != 0 and feedback == .terminal) _ = @import("stderr.zig").write(startup_bytes[0..startup_length]);
-    if (feedback == .terminal) stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
+    if (startup_length != 0) feedback.write(startup_bytes[0..startup_length]);
+    feedback.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
     return error.HostReadinessUnconfirmed;
 }
 
@@ -1657,21 +1657,38 @@ fn openAiBaseUrlDiagnostic(init: std.process.Init) ?Overview.HostStartNotice {
     return null;
 }
 
+/// The only output policy for every path through the shared launcher.
 const HostStartFeedback = union(enum) {
     terminal,
     // The caller owns this until the synchronous launch returns, on error too.
     screen: *?Overview.HostStartNotice,
+
+    fn write(self: HostStartFeedback, bytes: []const u8) void {
+        if (self == .terminal) _ = stderr.write(bytes);
+    }
+
+    fn diagnostic(self: HostStartFeedback, comptime format: []const u8, args: anytype) void {
+        if (self == .terminal) stderr.diagnostic(format, args);
+    }
+
+    fn started(self: HostStartFeedback, io: std.Io, paths: *const platform.Paths, ready: @FieldType(protocol_reply.HostStatus, "ready"), quiet: bool, capacity: ?usize) !void {
+        if (self == .terminal) try reportStartedHost(io, paths, ready, quiet, capacity);
+    }
+
+    fn note(self: HostStartFeedback, value: Overview.HostStartNotice) void {
+        switch (self) {
+            .terminal => switch (value) {
+                .invalid_openai_base_url => self.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{}),
+            },
+            .screen => |notice| notice.* = value,
+        }
+    }
 };
 
 /// The launch owner routes helper diagnostics through its caller's channel.
 fn launchOpenAi(init: std.process.Init, feedback: HostStartFeedback) bool {
     const diagnostic = openAiBaseUrlDiagnostic(init) orelse return true;
-    switch (feedback) {
-        .terminal => switch (diagnostic) {
-            .invalid_openai_base_url => stderr.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{}),
-        },
-        .screen => |notice| notice.* = diagnostic,
-    }
+    feedback.note(diagnostic);
     return false;
 }
 
@@ -4065,7 +4082,7 @@ test "fresh instruction validation renders both source and stdin conflict refusa
     }
 }
 
-test "Host launcher routes invalid OpenAI base URL diagnostics to terminal or screen" {
+test "Host launcher routes all feedback including invalid OpenAI base URLs to its caller" {
     var environment = std.process.Environ.Map.init(std.testing.allocator);
     defer environment.deinit();
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -4087,14 +4104,18 @@ test "Host launcher routes invalid OpenAI base URL diagnostics to terminal or sc
                 defer closeDescriptor(saved);
                 if (std.c.dup2(descriptors[1], 2) != 2) return error.TestRedirectFailed;
                 defer std.debug.assert(std.c.dup2(saved, 2) == 2);
+                const feedback: HostStartFeedback = if (screen) .{ .screen = &notice } else .terminal;
+                feedback.write("launch output\n");
+                feedback.diagnostic("launch diagnostic\n", .{});
                 // The helper has no output policy; only the launch owner does.
                 try std.testing.expectEqual(if (invalid) @as(?Overview.HostStartNotice, .invalid_openai_base_url) else null, openAiBaseUrlDiagnostic(init));
-                try std.testing.expectEqual(!invalid, launchOpenAi(init, if (screen) .{ .screen = &notice } else .terminal));
+                try std.testing.expectEqual(!invalid, launchOpenAi(init, feedback));
             }
             var bytes: [1024]u8 = undefined;
             const count = std.c.read(descriptors[0], &bytes, bytes.len);
             if (count < 0) return error.TestReadFailed;
-            try std.testing.expectEqualStrings(if (invalid and !screen) "\n" ++ invalid_base_url ++ "; this Host starts without OpenAI.\n" else "", bytes[0..@intCast(count)]);
+            const expected = if (screen) "" else if (invalid) "launch output\n\nlaunch diagnostic\n\n" ++ invalid_base_url ++ "; this Host starts without OpenAI.\n" else "launch output\n\nlaunch diagnostic\n";
+            try std.testing.expectEqualStrings(expected, bytes[0..@intCast(count)]);
             try std.testing.expectEqual(if (invalid and screen) @as(?Overview.HostStartNotice, .invalid_openai_base_url) else null, notice);
         }
     }
