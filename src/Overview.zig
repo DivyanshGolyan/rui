@@ -463,7 +463,16 @@ fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appDraw };
 }
 
+fn listWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .drawFn = appListDraw };
+}
+
+fn composeWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .eventHandler = appEvent, .drawFn = appComposeDraw };
+}
+
 fn paintCursor(self: *Self) !void {
+    self.root.divider_style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     if (self.caps.depth == .none) return;
     const theme = @import("theme.zig");
     const mode: theme.Mode = if (self.caps.skin() == .day) .light else .dark;
@@ -503,7 +512,10 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 // Under a Session the overview serves as it did when lending:
                 // a failure there is the overview's, not the Session's. An
                 // Upgrade holds Host work here as it does on the overview.
-                if (self.state.upgrading()) try self.appUpgrade(ctx) else _ = try service(self);
+                if (self.state.upgrading()) try self.appUpgrade(ctx) else {
+                    const answered = try service(self);
+                    ctx.redraw = ctx.redraw or answered;
+                }
             } else {
                 if (self.worker.thread != null and self.worker.completed()) {
                     try self.appNext(ctx, try self.complete());
@@ -518,8 +530,8 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     };
                     try self.dispatch(.all);
                 }
-                if (self.wantsFrame()) ctx.redraw = true;
             }
+            if (self.wantsFrame()) ctx.redraw = true;
             const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
@@ -550,6 +562,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (click == .open and self.root.session != null) {
+        try self.app_session.?.frontend.?.openPeer(ctx, &click.open);
+        ctx.redraw = true;
+        return;
+    }
     try self.appNext(ctx, try self.event(.{ .clicked = click }));
     ctx.redraw = true;
 }
@@ -791,73 +808,111 @@ fn animationFrame(self: *const Self) u64 {
 
 fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
+    return self.drawPart(ctx, .whole);
+}
+
+fn appListDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.drawPart(ctx, .list);
+}
+
+fn appComposeDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.drawPart(ctx, .compose);
+}
+
+/// A visible conversation determines the highlight without changing the
+/// overview's own selection or borrowing a row's storage across frames.
+fn selectedListLine(self: *const Self) ?u32 {
+    const open = self.state.conversing orelse return if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
+    var line: usize = 0;
+    while (view.listItem(&self.state, line)) |item| : (line += 1) {
+        const target = view.clickOf(&self.state, item) orelse continue;
+        if (target == .open and std.mem.eql(u8, &target.open, &open)) return @intCast(line);
+    }
+    return null;
+}
+
+/// Each visible part prepares only what it draws, at that part's width:
+/// rows once on the left, facts/status once on the right, or both when narrow.
+fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
-    _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
     self.caps.width = self.attention.vx.caps.unicode;
     self.caps.devanagari = std.mem.eql(u8, @import("theme.zig").wordmark(self.caps.unicode, self.attention.vx.terminalVersion(), self.init.environ_map.get("TERM_PROGRAM")), "रुई rui");
     const normal = @import("widget_style.zig").of(self.caps, .{});
     const quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     self.app_screen.style = normal;
-    self.app_input.composer.style = normal;
-    self.app_input.composer.quiet = quiet;
-    self.app_input.composer.method = self.caps.width;
-    self.app_input.composer.ascii = !self.caps.unicode;
-    self.app_input.composer.caret = self.state.inputMode() != .frozen;
-    const frame = self.animationFrame();
-    self.app_frame = frame;
-    if (self.state.picker != null) view.syncPicker(&self.state, self.composerDraft());
-    // The core says what fills the list; this frame draws that widget.
-    const list: *GroupedList = switch (self.state.listArea()) {
-        .picker => picker: {
-            const defaults = view.pickerDefaults(&self.state);
-            const words = view.pickerWords(self.composerDraft().bytes);
-            const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
-            const rows = try ctx.arena.create(PickerRows);
-            rows.* = .{ .models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read) };
-            self.app_picker.selected = rows.models.selected;
-            self.app_picker.rows = .{ .userdata = rows, .count = @intCast(rows.models.count), .rowFn = PickerRows.row };
-            break :picker &self.app_picker;
-        },
-        .panel => panel: {
-            const rows = try ctx.arena.create(PanelRows);
-            rows.* = .{ .items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).? };
-            self.app_panel.rows = .{ .userdata = rows, .count = @intCast(rows.items.len), .rowFn = PanelRows.row };
-            break :panel &self.app_panel;
-        },
-        .sessions => sessions: {
-            const rows = try ctx.arena.create(SessionRows);
-            rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
-            self.app_sessions.selected = if (view.selectedLine(&self.state)) |line| @intCast(line) else null;
-            self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row };
-            break :sessions &self.app_sessions;
-        },
-    };
-    list.caps = self.caps;
-    self.app_screen.content = list;
-    self.state.commands = view.nextCommands(&self.state, self.composerDraft());
-    self.app_header.caps = self.caps;
-    self.app_screen.header = self.app_header.widget();
-    self.app_input.facts = try rich(ctx, self.caps, try view.factsSegments(ctx.arena, &self.state, size.width, self.caps));
-    self.app_input.status = try rich(ctx, self.caps, try view.statusSegments(ctx.arena, &self.state, self.composerDraft(), size.width, self.caps));
-    self.app_screen.tail = null;
-    self.app_screen.overlay = null;
-    if (self.state.commands) |*shown| {
-        self.app_palette = .{ .shown = shown, .style = normal, .quiet = quiet, .method = self.caps.width };
-        self.app_screen.overlay = self.app_palette.widget();
+    var list: ?*GroupedList = null;
+    if (part != .compose) {
+        _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
+        const frame = self.animationFrame();
+        self.app_frame = frame;
+        if (self.state.picker != null) view.syncPicker(&self.state, self.composerDraft());
+        // The core says what fills the list; this frame draws that widget.
+        const prepared: *GroupedList = switch (self.state.listArea()) {
+            .picker => picker: {
+                const defaults = view.pickerDefaults(&self.state);
+                const words = view.pickerWords(self.composerDraft().bytes);
+                const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
+                const rows = try ctx.arena.create(PickerRows);
+                rows.* = .{ .models = try model_picker_view.rows(ctx.arena, &self.state.menu, words, defaults, choice, size.width, self.caps.width, self.caps.unicode, self.state.menu_read) };
+                self.app_picker.selected = rows.models.selected;
+                self.app_picker.rows = .{ .userdata = rows, .count = @intCast(rows.models.count), .rowFn = PickerRows.row };
+                break :picker &self.app_picker;
+            },
+            .panel => panel: {
+                const rows = try ctx.arena.create(PanelRows);
+                rows.* = .{ .items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).? };
+                self.app_panel.rows = .{ .userdata = rows, .count = @intCast(rows.items.len), .rowFn = PanelRows.row };
+                break :panel &self.app_panel;
+            },
+            .sessions => sessions: {
+                const rows = try ctx.arena.create(SessionRows);
+                rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
+                self.app_sessions.selected = self.selectedListLine();
+                self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row };
+                break :sessions &self.app_sessions;
+            },
+        };
+        prepared.caps = self.caps;
+        self.app_screen.content = prepared;
+        list = prepared;
+        self.app_header.caps = self.caps;
+        self.app_screen.header = self.app_header.widget();
+    }
+    if (part != .list) {
+        self.app_input.composer.style = normal;
+        self.app_input.composer.quiet = quiet;
+        self.app_input.composer.method = self.caps.width;
+        self.app_input.composer.ascii = !self.caps.unicode;
+        self.app_input.composer.caret = self.state.inputMode() != .frozen;
+        self.state.commands = view.nextCommands(&self.state, self.composerDraft());
+        self.app_input.facts = try rich(ctx, self.caps, try view.factsSegments(ctx.arena, &self.state, size.width, self.caps));
+        self.app_input.status = try rich(ctx, self.caps, try view.statusSegments(ctx.arena, &self.state, self.composerDraft(), size.width, self.caps));
+        self.app_screen.tail = null;
+        self.app_screen.overlay = null;
+        if (self.state.commands) |*shown| {
+            self.app_palette = .{ .shown = shown, .style = normal, .quiet = quiet, .method = self.caps.width };
+            self.app_screen.overlay = self.app_palette.widget();
+        }
     }
     defer {
-        list.rows = .none;
+        if (list) |prepared| prepared.rows = .none;
         self.app_screen.header = null;
         self.app_screen.tail = null;
         self.app_input.facts = app_empty.widget();
         self.app_input.status = app_empty.widget();
     }
-    var surface = try self.app_screen.widget().draw(ctx);
-    surface.widget = self.widget();
-    self.app_spins = false;
-    if (list == &self.app_sessions) for (list.shown.first..list.shown.end) |at| {
-        if (view.markSpins(&self.state, view.listItem(&self.state, at).?, self.caps)) self.app_spins = true;
-    };
+    var surface = try self.app_screen.drawPart(ctx, part);
+    // The overview remains the compose ancestor in either layout, so a
+    // resize never changes the composer's focus identity or key route.
+    surface.widget = if (part == .list) self.listWidget() else self.widget();
+    if (list) |prepared| {
+        self.app_spins = false;
+        if (prepared == &self.app_sessions) for (prepared.shown.first..prepared.shown.end) |at| {
+            if (view.markSpins(&self.state, view.listItem(&self.state, at).?, self.caps)) self.app_spins = true;
+        };
+    }
     return surface;
 }
 
@@ -902,7 +957,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget() };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .divider_style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet }) };
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" } };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state, .userdata = self, .on_click = appClick };
@@ -1379,9 +1434,9 @@ fn observed(raw: *anyopaque, read: protocol.session_work.Work, opening: bool) !v
     std.debug.assert(next == null);
 }
 
-/// While a conversation holds the terminal the overview goes on without
-/// the screen or input: its ticks keep the listing going, so another
-/// Session's records stay current, and a finished job is answered here, so a
+/// While a conversation has input focus the overview keeps its list current.
+/// Its ticks refresh other Sessions, including the visible pane, and a
+/// finished job is answered here, so a
 /// stop never waits behind a listing. Starts wait for the overview.
 fn service(raw: *anyopaque) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -2353,7 +2408,7 @@ test "/model keeps the selected effort for a start after a failed save" {
     try std.testing.expect(try rig.press("luna high\r") == null);
     try std.testing.expect(try rig.settle() == null);
     {
-        var shown = try rig.shown(120, 24);
+        var shown = try rig.shown(161, 24);
         defer shown.deinit();
         try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "new Sessions here still use gpt-6-luna · high · ChatGPT") != null);
     }
@@ -4792,4 +4847,189 @@ test "a Session link that no longer opens ends as any failed open, naming that S
     try std.testing.expectEqualStrings("k7m2qx", &overview.follow.return_to.?);
     try std.testing.expectEqual(@as(?view.Reference, null), overview.follow.pending);
     overview.app_session = null;
+}
+
+test "App overview panes prepare rows and compose only at their actual widths" {
+    const Find = struct {
+        fn count(surface: vxfw.Surface, target: vxfw.Widget) usize {
+            var found: usize = @intFromBool(surface.widget.eql(target));
+            for (surface.children) |child| found += count(child.surface, target);
+            return found;
+        }
+    };
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try rig.press("/") == null);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const wide = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+    const panes = wide.children[0].surface.children;
+    try std.testing.expectEqual(@as(u16, 40), overview.state.size.width);
+    try std.testing.expectEqual(@as(u16, 40), panes[0].surface.size.width);
+    try std.testing.expectEqual(@as(u16, 99), panes[2].surface.size.width);
+    const composer = overview.app_input.composer.widget();
+    const header = overview.app_header.widget();
+    const palette = overview.app_palette.widget();
+    try std.testing.expectEqual(@as(usize, 1), Find.count(panes[0].surface, header));
+    try std.testing.expectEqual(@as(usize, 0), Find.count(panes[0].surface, composer));
+    try std.testing.expectEqual(@as(usize, 0), Find.count(panes[0].surface, palette));
+    try std.testing.expectEqual(@as(usize, 0), Find.count(panes[2].surface, header));
+    try std.testing.expectEqual(@as(usize, 1), Find.count(panes[2].surface, composer));
+    try std.testing.expectEqual(@as(usize, 1), Find.count(panes[2].surface, palette));
+    try std.testing.expect(panes[2].surface.widget.eql(overview.widget()));
+    try std.testing.expectEqualStrings("/", overview.composerDraft().bytes);
+    const phone = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 26 }, .cell_size = .{} });
+    try std.testing.expectEqual(@as(u16, 46), overview.state.size.width);
+    try std.testing.expectEqual(@as(usize, 1), Find.count(phone, header));
+    try std.testing.expectEqual(@as(usize, 1), Find.count(phone, composer));
+    try std.testing.expectEqual(@as(usize, 1), Find.count(phone, palette));
+    try std.testing.expectEqualStrings("/", overview.composerDraft().bytes);
+}
+
+test "App overview list stays live beside a focused child and wheels stay in their panes" {
+    const Peer = struct {
+        wheels: usize = 0,
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = @This().event, .drawFn = @This().draw };
+        }
+        fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (input == .mouse and (input.mouse.button == .wheel_down or input.mouse.button == .wheel_up)) {
+                self.wheels += 1;
+                ctx.consumeEvent();
+            }
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+    };
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = listed_references.len;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    var peer: Peer = .{};
+    overview.root.session = peer.widget();
+    overview.state.conversing = "k7m2qx".*;
+    overview.state.selected = "b4n8wd".*;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 4 }, .cell_size = .{} };
+    const frame = try overview.root.widget().draw(draw);
+    const selected = overview.app_sessions.selected.?;
+    const target = view.clickOf(&overview.state, view.listItem(&overview.state, selected).?).?;
+    try std.testing.expectEqualStrings("k7m2qx", &target.open);
+    try std.testing.expectEqualStrings("b4n8wd", &overview.state.selected.?);
+    const before = overview.app_sessions.list.scroll;
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 0), peer.wheels);
+    try std.testing.expect(!std.meta.eql(before, overview.app_sessions.list.scroll));
+    const scrolled = overview.app_sessions.list.scroll;
+    try app_events.mouse(&ctx, frame, .{ .col = 45, .row = 2, .button = .wheel_down, .type = .press, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 1), peer.wheels);
+    try std.testing.expectEqualDeep(scrolled, overview.app_sessions.list.scroll);
+    // A later listing is still adopted and drawn at 40 cells with a child open.
+    Seen.now.listed = 2;
+    overview.state.next_list_ms = 0;
+    _ = try service(overview);
+    try rig.answered();
+    overview.app_spins = false;
+    ctx.redraw = false;
+    try appEvent(overview, &ctx, .tick);
+    try std.testing.expect(ctx.redraw);
+    try rig.lend();
+    _ = try overview.root.widget().draw(draw);
+    try std.testing.expectEqual(@as(usize, 2), overview.state.rows.items.len);
+    try std.testing.expectEqual(@as(u16, 40), overview.state.size.width);
+    try std.testing.expect(overview.root.session.?.eql(peer.widget()));
+}
+
+test "App overview list press follows only after the open child settles and opens once" {
+    const Scratch = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    const Find = struct {
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (@This().origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+        fn row(overview: *Self, id: []const u8) i17 {
+            for (overview.app_sessions.shown_at) |span| if (span.target) |target| {
+                if (target == .open and std.mem.eql(u8, &target.open, id)) return span.row;
+            };
+            unreachable;
+        }
+        fn leave(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFrontend.Outcome) !void {
+            const overview: *Self = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("b4n8wd", &overview.follow.pending.?);
+            const frontend = overview.app_session.?.frontend.?;
+            try std.testing.expect(frontend.reader.thread == null);
+            try std.testing.expect(frontend.skill_task.thread == null);
+            try appSessionLeft(raw, ctx, outcome);
+        }
+        fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
+            try std.testing.expect(overview.root.session == null);
+            try std.testing.expectEqual(@as(usize, 1), overview.retired.items.len);
+            try std.testing.expectEqualStrings("k7m2qx", &overview.follow.return_to.?);
+            try std.testing.expectEqualStrings("b4n8wd", &overview.opened);
+            Seen.now.conversations += 1;
+            Seen.now.conversed = overview.opened;
+            try overview.root.openSession(ctx, overview.app_sessions.widget());
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Scratch.dir = tmp.dir;
+    Scratch.count = 0;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    Seen.now.listed = 2;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    overview.ops.open = openSession;
+    overview.hooks.scratch = Scratch.scratch;
+    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    defer {
+        if (overview.app_session) |left| {
+            if (left.frontend) |frontend| frontend.stop();
+            overview.disposeSession(left);
+            overview.app_session = null;
+        }
+        for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+        overview.retired.deinit(std.testing.allocator);
+    }
+    overview.app_session.?.frontend.?.app_hooks.leave = Find.leave;
+    overview.ops.open = Find.open;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+    const origin = Find.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    const original = overview.root.session.?;
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = @intCast(origin.row + Find.row(overview, "k7m2qx")), .button = .left, .type = .press, .mods = .{} });
+    try std.testing.expect(overview.root.session.?.eql(original));
+    try std.testing.expect(overview.follow.pending == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    try app_events.mouse(&ctx, frame, .{ .col = 4, .row = @intCast(origin.row + Find.row(overview, "b4n8wd")), .button = .left, .type = .press, .mods = .{} });
+    try std.testing.expectEqual(@as(usize, 1), Seen.now.conversations);
+    try std.testing.expectEqualStrings("b4n8wd", &Seen.now.conversed);
+    try std.testing.expect(overview.follow.pending == null);
+    try std.testing.expect(!ctx.quit);
 }

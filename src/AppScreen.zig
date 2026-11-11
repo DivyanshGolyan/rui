@@ -23,8 +23,29 @@ fn Screen(comptime Content: type) type {
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
 
+        pub const Part = enum { whole, list, compose };
+        const empty: vxfw.Text = .{ .text = "" };
+
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+        }
+
+        pub fn listWidget(self: *Self) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = drawList };
+        }
+
+        pub fn composeWidget(self: *Self) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = event, .drawFn = drawCompose };
+        }
+
+        fn drawList(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            return self.drawPart(ctx, .list);
+        }
+
+        fn drawCompose(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            return self.drawPart(ctx, .compose);
         }
 
         fn event(raw: *anyopaque, ctx: *vxfw.EventContext, value: vxfw.Event) !void {
@@ -39,45 +60,55 @@ fn Screen(comptime Content: type) type {
 
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *Self = @ptrCast(@alignCast(raw));
+            return self.drawPart(ctx, .whole);
+        }
+
+        pub fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: Part) std.mem.Allocator.Error!vxfw.Surface {
+            const own = switch (part) {
+                .whole => self.widget(),
+                .list => self.listWidget(),
+                .compose => self.composeWidget(),
+            };
             const size = ctx.max.size();
-            if (size.width == 0 or size.height == 0) return .empty(self.widget());
+            if (size.width == 0 or size.height == 0) return .empty(own);
             // Nest columns to retain the existing height priority: input,
             // header, tail, marker, then the remaining content.
             const lower = try ctx.arena.create(Stack);
             const lower_children = try ctx.arena.alloc(Stack.Child, 3);
             var count: usize = 1;
-            lower_children[0] = .{ .widget = self.content.widget(), .sizing = .fill };
-            if (self.marker) |marker| {
+            lower_children[0] = .{ .widget = if (part == .compose) empty.widget() else self.content.widget(), .sizing = .fill };
+            if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
                 row.* = .{ .child = marker };
                 lower_children[count] = .{ .widget = row.widget() };
                 count += 1;
-            }
-            if (self.tail) |tail| {
+            };
+            if (part == .whole) if (self.tail) |tail| {
                 lower_children[count] = .{ .widget = tail };
                 count += 1;
-            }
+            };
             lower.* = .{ .children = lower_children[0..count] };
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
-            if (self.header) |header| {
+            if (part != .compose) if (self.header) |header| {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
-            }
+            };
             upper_children[count] = .{ .widget = lower.widget(), .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
             const column = try ctx.arena.create(Stack);
-            column.* = .{ .children = try ctx.arena.dupe(Stack.Child, &.{
-                .{ .widget = upper.widget(), .sizing = .fill },
-                .{ .widget = self.input.widget() },
-            }) };
+            const column_children = try ctx.arena.alloc(Stack.Child, if (part == .list) 1 else 2);
+            column_children[0] = .{ .widget = upper.widget(), .sizing = .fill };
+            if (part != .list) column_children[1] = .{ .widget = self.input.widget() };
+            column.* = .{ .children = column_children };
             const base = try column.widget().draw(ctx);
-            const panels = try ctx.arena.alloc(Layer.Panel, if (self.overlay != null) 1 else 0);
-            if (self.overlay) |overlay| panels[0] = .{
-                .child = overlay,
+            const overlay = if (part == .list) null else self.overlay;
+            const panels = try ctx.arena.alloc(Layer.Panel, if (overlay != null) 1 else 0);
+            if (overlay) |shown| panels[0] = .{
+                .child = shown,
                 .bottom = @intCast(base.children[1].origin.row),
-                .top = if (self.header != null and base.children[1].origin.row > 0) base.children[0].surface.children[0].surface.size.height else 0,
+                .top = if (part == .whole and self.header != null and base.children[1].origin.row > 0) base.children[0].surface.children[0].surface.size.height else 0,
                 .style = self.style,
                 .userdata = self,
                 .on_close = closeOverlay,
@@ -85,9 +116,9 @@ fn Screen(comptime Content: type) type {
             const layer = try ctx.arena.create(Layer);
             layer.* = .{ .base = column.widget(), .panels = panels };
             var surface = try layer.drawAbove(ctx, base);
-            // Existing screen policy still owns events; only composition moves
-            // here. The shell will route captured panel events in its next unit.
-            surface.widget = self.widget();
+            // Existing screen policy still owns events; these parts change
+            // composition without changing how panels or input handle keys.
+            surface.widget = own;
             surface.buffer = try vxfw.Surface.createBuffer(ctx.arena, size);
             @memset(surface.buffer, .{ .style = self.style });
             return surface;
