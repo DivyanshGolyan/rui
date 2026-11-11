@@ -49,6 +49,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
     .{ .schema_version = 62, .digest = 0x3d68029b9bcbfdd0 },
+    .{ .schema_version = 63, .digest = 0x7a09d94b6ba24eea },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
