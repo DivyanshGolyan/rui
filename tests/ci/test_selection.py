@@ -16,9 +16,9 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
-                          setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites)
+                          setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
 from qualification import NATIVE, RESOURCES, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
@@ -167,6 +167,7 @@ class SelectionTest(unittest.TestCase):
             'from live_engines import MYSQL_SOCKET as socket\nvalue = env.get(socket)',
             'import os\nsocket = os.environ.get("RUI_TEST_MYSQL_SOCKET")',
             'import os\nsocket = os.environ["RUI_TEST_MYSQL_SOCKET"]',
+            'import os\nsocket = os.environ.get(str("RUI_TEST_MYSQL_SOCKET"))',
         ):
             with self.subTest(source=source):
                 self.assertTrue(uses_live_mysql(source, entry=False))
@@ -180,49 +181,78 @@ class SelectionTest(unittest.TestCase):
         self.assertFalse(uses_live_mysql(provisioner, entry=False))
         self.assertTrue(uses_live_mysql(provisioner, entry=True))
 
-    def test_live_mysql_suites_are_derived_from_transitive_case_inputs(self):
-        graph = tree_graph()
-        self.assertEqual(graph.live_mysql, {"host-status-integration", "launch-frame-integration"})
-        # A new case in a helper automatically makes its importing suite live,
-        # without editing a suite list. Infrastructure forwarding does not.
-        tracked = subprocess.check_output(["git", "ls-files"], text=True).splitlines()
-        files = {name: Path(name).read_text() for name in tracked
-                 if name.endswith((".zig", ".py", ".sh")) or name == "tests/ci/stack_frames.json"}
-        files["tests/integration/control_fixture.py"] += '\nimport live_engines\nmysql_socket = live_engines.MYSQL_SOCKET\n'
-        changed = Graph(files, files.__getitem__)
-        self.assertIn("control-integration", changed.live_mysql)
-        self.assertNotIn("human-cli-integration", changed.live_mysql)
-        with self.assertRaisesRegex(ValueError, "MySQL-enabled job"):
-            select(["tests/integration/control_integration.py"], "review", AVAILABLE, changed)
+    def test_new_helper_case_automatically_provisions_mysql(self):
+        fixtures = {
+            "sample-integration": (("tests/integration/sample.py",), (), ()),
+            "other-integration": (("tests/integration/other.py",), (), ()),
+        }
+        files = {
+            "src/logic_tests.zig": "const cores = .{\n};\n",
+            "src/cli.zig": "",
+            "tests/integration/sample.py": "import helper\n",
+            "tests/integration/other.py": "",
+            "tests/integration/helper.py": "import nested\n",
+            "tests/integration/nested.py": "",
+            "tests/integration/live_engines.py": 'MYSQL_SOCKET = "RUI_TEST_MYSQL_SOCKET"\n',
+        }
+        for source, expected in (("", False),
+                                 ("import live_engines\nsocket = env.get(live_engines.MYSQL_SOCKET)\n", True)):
+            with self.subTest(live_case=expected), patch("select_tests.FIXTURES", fixtures):
+                files["tests/integration/nested.py"] = source
+                graph = Graph(files, files.__getitem__)
+                result = select(["tests/integration/nested.py"], "review", set(fixtures), graph)
+                self.assertEqual(result["targets"], ["sample-integration"])
+                rows = shards(result["targets"], mysql_suites=graph.live_mysql)["include"]
+                self.assertEqual(rows[0]["live_mysql"], expected)
+                self.assertFalse(rows[0]["mysql_dialect"])
+                self.assertFalse(shards(["other-integration"], mysql_suites=graph.live_mysql)["include"][0]["live_mysql"])
 
-    def test_every_live_mysql_suite_runs_in_a_mysql_enabled_job(self):
-        workflow = Path(".github/workflows/check.yml").read_text()
-        condition = next(line.split("${{", 1)[1].split("}}", 1)[0]
-                         for line in workflow.splitlines() if line.strip().startswith("LIVE_MYSQL:"))
-        expression = condition.replace("||", " or ").replace("&&", " and ")
+    def test_mysql_provisioning_owner_combinations(self):
+        cases = (([], "all", False, False),
+                 (["plain"], "all", False, False),
+                 (["fixture"], "all", True, False),
+                 (["test-native"], "all", False, False),
+                 (["test"], "all", True, True),
+                 (["test-store"], "all", True, True),
+                 (["check"], "all", True, True),
+                 (["check-full"], "all", True, True),
+                 (["check-full"], "execution", True, True),
+                 (["check-full"], "callers", False, False),
+                 (["check-full", "fixture"], "callers", True, False),
+                 (["check-full", "test-store"], "callers", True, True))
+        for targets, part, live, dialect in cases:
+            for platform in ("linux", "macos"):
+                with self.subTest(targets=targets, part=part, platform=platform):
+                    self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}),
+                                     {"live_mysql": live and platform == "linux",
+                                      "mysql_dialect": dialect and platform == "linux"})
+                    for row in shards(targets, platform, mysql_suites={"fixture"})["include"]:
+                        self.assertEqual(row["live_mysql"], platform == "linux" and (
+                            "fixture" in row["targets"] or row["mysql_dialect"]))
+
+    def test_full_callers_keeps_a_separate_live_mysql_shard(self):
+        graph = SimpleNamespace(live_mysql={"caller-fixture"})
+        with patch("select_tests.CHECK_COVERS", {"caller-fixture"}):
+            targets = {"check-full"} | live_mysql_suites(["check-full"], graph.live_mysql)
+            self.assertEqual(live_mysql_suites(["check"], graph.live_mysql), set())
+        rows = shards(sorted(targets), mysql_suites=graph.live_mysql)["include"]
+        callers = next(row for row in rows if row["part"] == "callers")
+        self.assertFalse(callers["live_mysql"])
+        self.assertFalse(callers["mysql_dialect"])
+        fixture = next(row for row in rows if "caller-fixture" in row["targets"])
+        self.assertTrue(fixture["live_mysql"])
+        self.assertFalse(fixture["mysql_dialect"])
+
+    def test_real_host_status_change_has_a_live_mysql_shard(self):
+        # One real-repo boundary check for #1260; owner combinations above
+        # use tiny fixtures and never rebuild or repeatedly select the repo.
         graph = tree_graph()
-        self.assertIn("p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets']))", workflow)
-        self.assertIn("host-status-integration", live_mysql_suites(["check-full"], graph))
-        self.assertEqual(live_mysql_suites(["check"], graph), set())
-        # Includes #1260's exact file, both other external-server case files,
-        # and each suite's entry scripts. Test real shard parts, not just a
-        # different job somewhere in the selection that starts MySQL.
+        result = select(["tests/integration/host_status_integration.py", "tests/integration/check.sh"],
+                        "review", AVAILABLE, graph)
+        rows = shards(result["targets"], mysql_suites=graph.live_mysql)["include"]
+        self.assertTrue(any("host-status-integration" in row["targets"] and row["live_mysql"] for row in rows))
         for suite in graph.live_mysql:
-            self.assertIn(suite, LIVE_MYSQL_TARGETS)
-            for path in FIXTURES[suite][0]:
-                for companion in ([], ["tests/integration/check.sh"], ["build.zig"]):
-                    with self.subTest(suite=suite, path=path, companion=companion):
-                        result = select([path, *companion], "review", AVAILABLE, graph)
-                        rows = shards(result["targets"])["include"]
-                        served = []
-                        for row in rows:
-                            live = eval(expression, {"__builtins__": {},
-                                        "contains": lambda targets, target: target in targets,
-                                        "matrix": SimpleNamespace(**row)})
-                            if live:
-                                served.extend(row["targets"])
-                        self.assertTrue(suite in served or suite in CHECK_COVERS and "check" in served,
-                                        (suite, rows))
+            self.assertTrue(shards([suite], mysql_suites=graph.live_mysql)["include"][0]["live_mysql"])
 
     def test_native_conformance_dependencies_keep_live_mysql(self):
         graph = tree_graph()
@@ -236,7 +266,7 @@ class SelectionTest(unittest.TestCase):
         for path in graph.live_conformance & graph.reached["test-native"]:
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE, graph)
-                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS)
+                self.assertTrue(any(row["mysql_dialect"] for row in shards(result["targets"], mysql_suites=graph.live_mysql)["include"]))
 
     def test_unit_roots_follow_store_imports(self):
         native = select(["src/session_consent.zig"], "review", AVAILABLE)["targets"]
@@ -332,7 +362,7 @@ class SelectionTest(unittest.TestCase):
         for phase in ("development", "review"):
             with self.subTest(phase=phase):
                 result = select(["src/store/rsql.zig"], phase, AVAILABLE)
-                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS, result["targets"])
+                self.assertTrue(any(row["mysql_dialect"] for row in shards(result["targets"])["include"]), result["targets"])
 
     def test_every_live_rule_selects_a_target_that_starts_its_server(self):
         for patterns, _, _, reason, served_by in LIVE_RULES:
@@ -349,14 +379,14 @@ class SelectionTest(unittest.TestCase):
                 builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
                 self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
 
-    def test_live_server_targets_match_the_workflow_conditions_that_start_the_servers(self):
+    def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
 
         def named(line):
             return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
 
-        live_mysql = next(line for line in workflow.splitlines() if line.strip().startswith("LIVE_MYSQL:"))
-        self.assertEqual(named(live_mysql), LIVE_MYSQL_TARGETS)
+        self.assertIn("LIVE_MYSQL: ${{ matrix.live_mysql }}", workflow)
+        self.assertIn("if: ${{ !cancelled() && matrix.mysql_dialect }}", workflow)
         postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
         self.assertTrue(postgres.strip().startswith("if:"), postgres)
         self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)

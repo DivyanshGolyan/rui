@@ -29,7 +29,18 @@ def split_build(targets):
     return bool(UNIT_TARGETS & set(targets)) and set(targets) not in ({"test"}, {"test-native"}, {"test-store"})
 
 
-def shards(targets, platform="linux", limit=LINUX_SHARDS):
+def shards(targets, platform="linux", limit=LINUX_SHARDS, *, mysql_suites=None):
+    # Lazy import: selection also uses this module's resource target names.
+    from select_tests import mysql_provisioning, tree_graph
+    if mysql_suites is None:
+        mysql_suites = tree_graph().live_mysql if platform == "linux" and targets else set()
+    mysql_suites = set(mysql_suites)
+
+    def provision(rows):
+        for row in rows:
+            row.update(mysql_provisioning(row["targets"], row["part"], platform, mysql_suites))
+        return {"include": rows}
+
     if platform == "macos":
         # The standard account cap is five Macs shared by all workflows. Use
         # three workers, leaving room for another PR; never queue ten compilers.
@@ -45,8 +56,8 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS):
                      and not (t == "test-logic" and "check-full" in targets)]
         if remaining:
             rows.append(dict(name="native", targets=remaining, part="all", resource=False, args=[]))
-        rows.extend(shards([t for t in targets if t in RESOURCES], limit=None)["include"])
-        return {"include": rows}
+        rows.extend(shards([t for t in targets if t in RESOURCES], limit=None, mysql_suites=set())["include"])
+        return provision(rows)
     rows, packed = [], []
     for target in targets:
         if target == "measure-model-output":
@@ -69,7 +80,7 @@ def shards(targets, platform="linux", limit=LINUX_SHARDS):
     for shard in range(count if packed else 0):
         members = packed[shard::count]
         rows.append(dict(name="+".join(members), targets=members, part="all", resource=False, args=[]))
-    return {"include": rows}
+    return provision(rows)
 
 
 def qualification(suite, platform):

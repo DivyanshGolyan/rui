@@ -160,6 +160,8 @@ def uses_live_mysql(source, *, entry):
     Imported helpers do not execute their main blocks: mysql_server's CLI
     reads a provisioning password there, but its Docker fixture callers do not.
     """
+    if "MYSQL_" not in source:
+        return False
     tree = ast.parse(source)
     if not entry:
         tree.body = [node for node in tree.body if not (
@@ -171,13 +173,21 @@ def uses_live_mysql(source, *, entry):
     names = {alias.asname or alias.name for node in nodes
              if isinstance(node, ast.ImportFrom) and node.module == "live_engines"
              for alias in node.names if alias.name.startswith("MYSQL_")}
-    return any((isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
-                and node.value.id in modules and node.attr.startswith("MYSQL_"))
-               or (isinstance(node, ast.Name) and node.id in names)
-               or (isinstance(node, (ast.Call, ast.Subscript))
-                   and any(isinstance(part, ast.Constant) and isinstance(part.value, str)
-                           and part.value.startswith("RUI_TEST_MYSQL_") for part in ast.walk(node)))
-               for node in nodes)
+    pending = [(tree, False)]
+    while pending:
+        node, in_input = pending.pop()
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+            and node.value.id in modules and node.attr.startswith("MYSQL_")) or (
+                isinstance(node, ast.Name) and node.id in names):
+            return True
+        if (in_input and isinstance(node, ast.Constant) and isinstance(node.value, str)
+            and node.value.startswith("RUI_TEST_MYSQL_")):
+            return True
+        # Walk each subtree once, rather than rewalking every nested call.
+        in_input = in_input or isinstance(node, (ast.Call, ast.Subscript))
+        pending.extend((child, in_input) for child in ast.iter_child_nodes(node))
+    return False
+
 
 
 class Graph:
@@ -501,10 +511,9 @@ RULES = (
      "Installer report reads the CLI's defaults and Host status JSON"),
 )
 
-# check.yml's LIVE_MYSQL: Linux shards for the unit dialect check
-# (src/store/mysql_dialect_check.zig) and live-MySQL process fixtures.
+# Targets that execute the Store dialect check; shard provisioning owns
+# whether their selected part runs that check (callers does not).
 LIVE_MYSQL_DIALECT_TARGETS = frozenset({"test", "test-store", "check", "check-full"})
-LIVE_MYSQL_TARGETS = LIVE_MYSQL_DIALECT_TARGETS | {"launch-frame-integration", "host-status-integration"}
 # check.yml's Postgres step condition: the Linux targets whose shards start
 # postgres:15 for test-pg's live rounds.
 LIVE_POSTGRES_TARGETS = frozenset({"test-pg", "check", "check-full"})
@@ -538,7 +547,7 @@ LIVE_RULES = (
 )
 RULES += tuple(rule[:4] for rule in LIVE_RULES)
 # The Store's MySQL round-trip budget runs against the live MySQL that
-# launch-frame-integration starts (LIVE_MYSQL_TARGETS); development skips it.
+# launch-frame-integration requires; development skips it.
 RULES += ((("src/store.zig", "src/store/*", "!src/store/wire/*", "src/server_execution.zig", "src/execution_turn.zig",
             "src/model_adapter.zig", "tests/integration/store_rounds_cases.py"),
            ("launch-frame-integration",), (),
@@ -688,17 +697,24 @@ def matches(path, patterns):
     return included and not any(fnmatch.fnmatchcase(path, pattern[1:]) for pattern in patterns if pattern.startswith("!"))
 
 
-def live_mysql_suites(targets, graph=None):
+def mysql_provisioning(targets, part, platform, mysql_suites):
+    """Provisioning and dialect evidence for one shard, from its requirements."""
+    targets = set(targets)
+    dialect = platform == "linux" and bool(
+        targets & (LIVE_MYSQL_DIALECT_TARGETS - {"check-full"})
+        or "check-full" in targets and part != "callers")
+    return {"live_mysql": platform == "linux" and (dialect or bool(targets & mysql_suites)),
+            "mysql_dialect": dialect}
+
+
+def live_mysql_suites(targets, mysql_suites):
     """Standalone fixtures that must also run with CI's live MySQL server."""
-    graph = graph or tree_graph()
     targets = set(targets)
     # check-full's callers shard has no MySQL. Keep each selected live
     # fixture standalone too, even when that composed gate absorbed it.
     # check runs every part together with MySQL, so needs no duplicate.
     selected = targets | (CHECK_COVERS if "check-full" in targets else set())
-    suites = selected & graph.live_mysql
-    if suites - LIVE_MYSQL_TARGETS:
-        raise ValueError(f"Live MySQL fixtures have no MySQL-enabled job: {sorted(suites - LIVE_MYSQL_TARGETS)}")
+    suites = selected & set(mysql_suites)
     return suites
 
 
@@ -826,7 +842,7 @@ def select(paths, phase, available, graph=None, contents=None):
             targets.add("test")
     if "test" in targets:
         targets.difference_update({"test-native", "test-store"})
-    mysql_suites = live_mysql_suites(targets, graph)
+    mysql_suites = live_mysql_suites(targets, graph.live_mysql)
     targets.update(mysql_suites)
     if mysql_suites:
         reasons.add("Live MySQL fixtures also run in a MySQL-enabled Linux job")
@@ -840,6 +856,7 @@ def select(paths, phase, available, graph=None, contents=None):
     if missing:
         raise ValueError(f"Selected targets absent from the build: {sorted(missing)}")
     return {"phase": phase, "targets": sorted(targets),
+            "mysql_suites": sorted(graph.live_mysql),
             # The selected targets that start a live server in CI (`LIVE_RULES`).
             "server_targets": sorted((targets & live_targets) | ({"test"} if "test" in targets and "test-store" in live_targets else set())),
             "native_targets": sorted(native_targets), "native_required": bool(native_targets),
