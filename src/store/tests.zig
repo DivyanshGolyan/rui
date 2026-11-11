@@ -13763,8 +13763,8 @@ test "saved MCP call lines survive all work reads pending, running and completed
                     .decoded_arguments = args,
                 }});
                 try reads(&storage, &tmp, session.slice(), "pending", text);
-                const action = (try storage.nextMcpAction()).?;
-                const binding = (try storage.admitMcpActionAttempt(action.action_id, 600_000, .{})).?;
+                const action = (try storage.nextAction(.mcp)).?;
+                const binding = (try storage.admitActionAttempt(action, 600_000, .{})).?.permit.binding;
                 try reads(&storage, &tmp, session.slice(), "bash", text);
                 _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
                 try reads(&storage, &tmp, session.slice(), "pending", text);
