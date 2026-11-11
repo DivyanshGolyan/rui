@@ -648,7 +648,7 @@ fn reconnect(self: *Mysql) !mysql_open.Reclaimed {
         s.connection.reopen(login.options(), &refusal) catch continue;
         const owner = mysql_open.reclaim(&s.connection, login.database.slice(), &s.store_id, s.epoch, s.connection_id) catch |err| switch (err) {
             // Another server, Store or owner, or one admission refuses: no retry helps.
-            error.WrongStoreIdentity, error.OwnershipLost, error.StoreLocked, error.UnsupportedMysqlVersion, error.MysqlReadOnly, error.MysqlDurabilityTooWeak, error.MysqlStatementBinlog => return error.StoreConnectionLost,
+            error.WrongStoreIdentity, error.OwnershipLost, error.StoreLocked, error.MysqlTooOld, error.MysqlIsMariadb, error.MysqlReadOnly, error.MysqlFlushLogUnsafe, error.MysqlSyncBinlogUnsafe, error.MysqlStatementBinlog => return error.StoreConnectionLost,
             else => continue,
         };
         s.connection_id = owner.connection_id;
@@ -843,4 +843,8 @@ test "MySQL content query shape counts causes independently of wire sends" {
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.prefix_only);
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.access_passes);
     try std.testing.expectEqual(@as(u64, 0), state.testing_shape.identity_passes);
+}
+
+test {
+    _ = mysql_open;
 }
