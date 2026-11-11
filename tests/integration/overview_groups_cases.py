@@ -2,7 +2,7 @@
 
 Each case drives a real Host into a work state, opens bare `rui` on a PTY
 and reads the rows as the terminal shows them: the group headings, each
-row's mark and its colour, the detail column and the age.
+row's mark and colour, quiet second line, folder and age.
 """
 import json
 import pathlib
@@ -47,6 +47,11 @@ def row(frame, title):
     return rows[0]
 
 
+def detail(frame, title):
+    lines = frame.split("\n")
+    return lines[lines.index(row(frame, title)) + 1]
+
+
 def cells(screen, title):
     """The drawn cells of the row showing `title` in the latest frame."""
     for line in screen.capture.completed_cells:
@@ -76,19 +81,21 @@ def needs_you():
             lines = frame.split("\n")
             headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
             assert headings == [], frame
-            assert lines[1] == "  + New Session", frame
+            assert lines[0] == "  + New Session" and lines[1] == "", frame
             asked = row(frame, "Asks before running")
-            assert re.fullmatch(r"  \? Asks before running {2,}echo first line of the command {2,}\d+s", asked), asked
+            assert re.fullmatch(r" \? Asks before running {2,}\d+s", asked), asked
             assert len(asked) == 98, asked
             assert "second line" not in frame, frame
             assert lines.index(asked) == 2, frame
-            assert re.fullmatch(r"  ✓ Answered already {2,}\d+s", row(frame, "Answered already")), frame
-            mark = cells(screen, "Asks before running")[2]
-            ordinary = cells(screen, "Answered already")[2]
+            assert detail(frame, "Asks before running").startswith("   echo first line of the command"), frame
+            assert detail(frame, "Asks before running").rstrip().endswith("workspace"), frame
+            assert re.fullmatch(r" ✓ Answered already {2,}\d+s", row(frame, "Answered already")), frame
+            mark = cells(screen, "Asks before running")[1]
+            ordinary = cells(screen, "Answered already")[1]
             assert (mark.data, ordinary.data) == ("?", "✓"), (mark, ordinary)
             assert mark.fg is not None and mark.fg != ordinary.fg, (mark, ordinary)
-            # The counts line's `? 1` is drawn in the attention colour too.
-            assert mark.fg == screen.style("? 1").fg, (mark, screen.style("? 1"), frame)
+            assert screen.style("Asks before running").bold, frame
+            assert screen.style("echo first line of the command").fg != mark.fg, frame
             # The list opens on the waiting row: Enter opens that Session.
             screen.keys(b"\r")
             # Its conversation's status line names it; the card may fill
@@ -124,21 +131,19 @@ def queued_in_active():
                 lines = frame.split("\n")
                 headings = [line for line in lines if re.fullmatch(r" \S.* · \d+", line)]
                 assert headings == [], frame
-                assert "Queued" not in frame, frame
+                assert "Queued" in frame, frame
                 working = row(frame, "First peer task")
                 queued = row(frame, "Second peer task")
-                assert re.fullmatch(r"  ⠹ First peer task {2,}\d+s", working), working
-                assert re.fullmatch(r"  ◌ Second peer task {2,}\d+s", queued), queued
+                assert re.fullmatch(r" ⠹ First peer task {2,}\d+s", working), working
+                assert re.fullmatch(r" ◌ Second peer task", queued), queued
                 done = row(frame, "Dispatcher")
                 assert lines.index(working) < lines.index(done) < lines.index(queued), frame
                 drawn = cells(screen, "Second peer task")
-                queued_mark, age = drawn[2], [cell for cell in drawn if cell.data != " "][-1]
-                assert age.data == "s", drawn
-                working_mark = cells(screen, "First peer task")[2]
-                # Dim: the queued mark takes the age's quiet colour, not the
-                # working mark's ink.
-                assert queued_mark.data == "◌" and queued_mark.fg == age.fg, (queued_mark, age)
-                assert queued_mark.fg != working_mark.fg, (queued_mark, working_mark)
+                queued_mark = drawn[1]
+                working_mark = cells(screen, "First peer task")[1]
+                assert queued_mark.data == "◌", queued_mark
+                assert queued_mark.fg == screen.style("Queued").fg, frame
+                assert queued_mark.fg != working_mark.fg, frame
         finally:
             hold.set()
     print("overview groups: a queued peer row shows a dim `◌` after working and done rows, with no headings", flush=True)
@@ -161,15 +166,17 @@ def detail_column():
             frame = screen.wait(lambda shown: "retry in" in shown and "Fails every time" in shown,
                                 "the retry countdown and the failed row")
             shown = row(frame, "Rate limited task")
-            match = re.fullmatch(r"  ⠹ Rate limited task {2,}Rate limited · retry in (\d+)s {2,}\d+s", shown)
+            assert re.fullmatch(r" ⠹ Rate limited task {2,}\d+s", shown), shown
+            match = re.match(r"   Rate limited · retry in (\d+)s", detail(frame, "Rate limited task"))
             assert match and 0 < int(match[1]) <= 41, (shown, frame)
             failure = row(frame, "Fails every time")
-            assert re.fullmatch(r"  × Fails every time {2,}Retries ran out {2,}\d+s", failure), (failure, code)
+            assert re.fullmatch(r" × Fails every time {2,}\d+s", failure), (failure, code)
             assert "you" not in failure.lower(), failure
-            failed_mark = cells(screen, "Fails every time")[2]
-            assert failed_mark.fg == screen.style("Retries ran out").fg, frame
+            assert detail(frame, "Fails every time").startswith("   Retries ran out"), frame
+            failed_mark = cells(screen, "Fails every time")[1]
+            assert failed_mark.fg != screen.style("Retries ran out").fg, frame
             # The countdown asks for attention; the failure keeps its colour.
-            assert cells(screen, "Rate limited task")[2].fg == screen.style("Rate limited ·").fg, frame
+            assert cells(screen, "Rate limited task")[1].fg != screen.style("Rate limited ·").fg, frame
     print("overview groups: a rate-limited row reads `Rate limited · retry in Ns`; a failed row names its cause only", flush=True)
 
 
@@ -185,10 +192,14 @@ def narrow():
         with w.overview(columns=40, rows=16) as screen:
             frame = screen.wait(lambda shown: "Narrow title" in shown and "A much" in shown, "both narrow rows")
             fits = row(frame, "Narrow title")
-            assert re.fullmatch(r"  ✓ Narrow title {2,}\d+s", fits) and len(fits) == 39, (fits, frame)
+            assert re.fullmatch(r" ✓ Narrow title {2,}\d+s", fits) and len(fits) == 39, (fits, frame)
             cut = row(frame, "A much")
-            # The title keeps 29 cells, its last an ellipsis; the age keeps its own.
-            assert re.fullmatch(r"  ✓ A much longer title that can… +\d+s", cut) and len(cut) == 39, (cut, frame)
+            match = re.fullmatch(r" ✓ (.+) +(\d+s)", cut)
+            assert match and len(cut) == 39, (cut, frame)
+            room = 40 - 3 - len(match[2]) - 2
+            assert match[1].rstrip() == "A much longer title that cannot fit here"[:room - 1] + "…", cut
+            assert detail(frame, "Narrow title").rstrip().endswith("workspace"), frame
+
     print("overview groups: at 40 columns a row keeps its mark, title and age, a long title cut short", flush=True)
 
 

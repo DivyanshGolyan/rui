@@ -15,6 +15,8 @@ composer: Composer,
 permission: ?*PermissionCard = null,
 facts: vxfw.Widget = empty.widget(),
 status: vxfw.Widget = empty.widget(),
+/// Where the facts row sits: under the composer, or last, under the status.
+facts_at: enum { top, bottom } = .top,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
@@ -39,8 +41,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(room, @import("draft_layout.zig").cap(size.height) + 2) }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
-    if (facts_rows == 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
-    if (status) |drawn| children[1 + facts_rows] = .{ .origin = .{ .row = content.size.height + facts_rows, .col = 0 }, .surface = drawn };
+    const status_rows = footer_rows - facts_rows;
+    const facts_row = content.size.height + if (self.facts_at == .bottom) status_rows else 0;
+    const status_row = content.size.height + if (self.facts_at == .top) facts_rows else 0;
+    if (facts_rows == 1) children[1] = .{ .origin = .{ .row = facts_row, .col = 0 }, .surface = try self.facts.draw(row) };
+    if (status) |drawn| children[1 + facts_rows] = .{ .origin = .{ .row = status_row, .col = 0 }, .surface = drawn };
     return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = content.size.height + footer_rows }, .buffer = &.{}, .children = children };
 }
 
@@ -221,4 +226,19 @@ test "InputArea approval has one document title above a choice between composer 
         _ = try input.widget().draw(ctx);
         try std.testing.expectEqual(choice, card.choice_row.?);
     }
+}
+
+test "InputArea puts the facts row last, under the status's rows, when asked" {
+    var bytes: [16]u8 = undefined;
+    var editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    const facts: vxfw.RichText = .{ .text = &.{.{ .text = "facts" }}, .softwrap = false, .width_basis = .parent };
+    const status: vxfw.RichText = .{ .text = &.{.{ .text = "Configured.\n! warning" }}, .softwrap = false, .width_basis = .parent };
+    var input: Self = .{ .composer = .{ .editor = &editor }, .facts = facts.widget(), .status = status.widget(), .facts_at = .bottom };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} });
+    try std.testing.expectEqual(@as(u16, 6), drawn.size.height);
+    try std.testing.expectEqual(@as(i17, 3), drawn.children[2].origin.row);
+    try std.testing.expectEqual(@as(i17, 5), drawn.children[1].origin.row);
+    try std.testing.expectEqualStrings("f", drawn.children[1].surface.readCell(0, 0).char.grapheme);
 }

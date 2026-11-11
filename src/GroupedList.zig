@@ -13,6 +13,8 @@ pub const Target = overview_view.Click;
 pub const Row = struct {
     segments: []const Segment,
     heading: bool = false,
+    second: ?[]const Segment = null,
+    height: u16 = 1,
     /// What a left press on this row means; null for a row that takes
     /// none, as a heading or a gap.
     target: ?Target = null,
@@ -23,6 +25,7 @@ pub const Row = struct {
 pub const Rows = struct {
     userdata: *const anyopaque,
     count: u32,
+    countFromFn: ?*const fn (*const anyopaque, u32) u32 = null,
     rowFn: *const fn (userdata: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!Row,
 
     pub const none: Rows = .{ .userdata = undefined, .count = 0, .rowFn = undefined };
@@ -49,10 +52,16 @@ selected: ?u32 = null,
 on_press: ?Press = null,
 caps: overview_view.Caps = .{},
 inner: List = .{},
+/// What is pinned under the list, and the rows the screen's layout gives
+/// it (`overview_view.layout`'s `settings`), which the list never takes.
+tail: ?Tail = null,
+belowFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 /// Borrowed alias to the widget's scrolling owner, established by widget().
 list: *vxfw.ListView = undefined,
 shown: List.Range = .{},
 shown_at: []const Span = &.{},
+
+pub const Tail = struct { widget: vxfw.Widget, rows: u16 };
 
 const Span = struct { row: i17, height: u16, target: ?Target };
 const Captured = struct { id: u32, target: Target };
@@ -62,10 +71,16 @@ const Frame = struct {
     owner: *Self,
     targets: std.ArrayList(Captured) = .empty,
 
+    fn count(raw: *const anyopaque, first: u32) u32 {
+        const self: *const Frame = @ptrCast(@alignCast(raw));
+        return self.owner.rows.countFromFn.?(self.owner.rows.userdata, first);
+    }
+
     fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!List.Row {
         const self: *Frame = @ptrCast(@alignCast(@constCast(raw)));
         const owner = self.owner;
         const built = try owner.rows.rowFn(owner.rows.userdata, index, arena);
+        std.debug.assert(built.height > 0 and (built.second == null or built.height >= 2));
         const selected = owner.selected != null and owner.selected.? == index;
         std.debug.assert(!(selected and built.heading));
         const segments = try arena.alloc(vaxis.Segment, built.segments.len);
@@ -75,8 +90,14 @@ const Frame = struct {
             dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, role) };
         }
         if (built.target) |target| try self.targets.append(arena, .{ .id = @intCast(index), .target = target });
-        const lines = try arena.alloc(List.Line, 1);
+        const lines = try arena.alloc(List.Line, built.height);
         lines[0] = segments;
+        for (lines[1..]) |*line| line.* = &.{};
+        if (built.second) |second| {
+            const converted = try arena.alloc(vaxis.Segment, second.len);
+            for (second, converted) |segment, *dest| dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, segment.style) };
+            lines[1] = converted;
+        }
         return .{ .lines = lines, .target = if (built.target != null) @intCast(index) else null };
     }
 };
@@ -101,12 +122,25 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const frame = try ctx.arena.create(Frame);
     frame.* = .{ .owner = self };
-    self.inner.rows = .{ .userdata = frame, .count = self.rows.count, .rowFn = Frame.row };
+    self.inner.rows = .{ .userdata = frame, .count = self.rows.count, .rowFn = Frame.row, .countFromFn = if (self.rows.countFromFn != null) Frame.count else null };
+    self.inner.belowFn = self.belowFn;
+    self.inner.below_align = .center;
+    self.inner.below_style = widget_style.of(self.caps, .{ .colour = .quiet });
     self.inner.selected = self.selected;
     self.inner.on_press = if (self.on_press != null) .{ .userdata = frame, .pressed = reportPress } else null;
     self.inner.base_style = widget_style.of(self.caps, .{});
     self.inner.selection_style = widget_style.of(self.caps, .{ .background = .selection });
-    var surface = try self.inner.widget().draw(ctx);
+    const size = ctx.max.size();
+    const tail_rows = if (self.tail) |tail| @min(tail.rows, size.height) else 0;
+    const room = size.height - tail_rows;
+    const tail = if (self.tail) |pinned| try pinned.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = tail_rows })) else null;
+    var surface = try self.inner.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }));
+    if (tail) |drawn| {
+        const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
+        children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = surface };
+        children[1] = .{ .origin = .{ .row = room, .col = 0 }, .surface = drawn };
+        surface = .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+    }
     surface.widget = self.widget();
     self.shown = self.inner.shown;
     const spans = try ctx.arena.alloc(Span, self.inner.shown_at.len);
@@ -276,4 +310,54 @@ test "GroupedList without on_press only scrolls on the wheel" {
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .wheel_down, .type = .press, .mods = .{} } });
     _ = try list.widget().draw(ctx);
     try std.testing.expect(list.shown.first > 0);
+}
+
+test "GroupedList two-line rows select and press both lines with a pinned tail" {
+    var rows = [_]Row{.{ .segments = &.{.{ .text = "first", .style = .{ .colour = .strong, .bold = true } }}, .second = &.{.{ .text = "detail", .style = .{ .colour = .quiet } }}, .height = 2, .target = .{ .open = numbered(1) } }};
+    const all: []const Row = &rows;
+    var presses: Pressed = .{};
+    const tail: vxfw.Text = .{ .text = "rule\nSettings" };
+    var list: Self = .{ .rows = .of(&all), .selected = 0, .on_press = presses.press(), .tail = .{ .widget = tail.widget(), .rows = 2 } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 8 }, .cell_size = .{} };
+    const surface = try list.widget().draw(ctx);
+    try std.testing.expectEqual(@as(i17, 6), surface.children[1].origin.row);
+    const row = surface.children[0].surface.children[0].surface;
+    try std.testing.expectEqual(@as(u16, 2), row.size.height);
+    for ([_]u16{ 0, 1 }) |y| for ([_]u16{ 0, 10, 39 }) |x| try std.testing.expectEqual(widget_style.of(.{}, .{ .background = .selection }).bg, row.readCell(x, y).style.bg);
+    try std.testing.expect(row.readCell(0, 0).style.bold);
+    try std.testing.expect(!row.readCell(0, 1).style.bold);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]i16{ 0, 1 }) |y| {
+        try list.widget().handleEvent(&events, leftPress(3, y));
+        try std.testing.expectEqualStrings(&numbered(1), &presses.targets[presses.count - 1].open);
+    }
+    try std.testing.expectEqual(@as(usize, 2), presses.count);
+}
+
+test "GroupedList below line counts Sessions not the New Session entry and stays quiet centered" {
+    const Source = struct {
+        fn row(_: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
+            return .{ .segments = &.{.{ .text = "row", .style = .{} }}, .height = 2, .target = if (index == 0) .new_session else .{ .open = numbered(index) } };
+        }
+        fn count(_: *const anyopaque, first: u32) u32 {
+            return 6 -| (first -| 1);
+        }
+        fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!List.Line {
+            return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) }});
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]overview_view.Caps.Depth{ .direct, .none }) |depth| {
+        var list: Self = .{ .rows = .{ .userdata = undefined, .count = 7, .rowFn = Source.row, .countFromFn = Source.count }, .selected = 0, .belowFn = Source.below, .caps = .{ .depth = depth } };
+        const surface = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 7 }, .cell_size = .{} });
+        const indicator = surface.children[surface.children.len - 1];
+        try std.testing.expectEqual(@as(i17, 6), indicator.origin.row);
+        var text: std.ArrayList(u8) = .empty;
+        for (0..30) |x| try text.appendSlice(arena.allocator(), indicator.surface.readCell(@intCast(x), 0).char.grapheme);
+        try std.testing.expectEqualStrings("           ↓ 4 more           ", text.items);
+        try std.testing.expectEqual(widget_style.of(list.caps, .{ .colour = .quiet }).fg, indicator.surface.readCell(11, 0).style.fg);
+    }
 }
