@@ -1,6 +1,7 @@
 //! The historical view a model request reads: settings, conversation entries,
 //! outputs, parts, tool results and prefix seals.
 
+const replay_recipe = @import("../../replay_recipe.zig");
 const std = @import("std");
 const activity_read = @import("../../activity_read.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -974,11 +975,15 @@ pub fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !voi
     try a.commit();
 }
 
-/// The latest compacted Operation of `current`'s Session admitted before
-/// it: its selected Compaction Base.
-const selected_base_sql = "(SELECT selected.operation_id " ++
-    "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
-    "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1)";
+/// The newest accepted compaction before this boundary, without a model
+/// filter or fallback to an older base. Recipe.select owns replay selection.
+pub fn newestBaseSql(comptime session: []const u8, comptime boundary: []const u8) []const u8 {
+    return "(SELECT selected.operation_id FROM model_operation selected @index(model_operation_compaction_bases) " ++
+        "WHERE selected.session_ref=" ++ session ++ " AND selected.purpose=1 AND " ++
+        store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<" ++ boundary ++
+        " ORDER BY selected.admission_position DESC LIMIT 1)";
+}
+const selected_base_sql = newestBaseSql("current.session_ref", "current.admission_position");
 
 /// The base's compaction items, whose provider bag is the opaque
 /// continuation: a base has exactly one.
@@ -1100,11 +1105,12 @@ fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) er
     view.anchor = if (row.anchors == 1 and row.anchor_bags == 1) (row.anchor_position orelse return error.CorruptStore).get() else null;
     // Validate the selected base even when its opaque state cannot be sent.
     if (view.selected_base != 0 and view.anchor == null) return error.CorruptStore;
-    const compatible = if (view.selected_base != 0) OutputItemKind.compaction.replayableTo(
-        (row.base_model orelse return error.CorruptStore).slice(),
-        row.current_model.slice(),
-        .selected_base,
-    ) else true;
+    const recipe = replay_recipe.Recipe.select(row.current_model.slice(), if (row.operation_id != null) .{
+        .position = row.frontier,
+        .floor = if (row.base_floor) |floor| floor.get() else 0,
+        .model = (row.base_model orelse return error.CorruptStore).slice(),
+    } else null, if (row.own_floor) |floor| floor.get() else 0);
+    const compatible = (view.selected_base != 0) == (recipe.frontier != 0);
     if (!compatible) {
         // Rebuild the visible exchanges the old base (and its floor) covered.
         // The settings round's speculative first output page began at that
@@ -1121,7 +1127,7 @@ fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) er
     // A compaction keeps its base's floor or goes deeper.
     if (own_floor != 0 and own_floor < base_floor) return error.CorruptStore;
     view.floor = .{
-        .position = @max(own_floor, base_floor),
+        .position = recipe.floor,
         .first_message = row.first_message,
         .own = own_floor > base_floor,
     };

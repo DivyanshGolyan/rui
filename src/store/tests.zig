@@ -8348,6 +8348,96 @@ test "compaction exact threshold zero reservation and integer usage fallback" {
     }.run);
 }
 
+test "compaction pressure anchors only usage of the selected replay recipe across model visits" {
+    try store_testing.forEachEngine(struct {
+        const Base = enum { none, compatible, incompatible };
+        const usage = "{\"input_tokens\":1,\"output_tokens\":0}";
+
+        fn model(storage: *Store, session: []const u8, key: []const u8, name: []const u8, trigger: []const u8) !void {
+            var patch: wire_request.ConfigureCommand = .{};
+            try patch.key.set(key);
+            try patch.session.set(session);
+            patch.configuration.model.state = .value;
+            try patch.configuration.model.value.set(name);
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set(trigger);
+            patch.configuration.output_reservation.state = .value;
+            try patch.configuration.output_reservation.value.set("0");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+        }
+
+        fn answer(storage: *Store, tmp: *std.testing.TmpDir, binding: AttemptBinding, saved_usage: bool) !void {
+            const calls = [_]TestingCall{.{ .item_id = "small", .name = "unknown", .encoded_call_id = "small-call", .decoded_call_id = "small-call", .encoded_arguments = "{}", .decoded_arguments = "{}" }};
+            try settleCallsForTestingWithFaults(storage, tmp, binding, "small-output", &calls, .{}, if (saved_usage) usage else null);
+        }
+
+        fn compact(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8, key: []const u8, saved_usage: bool) !void {
+            try submitTestMessage(storage, tmp, key, key, session, "compact this prefix");
+            const overflowing = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(overflowing));
+            try storage.settleModelAttemptFailure(overflowing, .{ .uncorrelated = "overflow" }, .context_overflow, .{});
+            const base = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try std.testing.expectEqual(ModelOperationKind.compaction, try storage.modelOperationKind(base));
+            try settleCompactionForTesting(storage, tmp, base, &.{.compaction});
+            // This usage measures the newly selected base, unlike the usage of
+            // the compaction request which produced it.
+            const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            try answer(storage, tmp, successor, saved_usage);
+        }
+
+        fn run(store_case: *store_testing.Case) !void {
+            for ([_]Base{ .none, .compatible, .incompatible }) |base| {
+                for ([_]bool{ false, true }) |returning| {
+                    for ([_]bool{ false, true }) |saved_usage| {
+                        errdefer std.debug.print("base={s}, returning={}, saved_usage={}\n", .{ @tagName(base), returning, saved_usage });
+                        var tmp = std.testing.tmpDir(.{});
+                        defer tmp.cleanup();
+                        var storage: Store = undefined;
+                        try store_testing.testingStore(store_case, &storage, &tmp, std.testing.io);
+                        defer storage.close() catch unreachable;
+                        const session = try configureTestSession(&storage, "config");
+                        // First visit: start in B, then visit A once. Return:
+                        // start in A, visit B, then switch back to A.
+                        try model(&storage, session.slice(), "seed-model", if (returning) "model-a" else "model-b", "1000000");
+                        try submitTestMessage(&storage, &tmp, "seed", "seed", session.slice(), "original");
+                        const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        const prefix: [12000]u8 = @splat('x');
+                        const calls = [_]TestingCall{.{ .item_id = "large", .name = "unknown", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = &prefix, .decoded_arguments = &prefix }};
+                        try settleCallsForTestingWithFaults(&storage, &tmp, first, "large-output", &calls, .{}, if (saved_usage) usage else null);
+                        if (returning and base != .none) try compact(&storage, &tmp, session.slice(), "a-base", saved_usage);
+                        if (returning) {
+                            try model(&storage, session.slice(), "visit-b", "model-b", "1000000");
+                            try submitTestMessage(&storage, &tmp, "b", "b", session.slice(), "visit B");
+                            const b = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                            try std.testing.expectEqual(ModelOperationKind.assistant_response, try storage.modelOperationKind(b));
+                            try answer(&storage, &tmp, b, saved_usage);
+                        }
+                        if (base == .incompatible) try compact(&storage, &tmp, session.slice(), "b-base", saved_usage);
+                        if (!returning and base == .compatible) {
+                            try model(&storage, session.slice(), "first-a", "model-a", "1000000");
+                            try compact(&storage, &tmp, session.slice(), "a-base", saved_usage);
+                        }
+                        try model(&storage, session.slice(), "requested-a", "model-a", "1000");
+                        try submitTestMessage(&storage, &tmp, "next", "next", session.slice(), "next");
+                        const compacts = base != .compatible and !(base == .none and returning and saved_usage);
+                        // Both public readers of pressure must agree. In the
+                        // A-base -> B-base -> A case, the restored large prefix
+                        // cannot be hidden behind A's compact-recipe usage.
+                        const estimate = (try testingContextEstimate(&storage, &tmp, session.slice())).?;
+                        try std.testing.expectEqual(compacts, estimate >= 1000);
+                        const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        try std.testing.expectEqual(if (compacts) ModelOperationKind.compaction else ModelOperationKind.assistant_response, try storage.modelOperationKind(next));
+                        var view: HistoricalView = undefined;
+                        storage.openHistoricalView(next, &view);
+                        defer view.close();
+                        try std.testing.expectEqual(base == .compatible, (try view.coverage()).anchor != null);
+                    }
+                }
+            }
+        }
+    }.run);
+}
+
 test "compaction pressure uses the latest accepted output even without usage" {
     try store_testing.forEachEngine(struct {
         fn run(store_case: *store_testing.Case) !void {

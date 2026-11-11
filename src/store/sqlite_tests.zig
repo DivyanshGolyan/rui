@@ -7478,8 +7478,15 @@ test "a failed context read answers its reader's name and fences" {
     // as main named the estimate's. Admission reads the context within
     // `admission_facts`, whose failed step is SessionReadFailed. The second
     // Message follows a Turn with usage under a trigger, so admission
-    // weighs the context, and the report estimates it.
-    for ([_]bool{ false, true }) |report| {
+    // weighs the context, and the report estimates it. Both readers name a
+    // failed uncovered-byte read CorruptStore, after selecting the recipe.
+    for ([_]struct { report: bool, bytes: bool }{
+        .{ .report = false, .bytes = false },
+        .{ .report = true, .bytes = false },
+        .{ .report = false, .bytes = true },
+        .{ .report = true, .bytes = true },
+    }) |case| {
+        const report = case.report;
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -7496,7 +7503,9 @@ test "a failed context read answers its reader's name and fences" {
         const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
         try submitTestMessage(&storage, &tmp, "context-fold-two", "context-fold-two", session.slice(), "two");
         try settleCallsForTestingWithFaults(&storage, &tmp, first, "context-fold-output", &.{}, .{}, "{\"input_tokens\":10,\"output_tokens\":0}");
-        var fault: TestingStatementFault = .{ .sql = if (report)
+        var fault: TestingStatementFault = .{ .sql = if (case.bytes)
+            namedStatementForTesting(model_admission_domain.compaction_failures, null, " AS uncovered_bytes")
+        else if (report)
             namedStatementForTesting(model_admission_domain.compaction_failures, null, "since AS (SELECT")
         else
             model_admission_domain.admission_facts_sql };
@@ -7505,7 +7514,7 @@ test "a failed context read answers its reader's name and fences" {
         if (report)
             try std.testing.expectError(error.CorruptStore, testingSessionReport(&storage, &tmp, session.slice(), 1024 * 1024))
         else
-            try std.testing.expectError(error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
+            try std.testing.expectError(if (case.bytes) error.CorruptStore else error.SessionReadFailed, storage.admitNextModelAttempt(.{}));
         try std.testing.expect(fault.failed > 0);
         try std.testing.expect(storage.isFenced());
     }

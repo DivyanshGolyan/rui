@@ -722,7 +722,7 @@ An omitted update preserves the override.
 Explicit `null` resets it to provider/model policy, spelled `default` in the CLI.
 Triggers are positive token counts; output reservation is nonnegative extra heuristic headroom, not a provider output limit.
 Current inspection and `/status` show effective values and whether each value is a Session override.
-Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (accepted usage since the compaction base, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
+Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (eligible accepted usage, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
 It is null without a trigger and when the next call's purpose does not depend on it: a Session's first call, the call after a compaction, a recovery compaction and context unchanged since the last compaction.
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
 `/status` shows it beside the trigger, and the conversation's Session line shows the share of the trigger it leaves.
@@ -731,6 +731,9 @@ Later settings or capability changes cannot change its purpose or retry policy.
 
 The Store keeps usage in Rui's form: four counts, uncached input, cache read, cache write and output, each a whole SQLite integer, all present or all absent.
 Pressure is their sum, saturating at its maximum.
+Usage anchors pressure only when its frozen request used the same model, selected Compaction Base (or no base), and effective history floor as the next request.
+Replay selection owns that identity; a model return does not make older compact-recipe usage cover a restored visible prefix.
+When the recipes differ, estimate retained context without that usage anchor.
 The Responses provider maps uniquely named top-level `input_tokens` and `output_tokens`, with `input_tokens_details.cached_tokens` as the cache read (zero when its details are absent or null) and zero cache writes, which Responses does not bill.
 A provider total is not a count.
 A missing, invalid or duplicate count, or a cache read above the input, leaves usage absent, and pressure falls back to retained-context estimates; a missing counter is not zero.
@@ -744,7 +747,7 @@ The catalog only bounds a requested count against the exact model's known contex
 An explicit count does not claim a model capacity or entitlement.
 A stored null threshold uses a fixed 115,200-token safety threshold independent of the catalog; new specs cannot save a null threshold.
 The CLI resolves `--compaction-trigger default` to a concrete token count before capture.
-Pressure uses valid usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without valid usage it estimates retained context.
+Pressure uses eligible usage from the latest accepted same-binding output plus estimates for appended input and extra reservation; without same-recipe usage it estimates retained context.
 The threshold fires at equality.
 The assistant successor of a compaction applies pending input even if the estimate remains above the threshold.
 Provider-reported overflow still permits recovery without a configured trigger; unchanged context after an accepted base, or overflow during compaction itself, fails with `ResourceExceeded` instead of repeating compaction.

@@ -421,7 +421,7 @@ pub fn settleModelAttemptFailure(
                 var changed: context_changed.Result = undefined;
                 a.read(context_changed, .{ .session = &session.ref, .boundary = row.admission_position.get() }, &changed);
                 try a.run();
-                break :compact turn_policy.recoversOverflow(.assistant_response, changed.changed);
+                break :compact turn_policy.recoversOverflow(.assistant_response, try model_admission_domain.contextChanged(&changed));
             };
             if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
             const diagnostic_id = try content.importDiagnostic(a, &failure);
