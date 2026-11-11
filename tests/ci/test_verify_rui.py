@@ -157,6 +157,35 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
+    def test_markdown_frames_show_the_compact_answer_at_both_sizes_and_colours(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("markdown", "day-chat", "no-color"):
+            with self.subTest(state=name):
+                state = states[name]
+                self.assertEqual(state["open"], "Markdown retry")
+                self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+                for text in ("What I changed", "retry.zig", "pub fn next",
+                             "Late request  waits 30 s  fails at once", "retry policy notes"):
+                    self.assertIn(text, state["expect"])
+        self.assertEqual(states["day-chat"]["theme"], "day")
+        self.assertEqual(states["no-color"]["env"]["NO_COLOR"], "1")
+        text = states["markdown"]["cast"][0]["messages"][0]
+        for mode in ("echo", "realistic"):
+            answer = self.helper["fixture_answer"](text, 1, mode)
+            for marker in ("## What I changed", "1. `retry.zig`", "```zig", "| Case |",
+                           "return null; // expired\n\n", "[retry policy notes](https://"):
+                self.assertIn(marker, answer)
+        for name in ("chat", "chat-scrolled", "chat-top"):
+            self.assertEqual(states[name]["open"], "Fix retry deadline")
+            self.assertTrue(states[name]["expect"])
+
+    def test_busy_frame_waits_for_work_text_not_a_rotating_spinner(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "start-busy")
+        self.assertIn({"wait": "Run the slow tests"}, state["steps"])
+        self.assertEqual(state["expect"], ["Docs build", "Run the slow tests"])
+
     def test_cumulative_cast_and_counted_labels(self):
         data = self.scenario()
         data["states"][1]["cast"].append({"label": "Batch {n}", "count": 3, "workspace": "code/batch",
