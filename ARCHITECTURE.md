@@ -2769,37 +2769,35 @@ Explicit `/status` keeps the current reserved recovery key under the page, even 
 
 The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
 This trade-off is accepted for one library-owned renderer.
-It retains a bounded latest view (256 KiB each for live text and a selected inspection).
-PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines and the mouse wheel scroll it; Esc, Ctrl-G, a click on the `↓` marker or scrolling past the end returns to the latest view, or to a pending Action.
-At the latest view, Esc or Ctrl-G returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
-Sending a Message returns to the latest view, where it and its reply appear, and a page asked for before it no longer opens over it.
-With nothing said yet, scrolling up reaches `Start of conversation`.
-Scrolling up from live text freezes a transcript copy that starts at the first retained read boundary.
-A boundary pairs a live offset with the Conversation cursor before it (an Admission or call row is no Conversation cursor) and is valid only if no Conversation item at or after its cursor showed before its offset.
-`session_reads.Marks` owns that rule: the opening's start is one, and a later page records each item it shows that follows the conversation row of every Message shown so far as its Admission.
-A stop answers every Message up to its cutoff, since each has its row by then or never will, and a read whose stop shows queued Messages before its line keeps no boundary before that stop.
-A page that reaches its snapshot's end with every shown Message rowed also records its output's end with that end as its cursor, even when it shows nothing: every later item, a tool result included, takes a fresh position after that end.
-An incomplete page, or one after which a shown Message still awaits its row, records no end, and a later boundary at the same offset replaces the earlier cursor.
-Every admitted Message stays reachable exactly once, by admission ID rather than content, across older pages, the retained copy, a listing between them and the queued row: a Message a person or script sent shows at its Admission when it is taken next, otherwise in the input's queued row until it is applied, then as its row, or until a stop excludes it, then as a labelled echo at the stop, even after it showed at its Admission; no listing shows it while it is queued.
-`session_reads.Record` keeps the Messages live output shows after the newest boundary (the opening's, the newest 64 live ones and the position span of live ones dropped beyond that), and `session_reads.plan` decides how a transcript lists them.
-Above its copy, a transcript lists each Message whose echo left the view, newest first and collapsed as live output shows it; then the gap label, if any; then, at its boundary's seam, Messages admitted before the boundary and not applied at its cursor's end, except one a person or script sent that is still queued there; then older pages.
-The listing reads one Message per step through the existing Activity page and content reads, and is cancellable like any older page.
-A seam's range is read at its boundary's end.
-The span of dropped live echoes is read at its newest echo's position, and each person's or script's Message in it is judged by the newest Message live output showed while it waited, before the span and after it, since that decides whether the Message showed at its Admission or as its row; `session_reads.listed` owns that rule.
-Each listed Message is labelled as of its read: `! Stopped before it ran · send it again to run it`, `Queued` while the Session's work holds its queue (any [work state](#work-state-and-wait-conditions) progress but `runnable`, as the newest page read reports it), or an unlabelled `›` row otherwise.
-A pending Session acts at once, so a `Queued` label would be stale by its next frame.
-The opening labels another Session's queued Messages by the same rule from its own page.
-Live output labels only a Message a stop excluded: it shows another Session's Message as its Admission, whose later pages show what became of it, and a person's or script's at its Admission or as its row.
-The listing has no controls; it never resends, executes or approves anything.
-Reaching the transcript's top loads the preceding canonical Conversation page in place, keeping the rows in view and applying rows requested while it loaded, until `Start of conversation`.
-When no boundary remains in view (one page exceeded it, or a Message still awaited its row), the transcript says `Earlier rows left this view.` above the retained rows, and older pages continue before the newest boundary that left: everything before that boundary stays reachable, while rows after it that left the view, including a Message whose row followed it before another Message's row arrived, are the gap the label names.
-A boundary's offset is where its item's text begins in live output, which keeps text but not the styling the read staged; a saved page larger than the view keeps its newest whole lines and says so.
-`/history` jumps to the transcript's top.
-Ctrl-O opens the lowest collapsed Message the latest frame drew, live or in the transcript, as a Message page: it is read from the Store and shows only if its length and digest match.
+The conversation is one continuous Activity feed: `feed_window.Window` owns a contiguous run of keyed rows and page-edge facts; `Feed` owns an anchor, either `end` or `(row key, logical line, wrapped row)`.
+At `end`, the last entry sits just above the input, including in a short conversation.
+PgUp/PgDn, Shift-PgUp/PgDn, Up/Down beyond the draft's lines, wheel and drag move that anchor, never switch documents.
+Prepending, appending and resize preserve the anchored line; scrolling past a loaded edge banks bounded movement until its fill arrives.
+There is no separate history mode, frozen transcript, seam listing or start label.
+Esc, Ctrl-G, clicking the `↓` chip and sending a Message return to `end`, or to a pending Action.
+At the end, Esc or Ctrl-G returns to the overview when nothing would be lost or dismissed: no pending Action, sub-view or running command, and no original still unsaved; a draft keeps the conversation open, and the status line says to clear it first.
+Sending also invalidates a page requested before it.
+
+`feed_reads.nextRead` fairly schedules scans and fills through one reader.
+Opening reads backward with all kinds for live facts, paints at once bottom-aligned, then fills with filtered pages of 16 visible rows toward a three-screen margin above and below.
+A fill applies only while its starting edge still matches; a stale result cannot move the window.
+The live scan owns its own cursor and work, call and queued facts, independently of the window's high edge.
+Exactly one forward-attach owner appends scan rows when the window high edge equals the scan's starting cursor; otherwise the scan only counts new rows.
+Settled rows render identically in either direction and across page splits; provisional Message rows may use current page facts, and each forward read replaces the suffix from its first provisional row.
+Applied Messages show at their user row; excluded Messages show at the stop, not their Admission; waiting Messages follow the page's admission and queue facts.
+The activity tail (work, calls and queued Messages) is the last, unkeyed entry.
+The `↓` chip has a permanently reserved row and uses `marks`' arrow; away from `end` it shows `↓`, or `↓ N new` as rows arrive, without changing feed height.
+Jumping to an end whose high edge was evicted starts a fresh opening read and keeps the old frame until it lands.
+
+The window stays within the former 256-KiB text ceiling, with separate entry-count and per-row caps; it trims the side farther from the view and reloads those rows on demand.
+The three-screen margin is a loading target, not an unbounded promise at arbitrary terminal dimensions.
+Tool open state belongs to the window's bounded set of row keys and survives trim and reload while its key remains held.
+Inspection, Action and Message pages remain separate bounded documents.
+Ctrl-O opens the lowest collapsed Message the latest frame drew in the feed, as a Message page: it is read from the Store and shows only if its length and digest match.
 When a peer's name is drawn below that Message, Ctrl-O follows it instead, under the same rules and refusals as a click on the name, so every link has a keyboard path.
 The page shows the whole text up to the 256-KiB view, then says how many lines it did not show in full; a saved row's page names its exact raw export.
 Esc, Ctrl-G or Ctrl-O returns to the same view and rows.
-Each collapsed block keeps its Message's identity while it stays in the copy; a block whose identity is no longer held says so and opens nothing.
+Ctrl-O targets and selection use `(row key, offset)`, not offsets counted from the end; a row reloaded after eviction keeps the same identity.
 A page asked for before a send, Esc, Ctrl-G or a newer Ctrl-O never opens.
 A Message page never shows or decides an Action.
 Display eviction does not delete saved work.
@@ -2807,8 +2805,7 @@ App enables mouse reporting, and wheel events scroll the visible widget.
 Rui does not enable alternate scroll mode 1007.
 libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
-`ConversationViewport` keeps retained bytes, styles and the first row in view as a logical line and row within it.
-The Transcript draws only visible rows, and the Composer shares the draft layout across both screens.
+The feed window keeps retained bytes and styles; Feed draws only visible rows, and the Composer shares the draft layout across both screens.
 One `vxfw.App` owns terminal input, modes, output and cell allocation for the Root and its screens.
 Switching screens does not restore or lend the terminal.
 Resize keeps the first browsed line in view and preserves draft bytes and logical cursor; an Action restarts from its top.
@@ -2826,11 +2823,11 @@ Standalone zero-width output clusters, clusters wider than eight cells and clust
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
 
-`/status`, `/requests`, `/help`, `/history` and `/details` render selected inspections without changing the draft.
+`/status`, `/requests`, `/help` and `/details` render selected inspections without changing the draft.
 `/status` is rendered by the next settled live read from that read's own Current capture, and shows in the same step as that read's history and composer status, so the page never disagrees with them.
 While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
 A live read's failure is the same failure with or without `/status`.
-A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later `/history`, `/details` or inspection request replaces it.
+A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later `/details` or inspection request replaces it.
 `/status` is also where settings change.
 Divyansh approved the page on 2026-11-02 (mock at 12:44Z, changes through #814's list at 13:23Z).
 Its title names the Session and its ID; a row for each of this Session's settings follows (effort, permissions, tools, name, Folder, compaction trigger, headroom, and the fixed model, Store and instructions, `none` or `set from a shell`), then a row for each default new Sessions start from (model, effort, notifications, Store), then the work: its state and Actions awaiting approval, its current message, every Action awaiting approval by ID, any indeterminate Action, and the recent messages with their outcomes, whose answers `/result KEY` shows.
@@ -2932,13 +2929,13 @@ A link to a Session that no longer opens ends as any failed open does.
 The label is the complete canonical ID, never an abbreviation or separate identity.
 Pages and Message selection retain that same ID, without abbreviation metadata.
 No colour carries meaning: the glyphs do.
-The Conversation pages that transcripts read hold received Messages only, so an older page shows `←` lines and no `→` lines; the Bash call that sent remains.
+Activity pages preserve both received and sent peer rows while scrolling in either direction.
 
-In a Session's transcript, a press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
-`transcript_selection` decides what the cells mean: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
-A drag held at the top or bottom row moves the viewed document one row through text it already holds; in live view that moves `live.top` for the drag and live output returns to the latest rows on release, since switching to the transcript view would swap documents and drop the selection.
+In a Session's feed, a press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
+Selection resolves keyed rows and offsets: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
+A drag held at the top or bottom row moves the same Feed anchor one row through text it already holds; incoming rows do not move the selection.
 No older page is read in under a press or drag; it waits for the release.
-A press or drag ends without copying when the pointer leaves the Transcript or its content is replaced, since vxfw sends no release then.
+A press or drag ends without copying when the pointer leaves the feed or its content is replaced, since vxfw sends no release then.
 
 Tool markers distinguish observed facts: `•` means unresolved, not proof that execution started; `?` means approval is required; `✓` means succeeded; `!` means failure or uncertainty with an explanation.
 Denied and rejected calls use neutral presentation with explicit outcome wording, distinct from execution failure.
@@ -3016,30 +3013,28 @@ The full stream still drains and authenticates before the heading is shown.
 Tool Result streams validate even when their bytes are not displayed; label-only observation uses admission-certified metadata under the public Session activity contract.
 Fresh Action inspection authenticates all three complete proposal fields.
 Complete Action arguments remain available through fresh inspection; one-shot inspection also exposes the call ID.
-`/details` shows the latest Conversation page through the same bounded history owner, without moving the older-navigation or live Activity cursor.
+`/details` shows the latest Conversation page in its own bounded inspection, without moving the feed anchor or live scan cursor.
 Each Tool Result shows its last min(raw length, 8,192) raw bytes through terminal-safe escaping, with `Earlier output omitted` before a shortened suffix and a full canonical raw export command.
 The raw suffix boundary is not adjusted for UTF-8 or lines.
-Older outcome headings remain available through `/history`; oversized non-tool items retain their omission and exact raw export.
-Opening and live user and assistant content are never subject to the historical omission limit.
+Older outcome headings remain available by scrolling the feed; capped rows retain access to their full saved content.
 Stream framing, expected length, domain digest and physical EOF must validate before the final content window is delivered.
 A late content, integrity or rendering failure after visible opening/live output is fatal after terminal restoration, without retry or rollback.
 Failure abandons retained renderer text and pending writer bytes; synchronous keyed-result output attempts only an ANSI reset before diagnostics, preserving the original error rather than finishing incomplete content.
 
-`/history` uses existing public Conversation reads, independently of Admission.
-It prepares one page atomically in unlinked scratch: at most 16 retained spans of at most 8,192 raw bytes each, with a 128-KiB raw-content ceiling.
+Details preparation stages one page atomically in unlinked scratch: at most 16 retained spans of at most 8,192 raw bytes each, with a 128-KiB raw-content ceiling.
 Every Tool Result authenticates its entire canonical stream, including discarded prefixes, while only its certified-length suffix is staged.
 An independent hash of the received suffix authenticates its reread staged bytes; whole non-tool spans retain their canonical digest check.
 Metadata continuation, complete received bytes and reread staged bytes validate before output.
 Preparation retains explicit whole, tool-suffix, omitted non-tool or no-content authority per item; unstaged content has no readable scratch offset.
-Ordinary preparation failure exposes no page content and retains the older cursor and draft for an explicit retry.
-Rendering I/O or integrity failure is fatal.
-Local command cancellation after the first nonempty output window is also fatal, preventing replay of an incomplete prefix within this invocation.
-Only a successful joined render advances the older cursor.
-Oversized non-tool bodies are omitted with their exact position, ordinal, raw-byte count and executable `rui session read-conversation` command.
-Hidden tool output never creates a historical omission notice; normal history remains header-only regardless of tool-result size.
-Generated commands use printable hex Store selectors and bare six-character Session IDs without terminal or shell interpretation; decoded Store values retain the existing bounds and validation.
+Ordinary preparation failure exposes no page content and retains the draft for an explicit retry.
+Rendering I/O or integrity failure is fatal; local command cancellation after the first nonempty output window is also fatal, preventing replay of an incomplete prefix within this invocation.
+Oversized non-tool bodies in details are omitted with their exact position, ordinal, raw-byte count and executable `rui session read-conversation` command.
+
+Feed reads use existing public Activity and content reads, independently of Admission; there is no history cache or new Host route.
+Content streams retain their length and digest checks before a joined read becomes visible.
+Hidden tool output never creates a historical omission notice; normal feed rows remain header-only regardless of tool-result size.
 Raw export streams the exact content without presentation.
-There is no history cache or new Host route.
+Generated commands use printable hex Store selectors and bare six-character Session IDs without terminal or shell interpretation; decoded Store values retain the existing bounds and validation.
 
 When Current exposes an actionable permission, the frontend reads the selected call's identity from that capture before its complete arguments replace scratch.
 The runner is derived from the name and owner in the Operation's frozen offer, never from argument shape or the Session's latest catalog.
@@ -3080,7 +3075,7 @@ The Host revalidates that exact Action at admission, even if an external decisio
 Observation continues while a choice is shown: once Current no longer names that Action, because another client decided it or its Turn ended, the choice leaves without a key and the outcome follows in the conversation.
 A definite stale-target rejection remains the original until explicit `/discard`; a subsequent distinct Action receives its own fresh presentation.
 The next draft and cursor survive choice and recovery.
-`/details` and `/history` return to the same choice without moving its target.
+`/details` returns to the same choice without moving its target.
 All normal tool outcomes remain header-only; explicit `/details` retains bounded raw tool suffixes and full raw export.
 
 `/inspect-action` freshly inspects the first actionable exact Action through the existing CLI diagnostics path, shown as an inspection page.
@@ -3094,15 +3089,15 @@ Inspection does not reserve an Action.
 A pending command or inspection waits for the current observation.
 A read that has delivered no output is cancelled and later repeated; once the UI owns a nonempty window, that read completes first, so output is never replayed.
 Only a successful joined observation advances Current and the activity cursor.
-This shared boundary covers opening, live Activity, permission presentation, history and details; it changes no saved work or intent.
+This shared boundary covers opening, live Activity, permission presentation, feed fills and details; it changes no saved work or intent.
 
-An older-navigation request queued during opening is eligible only after successful joined opening establishes its cursor; pre-output cancellation for a command or inspection retains the request while opening restarts.
+A feed fill is eligible only after successful joined opening establishes its edge; pre-output cancellation for a command or inspection restarts opening without treating an unset edge as exhausted.
 A null cursor before that join is not evidence of exhaustion.
 
 Exit ends input consumption before terminal restoration discards queued suffix bytes.
 Cleanup collects independent reader and Admission outcomes after restoration, cancellation, both joins and output-loan retirement, then selects error precedence.
 An already-consumed substantive failure is not replaced by an external interruption.
-Ordinary history/details preparation failure remains recoverable while active, but reportable on final exit; rendering failure remains fatal.
+Ordinary feed/details preparation failure remains recoverable while active, but reportable on final exit; rendering failure remains fatal.
 Deliberate exit retires cancelled output without resuming or replaying it.
 An already-started synchronous command is not preemptible; interruption takes effect when it returns.
 
