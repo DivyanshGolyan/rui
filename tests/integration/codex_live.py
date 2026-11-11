@@ -236,7 +236,7 @@ def run(model, external_credential=None):
             "host_resources_before_restart": resources,
             "bash_effect_count": 1, "committed_recovery_model_requests": 0,
             "post_restart_model_requests": 1, "private_reasoning_counts": reasoning_counts,
-            "reasoning_token_usage": reasoning_tokens,
+            "output_token_usage": output_tokens,
             "private_replay": "request bytes fixture-verified; live subsequent requests accepted",
         }, sort_keys=True))
     finally:
