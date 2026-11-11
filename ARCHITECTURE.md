@@ -499,7 +499,7 @@ The CLI resolves `--reasoning-effort default` on the client to the client's prod
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
 For an admitted pre-D111 Session with null settings, the configuration owner carries forward its latest Operation's frozen effort, so continuation never clears that historical value; it does not infer a catalog or product default.
 Fresh explicit-null specs have no earlier concrete effort and remain unspecified.
-Each model Operation, including compaction and continuation, freezes the resolved effort at admission.
+Each model Operation, including compaction and continuation, freezes the resolved effort, its immutable configured-choice source, its previous same-model admitted effective effort and nullable override, and whether its own pinned request actually emits an effort update at admission.
 Replacement Attempts and reopened historical views emit that stored value without consulting later Session settings or catalog policy.
 Persisted values outside the closed grammar are corruption.
 There is no per-Message override, automatic effort downgrade or model substitution.
@@ -1024,9 +1024,12 @@ Under `openai-responses/1` each request's top-level `reasoning.effort` is its Op
 Under `openai-responses/2` the top-level effort is the effort the Session's first Operation for the requested model froze.
 A rebuilt history preserves effort boundaries only from Operations requesting that model; other models' effort settings are not visible conversation and may not be supported by this model.
 Their tool declarations remain in place for the visible calls.
-The history view yields an Operation element at each earlier Operation's admission position, with the effort it froze, and the request being prepared gets its own Operation item after `history_end`, where a later request's span will place it.
-At an Operation whose effort differs from the one in force, the codec writes `{"type":"configuration_update","reasoning":{"effort":…}}` and its carry takes the new effort; an unchanged effort writes nothing.
-A compaction base covers the Operation elements before its anchor with the output it covers, so effort there is the top's again.
+The history view yields an Operation element at each earlier same-model Operation's admission position. The codec restores its effective effort only when it differs from replay carry; a boundary back to null declines. Admission captures the current request's actual emission decision against that same replay recipe (raw newest base, compatibility, effective floor and covered anchor) and frozen first-model top. The current unrefused request emits exactly that saved decision, not a new comparison against later settings. Historical boundaries and refused retries remain representation restorations, preserving pinned request bytes and memo/rebuild parity even on the first successor after compaction.
+An unambiguous provider error can refuse only a saved emitted update that changes the previous same-model admitted effective effort. A synthetic restoration of an unchanged choice, a configure cycle ending at the unchanged wire effort, a first/top-level request, and a repeated refusal are ordinary provider failures. Eligible settlement appends a `session_changed` refusal with the bounded provider report and a foreign key to the exact Operation and source, atomically with its existing retry or exhaustion transition. It creates no compensating revision and never edits the Operation's admission snapshot.
+Configure owns configured-choice identity: each immutable revision freezes its source, inheriting it for labels/no-ops/effective snapshot copies and establishing a new source for a real model or effort choice. Format 66 freezes legacy raw choices for every migrated revision once, including choices newer than an unresolved Operation; a later refusal cannot reinterpret their identity. The source revision owns the nullable override. A refusal maps that exact source to its Operation's frozen previous override, including null; actual request fallback is that Operation's independently frozen previous effective effort. This distinguishes legacy null overrides carrying concrete effort without searching older, possibly unadmitted choices. `operation_effort` owns those projections for configuration, historical requests and settlement.
+Refusal settlement invalidates the history prefix seal, so a memo from before the refusal cannot reintroduce the rejected item.
+Initial top-level effort errors, ambiguous errors, and failures without an eligible update remain ordinary provider failures; retries use the existing Attempt allowance.
+A compaction base covers the Operation elements before its anchor with the output it covers, so replay carry restarts at the frozen top; an unchanged admitted effort may require a non-refusable restoration after the base.
 Every Operation is placed, whatever its outcome, because its own request carried its boundary; effort may start unspecified and then acquire a supported value, but admission refuses a boundary back to unspecified effort.
 
 #### Tools inside the history
@@ -2667,7 +2670,8 @@ Session binding and normal provider rejection remain unchanged.
 
 The Host does not check the saved future-Session model default at startup: any pin with valid syntax starts Sessions, and one outside the catalog runs with default limits.
 A missing or null catalog window uses the product's unlisted context estimate, while compactAt admission enforces only non-null known windows.
-A catalog entry accepts exactly its listed efforts, including `none` where listed; an unlisted model accepts every effort in Rui's grammar, passing it through so a provider refusal remains the error.
+A catalog entry accepts exactly its listed efforts, including `none` where listed; an unlisted model accepts every effort in Rui's grammar and passes it through.
+A provider refusal of an effort update follows [effort inside the history](#effort-inside-the-history); it is not a configuration rejection or a request error.
 Missing or unreadable future defaults do not prevent a Host from serving existing saved work.
 A pin with invalid syntax rejects fresh CLI creation before capture rather than falling back to the recommendation.
 
@@ -3349,8 +3353,11 @@ An `approval_requested` row (D115) follows each call whose Action was saved unde
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
 Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
 A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
-A `session_changed` row (D138, D218) is one setting a later revision changed, carrying `revision` and `field` (a configuration member's name: `provider`, `model`, `instructions`, `tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`).
-The revision's commit writes them to `session_change` at a position taken when it is accepted, never edited; the revision keeps the current values, and a creation and a revision that changes nothing have none.
+A `session_changed` row (D138, D218) carries `revision`, `field` and required nullable `provider_text` (explicit `null` for ordinary changes).
+An ordinary row names a setting the revision changed (`provider`, `model`, `instructions`, `tools`, `loaded_tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`) and has null provider text.
+The revision's commit writes those rows at one position, never edited; creation and an unchanged revision have none.
+A refused effort update is also an immutable row, with `field:"reasoning_effort_refused"`, the revision whose effort was refused, and the provider report in `provider_text`, using the same bounded, control-normalized report as other provider failures.
+Settlement writes it once at its own position even though it changes no setting, and never edits the revision or its original change rows.
 A `compacted` row (D217) is a compaction that succeeded, at its compaction item's position (taken at settlement, so no earlier page gains it), carrying `operation` and `dropped`: how many conversation entries its floor left out beyond the one before it, zero for a compaction that made no room.
 A nonnull ordinal identifies an actual row in this Session and end.
 Continue from the last returned row with that ordinal and the same end/direction.

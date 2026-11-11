@@ -79,7 +79,9 @@ type EntryFromRow<R extends Row> = R extends Row ? {
 		& ("content" extends keyof R["value"][Kind] ? EntryText : {});
 }[keyof R["value"]] : never;
 
-/** A discriminated wire-row union with top-level camelCase fields and an opaque continuation `cursor`. */
+/** A discriminated wire-row union with top-level camelCase fields and an opaque continuation `cursor`.
+ * `session_changed` uses `reasoning_effort_refused` and inline `providerText` for a refused effort change.
+ */
 export type FeedEntry = EntryFromRow<Row>;
 
 /** An opaque cursor: after the row at this position and ordinal. */
