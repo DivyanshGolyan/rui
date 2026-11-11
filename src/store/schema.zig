@@ -344,7 +344,7 @@ comptime {
 
 /// The statements of the step from `from`, as one text for the DB team to
 /// run on a MySQL Store at `from`; `ddl(.mysql)` is a new MySQL Store's.
-/// PR 8's `rui store schema --engine mysql [--from N]` prints them. Rui takes
+/// `rui store schema --engine mysql --from N` prints the remaining steps. Rui takes
 /// no backup of a MySQL Store: backing it up before applying the text is the
 /// DB team's job.
 pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
@@ -356,6 +356,40 @@ pub fn mysqlMigration(comptime from: u32) [:0]const u8 {
         const terminated = text ++ "\x00";
         break :blk terminated[0..text.len :0];
     };
+}
+
+/// All forward steps from a runtime-selected format, oldest first, without
+/// allocation. The current format needs no SQL; unsupported formats have no text.
+pub fn mysqlMigrationFrom(from: u64) ?[:0]const u8 {
+    const texts = comptime blk: {
+        var result: [schema_version - migration_baseline + 1][:0]const u8 = undefined;
+        result[result.len - 1] = "";
+        var index = result.len - 1;
+        while (index > 0) {
+            index -= 1;
+            const text = mysqlMigration(migration_baseline + index) ++ result[index + 1];
+            const terminated = text ++ "\x00";
+            result[index] = terminated[0..text.len :0];
+        }
+        break :blk result;
+    };
+    if (from < migration_baseline or from > schema_version) return null;
+    return texts[@intCast(from - migration_baseline)];
+}
+
+test "store schema --from prints every remaining MySQL migration in order" {
+    for (migration_baseline..schema_version + 1) |from| {
+        var expected: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer expected.deinit();
+        inline for (migrations) |step| {
+            if (step.from >= from) try expected.writer.writeAll(mysqlMigration(step.from));
+        }
+        try std.testing.expectEqualStrings(expected.written(), mysqlMigrationFrom(@intCast(from)).?);
+    }
+    try std.testing.expectEqualStrings("", mysqlMigrationFrom(schema_version).?);
+    try std.testing.expect(mysqlMigrationFrom(migration_baseline - 1) == null);
+    try std.testing.expect(mysqlMigrationFrom(schema_version + 1) == null);
+    try std.testing.expect(mysqlMigrationFrom(std.math.maxInt(u64)) == null);
 }
 
 /// SQL membership of `column` in a closed set of enum tags or text literals:

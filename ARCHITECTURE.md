@@ -1399,6 +1399,7 @@ Schema 51 is the migration baseline (Divyansh, D204): every later format change 
 A SQLite Store at a format from 51 up to the current one takes each pending step at open, in one transaction that also sets its format and commits only when every foreign key holds and every object's text equals a fresh bootstrap's; otherwise nothing changes and the Store is refused.
 Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
+With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
 Forward steps for an existing database are `schema.mysqlMigration(from)`; this command does not apply them.
 The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
 The step to 53 records a Session's parent (D27).
