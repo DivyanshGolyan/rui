@@ -4020,7 +4020,7 @@ Measure filesystem metadata and cleanup latency separately from logical bytes an
 
 #### Tool excerpts and full output
 
-Tool output has no per-call total capture cap.
+Bash output has no per-call total capture cap.
 Short output is complete; larger output saves status, tail excerpt, omission notice and the path of each truncated stream, preserving combined-stream allowance and valid UTF-8 boundaries before provider JSON framing.
 Failed full capture cannot masquerade as successful preservation.
 Full output is read through ordinary Bash permissions/timeouts/excerpts, not a new Read tool or whole-file context injection.
@@ -4030,6 +4030,13 @@ Canonical permission, Edit intent and outcome evidence are not disposable spillo
 A Bash result names only what carries information: the outcome line, any warnings, a `stdout tail:` section only when stdout is nonempty and a `stderr tail:` section only when stderr is nonempty.
 When either tail omits earlier bytes, `[earlier output omitted]` follows, then `Full stdout: PATH` or `Full stderr: PATH` for each truncated stream, or `Full output was not retained.` when retention is unavailable.
 An untruncated stream is complete in the result and names no file.
+
+MCP answers are bounded by the existing 4 MiB per-call answer buffer.
+Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
+When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
+Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
+The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.
 
 #### Exhaustion and cleanup
 

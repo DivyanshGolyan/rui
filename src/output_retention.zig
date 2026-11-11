@@ -87,25 +87,67 @@ pub const Queue = struct {
         stderr_name: []const u8,
         stderr_charged: u64,
     ) !?Pair {
-        var names: [2]protocol.Bounded(96) = .{ .{}, .{} };
-        try names[0].set(stdout_name);
-        try names[1].set(stderr_name);
+        const tokens = (try self.reserveEntries(2, .{ stdout_name, stderr_name }, .{ stdout_charged, stderr_charged })) orelse return null;
+        return .{ .stdout = tokens[0], .stderr = tokens[1] };
+    }
+
+    pub fn publishPair(self: *Queue, pair: Pair) !void {
+        if (pair.stdout.index == pair.stderr.index) return error.InvalidRetentionTransition;
+        try self.publish(&.{ pair.stdout, pair.stderr });
+    }
+
+    /// Write optional output of a known rendered length, without a second
+    /// payload buffer. The callback must write exactly `length` bytes on success.
+    /// Once created, even a partial file belongs to this queue: failed writes
+    /// are not advertised, but keep their charge until ordinary cleanup confirms
+    /// removal. No producer handle survives publication and no fsync is needed.
+    pub noinline fn writeFile(self: *Queue, name: []const u8, length: u64, context: anytype, write: anytype) bool {
+        const tokens = (self.reserveEntries(1, .{name}, .{length}) catch return false) orelse return false;
+        const token = tokens[0];
+        defer self.releaseReservation(token);
+        const budget = self.sharedBudget();
+        if (!budget.allocate(length)) return false;
+        var created = false;
+        defer if (!created) budget.release(length);
+        var directory = std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{}) catch return false;
+        defer directory.close(self.io);
+        const file = directory.createFile(self.io, name, .{
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        }) catch return false;
+        created = true;
+        defer {
+            file.close(self.io);
+            // This method alone owns the still-reserved token. Even a failed
+            // write hands its closed file to retention, never loses custody.
+            self.publish(&.{token}) catch unreachable;
+        }
+        var buffer: [4096]u8 = undefined;
+        var out = file.writer(self.io, &buffer);
+        write(&out.interface, context) catch return false;
+        out.interface.flush() catch return false;
+        return true;
+    }
+
+    fn reserveEntries(self: *Queue, comptime count: usize, file_names: [count][]const u8, charges: [count]u64) !?[count]Token {
+        var names: [count]protocol.Bounded(96) = @splat(.{});
+        for (&names, file_names) |*name, value| try name.set(value);
         while (true) {
             self.mutex.lockUncancelable(self.io);
-            const next = std.math.add(u64, self.next_sequence, 2) catch {
+            const next = std.math.add(u64, self.next_sequence, count) catch {
                 self.mutex.unlock(self.io);
                 return error.RetentionSequenceExhausted;
             };
-            var free: [2]usize = undefined;
-            var count: usize = 0;
+            var free: [count]usize = undefined;
+            var found: usize = 0;
             for (self.entries, 0..) |entry, index| {
                 if (entry.state != .free) continue;
-                free[count] = index;
-                count += 1;
-                if (count == free.len) break;
+                free[found] = index;
+                found += 1;
+                if (found == free.len) break;
             }
-            if (count == free.len) {
-                var tokens: [2]Token = undefined;
+            if (found == free.len) {
+                var tokens: [count]Token = undefined;
                 for (free, 0..) |index, token_index| {
                     const entry = &self.entries[index];
                     entry.generation +%= 1;
@@ -113,28 +155,26 @@ pub const Queue = struct {
                     entry.state = .reserved;
                     entry.sequence = self.next_sequence + token_index;
                     entry.name = names[token_index];
-                    entry.charged = if (token_index == 0) stdout_charged else stderr_charged;
+                    entry.charged = charges[token_index];
                     tokens[token_index] = .{ .index = index, .generation = entry.generation };
                 }
                 self.next_sequence = next;
                 self.mutex.unlock(self.io);
-                return .{ .stdout = tokens[0], .stderr = tokens[1] };
+                return tokens;
             }
             self.mutex.unlock(self.io);
             if (!self.evictOldest()) return null;
         }
     }
 
-    pub fn publishPair(self: *Queue, pair: Pair) !void {
+    fn publish(self: *Queue, tokens: []const Token) !void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        const stdout_entry = try self.current(pair.stdout);
-        const stderr_entry = try self.current(pair.stderr);
-        if (stdout_entry == stderr_entry or stdout_entry.state != .reserved or stderr_entry.state != .reserved) {
-            return error.InvalidRetentionTransition;
+        for (tokens) |token| {
+            const entry = try self.current(token);
+            if (entry.state != .reserved) return error.InvalidRetentionTransition;
         }
-        stdout_entry.state = .retained;
-        stderr_entry.state = .retained;
+        for (tokens) |token| self.entries[token.index].state = .retained;
     }
 
     pub fn releaseReservation(self: *Queue, token: Token) void {
@@ -571,4 +611,64 @@ test "partial retained cleanup keeps only the exact residual owner and charge" {
     try std.testing.expectEqual(baseline, used.load(.acquire));
     queue.cleanupAll();
     try std.testing.expectEqual(baseline, used.load(.acquire));
+}
+
+test "retention file write failure keeps partial bytes charged through removal retry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(41);
+    var entries: [1]Entry = @splat(.{});
+    var queue = Queue.initializeWithRemoval(std.testing.io, root, .{ .used = &used, .limit = 48 }, &entries, .injected_failure);
+    defer queue.cleanupAll();
+    const Write = struct {
+        fn fail(out: *std.Io.Writer, _: void) !void {
+            try out.writeAll("partial");
+            try out.flush();
+            return error.InjectedOutputWriteFailure;
+        }
+    };
+    try std.testing.expect(!queue.writeFile("partial", 7, {}, Write.fail));
+    try std.testing.expectEqual(@as(u64, 48), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    var bytes: [7]u8 = undefined;
+    try std.testing.expectEqualStrings("partial", try tmp.dir.readFile(std.testing.io, "partial", &bytes));
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 48), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    queue.removal = .native;
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "partial", .{}));
+}
+
+test "retention file reservations protect writers and release failed creation charges" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(41);
+    var entries: [1]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 48 }, &entries);
+    defer queue.cleanupAll();
+    const Write = struct {
+        fn protected(out: *std.Io.Writer, owner: *Queue) !void {
+            try std.testing.expectEqual(@as(u64, 48), owner.budget.used.load(.acquire));
+            try std.testing.expect(!owner.sharedBudget().allocate(1));
+            try std.testing.expectEqual(@as(usize, 1), owner.occupied());
+            try out.writeAll("success");
+        }
+    };
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "collision", .data = "original" });
+    try std.testing.expect(!queue.writeFile("collision", 7, &queue, Write.protected));
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    var bytes: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("original", try tmp.dir.readFile(std.testing.io, "collision", &bytes));
+    try std.testing.expect(queue.writeFile("written", 7, &queue, Write.protected));
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
 }

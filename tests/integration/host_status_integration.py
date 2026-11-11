@@ -16,6 +16,7 @@ import time
 import host_process
 from host_process import HeldReplies, HostDiagnostics, TestHTTPServer, canonical_fixture_root, dispose_all, is_peer_disconnect, start_ready_process, stop_process, wait_for
 import os_semantics
+import launch_frame_fixture as frame_host
 from host_status_fixture import ACTOR, RUI, complete_response, socket_path, status
 
 
@@ -338,10 +339,59 @@ def discovery_body_deadline(root):
         stop_process(host)
 
 
+def resolved_sqlite_routing(root):
+    """A hex directory is SQLite without a hint; launch routing stays separate."""
+    home = pathlib.Path(root) / "routing-home"
+    home.mkdir(mode=0o700)
+    name = "0123456789abcdef0123456789abcdef"
+    store = pathlib.Path(root) / name
+    env = dict(os.environ, HOME=str(home))
+    env.pop("RUI_RUNTIME_DIR", None)
+    host, fields = start_ready_process([RUI, "host", "serve", "--store", store], env=env)
+    try:
+        result = subprocess.run([RUI, "host", "status", "--store", name], cwd=root, env=env,
+                                text=True, capture_output=True, timeout=10)
+        assert result.returncode == 0, result
+        value = json.loads(result.stdout)
+        assert value["status"] == "ready" and value["store"] == fields["store"], value
+        assert value["diagnostics"] == str(store / "diagnostics"), value
+        assert "innodb_doublewrite" not in value, value
+    finally:
+        stop_process(host)
+
+    runtime = pathlib.Path(root) / "sqlite-runtime"
+    runtime.mkdir(mode=0o700)
+    launched_store = pathlib.Path(root) / "launched-store"
+    frame = {"v": 1, "store": str(launched_store), "runtimeDir": str(runtime),
+             "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-routing-test"}}
+    launched = subprocess.Popen([RUI, "host", "serve", "--launch-frame"], stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        launched.stdin.write(frame_host.frame(frame))
+        launched.stdin.flush()
+        frame_host.wait_for_host(runtime / "rui.sock", launched_store, launched)
+        value = frame_host.host_info(runtime / "rui.sock", str(launched_store))
+        assert value["store"] == str(launched_store.resolve()), value
+        assert "innodb_doublewrite" not in value and "kind" not in value and "engine" not in value, value
+        # SQLite must never acquire MySQL's empty-id discovery exception just
+        # because it uses a separately launched runtime directory.
+        wrong = frame_host.post(runtime / "rui.sock", "host-info",
+                                {"version": frame_host.WIRE, "kind": "host_info", "store": ""}, expected_status=409)
+        assert wrong["code"] == "wrong_store_identity", wrong
+        host_process.close_stdin(launched)
+        assert launched.wait(timeout=20) == 0, frame_host.output(launched)
+        assert (launched_store / "diagnostics").is_dir() and not (runtime / "diagnostics").exists()
+    finally:
+        if launched.poll() is None:
+            launched.kill()
+        frame_host.output(launched)
+
+
 def main():
     prove_fragmented_request()
     with tempfile.TemporaryDirectory(prefix="rui-host-info-") as root:
         root = canonical_fixture_root(root)
+        resolved_sqlite_routing(root)
         protected_saturation(root)
         hostile_discovery(root)
         discovery_body_deadline(root)

@@ -154,7 +154,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     try std.testing.expect(screen.tail != null and screen.marker == null);
     const live = try screen.widget().draw(draw);
     // Tail: `+5 more running · /status` then the work line, right above the input at 19.
-    try std.testing.expectEqual(@as(i17, 17), live.children[0].origin.row);
+    try std.testing.expectEqual(@as(i17, 17), live.children[0].surface.children[0].surface.children[0].surface.children[1].origin.row);
     try clickAt(live, arena.allocator(), &ctx, 17, 4);
     try clickAt(live, arena.allocator(), &ctx, 22, 1);
     try clickAt(live, arena.allocator(), &ctx, 23, 20);

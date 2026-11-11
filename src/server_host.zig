@@ -1220,7 +1220,10 @@ pub inline fn traceSqliteDiagnostic(host: *Host, subject: []const u8) void {
 noinline fn writeSqliteDiagnosticTrace(host: *Host, subject: []const u8) void {
     var publication = beginTestObservation(host, "sqlite_diagnostic", subject);
     defer if (publication) |*value| value.finish();
-    const value = host.store.sqliteDiagnostic();
+    const value = switch (host.store.diagnostic()) {
+        .sqlite => |value| value,
+        .mysql => return,
+    };
     var trace: protocol.ResponseBuffer = .{};
     trace.append("{\"rui_test_phase\":\"sqlite_diagnostic\",\"at_ns\":\"") catch return;
     trace.appendFmt("{d}", .{nowNs(host)}) catch return;

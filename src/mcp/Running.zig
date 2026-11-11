@@ -4,6 +4,8 @@ const std = @import("std");
 const Call = @import("Call.zig");
 const post = @import("post.zig");
 const result_text = @import("result_text.zig");
+const output_retention = @import("../output_retention.zig");
+const named_scratch = @import("../named_scratch.zig");
 const Allocator = std.mem.Allocator;
 const Running = @This();
 
@@ -22,7 +24,11 @@ pub const Input = struct {
     id: u64,
     server_name: []const u8,
     timeout_ms: u64,
+    retention: ?Retention = null,
 };
+
+/// Borrowed Host queue and the durable attempt identity used for its filename.
+pub const Retention = struct { queue: *output_retention.Queue, action_id: u64, attempt_ordinal: u64 };
 
 const State = union(enum) { active, init_failed: anyerror, done };
 
@@ -35,6 +41,7 @@ server_name: []const u8,
 timeout_ms: u64,
 deadline_ms: u64,
 state: State,
+retention: ?Retention,
 
 /// Initialize in place and keep this owner at one address until deinit.
 /// Input strings are borrowed until resolution or deinit. Only OOM escapes;
@@ -49,6 +56,7 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
         .timeout_ms = input.timeout_ms,
         .deadline_ms = now_ms +| input.timeout_ms,
         .state = .done,
+        .retention = input.retention,
     };
     errdefer self.deinit();
     self.scratch = try gpa.alloc(u8, input.arguments.len);
@@ -129,7 +137,21 @@ pub fn service(self: *Running, now_ms: u64, out: *std.Io.Writer) !?result_text.C
 
 fn finish(self: *Running, out: *std.Io.Writer, ending: result_text.Ending) !result_text.Code {
     defer self.deinit();
-    return result_text.write(out, .{ .server_name = self.server_name, .ended = ending });
+    const ended: result_text.Ended = .{ .server_name = self.server_name, .ended = ending };
+    const excerpt = try result_text.writeExcerpt(out, ended);
+    if (excerpt.omitted) {
+        if (self.retention) |retention| {
+            var name_buffer: [96]u8 = undefined;
+            const name = named_scratch.NumericName.@"mcp-output".format(&name_buffer, retention.action_id, retention.attempt_ordinal) catch unreachable;
+            if (retention.queue.writeFile(name, excerpt.total, ended, result_text.writeFull)) {
+                try out.print("\nFull output: {s}/{s}\n", .{ retention.queue.scratch_path, name });
+                return excerpt.code;
+            }
+        }
+        // Optional scratch loss must never change the MCP call's outcome.
+        try out.writeAll("\nFull output was not retained.\n");
+    }
+    return excerpt.code;
 }
 
 const Script = @import("test_server.zig");
@@ -301,4 +323,120 @@ test "Running terminal writer failure still cancels and frees the call" {
     try std.testing.expectError(error.WriteFailed, running.service(running.deadlineMs(), &out));
     try std.testing.expectEqual(@as(usize, 0), running.answer.len);
     try std.testing.expectEqual(@as(std.posix.fd_t, -1), running.fd());
+}
+
+test "Running retains only omitted rendered MCP answers and preserves the excerpt" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [@import("../protocol.zig").max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(0);
+    var entries: [4]output_retention.Entry = @splat(.{});
+    var queue = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = max_answer_bytes }, &entries);
+    defer queue.cleanupAll();
+    const running = try gpa.create(Running);
+    defer gpa.destroy(running);
+    const Case = struct { length: usize, kind: enum { text, mixed_error, structured, rpc_error, refused } = .text };
+    for ([_]Case{
+        .{ .length = 32 },
+        .{ .length = result_text.excerpt_bytes },
+        .{ .length = result_text.excerpt_bytes + 128 },
+        .{ .length = result_text.excerpt_bytes + 128, .kind = .mixed_error },
+        .{ .length = result_text.excerpt_bytes + 128, .kind = .structured },
+        .{ .length = result_text.excerpt_bytes + 128, .kind = .rpc_error },
+        .{ .length = result_text.excerpt_bytes + 128, .kind = .refused },
+    }) |case| {
+        const payload = try gpa.alloc(u8, case.length);
+        defer gpa.free(payload);
+        @memset(payload, 'x');
+        if (case.length > result_text.excerpt_bytes) @memcpy(payload[result_text.excerpt_bytes - 1 ..][0..2], "é");
+        const body = switch (case.kind) {
+            .text => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}}]}}}}", .{payload}),
+            .mixed_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"isError\":true,\"content\":[{{\"type\":\"text\",\"text\":\"{s}\"}},{{\"type\":\"image\",\"data\":\"x\"}}]}}}}", .{payload}),
+            .structured => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{{\"content\":[],\"structuredContent\":{{\"data\":\"{s}\"}}}}}}", .{payload}),
+            .rpc_error => try std.fmt.allocPrint(gpa, "{{\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{{\"code\":-1,\"message\":\"{s}\"}}}}", .{payload}),
+            .refused => try gpa.dupe(u8, payload),
+        };
+        defer gpa.free(body);
+        const full = switch (case.kind) {
+            .text, .refused => try std.fmt.allocPrint(gpa, "{s}{s}", .{ if (case.kind == .refused) "The MCP server answered HTTP 502: " else "", payload }),
+            .mixed_error => try std.fmt.allocPrint(gpa, "The tool reported an error:\n{s}\n{{\"type\":\"image\",\"data\":\"x\"}}", .{payload}),
+            .structured => try std.fmt.allocPrint(gpa, "{{\"data\":\"{s}\"}}", .{payload}),
+            .rpc_error => try std.fmt.allocPrint(gpa, "The MCP server returned error -1: {s}", .{payload}),
+        };
+        defer gpa.free(full);
+        const wire = try std.fmt.allocPrint(gpa, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\n\r\n{s}", .{ if (case.kind == .refused) "502 Bad Gateway" else "200 OK", if (case.kind == .refused) "text/plain" else "application/json", body.len, body });
+        defer gpa.free(wire);
+        var script: Script = .{ .reply = wire };
+        try script.start();
+        defer script.stop();
+        var input = testInput(script.port);
+        input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
+        try running.start(gpa, input, 0);
+        defer running.deinit();
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        const expected_code: result_text.Code = switch (case.kind) {
+            .text, .structured => .succeeded,
+            else => .failed,
+        };
+        try std.testing.expectEqual(expected_code, try drive(running, &out.writer));
+        if (full.len <= result_text.excerpt_bytes) {
+            try std.testing.expectEqualStrings(full, out.written());
+            try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+            try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "mcp-output-17-1.tmp", .{}));
+        } else {
+            var kept: usize = result_text.excerpt_bytes;
+            while (full[kept] & 0xc0 == 0x80) kept -= 1;
+            const expected = try std.fmt.allocPrint(gpa, "{s}\n[{d} more bytes not shown]\nFull output: {s}/mcp-output-17-1.tmp\n", .{ full[0..kept], full.len - kept, root });
+            defer gpa.free(expected);
+            try std.testing.expectEqualStrings(expected, out.written());
+            const saved = try tmp.dir.readFileAlloc(std.testing.io, "mcp-output-17-1.tmp", gpa, .limited(max_answer_bytes));
+            defer gpa.free(saved);
+            try std.testing.expectEqualStrings(full, saved);
+            try std.testing.expectEqual(@as(u64, full.len), used.load(.acquire));
+            try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+            queue.cleanupAll();
+            // Losing optional scratch never rewrites the saved resolution.
+            try std.testing.expectEqualStrings(expected, out.written());
+        }
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    }
+}
+
+test "Running reports optional MCP retention refusal without changing success" {
+    const gpa = std.testing.allocator;
+    const payload: [result_text.excerpt_bytes + 1]u8 = @splat('x');
+    const wire = Script.jsonReply("{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" ++ payload ++ "\"}]}}");
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [@import("../protocol.zig").max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const running = try gpa.create(Running);
+    defer gpa.destroy(running);
+    const Reason = enum { absent, budget, capacity, reserved, sequence, create };
+    for (std.meta.tags(Reason)) |reason| {
+        var used: std.atomic.Value(u64) = .init(0);
+        var entries: [2]output_retention.Entry = @splat(.{});
+        var queue = output_retention.Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = if (reason == .budget) 1 else max_answer_bytes }, if (reason == .capacity) &.{} else &entries);
+        defer queue.cleanupAll();
+        if (reason == .reserved) _ = try queue.reservePair("protected-out", 0, "protected-err", 0);
+        if (reason == .sequence) queue.next_sequence = std.math.maxInt(u64);
+        if (reason == .create) try tmp.dir.createDir(std.testing.io, "mcp-output-17-1.tmp", .default_dir);
+        defer if (reason == .create) tmp.dir.deleteDir(std.testing.io, "mcp-output-17-1.tmp") catch {};
+        var script: Script = .{ .reply = wire };
+        try script.start();
+        defer script.stop();
+        var input = testInput(script.port);
+        if (reason != .absent) input.retention = .{ .queue = &queue, .action_id = 17, .attempt_ordinal = 1 };
+        try running.start(gpa, input, 0);
+        defer running.deinit();
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try std.testing.expectEqual(result_text.Code.succeeded, try drive(running, &out.writer));
+        try std.testing.expectEqualStrings(payload[0..result_text.excerpt_bytes] ++ "\n[1 more bytes not shown]\nFull output was not retained.\n", out.written());
+        try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+        try std.testing.expectEqual(@as(usize, if (reason == .reserved) 2 else 0), queue.occupied());
+    }
 }
