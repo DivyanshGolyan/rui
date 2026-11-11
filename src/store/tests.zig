@@ -13985,6 +13985,9 @@ test "runner action seam covers selection admission input settlement stop and re
                 break :blk out;
             };
             const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            // Admission and resolution each read once, then write/commit once.
+            // MySQL conformance rolls back before COMMIT and repeats both rounds.
+            const write_rounds: u16 = if (case.rerun) 4 else 2;
             inline for (.{ .bash, .mcp }) |runner| {
                 for (0..4) |scenario| {
                     var tmp = std.testing.tmpDir(.{});
@@ -14041,11 +14044,11 @@ test "runner action seam covers selection admission input settlement stop and re
                     } else if (scenario == 3) {
                         const resolve_rounds = storage.testing_content_work.rounds;
                         try storage.resolveAction(selected, .spawn_failed, expected_text, .{});
-                        if (runner == .bash) try std.testing.expectEqual(resolve_rounds + 2, storage.testing_content_work.rounds);
+                        if (runner == .bash) try std.testing.expectEqual(resolve_rounds + write_rounds, storage.testing_content_work.rounds);
                     } else {
                         const admission_rounds = storage.testing_content_work.rounds;
                         const binding = (try storage.admitActionAttempt(selected, 1234, .{})).?.permit.binding;
-                        if (runner == .bash) try std.testing.expectEqual(admission_rounds + 2, storage.testing_content_work.rounds);
+                        if (runner == .bash) try std.testing.expectEqual(admission_rounds + write_rounds, storage.testing_content_work.rounds);
                         try std.testing.expectEqual(selected.action_id, binding.action_id);
                         var input: action_domain.ActionExecutionInput = undefined;
                         try storage.readActionExecutionInput(runner, binding, &input);
