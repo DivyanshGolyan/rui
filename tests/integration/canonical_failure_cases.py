@@ -626,7 +626,7 @@ def permission_read_cases(state):
             b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
         armed = threading.Event()
-        proxy = ReplyProxy(host, "/v1/conversation-content", lambda reply: response if armed.is_set() else reply)
+        proxy = ReplyProxy(host, "/v1/activity-content", lambda reply: response if armed.is_set() else reply)
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         caller = None
@@ -639,10 +639,9 @@ def permission_read_cases(state):
             os.write(master, b"\x0f")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
-            # The transcript keeps the whole diagnostic, wrapped at the width;
-            # the notice under the input names only what failed.
-            assert "! Tool output unavailable; Ctrl-O to retry. Draft retained. HTTP 503; type: busy; code: host_busy" in " ".join(output.split()), output
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable; Ctrl-O to retry. Draft retained.", output
+            # The notice under the input names what failed, then the Host's
+            # own words, whole within the row. A diagnostic is never a feed row.
+            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable. HTTP 503; type: busy; code: host_busy", output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)

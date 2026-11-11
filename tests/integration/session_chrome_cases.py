@@ -3,9 +3,10 @@ the last row, the `↓` marker, pages without a heading and the send state.
 
 human_cli_integration.py runs these cases in its full and renderer modes, and
 alone as `session-chrome`. Each case judges the screen the person sees, at
-80×24 unless it says otherwise: the transcript fills rows 0–18, the input sits
+80×24 unless it says otherwise: the feed fills rows 0–17, row 18 is
+reserved for the marker even at the end, and the input sits
 between the rules on rows 19–21, the facts row is 22 and the last row 23.
-Transcript/page/activity rows have one gutter column; input, facts and status
+Feed/page/activity rows have one gutter column; input, facts and status
 retain their own margins."""
 import json
 import os
@@ -29,7 +30,7 @@ from human_cli_fixture import (
 from terminal_process import close_pty, open_pty, spawn
 
 ROWS = 24
-BOTTOM = ROWS - 6  # The transcript's last row, where the marker sits.
+BOTTOM = ROWS - 6  # The permanently reserved marker row below the feed.
 LAST = ROWS - 1
 
 
@@ -43,15 +44,15 @@ def transcript_rows(screen):
 
 
 def tail_rows(screen):
-    """The transcript's last rows down to the input's rule, after its last
-    blank row: the tail sits there however short the transcript is."""
-    shown = transcript_rows(screen)
+    """The feed's final block, excluding the permanently reserved chip row.
+    The activity tail is an entry in that same feed, not separate chrome."""
+    shown = transcript_rows(screen)[:BOTTOM]
     start = max((n for n, row in enumerate(shown) if not row.strip()), default=-1) + 1
     return shown[start:]
 
 
 def marker(screen):
-    """The marker at the right of the transcript's last row, or None."""
+    """The chip in its reserved row below the feed, or None."""
     shown = rows(screen)
     row = shown[BOTTOM].rstrip() if len(shown) == ROWS else ""
     if row.endswith(" new") and "↓ " in row:
@@ -181,8 +182,12 @@ def activity_case():
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
-            tail = tail_rows(running)
+            # The activity block is the feed's final entry, directly after
+            # the person's row; no blank separator owns a separate tail pane.
+            tail = transcript_rows(running)[BOTTOM - 1:BOTTOM]
+            assert [line for line in transcript_rows(running)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, running
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
+            assert transcript_rows(running)[BOTTOM - 1].startswith("⠹ Held call · ") and not rows(running)[BOTTOM].strip(), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
             # Alone at the right of the last row, inside its one-column margin.
             last = rows(running)[LAST]
@@ -193,8 +198,10 @@ def activity_case():
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, ""))
-            tail = tail_rows(waiting)
+            tail = transcript_rows(waiting)[BOTTOM - 2:BOTTOM]
+            assert [line for line in transcript_rows(waiting)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, waiting
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
+            assert transcript_rows(waiting)[BOTTOM - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[BOTTOM].strip(), waiting
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
             assert rows(waiting)[LAST].endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
@@ -239,18 +246,21 @@ def send_state_case():
 
 
 def scroll_marker_case():
-    """Shift-↑ and PgUp move back half a screen and draw the `↓` marker at
-    the right of the transcript's last row; entries arriving below make it
-    `↓ N new`; Esc returns to the latest with them shown. An empty Session
-    scrolls to its start. Scrolling never edits or sends the draft."""
+    """Shift-↑ and PgUp move the feed anchor by half a screen. The reserved
+    chip row shows `↓`, then `↓ N new` as entries arrive below. Esc returns
+    to the identical end frame. Empty feeds cannot scroll or show a chip;
+    scrolling never edits or sends the draft or changes the feed height."""
     release = threading.Event()
     with Chrome("rui-chrome-scroll.", []) as chrome:
         empty = chrome.session()
-        master, caller, _ = chrome.open(empty, lambda screen: True)
-        start = chrome.frame(master, b"\x1b[1;2A", lambda screen: transcript_rows(screen)[0] == "Start of conversation")
-        assert marker(start) == "↓", start
-        back = chrome.frame(master, b"\x1b", lambda screen: marker(screen) is None)
-        assert "Start of conversation" not in back, back
+        master, caller, opened = chrome.open(empty, lambda screen: True)
+        for keys in (b"\x1b[1;2A", b"\x1b[5~"):
+            # An empty feed draws nothing new for a scroll key, so the next
+            # frames come from typing after it and clearing that again.
+            typed = chrome.frame(master, keys + b"x", lambda screen: composing(screen, "x"))
+            assert marker(typed) is None and "Start of conversation" not in typed, typed
+            unchanged = chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
+            assert rows(unchanged) == rows(opened), (opened, unchanged)
         chrome.leave(master, caller)
 
         session = chrome.session()
@@ -263,33 +273,52 @@ def scroll_marker_case():
         master, caller, _ = chrome.open(session, lambda screen: "second row 07" in screen)
         requests = len(chrome.endpoint.requests)
         os.write(master, b"keep")
-        chrome.frame(master, b"", lambda screen: composing(screen, "keep"))
+        end = chrome.frame(master, b"", lambda screen: composing(screen, "keep"))
+        assert not rows(end)[BOTTOM].strip(), end
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
-            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓")
+            # The chip has not stolen a row: every overlapping unique content
+            # line moves by exactly half the feed height, not by half plus one.
+            # Rows above the loaded ones join first, so judge the frame where
+            # the whole move has landed.
+            end_rows = rows(end)[:BOTTOM]
+            before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
+
+            def moved(screen):
+                held_rows = rows(screen)[:BOTTOM]
+                after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
+                shared = before.keys() & after.keys()
+                return bool(shared) and all(after[line] - before[line] == BOTTOM // 2 for line in shared)
+
+            scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓" and moved(screen))
             assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
             assert rows(scrolled)[LAST].strip() == "", (keys, "no heading or hint", scrolled)
             assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
-            # End leaves the view where it is; only Esc or the marker return.
-            # Older pages may still join above; End is judged on the settled view.
+            # End edits this nonempty draft without moving the feed. Empty-
+            # draft End and Ctrl-End delegate to the conversation's end action.
+            # Older pages may still join above; judge the settled view.
             scrolled = settle_screen(master, quiet=0.5)
             os.write(master, b"\x1b[F")
             same = settle_screen(master, quiet=0.5)
             assert marker(same) == "↓" and rows(same)[:2] == rows(scrolled)[:2], (keys, same)
-            live = chrome.frame(master, b"\x1b", lambda screen: latest(screen, "second row 07"))
+            back = b"\x1b[1;5F" if keys == b"\x1b[1;2A" else b"\x1b"
+            live = chrome.frame(master, back, lambda screen: latest(screen, "second row 07"))
             assert composing(live, "keep"), live
+            assert rows(live)[:BOTTOM + 1] == rows(end)[:BOTTOM + 1], (end, live)
         assert len(chrome.endpoint.requests) == requests, "scrolling sent input"
         # Work arrives below a scrolled-back view: the marker counts it.
         os.write(master, b"\x15HOLD-QUESTION\r")
         release.set()
         chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
-        chrome.frame(master, b"\x1b[1;2A", lambda screen: marker(screen) == "↓")
+        held = chrome.frame(master, b"\x1b[1;2A", lambda screen: marker(screen) == "↓")
         (chrome.workspace / "release").write_text("")
         counted = chrome.frame(master, b"", lambda screen: (marker(screen) or "").endswith(" new"), timeout=30)
         assert marker(counted)[2:-4].isdigit() and int(marker(counted)[2:-4]) >= 1, counted
         assert "ARRIVED-ANSWER" not in counted, counted
+        assert rows(counted)[:BOTTOM] == rows(held)[:BOTTOM], (held, counted)
+        assert composing(counted, ""), counted
         chrome.frame(master, b"\x1b", lambda screen: latest(screen, "ARRIVED-ANSWER"), timeout=30)
         chrome.leave(master, caller)
-    print("session chrome: Shift-↑ and PgUp draw ↓, End keeps the view, ↓ N new counts arrivals, Esc returns; the empty Session reaches its start", flush=True)
+    print("session chrome: Shift-↑ and PgUp draw ↓, draft End keeps the view, ↓ N new counts arrivals, Ctrl-End and Esc return; empty PgUp is unchanged and the chip never changes feed height", flush=True)
 
 
 def pages_case():

@@ -454,12 +454,11 @@
           ]
         },
         {
-          "wait": "What I changed"
+          "wait": "↓"
         }
       ],
       "expect": [
-        "What I changed",
-        "retry.zig"
+        "↓"
       ]
     },
     {
@@ -476,12 +475,45 @@
           ]
         },
         {
-          "wait": "Start of conversation"
+          "wait": "The retry loop waits"
         }
       ],
       "expect": [
-        "Start of conversation",
-        "What I changed"
+        "The retry loop waits",
+        "↓"
+      ]
+    },
+    {
+      "name": "chat-new-below",
+      "note": "12a-conversation-new-below: incoming answer preserves the scrolled anchor",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp",
+            "PgUp",
+            "PgUp",
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "The retry loop waits"
+        },
+        {
+          "send": {
+            "to": "Fix retry deadline",
+            "text": "Summarise the deadline fix.",
+            "wait": true
+          }
+        },
+        {
+          "wait": "new"
+        }
+      ],
+      "expect": [
+        "The retry loop waits",
+        "↓",
+        "new"
       ]
     },
     {
@@ -809,8 +841,7 @@
       "expect": [
         "/copy [code|file]",
         "/effort LEVEL",
-        "/help",
-        "/history"
+        "/help"
       ]
     },
     {
@@ -1124,10 +1155,13 @@
           ]
         },
         {
-          "wait": "What I changed"
+          "wait": "↓"
         }
       ],
-      "theme": "mist"
+      "theme": "mist",
+      "expect": [
+        "↓"
+      ]
     },
     {
       "name": "no-color",
