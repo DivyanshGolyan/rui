@@ -94,16 +94,69 @@ pub const Hooks = struct {
     /// captures do.
     captured: *const fn (std.Io) anyerror!void,
     /// The launch owner, without terminal output while App holds the screen.
-    start_host: *const fn (std.process.Init, []const u8, *?HostStartNotice) anyerror!void,
+    start_host: *const fn (std.process.Init, []const u8) HostLaunch,
 };
 
-/// A launch diagnostic returned to the screen owner, even if launch fails.
-pub const HostStartNotice = enum {
-    invalid_openai_base_url,
+/// The screen's semantic projection of the shared launch result. It owns no
+/// terminal receipt or child bytes; kind, words and next action stay together.
+pub const HostLaunch = union(enum) {
+    ready: ?Warning,
+    failed: Failure,
 
-    fn words(self: HostStartNotice) []const u8 {
+    pub const Next = enum {
+        start,
+        retry,
+
+        pub fn label(self: HostLaunch.Next) []const u8 {
+            return switch (self) {
+                .start => "r start",
+                .retry => "r retry",
+            };
+        }
+    };
+    pub const Failure = struct {
+        kind: Kind,
+        /// Terminal exit classification is retained, never shown as UI text.
+        err: anyerror,
+
+        pub const Kind = enum { setup, worker, os_launch, child_refused, child_closed, startup_full, readiness_timeout, incompatible, store_access, store_identity, mysql_unavailable, interrupted };
+
+        pub fn words(self: Failure) []const u8 {
+            return switch (self.kind) {
+                .setup => "start setup failed",
+                .worker => "worker unavailable",
+                .os_launch => "launch failed",
+                .child_refused => "startup refused",
+                .child_closed => "startup ended",
+                .startup_full => "startup reply full",
+                .readiness_timeout => "readiness timeout",
+                .incompatible => "Rui mismatch",
+                .store_access => "Store unreadable",
+                .store_identity => "Store differs",
+                .mysql_unavailable => "Host not reachable",
+                .interrupted => "start interrupted",
+            };
+        }
+
+        pub fn next(self: Failure) ?HostLaunch.Next {
+            return switch (self.kind) {
+                .incompatible, .store_identity, .mysql_unavailable => null,
+                else => .retry,
+            };
+        }
+    };
+    pub const Warning = enum {
+        invalid_openai_base_url,
+
+        pub fn words(_: Warning) []const u8 {
+            return "OpenAI URL invalid";
+        }
+    };
+
+    pub fn words(self: HostLaunch) []const u8 {
         return switch (self) {
-            .invalid_openai_base_url => "OpenAI URL invalid",
+            .ready => |warning| if (warning) |value| value.words() else "",
+            .failed => |failure| failure.words(),
         };
     }
 };
@@ -138,7 +191,7 @@ pub const HostRead = struct {
 pub const Operations = struct {
     /// One Host read: host-info's facts and the memory sampled with them.
     host: *const fn (*Self) HostRead,
-    start_host: *const fn (*Self, *?HostStartNotice) anyerror!void,
+    start_host: *const fn (*Self) HostLaunch,
     /// Reads one `session list` page into `page`, or returns the Host's
     /// failure.
     list: *const fn (*Self, client.Requests, protocol_reply.SessionListCursor, *protocol_reply.SessionListPage) anyerror!?protocol_reply.ReadFailure,
@@ -325,7 +378,7 @@ const Answer = union(enum) {
     /// only its outcome.
     none,
     host: HostRead,
-    start_host: struct { read: HostRead = .{}, notice: ?HostStartNotice = null },
+    start_host: struct { read: HostRead, launch: HostLaunch },
     page: protocol_reply.SessionListPage,
     lines: [view.max_first_line_reads]Line,
     /// Each command read's leading bytes, null when it has none to show.
@@ -418,10 +471,8 @@ host_process: ?struct { started_at: u64, pid: i32 } = null,
 /// Last discovery observation, invalidated by a Session transport loss.
 /// Counts in the view core are a projection of this same read, not a probe.
 host_observation: HostObservation = .unavailable,
-/// A past outcome, not a copy of the queued/running launch job.
-host_start_failed: bool = false,
-/// Launcher feedback survives success or failure without writing under App.
-host_start_notice: ?HostStartNotice = null,
+/// The last launch's typed summary, never a boolean standing in for a cause.
+host_launch: ?HostLaunch = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
 /// What the overview last said under the open conversation.
 conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
@@ -1145,7 +1196,7 @@ fn dispatch(self: *Self, jobs: enum { all, lent }) !void {
     self.job = next;
     self.worker.start(self.init.io, self, work) catch |err| {
         if (next != .start_host) return err;
-        self.host_start_failed = true;
+        self.host_launch = .{ .failed = .{ .kind = .worker, .err = err } };
     };
 }
 
@@ -1163,9 +1214,9 @@ fn runJob(self: *Self, requests: client.Requests) !void {
     switch (self.job) {
         .host => self.answer = .{ .host = self.ops.host(self) },
         .start_host => {
-            self.answer = .{ .start_host = .{} };
-            try self.ops.start_host(self, &self.answer.start_host.notice);
-            self.answer.start_host.read = self.ops.host(self);
+            const launch = self.ops.start_host(self);
+            // Failure is not a reachability observation. Recheck even then.
+            self.answer = .{ .start_host = .{ .launch = launch, .read = self.ops.host(self) } };
         },
         .list => {
             self.answer = .{ .page = undefined };
@@ -1261,12 +1312,11 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     defer answer.deinit(self.init.gpa);
     switch (self.job) {
         .start_host => {
-            self.host_start_notice = if (answer.* == .start_host) answer.start_host.notice else null;
-            outcome catch {
-                self.host_start_failed = true;
+            outcome catch |err| {
+                self.host_launch = .{ .failed = .{ .kind = .worker, .err = err } };
                 return null;
             };
-            self.host_start_failed = answer.start_host.read.observation == .stopped;
+            self.host_launch = if (answer.start_host.launch == .ready and answer.start_host.launch.ready == null) null else answer.start_host.launch;
             return self.takeHostRead(answer.start_host.read);
         },
         .host => return self.takeHostRead(answer.host),
@@ -1608,7 +1658,9 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
 /// The same observation feeds the notice, Session service and core counts.
 fn takeHostRead(self: *Self, read: HostRead) !?Next {
     self.host_observation = read.observation;
-    if (read.observation == .ready) self.host_start_failed = false;
+    if (read.observation == .ready) if (self.host_launch) |launch| {
+        if (launch == .failed) self.host_launch = null;
+    };
     if (read.memory) |memory| _ = try self.event(.{ .memory = memory });
     return self.event(.{ .host = read.observation.facts() });
 }
@@ -1627,19 +1679,13 @@ const HostState = enum {
     stopped,
     paused,
     starting,
-    retry,
 
-    fn canStart(self: HostState) bool {
-        return self == .stopped or self == .retry;
-    }
-
-    fn line(self: HostState) struct { mark: marks.Mark, words: []const u8, key: []const u8 = "" } {
+    fn line(self: HostState) struct { mark: marks.Mark, words: []const u8 } {
         return switch (self) {
             .ready => .{ .mark = .failed, .words = "Host ready" },
-            .stopped => .{ .mark = .stopped, .words = "Host stopped", .key = "r start" },
+            .stopped => .{ .mark = .stopped, .words = "Host stopped" },
             .paused => .{ .mark = .stopped, .words = "Host paused" },
             .starting => .{ .mark = .active, .words = "Host starting" },
-            .retry => .{ .mark = .failed, .words = "Host stopped", .key = "r retry" },
         };
     }
 };
@@ -1652,7 +1698,7 @@ fn hostState(self: *const Self) HostState {
     return switch (self.host_observation) {
         .ready => |ready| if (ready.paused) .paused else .ready,
         .unavailable => .paused,
-        .stopped => if (self.host_start_failed) .retry else .stopped,
+        .stopped => .stopped,
     };
 }
 
@@ -1674,11 +1720,19 @@ fn queueHost(self: *Self) void {
     self.queue(.host);
 }
 
+/// One rule admits the gesture and supplies the exact key tail to the line.
+fn hostNext(self: *const Self) ?HostLaunch.Next {
+    if (self.state.holdsHost() or self.hostStarting() or self.host_observation != .stopped) return null;
+    return if (self.host_launch) |launch| switch (launch) {
+        .failed => |cause| cause.next(),
+        .ready => .start,
+    } else .start;
+}
+
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (!self.hostState().canStart()) return false;
-    self.host_start_failed = false;
-    self.host_start_notice = null;
+    if (self.hostNext() == null) return false;
+    self.host_launch = null;
     self.queue(.start_host);
     try self.dispatch(if (self.root.session == null) .all else .lent);
     ctx.redraw = true;
@@ -1687,7 +1741,7 @@ fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
 
 fn hostNotice(raw: *anyopaque) ?vxfw.Widget {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.hostState() == .ready and self.host_start_notice == null) return null;
+    if (self.hostState() == .ready and self.host_launch == null) return null;
     return .{ .userdata = self, .drawFn = drawHostNotice, .eventHandler = hostNoticeEvent };
 }
 
@@ -1701,15 +1755,17 @@ fn hostNoticeEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) 
 fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const line = self.hostState().line();
-    const mark = marks.marks.get(line.mark);
-    const notice = if (self.host_start_notice) |value| value.words() else "";
+    const detail = if (!self.state.holdsHost()) self.host_launch else null;
+    const mark = marks.marks.get(if (detail != null and detail.? == .failed) .failed else line.mark);
+    const notice = if (detail) |value| value.words() else "";
+    const key = if (self.hostNext()) |next| next.label() else "";
     const text = try std.fmt.allocPrint(ctx.arena, "{s} {s}{s}{s}{s}{s}", .{
         if (self.caps.unicode) mark.unicode else mark.ascii,
         line.words,
         if (notice.len == 0) "" else " · ",
         notice,
-        if (line.key.len == 0) "" else " · ",
-        line.key,
+        if (key.len == 0) "" else " · ",
+        key,
     });
     const label: vxfw.Text = .{ .text = text, .softwrap = false, .style = @import("widget_style.zig").of(self.caps, .{ .colour = switch (mark.tone) {
         .ink => .ink,
@@ -1723,8 +1779,8 @@ fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     return surface;
 }
 
-fn startHost(self: *Self, notice: *?HostStartNotice) !void {
-    try self.hooks.start_host(self.init, self.options.store, notice);
+fn startHost(self: *Self) HostLaunch {
+    return self.hooks.start_host(self.init, self.options.store);
 }
 
 fn hostFacts(self: *Self) HostRead {
@@ -1909,8 +1965,8 @@ const other_skills = [_]skill_suggestions.Entry{.{ .name = "release", .descripti
 
 const fake_operations: Operations = .{
     .start_host = struct {
-        fn start(_: *Self, _: *?HostStartNotice) !void {
-            return error.TestUnexpectedResult;
+        fn start(_: *Self) HostLaunch {
+            return .{ .failed = .{ .kind = .setup, .err = error.TestUnexpectedResult } };
         }
     }.start,
     .skills = struct {
@@ -3759,7 +3815,9 @@ const HostRecovery = struct {
     var availability: Availability = .ready;
     var starts: usize = 0;
     var fail_start: bool = false;
-    var start_notice: ?HostStartNotice = null;
+    var start_warning: ?HostLaunch.Warning = null;
+    var forced_start: ?HostLaunch = null;
+    var after_start: ?Availability = null;
     var worker_id: ?std.Thread.Id = null;
     var dir: std.Io.Dir = undefined;
     var files: u8 = 0;
@@ -3768,7 +3826,9 @@ const HostRecovery = struct {
         availability = .ready;
         starts = 0;
         fail_start = false;
-        start_notice = null;
+        start_warning = null;
+        forced_start = null;
+        after_start = null;
         worker_id = null;
         files = 0;
         var ops = fake_operations;
@@ -3784,13 +3844,17 @@ const HostRecovery = struct {
             .stopping => .unavailable,
         } };
     }
-    fn start(overview: *Self, notice: *?HostStartNotice) !void {
-        notice.* = start_notice;
-        try std.testing.expectEqualStrings("/store", overview.options.store);
+    fn start(overview: *Self) HostLaunch {
+        std.testing.expectEqualStrings("/store", overview.options.store) catch @panic("wrong launch Store");
         worker_id = std.Thread.getCurrentId();
         starts += 1;
-        if (fail_start) return error.HostStartupFailed;
+        if (forced_start) |result| {
+            if (after_start) |after| availability = after;
+            return result;
+        }
+        if (fail_start) return .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } };
         availability = .ready;
+        return .{ .ready = start_warning };
     }
     fn scratch(init: std.process.Init) !std.Io.File {
         files += 1;
@@ -3888,14 +3952,14 @@ test "Host recovery failed start waits for r retry and the line also accepts a c
     try std.testing.expect(try rig.press("r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
-    try std.testing.expectEqual(HostState.retry, overview.hostState());
+    try std.testing.expectEqual(HostState.stopped, overview.hostState());
     _ = try overview.event(.{ .tick = test_now_s * 1000 + view.list_interval_ms });
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
-    try std.testing.expectEqual(HostState.retry, overview.hostState());
+    try std.testing.expectEqual(HostState.stopped, overview.hostState());
     var shown = try rig.shown(46, 26);
     defer shown.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "× Host stopped · r retry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "× Host stopped · startup refused · r retry") != null);
     // r retries once, never a poll or a previous failed attempt.
     try std.testing.expect(try rig.press("r") == null);
     try std.testing.expect(try rig.settle() == null);
@@ -4124,13 +4188,24 @@ test "Host recovery derives launch progress from job custody without copying rea
     try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
 }
 
-test "Host recovery presents launcher diagnostics in its line on success and failure" {
-    for ([_]bool{ false, true }) |fails| {
+test "Host recovery renders the launch result cause without confusing failure and reachability" {
+    const Case = struct { launch: HostLaunch, words: []const u8, retry: bool = false };
+    const cases = [_]Case{
+        .{ .launch = .{ .ready = null }, .words = "" },
+        .{ .launch = .{ .ready = .invalid_openai_base_url }, .words = "OpenAI URL invalid" },
+        .{ .launch = .{ .failed = .{ .kind = .os_launch, .err = error.HostLaunchFailed } }, .words = "launch failed", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } }, .words = "startup refused", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed } }, .words = "readiness timeout", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } }, .words = "Store differs" },
+        .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "Rui mismatch" },
+    };
+    for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
+        errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });
         var cancellation: client.Cancellation = .{};
         const ops = HostRecovery.operations();
         HostRecovery.availability = .stopped;
-        HostRecovery.start_notice = .invalid_openai_base_url;
-        HostRecovery.fail_start = fails;
+        HostRecovery.forced_start = case.launch;
+        HostRecovery.after_start = after;
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
         defer rig.close();
         const overview = rig.overview;
@@ -4138,18 +4213,53 @@ test "Host recovery presents launcher diagnostics in its line on success and fai
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expect(try rig.press("r") == null);
         try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(@as(?HostStartNotice, .invalid_openai_base_url), overview.host_start_notice);
-        try std.testing.expectEqual(fails, hostHeld(overview));
+        try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+        try std.testing.expectEqual(after != .ready, hostHeld(overview));
+        const failure = case.launch == .failed;
+        const cleared = failure and after == .ready; // A competing ready owner wins.
+        const detail = case.words.len != 0 and !cleared;
+        const next: ?HostLaunch.Next = if (after != .stopped) null else if (failure) (if (case.retry) .retry else null) else .start;
+        try std.testing.expectEqual(next, overview.hostNext());
+        // Another discovery read cannot erase a still-relevant cause, or
+        // automatically retry an accepted effect.
+        overview.queue(.host);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
         for ([_]u16{ 140, 46 }) |width| {
             var shown = try rig.shown(width, 26);
             defer shown.deinit();
             const text = try shown.text();
-            try std.testing.expect(std.mem.indexOf(u8, text, "OpenAI URL invalid") != null);
-            try std.testing.expect(std.mem.indexOf(u8, text, if (fails) "Host stopped" else "Host ready") != null);
-            try std.testing.expectEqual(fails, std.mem.indexOf(u8, text, "r retry") != null);
+            if (case.words.len != 0) try std.testing.expectEqual(detail, std.mem.indexOf(u8, text, case.words) != null);
+            try std.testing.expectEqual(next == .retry, std.mem.indexOf(u8, text, "r retry") != null);
+            try std.testing.expectEqual(next == .start, std.mem.indexOf(u8, text, "r start") != null);
+            if (after != .ready) try std.testing.expect(std.mem.indexOf(u8, text, if (after == .stopped) "Host stopped" else "Host paused") != null);
+            if (failure and after != .ready) try std.testing.expect(std.mem.indexOf(u8, text, "× Host") != null);
             try std.testing.expect(std.mem.indexOf(u8, text, "rui host") == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "HostStartupFailed") == null);
         }
-    }
+        overview.state.upgrade.after = .blocked;
+        try std.testing.expect(overview.hostNext() == null);
+        var held = try rig.shown(140, 26);
+        defer held.deinit();
+        const text = try held.text();
+        try std.testing.expect(std.mem.indexOf(u8, text, "■ Host paused") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "r retry") == null);
+    };
+}
+
+test "Host recovery retains a worker failure in the same typed launch result" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, HostRecovery.operations(), &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.host_observation = .stopped;
+    overview.job = .start_host;
+    try std.testing.expect(try overview.deliver(error.SystemResources) == null);
+    try std.testing.expectEqual(HostLaunch.Failure.Kind.worker, overview.host_launch.?.failed.kind);
+    try std.testing.expectEqual(error.SystemResources, overview.host_launch.?.failed.err);
+    var shown = try rig.shown(46, 26);
+    defer shown.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Host stopped · worker unavailable · r retry") != null);
 }
 
 test "a conversation that fails to open still names the unconfirmed start on departure" {
