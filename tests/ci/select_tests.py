@@ -69,6 +69,9 @@ BASH = ("src/bash.zig", "src/BashLifecycle.zig", "src/deadline.zig")
 MODEL = ("src/provider.zig", "src/transport_policy.zig", "src/output_decode.zig", "src/history_memo.zig",
          "src/model_capability.zig", "src/failed_responses.zig")
 CREDENTIALS = ("src/codex_credential_policy.zig", "src/codex_token_wire.zig")
+# The Upgrade's own files, by name. An owner may be a pattern: a new file it
+# matches owns the fixture, and selects it, without being listed anywhere.
+UPGRADE = "src/[Uu]pgrade*.zig"
 FIXTURES = {
     "admission-integration": ((I + "admission_integration.sh",), (), (CALLER, HOST)),
     "admission-debug-integration": ((I + "admission_integration.sh",), (), ()),
@@ -117,9 +120,7 @@ FIXTURES = {
     "host-process-test": ((I + "host_process_test.py",), (), ()),
     "installer-integration": ((I + "installer_integration.py",), (),
                               ("src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig")),
-    "upgrade-integration": ((I + "upgrade_integration.py",), (),
-                            ("src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig",
-                             "src/HostLifecycle.zig", "src/Installation.zig")),
+    "upgrade-integration": ((I + "upgrade_integration.py",), (), (UPGRADE, "src/HostLifecycle.zig", "src/Installation.zig")),
     "terminal-restoration-integration": ((I + "terminal_restoration_integration.py",), ("src/terminal_notice_test.zig",),
                                          ("src/SessionFrontend.zig", "src/TerminalApp.zig", "src/TerminalEditor.zig")),
     "canonical-failure-integration": ((I + "canonical_failure_integration.py",), (),
@@ -208,8 +209,8 @@ class Graph:
         self.live_conformance = self.closure(self.every, conformance)
         self.driven, self.owners = {}, {}
         for target, (scripts, executables, owners) in FIXTURES.items():
-            self.owners[target] = set(owners)
-            owners = [*owners, *(host if HOST in owners else ())]
+            self.owners[target] = {name for name in names if matches(name, owners)}
+            owners = [*self.owners[target], *(host if HOST in owners else ())]
             self.reached[target] = self.reached.get(target, set()) | self.scripts(scripts)
             dispatch = self.closure(callers, owners) & (self.host | {RUI})
             self.driven[target] = ((self.closure(product, owners) | dispatch) & rui
@@ -275,9 +276,9 @@ def tree_graph():
 CLI_GRAMMAR = ("src/cli_grammar.zig", "src/cli_option_names.zig", "src/serve_grammar.zig")
 
 # The upgrade fixture is standalone, including when a composed gate is selected.
-UPGRADE_PATHS = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
-                 "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
+UPGRADE_PATHS = (UPGRADE, "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
+                 "src/HostLifecycle.zig", "src/host_identity.zig",
+                 "src/host_identity.c", "src/stderr.zig", "src/host_launch.c",
                  "src/cli.zig", "src/cli_args.zig", *CLI_GRAMMAR, "src/client.zig", "src/slash_commands.zig",
                  "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
                  "tests/integration/upgrade_integration.py", "release/*", "install.sh", "build.zig")
@@ -295,7 +296,7 @@ INSTALLER_PATHS = ("tests/integration/installer_integration.py", "tests/ci/fake_
 # what it exercises: installation, the upgrade and Host lifecycle owners, the
 # Store format (`store_format`), the build or the check itself. Its own unit
 # test runs in policy. Promotion runs it for every batch.
-UPGRADE_CHECK_PATHS = ("src/upgrade*.zig", "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
+UPGRADE_CHECK_PATHS = (UPGRADE, "src/Installation.zig", "src/installation_path.zig", "src/release_candidate.zig",
                        "src/HostLifecycle.zig", "src/host_identity.*", "src/host_launch.c",
                        "src/store/migration_*", "install.sh", "release/*", "build.zig", "build.zig.zon",
                        "tests/integration/previous_release_upgrade.py", ".github/workflows/previous-release-upgrade.yml")
