@@ -251,7 +251,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
         if (scanner.stackHeight() > protocol.max_json_depth) return refuse(refusal, "the frame exceeds the maximum JSON nesting depth");
         if (token == .end_of_document) break;
     }
-    const wire = std.json.parseFromSliceLeaky(Wire, arena.allocator(), bytes, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+    const wire = std.json.parseFromSliceLeaky(Wire, arena.allocator(), bytes, .{ .allocate = .alloc_always, .parse_numbers = false }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return refuse(refusal, "the frame is not a JSON object of v, store, provider, runtimeDir and optional activeCapacity, paused, mcpServers and presets"),
     };
@@ -329,7 +329,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
     var memory: std.heap.ArenaAllocator = .init(gpa);
     errdefer memory.deinit();
     const encoded = try std.json.Stringify.valueAlloc(arena.allocator(), wire.presets, .{});
-    const saved = try std.json.parseFromSliceLeaky(std.json.Value, memory.allocator(), encoded, .{ .allocate = .alloc_always });
+    const saved = try std.json.parseFromSliceLeaky(std.json.Value, memory.allocator(), encoded, .{ .allocate = .alloc_always, .parse_numbers = false });
     const retained = try memory.allocator().alloc(core_tools.Preset, presets.count());
     var saved_entries = saved.object.iterator();
     for (retained) |*preset| {

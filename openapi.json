@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Rui Host",
-    "version": "11",
+    "version": "12",
     "description": "The Rui Host's local protocol: HTTP/1.1 over the Unix socket of a running Host, one POST per request, generated from the Host's own wire types.\n\nRequest bodies list their fields in the order this document lists them; the Host refuses another order. Numbers that may exceed 2^53 travel as decimal strings. String bounds are in UTF-8 bytes (`x-rui-max-bytes`)."
   },
   "paths": {
@@ -1138,7 +1138,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "activity_content"
@@ -2103,7 +2103,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "activity_page"
@@ -2171,7 +2171,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "activity_page"
@@ -2199,7 +2199,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "activity_page"
@@ -2383,7 +2383,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "activity_search"
@@ -2417,7 +2417,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "activity_search"
@@ -2500,6 +2500,49 @@
           "model": {
             "type": "string"
           },
+          "instructions": {
+            "type": "string"
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "loadedTools": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "permissionMode": {
+            "type": "string",
+            "enum": [
+              "ask",
+              "bypass"
+            ]
+          },
+          "outputSchema": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Optional JSON output schema object; null clears it."
+          },
+          "compactAt": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "outputReservation": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "effort": {
             "type": [
               "string",
@@ -2515,42 +2558,11 @@
               "max"
             ]
           },
-          "compactAt": {
-            "type": "integer",
-            "description": "Tokens of context at which the agent compacts."
-          },
-          "tools": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Tool names, each one of yours."
-          },
-          "permissionMode": {
-            "type": "string",
-            "enum": [
-              "ask",
-              "bypass"
-            ]
-          },
-          "instructions": {
-            "type": "string",
-            "description": "Optional agent instructions."
-          },
-          "outputSchema": {
-            "type": [
-              "object",
-              "null"
-            ],
-            "description": "Optional JSON output schema.",
-            "additionalProperties": true
-          },
           "label": {
             "type": [
               "string",
               "null"
-            ],
-            "description": "A few words naming the agent's task."
+            ]
           },
           "provider": {
             "type": "string",
@@ -2612,504 +2624,117 @@
         "type": "object",
         "properties": {
           "workspace": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 4096,
-                    "x-rui-max-bytes": 4096
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
+            "type": "string",
+            "maxLength": 4096,
+            "x-rui-max-bytes": 4096
           },
           "provider": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 16,
-                    "x-rui-max-bytes": 16
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
+            "type": "string",
+            "maxLength": 16,
+            "x-rui-max-bytes": 16
           },
           "model": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 256,
-                    "x-rui-max-bytes": 256
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
+            "type": "string",
+            "maxLength": 256,
+            "x-rui-max-bytes": 256
           },
           "instructions": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
+            "type": "string",
+            "description": "Text of any length, saved as content."
           },
           "tools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
+          "loadedTools": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,64}$"
+            },
+            "maxItems": 128,
+            "uniqueItems": true,
+            "x-rui-max-bytes": 4096,
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+          },
+          "permissionMode": {
+            "type": "string",
+            "maxLength": 16,
+            "x-rui-max-bytes": 16
+          },
+          "outputSchema": {
             "anyOf": [
               {
                 "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
+                "additionalProperties": true
               },
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
-                    },
-                    "maxItems": 128,
-                    "uniqueItems": true,
-                    "x-rui-max-bytes": 4096,
-                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
+                "type": "null"
               }
             ]
           },
-          "loaded_tools": {
+          "compactAt": {
             "anyOf": [
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
+                "type": "integer",
+                "minimum": 0
               },
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
-                    },
-                    "maxItems": 128,
-                    "uniqueItems": true,
-                    "x-rui-max-bytes": 4096,
-                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
+                "type": "null"
               }
             ]
           },
-          "permission_mode": {
+          "outputReservation": {
             "anyOf": [
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
+                "type": "integer",
+                "minimum": 0
               },
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 16,
-                    "x-rui-max-bytes": 16
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
+                "type": "null"
               }
             ]
           },
-          "output_schema": {
+          "effort": {
             "anyOf": [
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
+                "type": "string",
+                "maxLength": 16,
+                "x-rui-max-bytes": 16
               },
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "compaction_trigger": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 20,
-                    "x-rui-max-bytes": 20
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "output_reservation": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 20,
-                    "x-rui-max-bytes": 20
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "reasoning_effort": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 16,
-                    "x-rui-max-bytes": 16
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
+                "type": "null"
               }
             ]
           },
           "label": {
             "anyOf": [
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
+                "type": "string",
+                "maxLength": 100,
+                "x-rui-max-bytes": 100
               },
               {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 100,
-                    "x-rui-max-bytes": 100
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
+                "type": "null"
               }
             ]
           }
         },
-        "required": [
-          "workspace",
-          "provider",
-          "model",
-          "instructions",
-          "tools",
-          "permission_mode",
-          "output_schema",
-          "compaction_trigger",
-          "output_reservation",
-          "reasoning_effort",
-          "label"
-        ],
+        "required": [],
         "additionalProperties": false
       },
       "ConfigureConflictReply": {
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "configuration_reply"
@@ -3171,7 +2796,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3235,7 +2860,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3307,7 +2932,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "configuration_reply"
@@ -3396,7 +3021,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "configure"
@@ -3445,7 +3070,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "conversation_content"
@@ -3490,7 +3115,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "conversation_page"
@@ -3799,7 +3424,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "conversation_page"
@@ -4118,7 +3743,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "conversation_page"
@@ -4163,7 +3788,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "type": "string",
@@ -4232,7 +3857,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "host_info"
@@ -4331,7 +3956,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "host_info"
@@ -4353,7 +3978,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "host_pause_reply"
@@ -4373,7 +3998,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "host_pause"
@@ -4399,7 +4024,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "host_stop_reply"
@@ -4419,7 +4044,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "host_stop"
@@ -4443,7 +4068,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_report"
@@ -4546,7 +4171,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_report"
@@ -4645,7 +4270,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_report"
@@ -4698,7 +4323,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_report"
@@ -4747,7 +4372,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4787,7 +4412,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4819,7 +4444,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "kind": {
                 "const": "inspect_session"
@@ -4989,7 +4614,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_list"
@@ -5043,7 +4668,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_list"
@@ -5099,7 +4724,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_list"
@@ -5142,7 +4767,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "list_sessions"
@@ -5201,470 +4826,11 @@
         ],
         "additionalProperties": false
       },
-      "MessageConfiguration": {
-        "type": "object",
-        "properties": {
-          "workspace": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 4096,
-                    "x-rui-max-bytes": 4096
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "provider": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 16,
-                    "x-rui-max-bytes": 16
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "model": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 256,
-                    "x-rui-max-bytes": 256
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "instructions": {
-            "type": "object",
-            "properties": {
-              "state": {
-                "const": "omitted"
-              }
-            },
-            "required": [
-              "state"
-            ],
-            "additionalProperties": false
-          },
-          "tools": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
-                    },
-                    "maxItems": 128,
-                    "uniqueItems": true,
-                    "x-rui-max-bytes": 4096,
-                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "loaded_tools": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "array",
-                    "items": {
-                      "type": "string",
-                      "pattern": "^[A-Za-z0-9_-]{1,64}$"
-                    },
-                    "maxItems": 128,
-                    "uniqueItems": true,
-                    "x-rui-max-bytes": 4096,
-                    "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "permission_mode": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 16,
-                    "x-rui-max-bytes": 16
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "output_schema": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "compaction_trigger": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 20,
-                    "x-rui-max-bytes": 20
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "output_reservation": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 20,
-                    "x-rui-max-bytes": 20
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "reasoning_effort": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 16,
-                    "x-rui-max-bytes": 16
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          },
-          "label": {
-            "anyOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "omitted"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "null"
-                  }
-                },
-                "required": [
-                  "state"
-                ],
-                "additionalProperties": false
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "maxLength": 100,
-                    "x-rui-max-bytes": 100
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            ]
-          }
-        },
-        "required": [
-          "workspace",
-          "provider",
-          "model",
-          "instructions",
-          "tools",
-          "permission_mode",
-          "output_schema",
-          "compaction_trigger",
-          "output_reservation",
-          "reasoning_effort",
-          "label"
-        ],
-        "additionalProperties": false
-      },
       "MessageConflictReply": {
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "message_reply"
@@ -5776,7 +4942,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "message_reply"
@@ -5871,7 +5037,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "message_reply"
@@ -5983,7 +5149,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "message"
@@ -6043,7 +5209,7 @@
             ]
           },
           "configuration": {
-            "$ref": "#/components/schemas/MessageConfiguration"
+            "$ref": "#/components/schemas/Configuration"
           },
           "text": {
             "type": "object",
@@ -6082,7 +5248,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "model_interruption_reply"
@@ -6144,7 +5310,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6200,7 +5366,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "model_interruption_reply"
@@ -6270,7 +5436,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "model_interruption"
@@ -6369,7 +5535,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "model_list"
@@ -6392,7 +5558,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "model_list"
@@ -6443,7 +5609,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -6486,7 +5652,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -6666,7 +5832,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -9944,7 +9110,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -10190,7 +9356,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -10396,7 +9562,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -10606,7 +9772,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -10812,7 +9978,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "command_observation"
@@ -10846,7 +10012,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "observe_command"
@@ -10974,7 +10140,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "permission_decision_reply"
@@ -11031,7 +10197,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -11082,7 +10248,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "permission_decision_reply"
@@ -11147,7 +10313,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "permission_decision"
@@ -11217,7 +10383,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "read_action_arguments"
@@ -11249,7 +10415,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "read_action_call_id"
@@ -11281,7 +10447,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "read_result"
@@ -11309,7 +10475,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "session_archive_reply"
@@ -11367,7 +10533,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -11427,7 +10593,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_archive_reply"
@@ -11490,7 +10656,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "session_archive"
@@ -11565,7 +10731,7 @@
             "maxItems": 128,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
           "permission_mode": {
             "type": "string",
@@ -11658,7 +10824,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "session_stop_reply"
@@ -11716,7 +10882,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -11796,7 +10962,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "type": {
                 "const": "session_stop_reply"
@@ -11858,7 +11024,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "kind": {
             "const": "session_stop"
@@ -11937,7 +11103,7 @@
         "type": "object",
         "properties": {
           "version": {
-            "const": "11"
+            "const": "12"
           },
           "type": {
             "const": "skill_suggestions"
@@ -11989,7 +11155,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -12023,7 +11189,7 @@
             "type": "object",
             "properties": {
               "version": {
-                "const": "11"
+                "const": "12"
               },
               "kind": {
                 "const": "skill_suggestions"
@@ -12647,7 +11813,7 @@
             "maxItems": 128,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
           "loaded_tools": {
             "type": "array",
@@ -12658,7 +11824,7 @@
             "maxItems": 128,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
           "permission_mode": {
             "type": "string",
@@ -13690,7 +12856,7 @@
             "maxItems": 128,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
           "loaded_tools": {
             "type": "array",
@@ -13701,7 +12867,7 @@
             "maxItems": 128,
             "uniqueItems": true,
             "x-rui-max-bytes": 4096,
-            "description": "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
+            "description": "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers."
           },
           "permission_mode": {
             "type": "string",
@@ -13904,7 +13070,7 @@
         "description": "The wire version this document describes. Any other version is refused.",
         "schema": {
           "type": "string",
-          "const": "11"
+          "const": "12"
         }
       },
       "HostInstance": {

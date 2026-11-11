@@ -1,4 +1,5 @@
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const execution = @import("execution.zig");
 const named_scratch = @import("named_scratch.zig");
 const history_memo = @import("history_memo.zig");
@@ -4002,7 +4003,7 @@ fn configureMemoSessionModelForTesting(setup: *PreparationTestSetup, model: []co
     command.configuration.permission_mode.state = .value;
     try command.configuration.permission_mode.value.set("ask");
     // D111: test clients supply an explicit effort using the client product choice.
-    if (if (@import("model_capability.zig").supportsModel(model)) @import("client_defaults.zig").startEffort(model, null) else null) |effort| {
+    if (if (@import("model_capability.zig").supportsModel(model_catalog.shipped, model)) @import("client_defaults.zig").startEffort(model, null) else null) |effort| {
         command.configuration.reasoning_effort.state = .value;
         try command.configuration.reasoning_effort.value.set(@tagName(effort));
     } else command.configuration.reasoning_effort.state = .explicit_null;
