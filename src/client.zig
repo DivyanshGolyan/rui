@@ -69,6 +69,19 @@ pub const Cancellation = struct {
 /// Only concrete socket effects (including premature EOF) stamp transport.
 pub const FailureOrigin = enum { local, host_transport };
 
+/// An in-app read adapter cannot omit its pinned result's provenance. Project
+/// this whole context into Requests; never rebuild a borrower from io alone.
+pub const ReadContext = struct {
+    io: std.Io,
+    origin: *FailureOrigin,
+    cancellation: ?*const Cancellation = null,
+    read_failure: ?*?protocol_reply.ReadFailure = null,
+
+    pub fn requests(self: ReadContext) Requests {
+        return .{ .io = self.io, .cancellation = self.cancellation, .read_failure = self.read_failure, .failure_origin = self.origin };
+    }
+};
+
 /// Borrows io, token, inputs, captures, sinks and reply storage through return.
 /// A worker owns each socket; no socket escapes or closes from another thread.
 pub const Requests = struct {

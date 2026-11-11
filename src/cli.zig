@@ -2470,7 +2470,9 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     });
 }
 
-fn sessionCommand(init: std.process.Init, requests_context: client.Requests, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
+/// Runs the in-app command with its joined reader's required provenance.
+pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destination: []const u8, reference: []const u8, input_buffer: []u8) !void {
+    const requests_context = read.requests();
     const command = switch (slash_commands.parse(input_buffer)) {
         .command => |command| command,
         // The Session frontend queues only commands the table admits.
@@ -2630,9 +2632,10 @@ test "a conversation's /setup says it left the active Session alone, and the ove
     const page = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer page.close(io);
     var token: client.Cancellation = .{};
+    var origin: client.FailureOrigin = .local;
     for ([_][]const u8{ "k7m2qx", "" }, [_][]const u8{ "Saved defaults for future Sessions. Active Session unchanged.\n", "Saved defaults for future Sessions.\n" }) |session, said| {
         var line = "/setup --notifications off".*;
-        const command: session_reads.CommandRun = .{ .command = sessionCommand, .init = init, .requests = .{ .io = io, .cancellation = &token }, .store = home, .session = session, .line = &line };
+        const command: session_reads.CommandRun = .{ .command = sessionCommand, .init = init, .requests = .{ .io = io, .cancellation = &token, .origin = &origin }, .store = home, .session = session, .line = &line };
         try command.into(page).outcome;
         var bytes: [4096]u8 = undefined;
         const printed = bytes[0..try page.readPositionalAll(io, &bytes, 0)];
@@ -2766,7 +2769,8 @@ fn decodeInteractive(input: []u8, tokens: [][]const u8, split: bool) !usize {
     return count;
 }
 
-pub fn sessionRequests(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer, picks: *session_reads.SavedRequests) anyerror!void {
+pub fn sessionRequests(init: std.process.Init, read: client.ReadContext, store: []const u8, session_ref: []const u8, out: *std.Io.Writer, picks: *session_reads.SavedRequests) anyerror!void {
+    const requester = read.requests();
     const canonical = try platform.resolveClientPaths(init.io, store);
     var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const directory = try requestDirectory(init, &path);
@@ -2829,7 +2833,8 @@ test "local recovery enumeration observes cancellation before skipping invalid r
     var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const store = try std.fmt.bufPrint(&store_buffer, "{s}/store", .{home});
     var token: client.Cancellation = .{};
-    const requester: client.Requests = .{ .io = io, .cancellation = &token };
+    var origin: client.FailureOrigin = .local;
+    const requester: client.ReadContext = .{ .io = io, .cancellation = &token, .origin = &origin };
     var buffer: [1024]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var picks: session_reads.SavedRequests = .{};
