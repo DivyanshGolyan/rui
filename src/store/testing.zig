@@ -224,6 +224,57 @@ pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.Tm
     }
 }
 
+/// Reconstruct the previous format's ending queues from production-created
+/// Turns, then perform the operator-run MySQL upgrade. SQLite upgrades at the
+/// next production open. Kept here because this fixture intentionally uses DDL.
+pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !void {
+    const schema = @import("schema.zig");
+    const Native = struct {
+        fn exec(store: *Store, sql: [:0]const u8) !void {
+            if (store.engine == .mysql) return mysql_testing.rawExec(store, sql);
+            return sqlite.exec(store.sqliteDatabase(), sql);
+        }
+    };
+    const from = schema.schema_version - 1;
+    const old = schema.migrations[53 - schema.migration_baseline];
+    const suppress = schema.migrations[56 - schema.migration_baseline];
+    // Use the historical definitions, not a second handwritten old format.
+    for (if (storage.engine == .mysql) old.mysql else old.sqlite) |sql| {
+        if (std.mem.startsWith(u8, sql, "CREATE TABLE session_ending_owed(")) try Native.exec(storage, sql);
+    }
+    if (storage.engine == .mysql) {
+        for (suppress.mysql) |sql| {
+            if (std.mem.startsWith(u8, sql, "ALTER TABLE session_ending_owed ")) try Native.exec(storage, sql);
+        }
+    } else {
+        // SQLite's historical step rebuilds this table with the suppression flag.
+        for (suppress.sqlite) |sql| {
+            if (std.mem.indexOf(u8, sql, "session_ending_owed") != null or std.mem.startsWith(u8, sql, "CREATE INDEX session_ending_open ")) try Native.exec(storage, sql);
+        }
+    }
+    try Native.exec(storage, "INSERT INTO session_ending_owed(turn_id,delivered,suppress_message) SELECT source_id,message_delivered,suppress_message FROM session_forward WHERE message_delivered IS NOT NULL");
+    if (!keep_pending_forward) try Native.exec(storage, "DELETE FROM session_forward WHERE message_delivered=0");
+    if (storage.engine == .mysql) {
+        try Native.exec(storage, "ALTER TABLE session_forward DROP INDEX session_forward_message, DROP CHECK session_forward_chk_7, DROP CHECK session_forward_chk_8, DROP COLUMN message_delivered, DROP COLUMN suppress_message");
+    } else {
+        try Native.exec(storage, "ALTER TABLE session_forward RENAME TO upgrade_forward");
+        for (old.sqlite) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE TABLE session_forward(")) try Native.exec(storage, sql);
+        }
+        try Native.exec(storage, "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at) SELECT forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at FROM upgrade_forward");
+        try Native.exec(storage, "DROP TABLE upgrade_forward");
+        for (old.sqlite) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE INDEX session_forward_")) try Native.exec(storage, sql);
+        }
+        try Native.exec(storage, comptime std.fmt.comptimePrint("PRAGMA user_version={d}", .{from}));
+    }
+    try Native.exec(storage, comptime std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{from}));
+    if (storage.engine == .mysql) {
+        for (schema.migrations[from - schema.migration_baseline].mysql) |sql| try Native.exec(storage, sql);
+        try Native.exec(storage, comptime std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version}));
+    }
+}
+
 /// Words a fixture's SQL may not hold outside string literals, matched
 /// whole and ignoring case: each names a SQLite setting, schema change,
 /// transaction or connection mechanism. A test that needs one belongs in
