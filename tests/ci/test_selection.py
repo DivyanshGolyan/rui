@@ -175,7 +175,9 @@ class SelectionTest(unittest.TestCase):
                 self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS)
 
     def test_unit_roots_follow_store_imports(self):
-        native = select(["src/session_consent.zig"], "review", AVAILABLE)["targets"]
+        # Consent is also reached by the all-engine Store/decoder contracts;
+        # use the standalone native probe to test the native-only partition.
+        native = select(["src/signal_stack_probe.zig"], "review", AVAILABLE)["targets"]
         self.assertIn("test-native", native)
         self.assertNotIn("test-store", native)
         self.assertNotIn("test", native)
@@ -367,6 +369,13 @@ class SelectionTest(unittest.TestCase):
                          if not name.startswith("src/store/") and "src/store.zig" in graph.every.get(name, ()))
         self.assertEqual(callers, [], "Store tests reach these Store callers; move the tests that "
                          "import them into the callers")
+
+    def test_store_tests_reach_no_client_reply_decoder(self):
+        # Store/decoder round trips belong to protocol_reply_store_tests.zig,
+        # not Store's root: the decoder can reach caller-only presentation.
+        graph = tree_graph()
+        self.assertNotIn("src/protocol_reply.zig", graph.reached["test-store"],
+                         "Move Store/client decoder contracts to protocol_reply_store_tests.zig")
 
     def test_store_code_imports_no_protocol(self):
         # The Store reads and writes plain values; the Host translates
