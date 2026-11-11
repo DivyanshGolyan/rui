@@ -1,5 +1,5 @@
-//! Shared model-picker values. A selection names a menu entry or owns a
-//! typed, unlisted ID; it never borrows mutable composer storage.
+//! Shared model-picker values. Every selection owns its model ID, whether
+//! listed or typed; neither menu replacement nor composer edits invalidate it.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const gwidth = @import("terminal_width");
@@ -8,14 +8,19 @@ const Bounded = @import("bounded.zig").Bounded;
 const overview = @import("overview_style.zig");
 
 pub const Choice = struct {
-    index: usize,
+    id: Bounded(model_catalog.max_model_bytes),
     row: picker.Row,
-    typed: Bounded(model_catalog.max_model_bytes) = .{ .len = 0 },
 
-    /// The selected model, including an ID absent from the live list.
-    pub fn entry(self: *const Choice, menu: *const picker.Menu) picker.Entry {
-        if (self.typed.len == 0) return menu.entries[self.index];
-        return .{ .id = self.typed.slice(), .known = false, .catalogued = false, .providers = self.row.providers };
+    fn of(entry_: picker.Entry, row: picker.Row) Choice {
+        std.debug.assert(model_catalog.validModelSyntax(entry_.id));
+        var id: Bounded(model_catalog.max_model_bytes) = .{ .len = 0 };
+        id.set(entry_.id) catch unreachable;
+        return .{ .id = id, .row = row };
+    }
+
+    /// A frame's menu position, or its synthetic-row sentinel. Not identity.
+    pub fn index(self: *const Choice, menu: *const picker.Menu) usize {
+        return menu.find(self.id.slice()) orelse menu.entries.len;
     }
 };
 
@@ -43,8 +48,8 @@ pub const Saved = struct {
     provider: picker.Provider,
 };
 
-/// A row for GroupedList. Model indices refer to the borrowed Menu, not the
-/// position in this list; headings and status rows cannot be selected.
+/// A row for GroupedList. Model indices refer to the Menu, not this list;
+/// `menu.entries.len` names the owned unlisted choice. Prose is not selectable.
 pub const Line = struct { text: []const u8, segments: []const overview.Segment, model: ?usize = null, heading: bool = false };
 pub const Lines = struct { rows: []Line, selected: ?u32 };
 pub const Read = enum { unread, read, unanswered, invalid };
@@ -66,7 +71,7 @@ pub const Rows = struct {
     total: usize,
     first: usize = 0,
     end: usize,
-    fallback: bool,
+    typed_row: bool,
 
     /// Keep the selection visible and account for every hidden model.
     pub fn viewport(self: Rows, height: usize) Rows {
@@ -104,19 +109,21 @@ pub const Rows = struct {
             if (self.end != self.total and wanted == self.count - 1) return simpleLine(arena, try std.fmt.allocPrint(arena, "{s} {d} more", .{ if (self.unicode) "↓" else "v", self.total - self.end }), false);
         }
         const ordinal = self.first + wanted - @as(usize, @intFromBool(self.first != 0 and self.selected != 0));
-        if (self.fallback) return self.modelLine(arena, typedEntry(self.menu, self.query.words, self.defaults), self.menu.entries.len);
+        if (self.typed_row and ordinal == 0) return self.modelLine(arena, unlistedEntry(self.menu, self.query, self.defaults, &self.choice), self.menu.entries.len);
+        const model_ordinal = ordinal - @intFromBool(self.typed_row);
         var at: usize = 0;
         for (self.menu.entries, 0..) |entry, index| {
             _ = self.query.row(entry, self.defaults) orelse continue;
-            if (at == ordinal) return self.modelLine(arena, entry, index);
+            if (at == model_ordinal) return self.modelLine(arena, entry, index);
             at += 1;
         }
         unreachable;
     }
 
     fn modelLine(self: Rows, arena: std.mem.Allocator, entry: picker.Entry, index: usize) !Line {
-        const highlighted = if (self.choice) |c| c.index == index else self.fallback;
-        const base = if (self.fallback) self.query.typed(entry, self.defaults) else self.query.row(entry, self.defaults).?;
+        const synthetic = index == self.menu.entries.len;
+        const highlighted = if (self.choice) |c| c.id.eql(entry.id) else synthetic;
+        const base = if (synthetic) self.query.typed(entry, self.defaults) else self.query.row(entry, self.defaults).?;
         const selected_row = if (highlighted and self.choice != null) self.choice.?.row else base;
         const buffer = try arena.alloc(u8, @max(entry.id.len, self.widest) + 256);
         const formatted = format(buffer, entry, selected_row, highlighted, self.widest, self.columns, self.method, self.unicode);
@@ -133,40 +140,57 @@ fn typedEntry(menu: *const picker.Menu, words: []const u8, defaults: picker.Defa
         providers.insert(provider);
     };
     if (providers.count() == 0) providers.insert(defaults.provider orelse comptime std.meta.stringToEnum(picker.Provider, @import("product_defaults.zig").provider).?);
-    return .{ .id = std.mem.trim(u8, words, " "), .known = false, .catalogued = false, .providers = providers };
+    return .{ .id = words, .known = false, .catalogued = false, .providers = providers };
+}
+
+/// A retained choice keeps its own ID even when a refresh omits it or
+/// introduces other matches. Without a choice, use the admitted typed words.
+fn unlistedEntry(menu: *const picker.Menu, query: picker.Query, defaults: picker.Defaults, choice: *const ?Choice) picker.Entry {
+    return typedEntry(menu, if (choice.*) |*c| c.id.slice() else query.words, defaults);
+}
+
+/// Multiword filters may narrow real rows, but only a valid model ID can
+/// become a typed row. Invalid unmatched words leave the full chat list.
+fn matchingQuery(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults) picker.Query {
+    const query = picker.Query.parse(words);
+    if (model_catalog.validModelSyntax(words)) return query;
+    for (menu.entries) |entry| if (query.row(entry, defaults) != null) return query;
+    return picker.Query.parse("");
 }
 
 /// Build an unbounded plan; the shell applies the actual list viewport.
 pub fn rows(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults, choice: ?Choice, width: usize, method: gwidth.Method, unicode: bool, read: Read) !Rows {
     _ = read; // Transport/list state is not a model choice or a prose row.
-    const query = picker.Query.parse(words);
+    const query = matchingQuery(menu, words, defaults);
     var widest: usize = 0;
     var count: usize = 0;
     var selected: ?u32 = null;
     var providers: picker.Providers = .empty;
-    for (menu.entries, 0..) |entry, index| {
+    for (menu.entries) |entry| {
         if (query.row(entry, defaults) == null) continue;
         widest = @max(widest, entry.id.len);
         providers.setUnion(entry.providers);
-        if (choice) |c| if (c.index == index) {
+        if (choice) |c| if (c.id.eql(entry.id)) {
             selected = @intCast(count);
         };
         count += 1;
     }
-    const fallback = count == 0 and std.mem.trim(u8, words, " ").len != 0;
-    if (fallback) {
-        const entry = typedEntry(menu, words, defaults);
-        widest = entry.id.len;
-        providers = entry.providers;
-        count = 1;
+    // A refresh may omit the selected ID. Keep that owned choice visible
+    // alongside any matching live rows, not hidden behind a different model.
+    const typed_row = selected == null and (choice != null or (count == 0 and model_catalog.validModelSyntax(query.words)));
+    if (typed_row) {
+        const entry = unlistedEntry(menu, query, defaults, &choice);
+        widest = @max(widest, entry.id.len);
+        providers.setUnion(entry.providers);
+        count += 1;
         selected = 0;
     }
     const buffer = try arena.alloc(u8, widest + 256);
     var columns: Columns = .{ .sign_ins = providers.count() > 1 };
-    if (needed(buffer, menu, query, defaults, choice, widest, columns, method, unicode, fallback) > width) columns.context = false;
-    if (needed(buffer, menu, query, defaults, choice, widest, columns, method, unicode, fallback) > width) columns.all_sign_ins = false;
-    widest = @min(widest, width -| needed(buffer, menu, query, defaults, choice, 0, columns, method, unicode, fallback));
-    return .{ .menu = menu, .query = query, .defaults = defaults, .choice = choice, .widest = widest, .columns = columns, .method = method, .unicode = unicode, .count = count, .selected = selected, .total = count, .end = count, .fallback = fallback };
+    if (needed(buffer, menu, query, defaults, choice, widest, columns, method, unicode, typed_row) > width) columns.context = false;
+    if (needed(buffer, menu, query, defaults, choice, widest, columns, method, unicode, typed_row) > width) columns.all_sign_ins = false;
+    widest = @min(widest, width -| needed(buffer, menu, query, defaults, choice, 0, columns, method, unicode, typed_row));
+    return .{ .menu = menu, .query = query, .defaults = defaults, .choice = choice, .widest = widest, .columns = columns, .method = method, .unicode = unicode, .count = count, .selected = selected, .total = count, .end = count, .typed_row = typed_row };
 }
 
 /// Apply the shell's available height without changing the model selection.
@@ -181,16 +205,16 @@ fn lines(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u8, 
     return .{ .rows = result, .selected = plan.selected };
 }
 
-fn needed(buffer: []u8, menu: *const picker.Menu, query: picker.Query, defaults: picker.Defaults, choice: ?Choice, id_width: usize, columns: Columns, method: gwidth.Method, unicode: bool, fallback: bool) usize {
-    if (fallback) {
-        const entry = typedEntry(menu, query.words, defaults);
-        const row = if (choice) |c| c.row else query.typed(entry, defaults);
-        return gwidth.gwidth(format(buffer, entry, row, true, id_width, columns, method, unicode).text, method);
-    }
+fn needed(buffer: []u8, menu: *const picker.Menu, query: picker.Query, defaults: picker.Defaults, choice: ?Choice, id_width: usize, columns: Columns, method: gwidth.Method, unicode: bool, typed_row: bool) usize {
     var max: usize = 0;
-    for (menu.entries, 0..) |entry, index| {
+    if (typed_row) {
+        const entry = unlistedEntry(menu, query, defaults, &choice);
+        const row = if (choice) |c| c.row else query.typed(entry, defaults);
+        max = gwidth.gwidth(format(buffer, entry, row, true, id_width, columns, method, unicode).text, method);
+    }
+    for (menu.entries) |entry| {
         const base = query.row(entry, defaults) orelse continue;
-        const highlighted = if (choice) |c| c.index == index else false;
+        const highlighted = if (choice) |c| c.id.eql(entry.id) else false;
         const row = if (highlighted) choice.?.row else base;
         max = @max(max, gwidth.gwidth(format(buffer, entry, row, highlighted, id_width, columns, method, unicode).text, method));
     }
@@ -291,26 +315,24 @@ pub fn open(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaul
     return select(menu, words, defaults, wanted);
 }
 
-/// Reconcile a selection after a draft edit or menu replacement. Keep the
+/// Select after a draft edit. Keep the
 /// highlighted row if it still matches, otherwise select the first match.
 pub fn select(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults, wanted: ?usize) ?Choice {
-    const query = picker.Query.parse(words);
+    const query = matchingQuery(menu, words, defaults);
     if (wanted) |index| if (index < menu.entries.len) {
-        if (query.row(menu.entries[index], defaults)) |row| return .{ .index = index, .row = row };
+        if (query.row(menu.entries[index], defaults)) |row| return Choice.of(menu.entries[index], row);
     };
-    for (menu.entries, 0..) |entry, index| {
-        if (query.row(entry, defaults)) |row| return .{ .index = index, .row = row };
+    for (menu.entries) |entry| {
+        if (query.row(entry, defaults)) |row| return Choice.of(entry, row);
     }
-    const entry = typedEntry(menu, words, defaults);
-    if (entry.id.len == 0 or entry.id.len > model_catalog.max_model_bytes or !std.unicode.utf8ValidateSlice(entry.id)) return null;
-    var typed: Bounded(model_catalog.max_model_bytes) = .{ .len = entry.id.len };
-    @memcpy(typed.bytes[0..entry.id.len], entry.id);
-    return .{ .index = menu.entries.len, .row = query.typed(entry, defaults), .typed = typed };
+    const entry = typedEntry(menu, query.words, defaults);
+    if (!model_catalog.validModelSyntax(entry.id)) return null;
+    return Choice.of(entry, query.typed(entry, defaults));
 }
 
 /// Retain controls that the refreshed row still offers.
 pub fn retain(choice: Choice, previous: Choice) Choice {
-    if (choice.typed.len != 0 and previous.typed.len != 0 and !choice.typed.eql(previous.typed.slice())) return choice;
+    if (!choice.id.eql(previous.id.slice())) return choice;
     var kept = choice;
     if (previous.row.effort) |effort| {
         if (kept.row.efforts.contains(effort)) kept.row.effort = effort;
@@ -319,16 +341,25 @@ pub fn retain(choice: Choice, previous: Choice) Choice {
     return kept;
 }
 
-/// Apply a key or a hit-tested click. A save borrows the Menu's model ID.
+/// Reconcile by owned ID even when a refresh no longer lists the model.
+/// Only controls the replacement model/sign-ins still offer survive.
+pub fn reconcile(menu: *const picker.Menu, defaults: picker.Defaults, previous: Choice) Choice {
+    const entry = if (menu.find(previous.id.slice())) |at| menu.entries[at] else typedEntry(menu, previous.id.slice(), defaults);
+    return retain(Choice.of(entry, picker.Query.parse("").typed(entry, defaults)), previous);
+}
+
+/// Apply a key or a hit-tested click. A save borrows the choice's model ID.
 pub fn step(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaults, choice: *?Choice, action: Action) ?Saved {
-    const query = picker.Query.parse(words);
+    const query = matchingQuery(menu, words, defaults);
     if (action == .click) {
         const click = action.click;
         if (click.index >= menu.entries.len) {
-            if (click.index != menu.entries.len or choice.* == null or choice.*.?.typed.len == 0) return null;
+            if (click.index != menu.entries.len or choice.* == null) return null;
+            const listed = choice.*.?.index(menu);
+            if (listed < menu.entries.len and query.row(menu.entries[listed], defaults) != null) return null;
         } else {
             const row = query.row(menu.entries[click.index], defaults) orelse return null;
-            if (choice.* == null or choice.*.?.index != click.index) choice.* = .{ .index = click.index, .row = row };
+            if (choice.* == null or !choice.*.?.id.eql(menu.entries[click.index].id)) choice.* = Choice.of(menu.entries[click.index], row);
         }
         return switch (click.target) {
             .model => step(menu, words, defaults, choice, .save),
@@ -340,21 +371,22 @@ pub fn step(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaul
     const current = choice.* orelse return null;
     switch (action) {
         .previous => {
-            if (current.typed.len != 0) return null;
-            var index = current.index;
+            var index = current.index(menu);
+            if (index == menu.entries.len) return null;
             while (index > 0) {
                 index -= 1;
                 if (query.row(menu.entries[index], defaults)) |row| {
-                    choice.* = .{ .index = index, .row = row };
+                    choice.* = Choice.of(menu.entries[index], row);
                     break;
                 }
             }
         },
         .next => {
-            var index = current.index + 1;
+            const listed = current.index(menu);
+            var index = if (listed == menu.entries.len) 0 else listed + 1;
             while (index < menu.entries.len) : (index += 1) {
                 if (query.row(menu.entries[index], defaults)) |row| {
-                    choice.* = .{ .index = index, .row = row };
+                    choice.* = Choice.of(menu.entries[index], row);
                     break;
                 }
             }
@@ -367,11 +399,11 @@ pub fn step(menu: *const picker.Menu, words: []const u8, defaults: picker.Defaul
         },
         .select => |index| {
             if (index < menu.entries.len) if (query.row(menu.entries[index], defaults)) |row| {
-                choice.* = .{ .index = index, .row = row };
+                choice.* = Choice.of(menu.entries[index], row);
             };
         },
         .click => unreachable,
-        .save => return .{ .model = choice.*.?.entry(menu).id, .effort = current.row.effort, .provider = current.row.provider },
+        .save => return .{ .model = choice.*.?.id.slice(), .effort = current.row.effort, .provider = current.row.provider },
     }
     return null;
 }
@@ -384,7 +416,7 @@ test "model picker view opens on the saved default without changing row order" {
     for ([_][]const u8{ "gpt-6.1-terra", "ft:custom" }) |id| {
         const defaults: picker.Defaults = .{ .model = id };
         var choice = open(&menu, "", defaults);
-        try std.testing.expectEqualStrings(id, menu.entries[choice.?.index].id);
+        try std.testing.expectEqualStrings(id, menu.entries[choice.?.index(&menu)].id);
         try std.testing.expectEqualStrings(id, step(&menu, "", defaults, &choice, .save).?.model);
         const shown = try lines(arena.allocator(), &menu, "", defaults, choice, 100);
         var previous: ?usize = null;
@@ -392,15 +424,15 @@ test "model picker view opens on the saved default without changing row order" {
             if (previous) |old| try std.testing.expect(old < index);
             previous = index;
         };
-        choice = select(&menu, "", defaults, choice.?.index);
-        try std.testing.expectEqualStrings(id, menu.entries[choice.?.index].id);
-        choice = select(&menu, "sol", defaults, choice.?.index);
-        try std.testing.expectEqualStrings("gpt-6.1-sol", menu.entries[choice.?.index].id);
+        choice = select(&menu, "", defaults, choice.?.index(&menu));
+        try std.testing.expectEqualStrings(id, menu.entries[choice.?.index(&menu)].id);
+        choice = select(&menu, "sol", defaults, choice.?.index(&menu));
+        try std.testing.expectEqualStrings("gpt-6.1-sol", menu.entries[choice.?.index(&menu)].id);
     }
     const missing = open(&menu, "", .{ .model = "not-offered" });
-    try std.testing.expectEqual(@as(usize, 0), missing.?.index);
+    try std.testing.expectEqual(@as(usize, 0), missing.?.index(&menu));
     const unmatched = open(&menu, "sol", .{ .model = "gpt-6.1-terra" });
-    try std.testing.expectEqualStrings("gpt-6.1-sol", menu.entries[unmatched.?.index].id);
+    try std.testing.expectEqualStrings("gpt-6.1-sol", menu.entries[unmatched.?.index(&menu)].id);
 }
 
 test "model picker view filters and saves the selected row's controls" {
@@ -412,14 +444,14 @@ test "model picker view filters and saves the selected row's controls" {
     const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .high };
     var selected = select(&menu, "terra low api", defaults, null);
     try std.testing.expect(selected != null);
-    try std.testing.expectEqualStrings("gpt-6.1-terra", menu.entries[selected.?.index].id);
+    try std.testing.expectEqualStrings("gpt-6.1-terra", menu.entries[selected.?.index(&menu)].id);
     const saved = step(&menu, "terra low api", defaults, &selected, .save).?;
     try std.testing.expectEqualStrings("gpt-6.1-terra", saved.model);
     try std.testing.expectEqual(picker.ReasoningEffort.low, saved.effort.?);
     try std.testing.expectEqual(picker.Provider.openai, saved.provider);
     _ = step(&menu, "terra low api", defaults, &selected, .next_sign_in);
     try std.testing.expectEqual(picker.Provider.codex, selected.?.row.provider);
-    const index = selected.?.index;
+    const index = selected.?.index(&menu);
     _ = step(&menu, "terra low api", defaults, &selected, .{ .click = .{ .index = index, .target = .{ .sign_in = .openai } } });
     const clicked = step(&menu, "terra low api", defaults, &selected, .{ .click = .{ .index = index, .target = .model } }).?;
     try std.testing.expectEqual(picker.Provider.openai, clicked.provider);
@@ -427,9 +459,9 @@ test "model picker view filters and saves the selected row's controls" {
     try std.testing.expectEqual(picker.ReasoningEffort.medium, selected.?.row.effort.?);
     _ = step(&menu, "terra low api", defaults, &selected, .{ .click = .{ .index = index, .target = .lower_effort } });
     try std.testing.expectEqual(picker.ReasoningEffort.low, selected.?.row.effort.?);
-    selected = select(&menu, "sol", defaults, selected.?.index);
-    try std.testing.expectEqualStrings("gpt-6.1-sol", menu.entries[selected.?.index].id);
-    try std.testing.expectEqualStrings("no-such-model", select(&menu, "no-such-model", defaults, null).?.entry(&menu).id);
+    selected = select(&menu, "sol", defaults, selected.?.index(&menu));
+    try std.testing.expectEqualStrings("gpt-6.1-sol", menu.entries[selected.?.index(&menu)].id);
+    try std.testing.expectEqualStrings("no-such-model", select(&menu, "no-such-model", defaults, null).?.id.slice());
 }
 
 test "model picker view drops columns before the ID without prose rows" {
@@ -517,7 +549,7 @@ test "model picker truncated rows and overflow use ASCII in an ASCII locale" {
 }
 
 test "model picker view truncates long live model IDs without losing controls" {
-    var id: [2048]u8 = @splat('a');
+    var id: [model_catalog.max_model_bytes]u8 = @splat('a');
     var providers: picker.Providers = .empty;
     providers.insert(.openai);
     const entries = [_]picker.Entry{.{ .id = &id, .known = false, .catalogued = false, .providers = providers }};
@@ -541,7 +573,7 @@ test "model picker view drops other efforts without losing the selected model" {
     const narrow = try lines(arena.allocator(), &menu, "", .{}, selected, 30);
     var selected_visible = false;
     for (narrow.rows) |line| if (line.model) |index| {
-        if (index == selected.index) {
+        if (index == selected.index(&menu)) {
             try std.testing.expect(std.mem.indexOf(u8, line.text, "openai/gpt-4.1") != null);
             selected_visible = true;
         } else try std.testing.expect(std.mem.indexOf(u8, line.text, "low") == null);
@@ -573,11 +605,11 @@ test "model picker view moves only among matching models and keeps single choice
     try std.testing.expectEqual(initial.effort, choice.?.row.effort);
     try std.testing.expectEqual(initial.provider, choice.?.row.provider);
     _ = step(&menu, "", .{}, &choice, .next);
-    try std.testing.expect(choice.?.index > menu.find("openai/gpt-4.1").?);
+    try std.testing.expect(choice.?.index(&menu) > menu.find("openai/gpt-4.1").?);
     _ = step(&menu, "", .{}, &choice, .previous);
-    try std.testing.expectEqual(menu.find("openai/gpt-4.1").?, choice.?.index);
-    choice = select(&menu, "openai/gpt-4.1", .{}, choice.?.index);
-    try std.testing.expectEqual(menu.find("openai/gpt-4.1").?, choice.?.index);
+    try std.testing.expectEqual(menu.find("openai/gpt-4.1").?, choice.?.index(&menu));
+    choice = select(&menu, "openai/gpt-4.1", .{}, choice.?.index(&menu));
+    try std.testing.expectEqual(menu.find("openai/gpt-4.1").?, choice.?.index(&menu));
     try std.testing.expect(choice.?.row.effort == null);
     _ = step(&menu, "openai/gpt-4.1", .{}, &choice, .lower_effort);
     try std.testing.expect(choice.?.row.effort == null);
@@ -597,7 +629,7 @@ test "model picker domain narrows several one none and saves an owned typed choi
         .{ "terra low api", 1, "gpt-6.1-terra" },
         .{ "private-chat", 1, "private-chat" },
         .{ "not-yet-listed", 1, "not-yet-listed" },
-        .{ "unmatched words", 1, "unmatched words" },
+        .{ "unmatched words", 3, "gpt-6.1-sol" },
     };
     inline for (cases) |case| {
         var choice = open(&menu, case[0], defaults);
@@ -624,6 +656,54 @@ test "model picker domain narrows several one none and saves an owned typed choi
     try std.testing.expectEqual(picker.Provider.openai, typed.?.row.provider);
     const clicked = step(&menu, "typed-custom", defaults, &typed, .{ .click = .{ .index = menu.entries.len, .target = .model } }).?;
     try std.testing.expectEqualStrings("typed-custom", clicked.model);
+}
+
+/// Exercise admission through the same select, row and save path as typed input.
+fn expectTypedAdmission(menu: *const picker.Menu, words: []const u8, admitted: bool) !void {
+    const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .low };
+    var choice = open(menu, words, defaults);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const plan = try rows(arena.allocator(), menu, words, defaults, choice, 100, .unicode, true, .read);
+    try std.testing.expectEqual(if (admitted) @as(usize, 1) else menu.entries.len, plan.count);
+    try std.testing.expectEqual(admitted, plan.typed_row);
+    for (0..plan.count) |at| {
+        const line = try plan.row(arena.allocator(), at);
+        try std.testing.expectEqual(admitted, line.model.? == menu.entries.len);
+    }
+    const selected = try plan.row(arena.allocator(), plan.selected.?);
+    try std.testing.expectEqual(admitted, selected.model.? == menu.entries.len);
+    const saved = step(menu, words, defaults, &choice, .save).?;
+    try std.testing.expectEqualStrings(if (admitted) words else "gpt-6.1-sol", saved.model);
+    try std.testing.expect(model_catalog.validModelSyntax(saved.model));
+    // Hit testing and keyboard actions consume the same effective query.
+    const clicked = step(menu, words, defaults, &choice, .{ .click = .{ .index = selected.model.?, .target = .model } }).?;
+    try std.testing.expectEqualStrings(saved.model, clicked.model);
+    _ = step(menu, words, defaults, &choice, .next);
+    try std.testing.expectEqualStrings(if (admitted) words else "gpt-6.1-terra", choice.?.id.slice());
+}
+
+test "model picker typed choice admission spans bytes whitespace Unicode and length boundaries" {
+    var menu = try picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\n" } } }});
+    defer menu.deinit(std.testing.allocator);
+    // An independent byte-domain oracle, including every control and high byte.
+    var words = "missing-model-x".*;
+    for (0..256) |byte| {
+        words[words.len - 1] = @intCast(byte);
+        try expectTypedAdmission(&menu, &words, byte >= 0x21 and byte <= 0x7e);
+    }
+    for ([_][]const u8{ "missing words", " missing", "missing ", " ", "\t", "missing\n", "missing\r", "missing-λ", "模型", "missing-\xff" }) |invalid| {
+        try expectTypedAdmission(&menu, invalid, false);
+    }
+    const long: [model_catalog.max_model_bytes + 1]u8 = @splat('z');
+    const cases = [_]struct { length: usize, admitted: bool }{
+        .{ .length = 0, .admitted = false },
+        .{ .length = 1, .admitted = true },
+        .{ .length = model_catalog.max_model_bytes - 1, .admitted = true },
+        .{ .length = model_catalog.max_model_bytes, .admitted = true },
+        .{ .length = model_catalog.max_model_bytes + 1, .admitted = false },
+    };
+    for (cases) |case| try expectTypedAdmission(&menu, long[0..case.length], case.admitted);
 }
 
 test "model picker domain accounts for overflow at every selection height and width" {
