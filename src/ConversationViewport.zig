@@ -518,30 +518,49 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
         };
 
-        /// Inserts/removes just this row's bounded output. Other folds and live
-        /// text stay intact. The first visible line is held while the feed grows
-        /// below the heading; normal viewport clamping handles a short close.
-        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool, layout: Layout, height: u16) !?Edit {
+        const ToolEdit = struct { start: usize, end: usize, added: usize, discard: usize };
+
+        fn toolEdit(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool) !?ToolEdit {
             const heading = self.findTool(reference) orelse return null;
             if (self.toolIsOpen(heading) == open) return null;
-            var start = @min(self.lineEnd(heading) + 1, self.text().len);
+            const start = @min(self.lineEnd(heading) + 1, self.text().len);
             var end = start;
             while (self.toolOutput(end)) end = self.nextLine(end) orelse self.text().len;
             const added = if (open) rows.length else 0;
             const removed = end - start;
-            const first_row = self.first(layout, height);
-            self.top = first_row;
+            var discard: usize = 0;
             if (self.length - removed + added > limit) {
                 const wanted = self.length - removed + added - limit;
-                const discard = self.lineEnd(wanted) + 1;
-                // Evict only older complete lines, as live append does. A row
-                // at the very front of a full view cannot grow without losing
-                // that row or newer canonical text: let the frontend say so.
+                discard = self.lineEnd(wanted) + 1;
+                // Only older complete lines can leave, never this heading
+                // or newer canonical text. Check before mutating either copy.
                 if (discard > heading) return error.ToolFoldViewFull;
-                self.discardFront(self.origin + discard);
-                self.top = .{ .offset = first_row.offset -| discard, .row = first_row.row };
-                start -= discard;
-                end -= discard;
+            }
+            return .{ .start = start, .end = end, .added = added, .discard = discard };
+        }
+
+        /// Validate all copies before editing any. True means this Reference
+        /// exists, including when it already has the desired state.
+        pub fn checkToolOpen(self: *const Self, reference: tool_fold.Reference, rows: anytype, open: bool) !bool {
+            _ = try self.toolEdit(reference, rows, open);
+            return self.findTool(reference) != null;
+        }
+
+        /// Inserts/removes just this row's bounded output. Other folds and live
+        /// text stay intact. A refused insertion changes neither text nor anchor.
+        pub fn setToolOpen(self: *Self, reference: tool_fold.Reference, rows: anytype, open: bool, layout: Layout, height: u16) !?Edit {
+            const plan = try self.toolEdit(reference, rows, open) orelse return null;
+            var start = plan.start;
+            var end = plan.end;
+            const added = plan.added;
+            const removed = end - start;
+            const first_row = self.first(layout, height);
+            self.top = first_row;
+            if (plan.discard != 0) {
+                self.discardFront(self.origin + plan.discard);
+                self.top = .{ .offset = first_row.offset -| plan.discard, .row = first_row.row };
+                start -= plan.discard;
+                end -= plan.discard;
             }
             if (added > removed) {
                 std.mem.copyBackwards(u8, self.bytes[start + added .. self.length - removed + added], self.bytes[end..self.length]);

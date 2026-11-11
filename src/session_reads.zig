@@ -825,7 +825,8 @@ const DisplayCapture = struct {
 };
 
 /// Authenticate the selected Tool Result unchanged, then stage only its
-/// bounded printed output. Store/model-facing Bash envelopes stay canonical.
+/// bounded printed output. The public content reader calls Output.begin with
+/// Host-checked tool provenance before feeding the unchanged canonical bytes.
 pub fn fullTool(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     const requests = task.requests();

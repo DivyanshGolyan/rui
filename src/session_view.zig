@@ -1367,15 +1367,24 @@ pub const ToolHeaderFacts = struct {
 };
 
 pub const ToolHeaderScan = struct {
-    line: [64]u8 = undefined,
+    line: [128]u8 = undefined,
     length: usize = 0,
     ended: bool = false,
     overflow: bool = false,
+    framed: bool = false,
 
     pub fn feed(self: *@This(), bytes: []const u8) !void {
         for (bytes) |byte| {
             if (self.ended) return;
             if (byte == '\n') {
+                if (!self.framed and self.length < self.line.len) {
+                    self.line[self.length] = '\n';
+                    if (@import("bash_result_format.zig").decode(self.line[0 .. self.length + 1]) != null) {
+                        self.framed = true;
+                        self.length = 0;
+                        continue;
+                    }
+                }
                 self.ended = true;
             } else if (self.length < self.line.len) {
                 self.line[self.length] = byte;
@@ -1743,7 +1752,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
             .tool_result => |result| {
                 var scan: ToolHeaderScan = .{};
                 try content(requests, store, session, item, result.content, &scan);
-                try toolResultRow(result.presentation, scan.facts(result.presentation.code), .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = result.content }, sink, colour, compact_tools);
+                try toolResultRow(result.presentation, scan.facts(result.presentation.code), tool_fold.resultReference(item.position, item.ordinal, result.content), sink, colour, compact_tools);
             },
             // A call the provider ran is its line alone, grouped with
             // other tool rows like a result with no output.
@@ -1972,4 +1981,15 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     const projection = Consent.project(screen.consent, .{ .action_page = true, .read = true }, false);
     try std.testing.expect(projection.approval == .preview);
     try std.testing.expect(Consent.offered(screen.consent, projection.approval) == null);
+}
+
+test "tool exit scanner accepts versioned framing before Bash status" {
+    const format = @import("bash_result_format.zig");
+    var buffer: [format.max_header]u8 = undefined;
+    const body = "Bash failed. Exit code: 7.\nstdout tail:\n";
+    const head = try format.header(&buffer, .{ body.len, 0, 0, 0, 0 });
+    var scan: ToolHeaderScan = .{};
+    for (head) |byte| try scan.feed(&.{byte});
+    try scan.feed(body);
+    try std.testing.expectEqual(@as(?u16, 7), scan.facts(.failed).exit);
 }

@@ -134,7 +134,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 		if index == 1 {
 			text = "Bash failed. Exit code: 7."
 		}
-		outputs = append(outputs, item, map[string]any{"type": "function_call_output", "call_id": item["call_id"], "output": text})
+		outputs = append(outputs, item, map[string]any{"type": "function_call_output", "call_id": item["call_id"], "output": framedBashForTest(text)})
 	}
 	toolRequest(t, client, server.ProviderURL(), ids[0], outputs...)
 	summary := server.Snapshot(true)
@@ -156,7 +156,7 @@ func TestToolTurnCountsDispatchAndWorkloadSeparately(t *testing.T) {
 func TestToolOutputsRequireExactIssuedCalls(t *testing.T) {
 	issued := []toolCall{{ID: "tool-000-dispatch-001", Kind: "dispatch"}, {ID: "tool-000-workload", Kind: "workload"}}
 	output := func(id, text string) json.RawMessage {
-		encoded, _ := json.Marshal(map[string]any{"type": "function_call_output", "call_id": id, "output": text})
+		encoded, _ := json.Marshal(map[string]any{"type": "function_call_output", "call_id": id, "output": framedBashForTest(text)})
 		return encoded
 	}
 	good := "Bash succeeded. Exit code: 0.\nrui-measure-park 1.000000\nrui-measure-start 2.000000"
@@ -299,4 +299,8 @@ func TestBarrierHoldsWorkloadUntilRelease(t *testing.T) {
 	if markers := shellMarker.FindAllStringSubmatch(stderr.String(), -1); len(markers) != 2 || markers[0][1] != "park" || markers[1][1] != "start" {
 		t.Fatalf("markers in %q", stderr.String())
 	}
+}
+
+func framedBashForTest(body string) string {
+	return fmt.Sprintf("RUI-BASH-RESULT/1 %d 0 0 0 0\n%s", len(body), body)
 }

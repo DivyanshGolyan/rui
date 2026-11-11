@@ -3850,7 +3850,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The content bytes, from the requested offset. */
+            /** @description The content bytes, from the requested offset. Optional X-Rui-Tool: bash identifies a canonical Bash Tool Result; absence means plain content. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3964,7 +3964,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description The content bytes, from the requested offset. */
+            /** @description The content bytes, from the requested offset. Optional X-Rui-Tool: bash identifies a canonical Bash Tool Result; absence means plain content. */
             200: {
                 headers: {
                     [name: string]: unknown;

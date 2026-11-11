@@ -1,4 +1,5 @@
 const std = @import("std");
+const result_format = @import("bash_result_format.zig");
 const change_ring = @import("change_ring.zig");
 const activity_reply = @import("activity_reply.zig");
 const os = @import("os/os.zig");
@@ -1836,16 +1837,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             };
             try fd.json(200, activity_reply.max_search_bytes, host_reply.renderActivitySearch, .{page});
         },
-        .activity_content => |*command| {
-            const location = host.store.openActivityContent(command) catch |err| switch (err) {
-                error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
-                else => {
-                    fenceDispatch(host, "activity content", err);
-                    return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
-                },
-            };
-            try deliverPublicContent(host, fd, location, 0, true);
-        },
+        .activity_content => |*command| try prepareActivityContent(host, fd, command),
         .skill_suggestions => |*command| {
             const scope: @import("skill_suggestions.zig").Scope = if (command.session) |*session| .{ .session = session.slice() } else .{ .workspace = command.workspace.?.slice() };
             var page = readSkillSuggestions(host, host.allocator, scope, command.prefix.slice()) catch |err| {
@@ -1938,6 +1930,17 @@ fn deliverConversationContent(host: *Host, fd: std.posix.fd_t, command: protocol
     };
 }
 
+fn prepareActivityContent(host: *Host, fd: *Reply, command: *const protocol.ReadActivityContent) !void {
+    const location = host.store.openActivityContent(command) catch |err| switch (err) {
+        error.ContentNotFound => return respondStatic(fd, 409, .activity_unavailable, @errorName(err)),
+        else => {
+            fenceDispatch(host, "activity content", err);
+            return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+        },
+    };
+    try deliverPublicContent(host, fd, location, 0, true, command.session, command.position, command.ordinal);
+}
+
 fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.ConversationContent) !void {
     const location = host.store.openPublicConversationContent(command) catch |err| switch (err) {
         error.ContentNotFound, error.RangeOutOfBounds => return respondStatic(fd, 409, .conversation_unavailable, @errorName(err)),
@@ -1946,10 +1949,33 @@ fn prepareConversationContent(host: *Host, fd: *Reply, command: *const protocol.
             return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
         },
     };
-    return deliverPublicContent(host, fd, location, command.start, command.stream);
+    return deliverPublicContent(host, fd, location, command.start, command.stream, command.session, command.position, command.ordinal);
 }
 
-fn deliverPublicContent(host: *Host, fd: *Reply, location: store_module.ContentLocation, start: u64, stream: bool) !void {
+fn publicToolKind(host: *Host, session: anytype, position: u64, ordinal: u64) !result_format.Kind {
+    if (ordinal == 0) return .plain;
+    const tool = try host.store.activityTool(&.{ .session = session, .position = position, .ordinal = ordinal });
+    // The Store provenance-checks this immutable content identity. Compare
+    // both length and digest, never model prose or a caller-supplied name.
+    return toolKindFromName(tool.name);
+}
+
+fn toolKindFromName(name: protocol.ProposalFieldReference) result_format.Kind {
+    return if (name.length == 4 and std.mem.eql(u8, &name.digest, &protocol.contentDigest("bash"))) .bash else .plain;
+}
+
+test "public tool kind binds exact stored name identity rather than result prose" {
+    try std.testing.expectEqual(result_format.Kind.bash, toolKindFromName(.{ .length = 4, .digest = protocol.contentDigest("bash") }));
+    try std.testing.expectEqual(result_format.Kind.plain, toolKindFromName(.{ .length = 5, .digest = protocol.contentDigest("bash") }));
+    try std.testing.expectEqual(result_format.Kind.plain, toolKindFromName(.{ .length = 4, .digest = protocol.contentDigest("Bash") }));
+    try std.testing.expectEqual(result_format.Kind.plain, toolKindFromName(.{ .length = 4, .digest = protocol.contentDigest("fake") }));
+}
+
+fn deliverPublicContent(host: *Host, fd: *Reply, location: store_module.ContentLocation, start: u64, stream: bool, session: anytype, position: u64, ordinal: u64) !void {
+    fd.tool_kind = publicToolKind(host, session, position, ordinal) catch |err| {
+        fenceDispatch(host, "public tool identity", err);
+        return respondStatic(fd, 500, .invocation_error, "canonical_store_failure");
+    };
     fd.setContent(location, start, stream, true) catch |err| {
         fenceDispatch(host, "public content", err);
         fd.deinit();
@@ -2284,7 +2310,8 @@ fn respondStatic(reply: *Reply, status: u16, kind: protocol.ErrorType, code: []c
 const Reply = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
-    header: [320]u8 = undefined,
+    header: [384]u8 = undefined,
+    tool_kind: result_format.Kind = .plain,
     header_length: usize = 0,
     header_sent: usize = 0,
     window: [protocol.content_window_bytes]u8 = undefined,
@@ -2398,7 +2425,7 @@ const Reply = struct {
         self.end = start + length;
         if (public) {
             try self.fill();
-            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\nConnection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ length, location.reference.length, self.end });
+            const header = try std.fmt.bufPrint(&self.header, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {d}\r\nX-Rui-Content-Bytes: {d}\r\nX-Rui-Next-Offset: {d}\r\n{s}Connection: close\r\nX-Rui-Wire-Version: " ++ protocol.wire_version ++ "\r\n\r\n", .{ length, location.reference.length, self.end, if (self.tool_kind == .bash) "X-Rui-Tool: bash\r\n" else "" });
             self.header_length = header.len;
             self.renew();
         } else try self.prepareHeader(200, "text/plain; charset=utf-8", length);
@@ -4676,4 +4703,50 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
         try std.testing.expect(std.mem.startsWith(u8, status, "HTTP/1.1 503 "));
     }
     try std.testing.expect(fail_index > 0);
+}
+
+test "public content route owners bind Bash metadata to canonical result groups" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: store_module.Store = undefined;
+    try store_module.testing.testingSqliteStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const session = try store_module.testing.configureTestSession(&storage, "content-kind-config");
+    try store_module.testingSubmitMessage(&storage, &tmp, "content-kind-input", "content-kind-message", session.slice(), "input");
+    const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    // Both rejections publish real result rows without launching a process.
+    try store_module.settleAnswerItemsForTesting(&storage, &tmp, binding, &.{
+        "{\"type\":\"function_call\",\"id\":\"bash-item\",\"call_id\":\"bash-call\",\"name\":\"bash\",\"arguments\":\"{}\"}",
+        "{\"type\":\"function_call\",\"id\":\"other-item\",\"call_id\":\"other-call\",\"name\":\"other\",\"arguments\":\"{}\"}",
+    }, "");
+    var page: store_module.PublicConversationPage = undefined;
+    try storage.publicConversationPage(&.{ .session = session }, &page);
+    var host = Host{ .io = std.testing.io, .allocator = std.testing.allocator, .lease = undefined, .store = &storage };
+    var results: usize = 0;
+    var messages: usize = 0;
+    for (page.items[0..page.count]) |item| {
+        if (item.kind != .tool_result and item.kind != .user) continue;
+        const bash_result = item.kind == .tool_result and item.ordinal == 1;
+        if (item.kind == .tool_result) results += 1 else messages += 1;
+        var activity = Reply{ .io = std.testing.io, .allocator = std.testing.allocator };
+        defer activity.deinit();
+        try prepareActivityContent(&host, &activity, &.{ .session = session, .position = item.position, .ordinal = item.ordinal });
+        var conversation = Reply{ .io = std.testing.io, .allocator = std.testing.allocator };
+        defer conversation.deinit();
+        try prepareConversationContent(&host, &conversation, &.{ .session = session, .position = item.position, .ordinal = item.ordinal, .stream = true });
+        for ([_]*Reply{ &activity, &conversation }) |reply| {
+            const head = reply.header[0..reply.header_length];
+            try std.testing.expect(std.mem.startsWith(u8, head, "HTTP/1.1 200 OK\r\n"));
+            try std.testing.expectEqual(bash_result, std.mem.indexOf(u8, head, "X-Rui-Tool: bash\r\n") != null);
+            try std.testing.expectEqual(item.content.length, reply.end);
+            try std.testing.expectEqual(item.content.length, reply.body.content.reader.reference.length);
+            try std.testing.expectEqualSlices(u8, &item.content.digest, &reply.body.content.reader.reference.digest);
+            try std.testing.expectEqualSlices(u8, &item.content.digest, &protocol.contentDigest(reply.window[0..reply.window_length]));
+        }
+        try std.testing.expectEqualStrings(activity.header[0..activity.header_length], conversation.header[0..conversation.header_length]);
+        try std.testing.expectEqualSlices(u8, activity.window[0..activity.window_length], conversation.window[0..conversation.window_length]);
+    }
+    try std.testing.expectEqual(@as(usize, 2), results);
+    try std.testing.expectEqual(@as(usize, 1), messages);
+    try std.testing.expect(!storage.isFenced());
 }

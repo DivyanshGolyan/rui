@@ -7,6 +7,7 @@ import tempfile
 import threading
 
 import bash_fixture
+from bash_result_frame import result_body
 import model_fixture as fixture
 from control_fixture import raw_request
 import host_process
@@ -72,6 +73,7 @@ def prove_timeout_feedback(state):
             bash_fixture.allow(state, store, f"{name}-allow", session, action["action"])
             fixture.wait_for(lambda: fixture.completed_observation(store, f"{name}-message"), f"{name} continuation")
             result = bash_fixture.result_text(store, session)
+            body = result_body(result)
             replay = json.loads(endpoint.requests[index * 2 + 1])
             outputs = [item["output"] for item in replay["input"] if item.get("type") == "function_call_output"]
             assert outputs == [result], replay
@@ -81,7 +83,7 @@ def prove_timeout_feedback(state):
             if effective is None:
                 # The model and the saved result get exactly the outcome and the
                 # nonempty stream: no empty stderr section, no retirement note.
-                assert result == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{workspace}", result
+                assert body == f"Bash succeeded. Exit code: 0.\nstdout tail:\n{workspace}", result
             else:
                 expected = (
                     f"Execution timed out after a {effective} ms total budget from process start; output does not reset it. "
@@ -89,7 +91,7 @@ def prove_timeout_feedback(state):
                     "For safe repeatable work, narrow the command or choose a longer timeout_ms. "
                     "A timed-out search does not establish absence.\n"
                 )
-                assert result.startswith("Bash timed_out."), result
+                assert body.startswith("Bash timed_out."), result
                 assert expected in result, result
                 assert "stdout tail:\nbefore" in result, result
                 assert marker.read_text() == "x" * (index + 1)

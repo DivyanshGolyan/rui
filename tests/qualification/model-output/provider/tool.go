@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"rui.local/qualification/bashresult"
 	"rui.local/qualification/measurement"
 )
 
@@ -237,8 +238,9 @@ func validateOutputs(issued []toolCall, input []json.RawMessage, barrier bool) (
 			continue
 		}
 		row := ToolOutput{CallID: item.CallID, Kind: kind, OutputBytes: len(item.Output)}
+		body, framed := bashresult.Body(item.Output)
 		markers := map[string]int{}
-		for _, match := range shellMarker.FindAllStringSubmatch(item.Output, -1) {
+		for _, match := range shellMarker.FindAllStringSubmatch(body, -1) {
 			markers[match[1]]++
 			switch match[1] {
 			case "park":
@@ -250,7 +252,7 @@ func validateOutputs(issued []toolCall, input []json.RawMessage, barrier bool) (
 		park := barrier && kind == "workload"
 		ordered := markers["start"] == 1 && markers["end"] == 0 &&
 			(!park && markers["park"] == 0 || park && markers["park"] == 1 && row.ShellParkNS <= row.ShellStartNS)
-		row.Succeeded = ordered && seen[item.CallID] == 1 && strings.HasPrefix(item.Output, "Bash succeeded. Exit code: 0.")
+		row.Succeeded = framed && ordered && seen[item.CallID] == 1 && strings.HasPrefix(body, "Bash succeeded. Exit code: 0.")
 		if seen[item.CallID] > 1 {
 			failures = append(failures, fmt.Sprintf("%d outputs for %s", seen[item.CallID], item.CallID))
 		} else if !row.Succeeded {

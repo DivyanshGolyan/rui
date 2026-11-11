@@ -324,8 +324,8 @@ def pages_case():
 
 def opening_case():
     """A Session reopened while Messages wait shows them as one counted
-    `◌ N · <newest>` row; a collapsed Message opens with Ctrl-O, and Esc
-    returns to the transcript."""
+    `◌ N · <newest>` row; Ctrl-O opens the lowest tool or collapsed Message, and Esc
+    returns from the Message page to the transcript."""
     release = threading.Event()
     long_text = "\n".join(f"LONG line {i:02d}" for i in range(40))
     with Chrome("rui-chrome-opening.", []) as chrome:
@@ -349,8 +349,21 @@ def opening_case():
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "HELD-DONE") and "◌" not in screen, timeout=30)
             chrome.leave(master, caller)
-            master, caller, _ = chrome.open(session, lambda screen: "HELD-DONE" in screen)
+            master, caller, reopened = chrome.open(session, lambda screen: "HELD-DONE" in screen)
+            assert "ctrl+o close" not in reopened and "    done" not in reopened, reopened
             folded = chrome.frame(master, b"\x1b[5~\x1b[5~", lambda screen: "┄ 38 more lines" in screen)
+            # The newer tool is below the old Message. Ctrl-O therefore opens
+            # the tool, and only this key—not reopening the Session—opens it.
+            tool = chrome.frame(master, b"\x0f", lambda screen: "    done" in screen and "ctrl+o close" in screen)
+            assert "Message · 40 lines" not in tool, tool
+            chrome.frame(master, b"\x0f", lambda screen: "ctrl+o close" not in screen and "    done" not in screen)
+            chrome.leave(master, caller)
+            # Now put the long Message below the tool so the same nearest-in-
+            # view rule selects the Message, rather than assuming tools lose.
+            chrome.endpoint.responses.append(fixture.sse_answer("later-long", "r", "m", "LATER-LONG-ANSWER")[0])
+            chrome.answered(session, long_text)
+            master, caller, reopened = chrome.open(session, lambda screen: "LATER-LONG-ANSWER" in screen and "┄ 38 more lines" in screen)
+            assert "ctrl+o close" not in reopened and "    done" not in reopened, reopened
             whole = chrome.frame(master, b"\x0f", lambda screen: rows(screen)[0].startswith("Message · 40 lines"))
             assert "LONG line 11" in whole and marker(whole) == "↓", whole
             chrome.frame(master, b"\x1b", lambda screen: "Message · 40 lines" not in screen)
@@ -359,7 +372,7 @@ def opening_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O opens a collapsed Message", flush=True)
+    print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
 def notice_case():

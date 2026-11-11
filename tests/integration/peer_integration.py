@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 
+from bash_result_frame import result_body
 import model_fixture as fixture
 import host_process
 from product_defaults import start_effort
@@ -358,7 +359,7 @@ def main(report_source):
         b_held = run(installed, "session", "inspect", "--store", store, "--session", session_b, home=home)
         assert b_held["work"]["state"]["kind"] != "finished", b_held
         settled = run(installed, "session", "inspect", "--store", store, "--session", session_a, "--profile", "full", home=home)["full"]["actions"][0]
-        assert settled["resolution"] == "succeeded" and settled["result"]["text"].startswith("Bash succeeded. Exit code: 0.\n"), settled
+        assert settled["resolution"] == "succeeded" and result_body(settled["result"]["text"]).startswith("Bash succeeded. Exit code: 0.\n"), settled
         # An explicit --store naming another Store is a plain caller's send
         # there: peer identity never crosses Stores (#957).
         elsewhere = json.loads((workspace / "conflicting-store.out").read_text())
@@ -563,7 +564,7 @@ class CohortModel(TestHTTPServer):
             assert sender_of(request) == self.parent, request
             assert last_user_text(request) == f"Report to parent ID {self.parent}", request
             if tool_outputs(request):
-                assert all(output.startswith("Bash succeeded. Exit code: 0.\n") for output in tool_outputs(request)), request
+                assert all(result_body(output).startswith("Bash succeeded. Exit code: 0.\n") for output in tool_outputs(request)), request
                 return answer(session, f"peer original result {session}")
             return bash_call(session, (
                 "n=0; while [ ! -e cohort-report-release ] && [ $n -lt 400 ]; do sleep 0.05; n=$((n+1)); done; "
@@ -581,7 +582,7 @@ class CohortModel(TestHTTPServer):
         if last_user_text(request).startswith("report from "):
             return answer("parent-reports", "parent received reports")
         if tool_outputs(request):
-            assert all(output.startswith("Bash succeeded. Exit code: 0.\n") for output in tool_outputs(request)), request
+            assert all(result_body(output).startswith("Bash succeeded. Exit code: 0.\n") for output in tool_outputs(request)), request
             return answer("parent-started", "parent original result")
         assert sender_of(request) is None, request
         # Start all configurators before any allocation is allowed. Each

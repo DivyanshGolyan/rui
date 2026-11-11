@@ -4,6 +4,7 @@ const client = @import("client.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const View = @import("session_view.zig");
+const tool_fold = @import("tool_fold.zig");
 
 pub const item_bytes = 8192;
 pub const max_scratch_bytes = item_bytes * protocol.public_conversation_page_items;
@@ -74,7 +75,7 @@ pub const Prepared = struct {
             };
             const staged: Staged = .{ .io = io, .scratch = scratch, .start = span.offset, .bytes = span.length, .window = &window };
             if (item.kind == .tool_result or item.kind == .hosted_call) {
-                try View.toolResultRow(item.presentation.?, if (prepared_body == .tool) prepared_body.tool.facts else .{}, if (item.kind == .tool_result) .{ .source = .conversation, .position = item.position, .ordinal = item.ordinal, .content = .{ .length = item.content.bytes, .digest = item.content.digest } } else null, sink, colour, &compact);
+                try View.toolResultRow(item.presentation.?, if (prepared_body == .tool) prepared_body.tool.facts else .{}, if (item.kind == .tool_result) tool_fold.resultReference(item.position, item.ordinal, .{ .length = item.content.bytes, .digest = item.content.digest }) else null, sink, colour, &compact);
                 continue;
             }
             compact = false;
