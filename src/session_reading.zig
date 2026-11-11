@@ -43,7 +43,7 @@ pub fn shows(phase: ReadPhase, inspection: Inspection) Shows {
     return switch (phase) {
         .message => .message,
         .recall => .recalled,
-        .activity, .permission => .staged,
+        .activity, .fill, .permission => .staged,
         .inspection => if (inspection == .copy) .copy else .page,
         .details => .page,
     };
@@ -68,6 +68,7 @@ pub const Unavailable = union(enum) { say: []const u8, copy };
 
 pub fn unavailable(phase: ReadPhase, inspection: Inspection) Unavailable {
     return switch (phase) {
+        .fill => .{ .say = "! Messages unavailable; scroll to retry. Draft retained." },
         .details => .{ .say = "! Details unavailable; draft retained." },
         .message => .{ .say = "! Message unavailable; Ctrl-O to retry. Draft retained." },
         .recall => .{ .say = "! Sent message unavailable; draft retained." },
@@ -144,6 +145,7 @@ test "a completed read shows what its phase read; only /copy's inspection copies
         .{ .message, .copy, .message },
         .{ .recall, .other, .recalled },
         .{ .activity, .other, .staged },
+        .{ .fill, .other, .staged },
         .{ .permission, .copy, .staged },
         .{ .inspection, .copy, .copy },
         .{ .inspection, .command, .page },
