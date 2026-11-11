@@ -569,7 +569,63 @@ const label_column: Column = .{ .name = "label", .type = .{ .text = .{ .min = 1,
 /// store_meta's keys, as bootstrap writes them: a closed set, so a key is
 /// a tag, which MySQL can key. `store_id` is the Store's own random id,
 /// drawn once when it is created and never changed (D204, format 54).
-const meta_keys = [_][]const u8{ "wire_version", "store_selector", "format", "store_id" };
+pub const MetaKey = enum { wire_version, store_selector, format, store_id };
+const meta_keys = blk: {
+    var names: [std.enums.values(MetaKey).len][]const u8 = undefined;
+    for (std.enums.values(MetaKey), 0..) |key, index| names[index] = @tagName(key);
+    break :blk names;
+};
+pub const MetaPresence = std.EnumSet(MetaKey);
+
+const MetaSeed = struct {
+    key: MetaKey,
+    value: union(enum) { binding: u8, literal: []const u8, random_id },
+};
+
+/// One seed policy, with engine-owned bindings/randomness. Both engines
+/// bind the canonical selector independently of the durable random id.
+pub fn metaSeed(comptime dialect: rsql.Dialect) []const MetaSeed {
+    return comptime blk: {
+        var seed: []const MetaSeed = &.{};
+        for (std.enums.values(MetaKey)) |key| {
+            const value: @FieldType(MetaSeed, "value") = switch (key) {
+                .wire_version => if (dialect == .sqlite) .{ .binding = 1 } else .{ .literal = wire_version },
+                .store_selector => .{ .binding = 2 },
+                .format => .{ .literal = format_text },
+                .store_id => if (dialect == .sqlite) .random_id else .{ .binding = 1 },
+            };
+            seed = seed ++ .{MetaSeed{ .key = key, .value = value }};
+        }
+        break :blk seed;
+    };
+}
+
+/// Draw only when a missing id will be inserted. No additional id cache.
+pub fn drawStoreId(io: std.Io) [2 * store_id_bytes]u8 {
+    var random: [store_id_bytes]u8 = undefined;
+    io.random(&random);
+    return std.fmt.bytesToHex(random, .lower);
+}
+
+/// MySQL's missing-key repair; transaction and ownership stay with admission.
+pub fn writeMissingMeta(w: *std.Io.Writer, seen: MetaPresence, id: *const [2 * store_id_bytes]u8, selector: []const u8) !void {
+    for (comptime metaSeed(.mysql)) |entry| {
+        if (seen.contains(entry.key)) continue;
+        const value = switch (entry.value) {
+            .literal => |value| value,
+            .binding => |binding| if (binding == 2) selector else id,
+            .random_id => unreachable,
+        };
+        if (entry.key == .store_selector) {
+            try w.writeAll("INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',_utf8mb4 X'");
+            try @import("mysql_literal.zig").writeHex(w, value);
+            try w.writeAll("' COLLATE utf8mb4_0900_bin);");
+            continue;
+        }
+        // Other values are schema literals or a lower-case hexadecimal id.
+        try w.print("INSERT INTO store_meta(meta_key,meta_value) VALUES('{s}','{s}');", .{ @tagName(entry.key), value });
+    }
+}
 
 /// The bytes of one MySQL `content_chunk` row; the last of a content's
 /// chunks holds the rest. Under 16 MiB, so a chunk is one packet.
@@ -2049,8 +2105,21 @@ const format_text = std.fmt.comptimePrint("{d}", .{schema_version});
 /// a wire bump is no schema change.
 /// The Store id is 16 bytes from SQLite's randomness, which it seeds from
 /// the OS, in lower-case hex, as `migrations` writes it too.
-const store_meta_sql = "INSERT INTO store_meta(meta_key,meta_value) VALUES('" ++ meta_keys[0] ++ "',?1),('" ++ meta_keys[1] ++ "',?2),('" ++ meta_keys[2] ++ "','" ++ format_text ++
-    "'),('" ++ meta_keys[3] ++ "',lower(hex(randomblob(" ++ std.fmt.comptimePrint("{d}", .{store_id_bytes}) ++ "))))";
+pub fn sqliteMetaSeedSql() [:0]const u8 {
+    return comptime blk: {
+        var sql: []const u8 = "INSERT INTO store_meta(meta_key,meta_value) VALUES";
+        for (metaSeed(.sqlite), 0..) |entry, index| {
+            sql = sql ++ (if (index == 0) "" else ",") ++ "('" ++ @tagName(entry.key) ++ "',";
+            sql = sql ++ switch (entry.value) {
+                .binding => |slot| std.fmt.comptimePrint("?{d}", .{slot}),
+                .literal => |value| "'" ++ value ++ "'",
+                .random_id => std.fmt.comptimePrint("lower(hex(randomblob({d})))", .{store_id_bytes}),
+            } ++ ")";
+        }
+        break :blk sql ++ "";
+    };
+}
+const store_meta_sql = sqliteMetaSeedSql();
 /// The bytes of a Store id; store_meta holds them as twice as many hex digits.
 pub const store_id_bytes = 16;
 const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, store_meta_sql };

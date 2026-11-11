@@ -3631,7 +3631,15 @@ reclaiming each other's endpoint.
 Scratch and diagnostics live in
 `runtimeDir`.
 Requests use the persistent `store_meta.store_id` (32 lowercase
-hex characters), never the URL or runtime path.
+hex characters), never the URL or runtime path. This durable id survives a
+restore to a differently named database, but canonical identity is validated
+separately: MySQL requires a saved `store_selector` to match the selector passed
+at admission (the database name for a launched Host). A mismatch or malformed
+saved id refuses startup before any write. A missing selector is repaired
+atomically with ownership acquisition without changing an existing durable id.
+Restoring under another database name therefore requires explicitly updating
+the saved selector to that name; the durable id remains unchanged. SQLite still
+validates its saved id and canonical directory selector.
 An initial MySQL
 `host_info` probe may send an empty `store` to discover that id; every other
 request must match it.
@@ -3646,7 +3654,13 @@ MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
 `store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL
-start refusal (D222):
+start refusal (D222). The existing `store_schema_behind` code has distinct,
+bounded static messages for older, newer or malformed numeric format metadata,
+a wire-version mismatch, an unexpected metadata key, a catalog mismatch and
+invalid identity metadata or connection target. These refusals precede metadata
+repair, ownership changes and sender cleanup, and expose no saved values or
+connection secrets. They add no public code or Store-format change; MySQL DDL,
+backup and forward migration application remain operator-owned:
 
 - `mysql_version`: the server is older than MySQL 8.4, or its version cannot be parsed.
 - `mariadb`: the version or version comment identifies MariaDB, separately from an old MySQL version.
