@@ -1,5 +1,6 @@
 //! One model field choice for chat info and application settings. The menu
-//! and its model IDs are borrowed until cancel/pick; drawing uses the picker.
+//! and row rendering belong to the picker. Live lists are version-validated
+//! for each event and frame; immutable lists may be borrowed until cancel.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -10,6 +11,14 @@ const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
 const Self = @This();
 
+/// The owner changes revision whenever it replaces or releases a list. A
+/// snapshot is borrowed for this synchronous operation only, never a lease.
+pub const Snapshot = struct { menu: ?*const picker.Menu = null, revision: u64 = 0 };
+pub const Source = struct {
+    context: *anyopaque,
+    read: *const fn (*anyopaque) Snapshot,
+};
+
 const fallback_entries = blk: {
     @setEvalBranchQuota(20000);
     var entries: [catalog.openai_ids.len]picker.Entry = undefined;
@@ -19,6 +28,8 @@ const fallback_entries = blk: {
 const fallback: picker.Menu = .{ .entries = &fallback_entries };
 
 active: bool = false,
+source: ?Source = null,
+revision: u64 = 0,
 menu: *const picker.Menu = &fallback,
 provider: picker.Provider = .codex,
 current: []const u8 = "",
@@ -36,7 +47,9 @@ quiet: vaxis.Style = .{ .dim = true },
 /// The most recent frame's model indices, borrowed from its draw arena.
 hits: []const usize = &.{},
 
+/// The immutable menu must outlive this choice. Mutable owners use openSource.
 pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, current: []const u8) void {
+    self.source = null;
     self.menu = menu orelse &fallback;
     self.provider = provider;
     self.current = current;
@@ -49,6 +62,29 @@ pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, c
         if (self.selected == null or std.mem.eql(u8, entry.id, current)) self.selected = at;
     };
     self.active = self.selected != null;
+}
+
+pub fn openSource(self: *Self, source: Source, provider: picker.Provider, current: []const u8) void {
+    const snapshot = source.read(source.context);
+    self.open(snapshot.menu, provider, current);
+    self.source = source;
+    self.revision = snapshot.revision;
+}
+
+/// Validate before dereferencing the stored menu or an old frame's hit list.
+/// The source owns invalidation; no menu or selection identity is copied.
+pub fn validate(self: *Self) bool {
+    if (!self.active) return false;
+    if (self.source) |source| {
+        const snapshot = source.read(source.context);
+        if (snapshot.revision != self.revision or (snapshot.menu orelse &fallback) != self.menu) self.cancel();
+    }
+    return self.active;
+}
+
+/// Named application actions remain the caller's; arrows and text filter.
+pub fn takesKey(key: vaxis.Key) bool {
+    return Editor.named(key) == null or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{});
 }
 
 pub fn cancel(self: *Self) void {
@@ -89,7 +125,11 @@ fn pick(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (!self.active) return;
+    if (!self.validate()) {
+        ctx.consumeAndRedraw();
+        return;
+    }
+    if (input == .key_press and !self.pasting and !takesKey(input.key_press)) return;
     if (input == .mouse) {
         const mouse = input.mouse;
         switch (mouse.button) {
@@ -155,6 +195,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
     self.hits = &.{};
+    if (!self.validate()) return surface;
     if (size.width == 0 or size.height == 0) return surface;
     const search = try std.fmt.allocPrint(ctx.arena, "  Filter: {s}{s}", .{ self.editor.buffer[0..self.editor.length], if (self.no_match) " · no matches" else "" });
     paint(ctx, surface, search, 0, self.quiet);
@@ -229,7 +270,7 @@ test "Model choice shares picker rows filters never empty and picks only its pro
         try std.testing.expectEqualStrings("g", drawn.readCell(3, 1).char.grapheme);
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (drawn.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-        try std.testing.expect(std.mem.indexOf(u8, text.written(), "1.05M") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text.written(), "1M") != null);
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "API key") == null);
     }
     try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = '5', .text = "5.5" } });
@@ -270,5 +311,49 @@ test "Model choice bounds scrolling and mouse picking use the visible list" {
     try std.testing.expectEqualStrings(wanted, fixture.picked.?);
     for (0..9) |width| for (0..5) |height| {
         _ = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+    };
+}
+
+test "Model choice invalidates every replaced or released source before keys mouse or drawing" {
+    const Live = struct {
+        const old = [_]picker.Entry{
+            .{ .id = "old-a", .known = false, .catalogued = false, .providers = .full },
+            .{ .id = "old-b", .known = false, .catalogued = false, .providers = .full },
+        };
+        const replacements = [_][]const picker.Entry{
+            &.{old[0]}, // shorter
+            &.{ old[1], old[0] }, // reordered
+            &.{}, // released/empty
+            &.{ .{ .id = "new-a", .known = false, .catalogued = false, .providers = .full }, old[0] }, // same length
+        };
+        menu: picker.Menu = .{ .entries = &old },
+        revision: u64 = 0,
+        fn read(raw: *anyopaque) Snapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .menu = &self.menu, .revision = self.revision };
+        }
+    };
+    for (Live.replacements) |entries| for (0..3) |operation| {
+        var live: Live = .{};
+        var fixture: Fixture = .{};
+        var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
+        choice.openSource(.{ .context = &live, .read = Live.read }, .codex, "old-b");
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} };
+        _ = try choice.widget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(usize, 2), choice.hits.len);
+        live.revision += 1;
+        live.menu.entries = entries;
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        switch (operation) {
+            0 => _ = try choice.widget().draw(draw_ctx),
+            1 => try choice.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 2, .col = 4 } }),
+            2 => try press(&choice, &ctx, vaxis.Key.enter),
+            else => unreachable,
+        }
+        try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
+        try std.testing.expect(!choice.active);
+        try std.testing.expectEqual(@as(usize, 0), choice.hits.len);
     };
 }

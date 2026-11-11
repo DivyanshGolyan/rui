@@ -98,7 +98,8 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         // leaving and an Upgrade's Esc work as on the overview, which owns
         // them and takes nothing else under the page.
         .key_press => |key| if (self.settings_open) {
-            const closes = key.matches(vaxis.Key.escape, .{}) or key.matches('g', .{ .ctrl = true });
+            const named = @import("TerminalEditor.zig").named(key);
+            const closes = named == .escape or named == .ctrl_g;
             if (self.pasting) {
                 ctx.consumeEvent();
             } else if (closes and self.settings_page.hasChoice()) {
@@ -107,7 +108,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             } else if (closes and !self.settings_page.upgradeTakesEscape()) {
                 try self.showMain(ctx);
                 ctx.consumeAndRedraw();
-            } else if (!AppSettings.takesKey(key)) {
+            } else if (!self.settings_page.takesKey(key)) {
                 try self.overview.handleEvent(ctx, input);
                 ctx.consumeAndRedraw();
             }
@@ -586,4 +587,27 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     ctx.cmds.clearRetainingCapacity();
     try root.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(ctx.cmds.items[0].request_focus.eql(hidden.widget()));
+}
+
+test "App root routes Model filter typing to settings and Escape closes only its choice" {
+    var text: vxfw.Text = .{ .text = "overview" };
+    var root: Self = .{ .overview = text.widget(), .list = text.widget(), .compose = text.widget(), .settings_open = true };
+    root.settings_page.model_choice.open(null, .codex, "");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
+    const typed: vxfw.Event = .{ .key_press = .{ .codepoint = 'g', .text = "gpt" } };
+    try root.widget().captureEvent(&ctx, typed);
+    try std.testing.expect(!ctx.consume_event);
+    try root.settings_page.widget().handleEvent(&ctx, typed);
+    try std.testing.expectEqualStrings("gpt", root.settings_page.model_choice.editor.buffer[0..root.settings_page.model_choice.editor.length]);
+    ctx.consume_event = false;
+    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expect(!root.settings_page.hasChoice());
+    try std.testing.expect(root.settings_open);
+    ctx.consume_event = false;
+    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expect(!root.settings_open);
 }

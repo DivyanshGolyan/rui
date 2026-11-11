@@ -1173,11 +1173,15 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn run(raw: *anyopaque) ?upgrade_status.Run {
             return owner(raw).state.upgrade.run;
         }
+        fn models(raw: *anyopaque) @import("model_choice.zig").Snapshot {
+            const state = &owner(raw).state;
+            return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision };
+        }
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = Callbacks.models };
 }
 
 fn destroy(self: *Self) void {
@@ -6681,4 +6685,59 @@ test "App settings typed queued saves settle on departure and retain failures" {
         }
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
     }
+}
+
+test "App settings Model borrow ends on every Overview menu replacement or release" {
+    for ([_]bool{ false, true }) |release| {
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        try std.testing.expect(try rig.press("/model") == null);
+        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        const page = &overview.root.settings_page;
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(page.model_choice.active);
+        try std.testing.expectEqual(&overview.state.menu, page.model_choice.menu);
+        // A failed refresh retains the same immutable list and its choice.
+        try std.testing.expect(try overview.event(.{ .models = .unanswered }) == null);
+        try std.testing.expect(page.model_choice.active);
+        if (release) {
+            try std.testing.expect(try overview.event(.{ .composed = .{ .input = .{ .composer = .{ .action = .clear } }, .draft = overview.composerDraft() } }) == null);
+        } else {
+            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
+        }
+        // The next page event validates before using an old index.
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(!page.hasChoice());
+        try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
+        try std.testing.expect(overview.root.settings_open);
+    }
+}
+
+test "App settings Model keeps every named app binding live while filter text stays local" {
+    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| {
+        // A lone ESC is deliberately incomplete in the byte fixture.
+        if (std.mem.eql(u8, bytes, "\x1b")) continue;
+        errdefer std.debug.print("settings Model key={s} bytes={x}\n", .{ @tagName(key), bytes });
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        const page = &overview.root.settings_page;
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(page.hasChoice());
+        const selected = overview.state.selected;
+        try app_events.send(&ctx, bytes, overview.root.widget(), page.widget());
+        const action = view.keys.get(key);
+        try std.testing.expectEqual(action == .exit, ctx.quit);
+        try std.testing.expectEqual(selected, overview.state.selected);
+        try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
+        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expectEqual(key != .escape and key != .ctrl_g, page.hasChoice());
+    };
 }

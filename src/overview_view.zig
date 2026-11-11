@@ -1038,6 +1038,8 @@ pub const State = struct {
     skill_rows: skill_completion.Rows = .{},
     /// The open picker's latest model lists, freed when it closes.
     menu: model_picker.Menu = .{},
+    /// Changes before a borrowed list is replaced or released.
+    menu_revision: u64 = 0,
     /// How the open picker's latest model-list read ended.
     menu_read: model_picker_view.Read = .unread,
     /// A model-list read is in flight.
@@ -1142,6 +1144,7 @@ pub const State = struct {
 
     fn closePicker(self: *State) void {
         self.picker = null;
+        self.menu_revision += 1;
         self.menu.deinit(self.gpa);
         self.menu_read = .unread;
     }
@@ -1773,6 +1776,7 @@ fn readModels(state: *State, read: ModelsRead) void {
             // them with this menu AND the current draft. A previously typed ID
             // must yield to listed matches, not become an extra row.
             picker.edits = null;
+            state.menu_revision += 1;
             state.menu.deinit(state.gpa);
             state.menu = owned;
             state.menu_read = .read;
