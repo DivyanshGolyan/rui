@@ -3908,6 +3908,58 @@ const HostRecovery = struct {
     }
 };
 
+test "Host line appears once in overview and chat at wide and narrow widths, never from list failure" {
+    const UnavailableList = struct {
+        fn read(_: *Self, _: client.Requests, _: protocol_reply.SessionListCursor, _: *protocol_reply.SessionListPage) !?protocol_reply.ReadFailure {
+            return error.ConnectionRefused;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    for ([_]HostRecovery.Availability{ .ready, .paused, .stopping, .stopped }) |availability| for ([_]bool{ false, true }) |open| {
+        errdefer std.debug.print("availability={s}, chat={}\n", .{ @tagName(availability), open });
+        const ops = HostRecovery.operations();
+        HostRecovery.dir = tmp.dir;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.hooks.scratch = HostRecovery.scratch;
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        defer if (overview.app_session) |left| {
+            left.frontend.?.stop();
+            overview.disposeSession(left);
+            overview.app_session = null;
+        };
+        if (open) try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        // A failed listing fades the held rows but says nothing about the
+        // Host. Discovery remains the shell Host line's sole observation.
+        overview.ops.list = UnavailableList.read;
+        HostRecovery.availability = availability;
+        overview.state.next_list_ms = 0;
+        try std.testing.expect(try overview.event(.{ .tick = (test_now_s + 1) * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(overview.state.list_stale);
+        try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
+        for ([_]u16{ 140, 46 }) |width| {
+            var shown = try rig.shown(width, 30);
+            defer shown.deinit();
+            const text = try shown.text();
+            const expected: ?[]const u8 = switch (availability) {
+                .ready => null,
+                .paused, .stopping => "■ Host paused",
+                .stopped => "■ Host stopped · r start",
+            };
+            try std.testing.expectEqual(@as(usize, @intFromBool(expected != null)), std.mem.count(u8, text, "Host "));
+            if (expected) |line| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, line));
+            try std.testing.expectEqual(availability == .stopped, std.mem.indexOf(u8, text, "r start") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "rui host") == null);
+            try std.testing.expect(std.mem.indexOf(u8, text, " ago. Run ") == null);
+        }
+    };
+}
+
 test "Host recovery keeps the open widget drafts and scroll and starts only on an empty draft r" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -5577,9 +5629,9 @@ test "App overview schedules spinning rows only while Root shows the list" {
             overview.caps.depth = .none;
             try std.testing.expectEqual(false, overview.wantsFrame());
             overview.caps = caps;
-            overview.state.unreachable_since_ms = 0;
+            overview.state.list_stale = true;
             try std.testing.expectEqual(false, overview.wantsFrame());
-            overview.state.unreachable_since_ms = null;
+            overview.state.list_stale = false;
             const row_state = overview.state.rows.items[0].state;
             overview.state.rows.items[0].state = .{ .idle = .{ .since = test_now_s } };
             try std.testing.expectEqual(false, overview.wantsFrame());
