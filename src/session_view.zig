@@ -11,7 +11,6 @@ const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
 const marks = @import("marks.zig");
 const work_line = @import("work_line.zig");
-const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
@@ -1645,24 +1644,10 @@ test "ending tails are quiet and joined in destination then key order" {
     try std.testing.expectEqualStrings("\n× Cause · Key\n", out.buffered());
 }
 
-/// What a live page needs to show the Messages people and scripts sent as
-/// they are taken.
-pub const Taking = struct {
-    /// The newest such Message shown while it waited, at its Admission: its
-    /// row never shows live.
-    drawn: queued_line.Drawn,
-    /// A position before the Admission of every such Message that waits at
-    /// the page's start, where a stop's search for those it excluded begins;
-    /// null when none waits.
-    from: ?u64,
-};
-
-/// Whether live output shows a waiting Message a person or script sent at
-/// its Admission: nothing holds the queue and it is the oldest waiting, so
-/// it is taken next and never waits above the input. Any other waits in
-/// the queued row and shows as its row once taken.
-pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, drawn: queued_line.Drawn, queued: protocol.Queued, held: bool) bool {
-    return value.state == .queued and value.admission > drawn.admission and !held and position == queued.oldest_position;
+/// Only the oldest waiting Message echoes in the feed when no work holds it.
+/// This row is provisional: once applied, the Message belongs at its user row.
+pub fn showsAtAdmission(position: u64, value: protocol.ActivityItem.Message, queued: protocol.Queued, held: bool) bool {
+    return value.state == .queued and !held and position == queued.oldest_position;
 }
 
 test "a waiting Message shows at its Admission only when nothing holds it and nothing older waits" {
@@ -1671,115 +1656,107 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
     const alone: protocol.Queued = .{ .count = 1, .oldest_position = 30, .newest_admission = 12, .newest_position = 30 };
     // A pending Session can wait long before it takes the Message, as after
     // Ctrl-R recovery: the conversation shows it at once, as on an idle send.
-    const before: queued_line.Drawn = .{ .admission = 10, .position = 20 };
-    try std.testing.expect(showsAtAdmission(30, waiting, before, alone, false));
+    try std.testing.expect(showsAtAdmission(30, waiting, alone, false));
     // Work under way holds it: it waits in the queued row.
-    try std.testing.expect(!showsAtAdmission(30, waiting, before, alone, true));
+    try std.testing.expect(!showsAtAdmission(30, waiting, alone, true));
     // An older Message waits, which the queued row shows: this one waits
     // with it, so the conversation shows both in order once taken.
-    try std.testing.expect(!showsAtAdmission(34, waiting, before, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
-    // Taken or excluded by the page's end, or shown already.
+    try std.testing.expect(!showsAtAdmission(34, waiting, .{ .count = 2, .oldest_position = 30, .newest_admission = 12, .newest_position = 34 }, false));
+    // Taken or excluded by the page's end.
     var taken = waiting;
     taken.state = .applied;
-    try std.testing.expect(!showsAtAdmission(30, taken, before, .{}, false));
-    try std.testing.expect(!showsAtAdmission(30, waiting, .{ .admission = 12, .position = 30 }, alone, false));
+    try std.testing.expect(!showsAtAdmission(30, taken, .{}, false));
+    taken.state = .excluded;
+    try std.testing.expect(!showsAtAdmission(30, taken, alone, false));
 }
 
-/// Writes a page and returns the newest Message a person or script sent
-/// that it or an earlier read showed while it waited (`Taking.drawn`). The
-/// sink learns each one as it shows (`drew`).
-/// `provider` remains accepted for callers; cause words are provider-neutral.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking, home: []const u8, destination: Destination) !queued_line.Drawn {
-    _ = provider;
-    const historical = page.facts.direction == .backward;
-    var from = taking.from;
-    var drawn = taking.drawn;
-    for (0..page.facts.count) |index| {
-        const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-        if (!historical and item.value == .stop) {
+/// Writes one Activity row, independent of traversal direction and prior reads.
+/// Returns whether its output is provisional and must be replaced when the
+/// current page's queue/work facts change. Settled rows use only Store content.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, compact_tools: *bool, home: []const u8, destination: Destination) !bool {
+    switch (item.value) {
+        .admission => |value| {
+            if (!showsAtAdmission(item.position, value, queued, held)) return false;
+            try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
+            return true;
+        },
+        .received => |value| try message(requests, store, session, item, value, .none, sink, colour, compact_tools),
+        .user => |value| {
+            if (value.sender != null) return false;
+            try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
+        },
+        .assistant => |assistant| {
             compact_tools.* = false;
-            if (from) |position| try excludedAtStop(requests, store, session, item, position, sink, colour);
-        }
-        // The sink learns which item its next bytes belong to: some items
-        // render nothing, and a read boundary must name the first that does.
-        sink.item(item);
-        switch (item.value) {
-            inline .admission, .received => |value, kind| {
-                if (historical and value.state == .applied) continue;
-                // A person's or script's Message shows live when it is
-                // taken: as its row, or at the stop that excluded it. Until
-                // then it waits above the input, unless it is taken next;
-                // one waiting at the opening too. The opening shows one a
-                // stop excluded, labelled.
-                if (kind == .admission and (!historical or value.state == .queued)) {
-                    if (!historical and from == null and value.state != .applied) from = item.position - 1;
-                    if (!showsAtAdmission(item.position, value, drawn, page.facts.queued, page.facts.work.work.state.holdsQueue())) continue;
-                    drawn = .{ .admission = value.admission, .position = item.position };
-                    sink.drew(drawn.admission);
-                }
-                try message(requests, store, session, item, value, if (historical) .lasting(page.facts.work.work.state.holdsQueue()) else .none, sink, colour, compact_tools);
-            },
-            .user => |value| {
-                // Live, another Session's Message showed as its Admission,
-                // and one shown while it waited never shows again.
-                if (!historical and (value.sender != null or value.admission <= drawn.admission)) continue;
-                try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
-            },
-            .assistant => |assistant| {
-                compact_tools.* = false;
-                try sink.feed("\n");
-                var answer: Answer(@TypeOf(sink)) = undefined;
-                answer.init(sink, home, colour, destination);
-                try content(requests, store, session, item, assistant.content, &answer);
-                try answer.finish();
-                try sink.feed("\n");
-            },
-            .tool_result => |result| {
-                var scan: ToolHeaderScan = .{};
-                try content(requests, store, session, item, result.content, &scan);
-                try toolResult(result.presentation, scan.facts(result.presentation.code), sink, colour, compact_tools);
-            },
-            // A call the provider ran is its line alone, grouped with
-            // other tool rows like a result with no output.
-            .hosted_call => |presentation| {
-                try toolResult(presentation, .{}, sink, colour, compact_tools);
-            },
-            // Hidden call rows use admission-certified page metadata. Exact
-            // proposal and permission inspection authenticate originals instead.
-            .call => {},
-            .turn_ended => |ended| {
-                // A done Turn's answer is its final assistant row, never a second answer.
-                if (ended.ending == .done) continue;
-                compact_tools.* = false;
-                // The report is deliberately not read: the shared cause owns the words.
-                if (!std.mem.eql(u8, ended.session.slice(), session)) {
-                    try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
-                } else try workEnded(sink, ended.code.slice(), colour);
-            },
-            .stop => |stop| {
-                compact_tools.* = false;
-                // A selected Turn owns its terminal line, even across page boundaries.
-                // Without a Turn, the stop itself is the completed outcome.
-                if (stop.turn == null) try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
-            },
-            .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
-            .send_failed => |failed| {
-                try sendFailed(sink, failed.target, compact_tools);
-            },
-            // The call's own line and the work status show the wait.
-            .approval_requested, .session_changed, .compacted => {},
-        }
+            try sink.feed("\n");
+            var answer: Answer(@TypeOf(sink)) = undefined;
+            answer.init(sink, home, colour, destination);
+            try content(requests, store, session, item, assistant.content, &answer);
+            try answer.finish();
+            try sink.feed("\n");
+        },
+        .tool_result => |result| {
+            var scan: ToolHeaderScan = .{};
+            try content(requests, store, session, item, result.content, &scan);
+            try toolResult(result.presentation, scan.facts(result.presentation.code), sink, colour, compact_tools);
+        },
+        // A call the provider ran is its line alone, grouped with
+        // other tool rows like a result with no output.
+        .hosted_call => |presentation| {
+            try toolResult(presentation, .{}, sink, colour, compact_tools);
+        },
+        // Hidden call rows use admission-certified page metadata. Exact
+        // proposal and permission inspection authenticate originals instead.
+        .call => {},
+        .turn_ended => |ended| {
+            // A done Turn's answer is its final assistant row, never a second answer.
+            if (ended.ending == .done) return false;
+            compact_tools.* = false;
+            // The report is deliberately not read: the shared cause owns the words.
+            if (!std.mem.eql(u8, ended.session.slice(), session)) {
+                try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
+            } else try workEnded(sink, ended.code.slice(), colour);
+        },
+        .stop => |stop| {
+            compact_tools.* = false;
+            try excludedAtStop(requests, store, session, item, sink, colour);
+            // A selected Turn owns its terminal line, even across page boundaries.
+            // Without a Turn, the stop itself is the completed outcome.
+            if (stop.turn == null) try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
+        },
+        .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
+        .send_failed => |failed| {
+            try sendFailed(sink, failed.target, compact_tools);
+        },
+        // The call's own line and the work status show the wait.
+        .approval_requested, .session_changed, .compacted => {},
     }
-    return drawn;
+    return false;
 }
 
-/// Shows the Messages a person or script sent that a live page's stop
-/// excluded, oldest first and labelled, at the stop: those
-/// waiting just before it, at or below its cutoff and admitted after `from`.
-/// One shown while it waited is labelled here too. Their bytes belong to no item.
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool) !void {
-    var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from, .kinds = .initOne(.admission) };
-    var first = true;
+/// A stop owns the admission-order prefix it excluded, labelled oldest first.
+/// At the instant before the stop, these were the queued suffix through its
+/// cutoff. Earlier applied/excluded Messages end the search. Two bounded
+/// passes keep oldest-first output without retaining pages or recursing.
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, sink: anytype, colour: bool) !void {
+    if (stop.value.stop.cutoff == 0) return;
+    var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .direction = .backward, .kinds = .initOne(.admission) };
+    var first: ?u64 = null;
+    search: while (true) {
+        const page = switch (try requests.activityPage(store, session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| {
+            const value = item.value.admission;
+            if (value.admission > stop.value.stop.cutoff) continue;
+            if (value.state != .queued) break :search;
+            first = item.position;
+        }
+        cursor = page.continuation() orelse break;
+    }
+    const lowest = first orelse return;
+    sink.excluding(lowest);
+    cursor = .{ .end = stop.position - 1, .position = lowest - 1, .kinds = .initOne(.admission) };
     while (true) {
         const page = switch (try requests.activityPage(store, session, cursor)) {
             .page => |page| page,
@@ -1788,8 +1765,6 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
         for (page.facts.items[0..page.facts.count]) |item| {
             var value = item.value.admission;
             if (value.state != .queued or value.admission > stop.value.stop.cutoff) continue;
-            if (first) sink.excluding(item.position);
-            first = false;
             value.state = .excluded;
             var compact = false;
             try message(requests, store, session, item, value, .lasting(false), sink, colour, &compact);

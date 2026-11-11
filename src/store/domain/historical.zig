@@ -203,6 +203,9 @@ pub const HistoricalView = struct {
     /// What the entry batch holds beyond its entries, on the heap for the
     /// view's life; its first read allocates it.
     page: ?*Page = null,
+    /// The settings an admission's commit already read for this view
+    /// (`Start`); `settings` then answers them without a round.
+    settled: ?*const HistoricalSettings = null,
     /// Open readers that borrow the page's bytes, which are then only
     /// added to.
     inline_readers: usize = 0,
@@ -383,6 +386,10 @@ pub const HistoricalView = struct {
     /// view once did, and reads the first page of the output check.
     pub fn settings(self: *HistoricalView, out: *HistoricalSettings) !void {
         std.debug.assert(self.active);
+        if (self.settled == out) {
+            self.settled = null;
+            return;
+        }
         try self.allocatePage();
         return readHistoricalSettings(self.store, self, out);
     }
@@ -806,73 +813,135 @@ const historical_settings = rsql.Read(.{
 /// `CorruptStore` for the rest, main's answer for each; so is a content
 /// row the settings name and the Store lacks.
 fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !void {
-    const page = view.page.?;
-    const row = page.decoded(historical_settings.Row);
-    row.model = &out.model;
-    row.session_ref = &out.session;
-    row.workspace = &out.workspace;
-    var standing: model_settlement_domain.attempt_standing.Result = undefined;
-    model_settlement_domain.queueAttemptKind(a, view.binding, &standing);
-    var found: store_access.Found = undefined;
-    a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, row, &found);
-    const first = view.output_frontier == null;
-    var boundary: reads_domain.First(output_boundary.Row) = .{};
-    var sources: OutputSources = .{ .view = view };
-    if (first) {
-        a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &boundary);
-        a.readEach(first_output_sources, .{ .operation = view.binding.operation_id }, output_source_page, &sources);
-    }
+    var read: SettingsRead = .init(view, out);
+    read.queue(a);
     try store_access.runNamed(a, .{.{ model_settlement_domain.attempt_standing, error.OperationReadFailed }}, error.CorruptStore);
-    _ = try model_settlement_domain.attemptKindOf(standing, view.binding);
-    if (!found.get() or !row.catalogs_consistent) return error.CorruptStore;
-    if (first) {
-        try sources.finish();
-        try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
-    }
-    page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
-    if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
-    view.tool_set_id = row.tool_set_id.get();
-    view.tool_count = row.member_count;
-    view.provider_tool_count = row.provider_count;
-    view.next_tool = 0;
-    out.tool_count = row.member_count;
-    const instructions: content_metadata.Row = .{ .byte_length = row.instructions_length, .digest = row.instructions_digest, .private = row.instructions_private };
-    out.baseline_instructions = try viewContent(view, row.instructions_content_id.get(), &instructions, false);
-    out.output_schema = if (row.output_schema_content_id) |id| schema: {
-        const output_schema: content_metadata.Row = .{
-            .byte_length = row.output_schema_length orelse return error.CorruptStore,
-            .digest = row.output_schema_digest orelse return error.CorruptStore,
-            .private = row.output_schema_private orelse return error.CorruptStore,
-        };
-        break :schema try viewContent(view, id.get(), &output_schema, false);
-    } else null;
-    out.store = a.store.selector;
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update("rui/session-affinity/v1");
-    var length: [8]u8 = undefined;
-    std.mem.writeInt(u64, &length, a.store.selector.len, .big);
-    hash.update(&length);
-    hash.update(a.store.selector.slice());
-    std.mem.writeInt(u64, &length, out.session.len, .big);
-    hash.update(&length);
-    hash.update(out.session.slice());
-    out.operation = switch (row.purpose) {
-        0 => .assistant_response,
-        1 => .compaction,
-        else => return error.CorruptStore,
-    };
-    if (row.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
-    out.compaction_trigger = row.compaction_trigger;
-    out.output_reservation = row.output_reservation orelse return error.CorruptStore;
-    out.reasoning_effort = row.reasoning_effort;
-    out.starting_effort = row.starting_effort;
-    out.provider = row.provider;
-    // Requests are built by the codec the Session pinned, which takes no
-    // options; a Session pinned to one this Host does not serve cannot be.
-    out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
-    if (!row.plain_codec) return error.CorruptStore;
-    out.session_affinity = hash.finalResult()[0..16].*;
+    return read.settle(a.store);
 }
+
+/// Where an admission starts the request of the Attempt it admits: the
+/// preparation's view and settings, which stay where they are.
+pub const Start = struct {
+    view: *HistoricalView,
+    settings: *HistoricalSettings,
+
+    /// Opens the view for `binding` with its page; false when there is no
+    /// memory for one, and the view is then not open.
+    pub fn open(start: Start, store: *Store, binding: AttemptBinding) bool {
+        start.view.* = .{ .store = store, .binding = binding };
+        start.view.allocatePage() catch return false;
+        return true;
+    }
+};
+
+/// The settings round as a value: `queue` binds its reads on the Access
+/// whose round or message runs them, and `settle` takes their answers
+/// once they ran. `settingsOf` runs it in a round of its own; an admission
+/// queues it behind its COMMIT (`Start`), where it costs no round trip.
+pub const SettingsRead = struct {
+    view: *HistoricalView,
+    out: *HistoricalSettings,
+    standing: model_settlement_domain.attempt_standing.Result = undefined,
+    found: store_access.Found = undefined,
+    first: bool,
+    boundary: reads_domain.First(output_boundary.Row) = .{},
+    sources: OutputSources,
+
+    pub fn init(view: *HistoricalView, out: *HistoricalSettings) SettingsRead {
+        return .{ .view = view, .out = out, .first = view.output_frontier == null, .sources = .{ .view = view } };
+    }
+
+    pub fn queue(read: *SettingsRead, a: anytype) void {
+        const view = read.view;
+        const row = view.page.?.decoded(historical_settings.Row);
+        row.model = &read.out.model;
+        row.session_ref = &read.out.session;
+        row.workspace = &read.out.workspace;
+        model_settlement_domain.queueAttemptKind(a, view.binding, &read.standing);
+        a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, row, &read.found);
+        if (read.first) {
+            a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &read.boundary);
+            a.readEach(first_output_sources, .{ .operation = view.binding.operation_id }, output_source_page, &read.sources);
+        }
+    }
+
+    /// This round as the reads an admission's commit carries.
+    pub fn follow(read: *SettingsRead) store_core.Follow {
+        return .{ .context = read, .queue = followQueue, .settle = followSettle };
+    }
+
+    fn followQueue(context: *anyopaque, a: *store_access.Access(.survey, error{})) void {
+        const read: *SettingsRead = @ptrCast(@alignCast(context));
+        read.queue(a);
+    }
+
+    /// A round whose answers do not settle leaves the view unsettled: its
+    /// owner's own `settings` round then answers as it always did.
+    fn followSettle(context: *anyopaque) void {
+        const read: *SettingsRead = @ptrCast(@alignCast(context));
+        read.settle(read.view.store) catch return;
+        read.view.settled = read.out;
+    }
+
+    pub fn settle(read: *SettingsRead, store: *Store) !void {
+        const view = read.view;
+        const out = read.out;
+        const page = view.page.?;
+        const row = page.decoded(historical_settings.Row);
+        const first = read.first;
+        const boundary = &read.boundary;
+        const sources = &read.sources;
+        _ = try model_settlement_domain.attemptKindOf(read.standing, view.binding);
+        if (!read.found.get() or !row.catalogs_consistent) return error.CorruptStore;
+        if (first) {
+            try sources.finish();
+            try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
+        }
+        page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
+        if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
+        view.tool_set_id = row.tool_set_id.get();
+        view.tool_count = row.member_count;
+        view.provider_tool_count = row.provider_count;
+        view.next_tool = 0;
+        out.tool_count = row.member_count;
+        const instructions: content_metadata.Row = .{ .byte_length = row.instructions_length, .digest = row.instructions_digest, .private = row.instructions_private };
+        out.baseline_instructions = try viewContent(view, row.instructions_content_id.get(), &instructions, false);
+        out.output_schema = if (row.output_schema_content_id) |id| schema: {
+            const output_schema: content_metadata.Row = .{
+                .byte_length = row.output_schema_length orelse return error.CorruptStore,
+                .digest = row.output_schema_digest orelse return error.CorruptStore,
+                .private = row.output_schema_private orelse return error.CorruptStore,
+            };
+            break :schema try viewContent(view, id.get(), &output_schema, false);
+        } else null;
+        out.store = store.selector;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("rui/session-affinity/v1");
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, store.selector.len, .big);
+        hash.update(&length);
+        hash.update(store.selector.slice());
+        std.mem.writeInt(u64, &length, out.session.len, .big);
+        hash.update(&length);
+        hash.update(out.session.slice());
+        out.operation = switch (row.purpose) {
+            0 => .assistant_response,
+            1 => .compaction,
+            else => return error.CorruptStore,
+        };
+        if (row.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
+        out.compaction_trigger = row.compaction_trigger;
+        out.output_reservation = row.output_reservation orelse return error.CorruptStore;
+        out.reasoning_effort = row.reasoning_effort;
+        out.starting_effort = row.starting_effort;
+        out.provider = row.provider;
+        // Requests are built by the codec the Session pinned, which takes no
+        // options; a Session pinned to one this Host does not serve cannot be.
+        out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
+        if (!row.plain_codec) return error.CorruptStore;
+        out.session_affinity = hash.finalResult()[0..16].*;
+    }
+};
 
 fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
     return self.queue().run(readHistoricalEntryHeld, .{ self, view, after_position });

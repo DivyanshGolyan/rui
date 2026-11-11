@@ -574,14 +574,20 @@ pub const Store = struct {
     /// Admission preparation uses this only as a replay hint. The writer always
     /// checks the original key and digest again before applying captured effects.
     pub fn commandExists(self: *Store, key: []const u8) !bool {
-        return self.queue().run(commandExistsHeld, .{ self, key });
+        return self.queue().run(commandExistsHeld, .{ self, key, null, null });
     }
 
-    fn commandExistsHeld(self: *Store, key: []const u8) !bool {
+    fn commandExistsHeld(self: *Store, key: []const u8, parent: ?[]const u8, workspace: ?*Bounded(workspace_path.max_bytes)) !bool {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.read, Ordinary.none) = .open(&entry);
         defer access.deinit();
+        if (parent) |reference| {
+            var row: configuration_domain.creation_hint.Row = .{ .replay = false, .workspace = workspace.? };
+            var found: @import("access.zig").Found = .missing;
+            access.readInto(configuration_domain.creation_hint, .{ .key = key, .parent = reference }, &row, &found);
+            return entry.finish(Ordinary.none, creationHintOn(&access, &row, &found));
+        }
         return entry.finish(Ordinary.none, commandExistsOn(&access, key));
     }
 
@@ -590,6 +596,17 @@ pub const Store = struct {
         command_domain.lookupCommand(a, key, &saved);
         try a.run();
         return saved != null;
+    }
+
+    /// Replay hint plus the inherited Workspace in the same preflight round.
+    pub fn creationHint(self: *Store, key: []const u8, parent: []const u8, workspace: *Bounded(workspace_path.max_bytes)) !bool {
+        return self.queue().run(commandExistsHeld, .{ self, key, parent, workspace });
+    }
+
+    fn creationHintOn(a: anytype, row: *const configuration_domain.creation_hint.Row, found: *const @import("access.zig").Found) !bool {
+        try a.run();
+        if (!found.get()) return error.CorruptStore;
+        return row.replay;
     }
 
     pub const SkillsState = struct {
@@ -652,7 +669,18 @@ pub const Store = struct {
     }
 
     pub fn configureWithCapturedSkills(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, faults: Faults) error{OutOfMemory}!ConfigureReply {
-        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, faults });
+        return self.configureWithCreationCommitted(command, preset, initial_skills, reload_capture, allocator, null, faults);
+    }
+
+    /// Configure's creation callback follows the same real COMMIT boundary as
+    /// MessageCommitted, including batch rollback/recovery and exact replay.
+    pub const CreationCommitted = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque, session: []const u8) void,
+    };
+
+    pub fn configureWithCreationCommitted(self: *Store, command: *const content_custody.ConfigureCommand, preset: ?*const configuration_domain.PresetDecision, initial_skills: ?*const skills_domain.Initial, reload_capture: ?*const skills_domain.Capture, allocator: std.mem.Allocator, committed: ?CreationCommitted, faults: Faults) error{OutOfMemory}!ConfigureReply {
+        return self.queue().write(configureHeld, .{ self, command, preset, initial_skills, reload_capture, allocator, committed, faults });
     }
 
     fn configureHeld(
@@ -662,6 +690,7 @@ pub const Store = struct {
         initial_skills: ?*const skills_domain.Initial,
         reload_capture: ?*const skills_domain.Capture,
         allocator: std.mem.Allocator,
+        committed: ?CreationCommitted,
         faults: Faults,
     ) error{OutOfMemory}!ConfigureReply {
         const entry = enter(self, .none) catch return .infrastructure_failure;
@@ -670,7 +699,7 @@ pub const Store = struct {
         defer access.deinit();
         // Running out of memory, the caller's for a reload or the engine's,
         // rolls the write back cleanly and is the caller's to answer.
-        return entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, faults))) catch |err| switch (err) {
+        return entry.finishTransaction(error{OutOfMemory}, faults, access.end(faults, configuration_domain.configure(&access, self.io, self.served, command, preset, initial_skills, reload_capture, allocator, committed, faults))) catch |err| switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => .infrastructure_failure,
         };
@@ -1088,10 +1117,18 @@ pub const Store = struct {
     /// Never inlined: its two Accesses and admission's rows (about 4 KiB)
     /// stay off the frame of a caller that goes on to dispatch the Attempt.
     pub fn admitModelAttempt(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
-        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults });
+        return self.admitModelAttemptInto(admission_kind, faults, null);
     }
 
-    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+    /// `admitModelAttempt`, which also starts the admitted Attempt's
+    /// request in `start`: its view opens there and its settings round
+    /// rides the admission's commit. `request_started` says whether it did;
+    /// when not, `start` is as it was and the caller opens the view.
+    pub fn admitModelAttemptInto(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
+        return self.queue().write(admitModelAttemptHeld, .{ self, admission_kind, faults, start });
+    }
+
+    noinline fn admitModelAttemptHeld(self: *Store, admission_kind: ModelAdmissionKind, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         const entry = try enter(self, .none);
         defer entry.release();
         var reader: ReadAccess = .open(&entry);
@@ -1100,16 +1137,16 @@ pub const Store = struct {
         // an assistant response under a guard on that size, and so reads no
         // size. Only the guard's failure, rolled back, admits again as the
         // compaction it showed is due.
-        const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults);
+        const first = admitModelAttemptOnce(&entry, &reader, admission_kind, .weighed, faults, start);
         const due = if (first) |_| false else |err| err == error.CompactionDue;
-        return entry.finishTransaction(Ordinary.none, faults, if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults) else first);
+        return entry.finishTransaction(Ordinary.none, faults, if (due) admitModelAttemptOnce(&entry, &reader, admission_kind, .over, faults, start) else first);
     }
 
     /// Never inlined: the second admission reuses the first's frame.
-    noinline fn admitModelAttemptOnce(entry: *const Entry, reader: *ReadAccess, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults) !?AttemptAdmission {
+    noinline fn admitModelAttemptOnce(entry: *const Entry, reader: *ReadAccess, admission_kind: ModelAdmissionKind, pressure: model_admission_domain.Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
         var writer: Access(.write, error{ SelectionChanged, ProjectionFailed, InstructionSelectionFailed, CompactionDue }) = .open(entry);
         defer writer.deinit();
-        return writer.end(faults, model_admission_domain.admitNextModelAttempt(reader, &writer, admission_kind, pressure, faults));
+        return writer.end(faults, model_admission_domain.admitNextModelAttempt(reader, &writer, admission_kind, pressure, faults, start));
     }
 
     pub fn admitNextActionAttempt(
@@ -1791,9 +1828,9 @@ comptime {
     // existing content identities for withdrawn names. Binding transient
     // history arguments avoids retaining a second copy of every call name.
     // Its 19032 bytes are below the previous 19240-byte resident ceiling;
-    // configuration reads reuse saved_tools for parent names and stay 14968.
+    // configuration reads reuse saved_tools for parent names and use 15032.
     // Exact, so a change to either size is a decision.
-    if (@sizeOf(configuration_domain.ConfigurationReads) != 14968 or scratch_bytes != 19032)
+    if (@sizeOf(configuration_domain.ConfigurationReads) != 15032 or scratch_bytes != 19032)
         @compileError(std.fmt.comptimePrint("the Store's scratch is {d} bytes and the configure reads {d}; restate them here", .{ scratch_bytes, @sizeOf(configuration_domain.ConfigurationReads) }));
     if (scratch_bytes - 4888 > accepted_settlement_growth) @compileError("the settlement batch outgrew what the owner accepted");
 }
@@ -2078,20 +2115,29 @@ pub fn commitsWithWrites(self: *Store) bool {
 /// the Host asks, and the commit stands.
 pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     const kept = &self.identities().survey;
-    if (kept.asked == .never) return writer.passCommit(null);
+    const follow = self.identities().follow;
+    self.identities().follow = null;
+    const surveyed = kept.asked != .never;
+    if (!surveyed and follow == null) return writer.passCommit(null);
     kept.kept = .none;
     var reads: store_access.Access(.survey, error{}) = .{ .store = self, .tail = true };
     defer reads.deinit();
+    if (follow) |after| after.queue(after.context, &reads);
     var survey: model_admission_domain.DispatchSurvey = .{};
-    survey.queue(&reads, kept.asked == .paused);
+    if (surveyed) survey.queue(&reads, kept.asked == .paused);
     if (reads.failure != null) {
         self.engine.dropTail();
         return writer.passCommit(null);
     }
     writer.passCommit(reads.asTail());
     if (writer.failure != null) return;
-    const answer: anyerror!?DispatchWork = if (reads.failure) |err| err else survey.work();
-    const found = (answer catch |err| {
+    if (reads.failure) |err| {
+        @as(anyerror!void, fence(self, err)) catch {};
+        return;
+    }
+    if (follow) |after| after.settle(after.context);
+    if (!surveyed) return;
+    const found = (survey.work() catch |err| {
         @as(anyerror!void, fence(self, err)) catch {};
         return;
     }) orelse return;
@@ -2102,6 +2148,23 @@ pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
     kept.tool_continuation = found.tool_continuation;
     kept.retry = found.retry;
     kept.kept = .fresh;
+}
+
+/// Reads a write asks to follow its COMMIT in the same message, ahead of
+/// the dispatch survey: `queue` binds them, and `settle` takes their
+/// answers once the message ran with no failure. They ride whole or not
+/// at all, as the survey does, so their owner must be able to read them
+/// in a round of its own.
+pub const Follow = struct {
+    context: *anyopaque,
+    queue: *const fn (*anyopaque, *store_access.Access(.survey, error{})) void,
+    settle: *const fn (*anyopaque) void,
+};
+
+/// Sets, or with null clears, the reads the holder's next commit carries
+/// (`commitWithSurvey`). The write that set them clears them when it ends.
+pub fn followCommit(self: *Store, follow: ?Follow) void {
+    self.identities().follow = follow;
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2147,10 +2210,24 @@ pub fn admitted(self: *Store, callback: Store.MessageCommitted, admission: Store
     if (self.batch == .none) return callback.call(callback.context, admission);
     const values = self.identities();
     values.admitted[values.admitted_len] = .{
-        .callback = callback,
+        .callback = .{ .message = callback },
         .session = admission.session[0..session_id.bytes].*,
         .admission_id = admission.admission_id,
         .from_peer = admission.from_peer,
+    };
+    values.admitted_len += 1;
+}
+
+/// A fresh native creation has no Message admission, but its Host effect
+/// still belongs to the batch's successful COMMIT, never a savepoint.
+pub fn created(self: *Store, callback: Store.CreationCommitted, session: []const u8) void {
+    if (self.batch == .none) return callback.call(callback.context, session);
+    const values = self.identities();
+    values.admitted[values.admitted_len] = .{
+        .callback = .{ .creation = callback },
+        .session = session[0..session_id.bytes].*,
+        .admission_id = 0,
+        .from_peer = false,
     };
     values.admitted_len += 1;
 }
@@ -2356,6 +2433,8 @@ const HostValues = struct {
     /// and advances the generation, then `ready` until the next advance.
     /// It fits the padding after `admitted_len`.
     survey: Survey = .{},
+    /// The reads the holder's next commit carries after it (`followCommit`).
+    follow: ?Follow = null,
 };
 
 const Survey = packed struct(u16) {
@@ -2371,13 +2450,16 @@ const Survey = packed struct(u16) {
 };
 
 const Admitted = struct {
-    callback: Store.MessageCommitted,
+    callback: union(enum) { message: Store.MessageCommitted, creation: Store.CreationCommitted },
     session: [session_id.bytes]u8,
     admission_id: u64,
     from_peer: bool,
 
     fn tell(self: *const Admitted) void {
-        self.callback.call(self.callback.context, .{ .session = &self.session, .admission_id = self.admission_id, .from_peer = self.from_peer });
+        switch (self.callback) {
+            .message => |callback| callback.call(callback.context, .{ .session = &self.session, .admission_id = self.admission_id, .from_peer = self.from_peer }),
+            .creation => |callback| callback.call(callback.context, &self.session),
+        }
     }
 };
 

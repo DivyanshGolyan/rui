@@ -83,7 +83,7 @@ jobs:
           sys.path.insert(0, 'tests/ci')
           from docs_only import ChangeKind, classify
           from qualification import shards, split_build
-          from select_tests import CHECK_COVERS
+          from select_tests import CHECK_COVERS, live_mysql_suites
           p = json.load(open('selection.json'))
           kind = (classify(p['base'], p['head']) if os.environ['EVENT_NAME'] == 'pull_request'
                   else ChangeKind.NORMAL)
@@ -111,6 +111,7 @@ jobs:
               # the frame gate and the Debug recovery, so they run beside it.
               core = {'check-full', 'test-logic', 'admission-debug-integration'}
               p['targets'] = sorted((set(p['targets']) - CHECK_COVERS - {'check'}) | core | {'stack-frames'})
+              p['targets'] = sorted(set(p['targets']) | live_mysql_suites(p['targets'], p['mysql_suites']))
               p['native_targets'] = sorted((set(p['native_targets']) - CHECK_COVERS - {'check'}) | core)
               p['retry'] = False
           elif ready_pr:
@@ -135,11 +136,11 @@ jobs:
               print('candidate_ref=' + os.environ['CANDIDATE_REF'], file=f)
               print('targets=' + json.dumps(p['targets']), file=f)
               print('native_targets=' + json.dumps(p['native_targets']), file=f)
-              print('linux_matrix=' + json.dumps(shards(p['targets'])), file=f)
+              print('linux_matrix=' + json.dumps(shards(p['targets'], mysql_suites=p['mysql_suites'])), file=f)
               print('linux_split=' + str(split_build(p['targets'])).lower(), file=f)
               print('macos_split=' + str(split_build(p['native_targets'])).lower(), file=f)
               print('linux_codegen=' + str(p['linux_codegen']).lower(), file=f)
-              print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos')), file=f)
+              print('macos_matrix=' + json.dumps(shards(p['native_targets'], 'macos', mysql_suites=p['mysql_suites'])), file=f)
               print('native=' + str(p['native_required']).lower(), file=f)
               print('upgrade=' + str(p['upgrade_required']).lower(), file=f)
               print('retry=' + str(p['retry']).lower(), file=f)
@@ -155,8 +156,7 @@ jobs:
     needs: plan
     if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' }}
     runs-on: ubuntu-24.04
-    # A tests/ci edit runs every self-check, about 4.5 minutes of the job.
-    timeout-minutes: 10
+    timeout-minutes: 5
     permissions:
       contents: read
     steps:
@@ -420,9 +420,7 @@ jobs:
       max-parallel: 10
       matrix: ${{ fromJSON(needs.plan.outputs.linux_matrix) }}
     env:
-      # The unit dialect check and launch-frame Host integration both
-      # require CI's live MySQL server.
-      LIVE_MYSQL: ${{ contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers') || contains(matrix.targets, 'launch-frame-integration') }}
+      LIVE_MYSQL: ${{ matrix.live_mysql }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -508,7 +506,7 @@ jobs:
         # Fails when the unit binary left no record or PREPAREd nothing, so
         # any path that keeps the check from running (selection, launcher
         # environment, caching) turns this shard red.
-        if: ${{ !cancelled() && (contains(matrix.targets, 'test') || contains(matrix.targets, 'test-store') || contains(matrix.targets, 'check') || (contains(matrix.targets, 'check-full') && matrix.part != 'callers')) }}
+        if: ${{ !cancelled() && matrix.mysql_dialect }}
         run: |
           set -euo pipefail
           python3 -B tests/ci/live_engine_step.py verify mysql | tee -a "$GITHUB_STEP_SUMMARY"
