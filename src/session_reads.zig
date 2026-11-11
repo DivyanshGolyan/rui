@@ -522,7 +522,10 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         // an Admission visible without adding another Activity row.
         const pending = item.value == .admission and item.value.admission.state == .queued;
         var row: RenderedRow = .{ .key = key, .offset = offset, .length = 0, .tight = false, .provisional = pending };
-        var output: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row };
+        var output: RowCapture = .{ .task = task, .file = job.files.inspection, .start = offset, .row = &row, .cap_target = switch (item.value) {
+            .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
+            else => null,
+        } };
         var compact = false;
         row.provisional = try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &output, job.colour, &compact, job.home, .{ .viewport = job.width_method }) or pending;
         row.tight = compact;
@@ -582,7 +585,8 @@ const DisplayCapture = struct {
 /// source even when full. Cuts end outside UTF-8 scalars and controls; the
 /// marker closes any hyperlink and resets presentation before its notice.
 const RowCapture = struct {
-    const more = TerminalText.link_close ++ "\x1b[0m\n… More — Ctrl-O for whole message\n";
+    const more = TerminalText.link_close ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ More — Ctrl-O for whole message" ++ View.Mark.reset ++ "\n";
+    const unkeyed_more = TerminalText.link_close ++ View.Mark.reset ++ "\n… More — Ctrl-O for whole message\n";
     task: *Task,
     file: std.Io.File,
     row: *RenderedRow,
@@ -590,6 +594,7 @@ const RowCapture = struct {
     length: u64 = 0,
     first: bool = true,
     cut: bool = false,
+    cap_target: ?View.Collapsed = null,
     boundary: u64 = 0,
     scalar_left: u3 = 0,
     control: enum { none, escape, csi, osc, osc_escape } = .none,
@@ -652,8 +657,16 @@ const RowCapture = struct {
     fn finish(self: *@This()) !void {
         if (!self.cut) return;
         self.length = self.boundary;
-        try self.file.writePositionalAll(self.task.io, more, self.start + self.length);
-        self.length += more.len;
+        // The cap mark follows all retained summaries, so its target must too.
+        const notice = if (self.cap_target != null and self.row.collapsed_count < self.row.collapsed_targets.len) keyed: {
+            const target = self.cap_target.?;
+            self.row.collapsed_targets[self.row.collapsed_count] = target;
+            self.row.collapsed_count += 1;
+            self.row.collapsed = target;
+            break :keyed more;
+        } else unkeyed_more;
+        try self.file.writePositionalAll(self.task.io, notice, self.start + self.length);
+        self.length += notice.len;
         try self.file.setLength(self.task.io, self.start + self.length);
     }
 };
@@ -1702,7 +1715,7 @@ test "session_reads row heads are bounded with ordered exact collapsed targets" 
     const shown = large[0..try file.readPositionalAll(io, large, 0)];
     try std.testing.expect(shown.len <= feed_window.row_capacity);
     try std.testing.expect(std.mem.startsWith(u8, shown, "head\nxxx"));
-    try std.testing.expect(std.mem.endsWith(u8, shown, RowCapture.more));
+    try std.testing.expect(std.mem.endsWith(u8, shown, RowCapture.unkeyed_more));
     try std.testing.expect(std.mem.indexOf(u8, shown, "tail") == null);
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
 }
@@ -1784,5 +1797,86 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
             try std.testing.expectEqual(@as(u64, position), target.position);
             try std.testing.expectEqual(View.Collapsed{ .source = .activity, .position = position, .ordinal = 0, .row = false, .content = .{ .length = text.len, .digest = protocol.contentDigest(text) } }, target);
         }
+    }
+}
+
+test "session_reads capped answer target opens the whole authenticated answer" {
+    const Domain = struct {
+        text: []const u8,
+        reference: protocol.ActivityItem.Content,
+        fn run(self: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const inspection = try dir.createFile(io, "inspection", .{ .read = true });
+            defer inspection.close(io);
+            const scratch = try dir.createFile(io, "message-stage", .{ .read = true });
+            defer scratch.close(io);
+            var job: Job = .{ .opening = true, .store = root, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 1 }, .files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .status = inspection, .actions = .{ inspection, inspection } } };
+            var task: Task = .{ .io = io };
+            try scan(&job, &task);
+            const row = job.result.rows[0];
+            try std.testing.expect(row.length <= feed_window.row_capacity);
+            try std.testing.expectEqual(@as(usize, 1), row.collapsed_count);
+            const target = row.collapsed_targets[0];
+            try std.testing.expectEqualDeep(self.reference, target.content);
+            try std.testing.expectEqual(@as(u64, 1), target.position);
+            try std.testing.expectEqual(@as(u64, 0), target.ordinal);
+            try std.testing.expect(!target.row);
+            var document: Viewport.Sized(feed_window.row_capacity + 100, true) = .{};
+            var preview: [feed_window.row_capacity]u8 = undefined;
+            try document.append(preview[0..try inspection.readPositionalAll(io, &preview, 0)]);
+            try document.prepare();
+            try std.testing.expectEqual(@as(usize, 1), document.collapsed(0, document.length).count);
+            job.target = .{ .message = target };
+            try fullMessage(&job, &task);
+            const shown = try std.testing.allocator.alloc(u8, self.text.len + 1024);
+            defer std.testing.allocator.free(shown);
+            const length = try inspection.readPositionalAll(io, shown, 0);
+            try std.testing.expect(std.mem.indexOf(u8, shown[0..length], self.text) != null);
+            try std.testing.expectEqual(@as(usize, 2), host.contents);
+        }
+    };
+    const text = try std.testing.allocator.alloc(u8, feed_window.row_capacity + 500);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'x');
+    @memcpy(text[text.len - 12 ..], "WHOLE answer");
+    var hash = protocol.contentHasher();
+    hash.update(text);
+    const reference: protocol.ActivityItem.Content = .{ .length = text.len, .digest = hash.finalResult() };
+    const tail = [_]FakeHost.Tail{.{ .value = .{ .assistant = .{ .content = reference, .final = true } } }};
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1, .content_texts = &.{text} };
+    var domain: Domain = .{ .text = text, .reference = reference };
+    try host.withHost(&domain);
+}
+
+test "session_reads cap target follows prior collapsed markers without mispairing" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "row", .{ .read = true });
+    defer file.close(io);
+    var task: Task = .{ .io = io };
+    const large = try std.testing.allocator.alloc(u8, feed_window.row_capacity * 2);
+    defer std.testing.allocator.free(large);
+    @memset(large, 'x');
+    for (0..17) |prior| {
+        try file.setLength(io, 0);
+        var row: RenderedRow = .{ .key = .{ .position = 99 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
+        const target: View.Collapsed = .{ .source = .activity, .position = 99, .ordinal = 7, .row = false, .content = FakeHost.content() };
+        var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row, .cap_target = target };
+        for (0..prior) |index| {
+            try capture.feed(View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
+            try capture.collapsed(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = true, .content = FakeHost.content() });
+        }
+        try capture.feed(large);
+        try capture.finish();
+        var document: Viewport.Sized(feed_window.row_capacity + 100, true) = .{};
+        var preview: [feed_window.row_capacity]u8 = undefined;
+        try document.append(preview[0..try file.readPositionalAll(io, &preview, 0)]);
+        try document.prepare();
+        const keyed = prior < row.collapsed_targets.len;
+        try std.testing.expectEqual(prior + @intFromBool(keyed), document.collapsed(0, document.length).count);
+        try std.testing.expectEqual(prior + @intFromBool(keyed), row.collapsed_count);
+        for (row.collapsed_targets[0..prior], 1..) |value, position| try std.testing.expectEqual(@as(u64, position), value.position);
+        if (keyed) try std.testing.expectEqualDeep(target, row.collapsed_targets[prior]);
     }
 }
