@@ -35,29 +35,71 @@ fn callNameSql(comptime test_sql: []const u8) []const u8 {
         "WHERE tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal AND call_name.digest" ++ test_sql ++ ")";
 }
 
-/// Whether the Action `action` carries out a call the core runs (D24): its
-/// call names a core tool, whose names' digests `first` and the three parameters
-/// after it bind, in `CoreNames` order.
+/// Whether the Action `action` calls a core tool. The contiguous name
+/// parameters start at `first`, in table order.
 fn coreCallSql(comptime first: u8) []const u8 {
-    return callNameSql(std.fmt.comptimePrint(" IN(?{d},?{d},?{d},?{d},?{d})", .{ first, first + 1, first + 2, first + 3, first + 4 }));
+    comptime {
+        var sql: []const u8 = " IN(";
+        for (std.enums.values(CoreTool), 0..) |_, i| {
+            sql = sql ++ (if (i == 0) "" else ",") ++ std.fmt.comptimePrint("?{d}", .{first + i});
+        }
+        return callNameSql(sql ++ ")");
+    }
 }
 
-/// The digests of the core tools' names, which `coreCallSql` binds.
+fn coreCaseSql() []const u8 {
+    comptime {
+        var sql: []const u8 = "CASE";
+        for (std.enums.values(CoreTool), 0..) |tool, i| {
+            // The WHERE restricts the domain to these tools. Keep the final
+            // ELSE, like the original CASE, without another name lookup.
+            sql = sql ++ if (i + 1 == core_count)
+                " ELSE '" ++ @tagName(tool) ++ "'"
+            else
+                " WHEN " ++ callNameSql(std.fmt.comptimePrint("=?{d}", .{i + 1})) ++ " THEN '" ++ @tagName(tool) ++ "'";
+        }
+        return sql ++ " END AS tool ";
+    }
+}
+
+const core_count = std.enums.values(CoreTool).len;
+
+/// The core name digests in table order. Args expands this one group into
+/// rsql's flat parameters after a statement's prefix, without changing the
+/// binder or introducing runtime storage/work beyond the original digests.
 pub const CoreNames = struct {
-    message_agent: [32]u8,
-    read_transcript: [32]u8,
-    start_agent: [32]u8,
-    find_tools: [32]u8,
-    skill: [32]u8,
+    digests: [core_count][32]u8,
 
     pub fn of() CoreNames {
-        return .{
-            .message_agent = content_string.digest(tool_catalog.message_agent_record.name),
-            .read_transcript = content_string.digest(tool_catalog.read_transcript_record.name),
-            .start_agent = content_string.digest(tool_catalog.start_agent_record.name),
-            .find_tools = content_string.digest(tool_catalog.find_tools_record.name),
-            .skill = content_string.digest(tool_catalog.skill_record.name),
-        };
+        var names: CoreNames = undefined;
+        inline for (std.enums.values(CoreTool), &names.digests) |tool, *digest| {
+            digest.* = content_string.digest(@tagName(tool));
+        }
+        return names;
+    }
+
+    pub fn Args(comptime Prefix: type) type {
+        const prefix = @typeInfo(Prefix).@"struct";
+        var fields: [prefix.field_names.len + core_count][]const u8 = undefined;
+        var types: [fields.len]type = undefined;
+        @memcpy(fields[0..prefix.field_names.len], prefix.field_names);
+        @memcpy(types[0..prefix.field_types.len], prefix.field_types);
+        for (std.enums.values(CoreTool), prefix.field_names.len..) |tool, i| {
+            fields[i] = @tagName(tool) ++ "_name";
+            types[i] = [32]u8;
+        }
+        return @Struct(.auto, null, &fields, &types, &@splat(.{}));
+    }
+
+    pub fn args(self: CoreNames, prefix: anytype) Args(@TypeOf(prefix)) {
+        var out: Args(@TypeOf(prefix)) = undefined;
+        inline for (@typeInfo(@TypeOf(prefix)).@"struct".field_names) |name| {
+            @field(out, name) = @field(prefix, name);
+        }
+        inline for (std.enums.values(CoreTool), self.digests) |tool, digest| {
+            @field(out, @tagName(tool) ++ "_name") = digest;
+        }
+        return out;
     }
 };
 
@@ -88,6 +130,11 @@ fn nonBashCallSql(comptime first: u8) []const u8 {
     return "(" ++ coreCallSql(first) ++ " OR " ++ mcpCallSql("action", "operation") ++ ")";
 }
 
+fn bashReadySql(comptime first: u8) []const u8 {
+    return "action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+        "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ nonBashCallSql(first);
+}
+
 /// The next Action ready for an Attempt, with its Session. Reads only
 /// `action_operation_executable`, so an Action waiting for permission costs
 /// admission nothing.
@@ -96,11 +143,9 @@ const next_action_attempt = rsql.Read(.{
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
         "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
-        "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-        "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
-        "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND NOT " ++ nonBashCallSql(1) ++ " " ++
+        "WHERE " ++ bashReadySql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
-    .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
+    .Args = CoreNames.Args(struct {}),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, bash_timeout_override_ms: ?rsql.Positive, session: rsql.SessionHead },
     .cardinality = .optional,
 });
@@ -109,7 +154,7 @@ pub const next_action_attempt_sql = next_action_attempt.sql;
 /// The next core tool call ready to run (D24), as `next_action_attempt`
 /// finds Bash's: decided, never attempted, of an open Turn no stop selected.
 const next_core_action = rsql.Read(.{
-    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session," ++ "CASE WHEN " ++ callNameSql("=?1") ++ " THEN 'message_agent' WHEN " ++ callNameSql("=?2") ++ " THEN 'read_transcript' WHEN " ++ callNameSql("=?3") ++ " THEN 'start_agent' WHEN " ++ callNameSql("=?4") ++ " THEN 'find_tools' ELSE 'skill' END AS tool " ++
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref AS session," ++ coreCaseSql() ++
         "FROM action_operation action @index(action_operation_executable) JOIN model_operation operation " ++
         "ON operation.operation_id=action.parent_operation_id JOIN turn active ON active.turn_id=operation.turn_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
@@ -117,14 +162,14 @@ const next_core_action = rsql.Read(.{
         "AND active.outcome_code IS NULL AND NOT EXISTS(" ++
         "SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ coreCallSql(1) ++ " " ++
         "ORDER BY action.action_id LIMIT 1",
-    .Args = struct { message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
+    .Args = CoreNames.Args(struct {}),
     .Row = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: Bounded(session_id.max_reference_bytes), tool: CoreTool },
     .cardinality = .optional,
 });
 
 /// A core tool call to run: which Action it is, which tool it calls, its
 /// Session, and its arguments' content.
-pub const CoreTool = enum { message_agent, read_transcript, start_agent, find_tools, skill };
+pub const CoreTool = tool_catalog.CoreTool;
 
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
@@ -166,7 +211,7 @@ pub const CoreWork = union(enum) {
     ending: OwedEnding,
     forward: u64,
     action: CoreActionInput,
-    mcp: McpAction,
+    mcp: ReadyAction,
 };
 
 /// A stopped Turn keeps the causal stop fact even when an ordinary stop
@@ -225,7 +270,7 @@ const CoreSelection = struct {
         if (include_mcp) a.read(next_mcp_action, .{}, &selection.mcp);
         a.read(owed_ending, .{}, &selection.ending);
         a.read(forward_domain.next, .{}, &selection.forward);
-        a.read(next_core_action, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, &selection.action);
+        a.read(next_core_action, names.args(.{}), &selection.action);
     }
 };
 
@@ -233,7 +278,7 @@ const CoreSelection = struct {
 /// `admitNextActionAttempt` selects, and the work read's Bash answer.
 fn queueNextActionAttempt(a: anytype, next: *next_action_attempt.Result) void {
     const names: CoreNames = .of();
-    a.read(next_action_attempt, .{ .message_agent_name = names.message_agent, .read_transcript_name = names.read_transcript, .start_agent_name = names.start_agent, .find_tools_name = names.find_tools, .skill_name = names.skill }, next);
+    a.read(next_action_attempt, names.args(.{}), next);
 }
 
 /// Whether `nextCoreWork` and `admitNextActionAttempt` would find work:
@@ -293,7 +338,7 @@ pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
     // After owed stops and endings, service both slot-free runners in Action order.
     if (mcp) |call| {
         if (next == null or call.action_id.get() < next.?.action_id.get())
-            return .{ .mcp = .{ .action_id = call.action_id.get(), .server = call.server } };
+            return .{ .mcp = .{ .action_id = call.action_id.get(), .runner = .mcp, .server = call.server } };
     }
     const found = next orelse return null;
     return .{ .action = .{
@@ -338,25 +383,24 @@ pub const ActionSettlement = enum { effect, session_stop };
 
 pub const ActionDispatchPermit = attempt.ActionDispatchPermit;
 
-/// What a Bash execution reads from its Attempt.
-pub const BashExecutionInput = struct {
+/// Canonical input of a Rui-run Action. Large fields are decoded in place;
+/// callers retain this one address through adapter preparation.
+pub const ActionExecutionInput = struct {
+    binding: ActionAttemptBinding,
     session: Bounded(session_id.max_reference_bytes),
-    sender_handle: Bounded(32),
-    workspace: Bounded(workspace_path.max_bytes),
-    arguments: ContentReference,
-    timeout_ms: u64,
-};
-
-pub const McpExecutionInput = struct {
-    session: Bounded(session_id.max_reference_bytes),
-    parent: ?Bounded(session_id.max_reference_bytes),
-    root: Bounded(session_id.max_reference_bytes),
-    name: Bounded(tool_name.max_bytes),
-    server: Bounded(tool_catalog.max_server_bytes),
-    input_schema: ContentReference,
     sender_handle: Bounded(32),
     arguments: ContentReference,
     timeout_ms: u64,
+    runner: union(enum) {
+        bash: struct { workspace: Bounded(workspace_path.max_bytes) },
+        mcp: struct {
+            parent: ?Bounded(session_id.max_reference_bytes),
+            root: Bounded(session_id.max_reference_bytes),
+            name: Bounded(tool_name.max_bytes),
+            server: Bounded(tool_catalog.max_server_bytes),
+            input_schema: ContentReference,
+        },
+    },
 };
 
 pub const ActiveOperationFilter = struct {
@@ -414,7 +458,7 @@ pub fn admitNextActionAttempt(
     candidate: anytype,
     a: anytype,
     io: std.Io,
-    bash_timeout_ms: u64,
+    timeout_ms: u64,
     faults: Faults,
 ) !?ActionAttemptAdmission {
     var next: next_action_attempt.Result = undefined;
@@ -426,7 +470,7 @@ pub fn admitNextActionAttempt(
     const sender_handle = std.fmt.bytesToHex(random, .lower);
     a.write(attempt_action, .{
         .action_id = found.action_id.get(),
-        .timeout_ms = if (found.bash_timeout_override_ms) |override| override.get() else bash_timeout_ms,
+        .timeout_ms = if (found.bash_timeout_override_ms) |override| override.get() else timeout_ms,
         .sender_handle = &sender_handle,
         .session = found.session,
     });
@@ -442,6 +486,7 @@ pub fn admitNextActionAttempt(
 /// The unresolved Attempt `binding` names, with its revision and its call,
 /// or none: the binding is stale. Its text columns decode in place into
 /// the caller's input, through the Row's pointers.
+// bash_timeout_ms is the legacy Store column for every runner's timeout (D225).
 const bash_input = rsql.Read(.{
     .sql = "SELECT item.session_position AS position,revision.workspace,action.session_ref AS session,action.sender_handle," ++
         "action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
@@ -467,8 +512,10 @@ const bash_input = rsql.Read(.{
 /// revision or call, is `StaleActionAttemptBinding`. Round 2, which needs
 /// the call's position, checks the Proposal and takes the arguments' content
 /// from it. `out` is valid only when this returns without error.
-pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-    var row: bash_input.Row = .{ .position = null, .workspace = &out.workspace, .session = &out.session, .sender_handle = &out.sender_handle, .timeout_ms = undefined };
+pub fn readBashExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+    out.binding = binding;
+    out.runner = .{ .bash = .{ .workspace = .{ .len = 0 } } };
+    var row: bash_input.Row = .{ .position = null, .workspace = &out.runner.bash.workspace, .session = &out.session, .sender_handle = &out.sender_handle, .timeout_ms = undefined };
     var found: store_access.Found = undefined;
     a.readInto(bash_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &row, &found);
     try a.run();
@@ -490,12 +537,12 @@ pub const core_facts = rsql.Read(.{
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 " ++
         "AND action.authorized=1 AND action.attempt_ordinal=0 AND action.resolution_code IS NULL AND " ++ coreCallSql(4),
-    .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64, message_agent_name: [32]u8, read_transcript_name: [32]u8, start_agent_name: [32]u8, find_tools_name: [32]u8, skill_name: [32]u8 },
+    .Args = CoreNames.Args(struct { action_id: u64, parent_operation_id: u64, turn_id: u64 }),
     .Row = struct { session: rsql.SessionHead, stopped: bool },
     .cardinality = .optional,
 });
 
-const resolve_core_action = rsql.Write(.{
+const resolve_unattempted_action = rsql.Write(.{
     .sql = "UPDATE action_operation SET resolution_code=?2,resolution_content_id=?3,acceptance_position=?4,resolved_at=@now " ++
         "WHERE action_id=?1 AND parent_operation_id=?5 AND session_ref=@session(?6) AND attempt_ordinal=0 AND resolution_code IS NULL",
     .Args = struct { action_id: u64, code: ActionResolutionCode, content_id: u64, position: u64, parent_operation_id: u64, session: rsql.SessionHead },
@@ -503,10 +550,10 @@ const resolve_core_action = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
 
-/// Resolves an unattempted core or MCP call `binding` names, at its
+/// Resolves the unattempted Action `binding` names, at its
 /// Session's next position, and lets its Turn continue.
-pub fn queueCoreResolution(a: anytype, binding: ActionAttemptBinding, session: rsql.SessionHead, code: ActionResolutionCode, content_id: u64) !void {
-    a.write(resolve_core_action, .{
+pub fn queueResolution(a: anytype, binding: ActionAttemptBinding, session: rsql.SessionHead, code: ActionResolutionCode, content_id: u64) !void {
+    a.write(resolve_unattempted_action, .{
         .action_id = binding.action_id,
         .code = code,
         .content_id = content_id,
@@ -535,8 +582,8 @@ const revoke_sender = rsql.Write(.{
 
 /// Clears the Attempt's sender handle, when `binding` names an attempted
 /// Action; otherwise changes nothing. On a `.single` Access: the read and
-/// the one UPDATE, as main's UPDATE and its touch's Workspace read were,
-/// and no transaction.
+/// the one UPDATE. Access selects SQLite autocommit or an ownership-fenced
+/// network transaction, including the no-work and error exits.
 pub fn revokeActionSender(a: anytype, binding: ActionAttemptBinding) !void {
     var found: attempt_session.Result = undefined;
     a.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &found);
@@ -589,13 +636,13 @@ pub fn validateActionDispatch(a: anytype, binding: ActionAttemptBinding) !void {
 /// Turn, and whether a Session stop selected that Turn.
 const settle_facts = rsql.Read(.{
     .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id," ++
-        mcpCallSql("action", "operation") ++ " AS mcp," ++
+        attemptRunnerSql() ++ " AS runner," ++
         "EXISTS(SELECT 1 FROM session_stop stop WHERE stop.selected_turn_id=operation.turn_id) AS stopped " ++
         "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
     .Args = struct { action_id: u64, parent_operation_id: u64 },
-    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, mcp: bool, stopped: bool },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, runner: tool_catalog.Runner, stopped: bool },
     .cardinality = .optional,
 });
 
@@ -626,9 +673,10 @@ pub fn settleActionAttempt(
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
 
-    // A stop that selected the Turn cancels whatever the Action did.
+    // Bash stop confirms local cancellation. MCP keeps the adapter's evidence:
+    // closing a sent request cannot establish that the remote work stopped.
     const settled: struct { code: ActionResolutionCode, text: []const u8 } =
-        if (found.stopped) .{ .code = .cancelled, .text = if (found.mcp) (if (code == .cancelled) result else if (code == .spawn_failed) mcp_stop_not_sent_text else mcp_stop_unknown_text) else content_domain.stop_cancellation_text } else .{ .code = code, .text = result };
+        if (found.stopped and found.runner != .mcp) .{ .code = .cancelled, .text = found.runner.stoppedText(code, result) } else .{ .code = code, .text = result };
     var content: content_domain.Import = .ofBytes(settled.text, false);
     var completion: turn_domain.stopped_turn.Result = null;
     content_domain.lookup(a, &content);
@@ -664,11 +712,11 @@ const uncertain_actions = rsql.Read(.{
 
 /// The Session and Turn of the Attempt `action_id`, while it is unresolved.
 const uncertain_facts = rsql.Read(.{
-    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id," ++ mcpCallSql("action", "operation") ++ " AS mcp FROM action_operation action " ++
+    .sql = "SELECT s.session_ref,s.workspace_key,s.next_position,operation.turn_id," ++ attemptRunnerSql() ++ " AS runner FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.resolution_code IS NULL AND action." ++ action_attempted_sql,
     .Args = struct { action_id: u64 },
-    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, mcp: bool },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, runner: tool_catalog.Runner },
     .cardinality = .optional,
 });
 
@@ -679,22 +727,22 @@ const resolve_uncertain = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
 });
 
-pub const mcp_stop_not_sent_text = "Cancelled by Session stop. Failed, not run: the MCP request was not sent.";
-pub const mcp_stop_unknown_text = "Cancelled by Session stop. Outcome unknown: the MCP request was sent; it may still be running.";
-pub const mcp_indeterminate_text = "Outcome unknown: the Host stopped while this MCP call was running; it was not retried.";
+/// Runner-specific recovery identities are hashed once at build time.
+fn recoveryContent(runner: tool_catalog.Runner) content_domain.Import {
+    return switch (runner) {
+        inline .bash, .mcp => |kind| comptime blk: {
+            @setEvalBranchQuota(1_000_000);
+            break :blk .ofBytes(kind.indeterminateText(), false);
+        },
+        .core, .provider => unreachable,
+    };
+}
 
-const indeterminate_text = "Bash outcome is indeterminate after Host recovery; the command was not replayed.";
-
-/// `indeterminate_text`'s identity, hashed when the Host is built.
-const indeterminate: content_domain.Import = blk: {
-    @setEvalBranchQuota(1_000_000);
-    break :blk .ofBytes(indeterminate_text, false);
-};
-
-const mcp_indeterminate: content_domain.Import = blk: {
-    @setEvalBranchQuota(1_000_000);
-    break :blk .ofBytes(mcp_indeterminate_text, false);
-};
+/// Attempts only belong to the two Action adapters. Derive the runner
+/// from the frozen call, never a saved runner column (D46).
+fn attemptRunnerSql() []const u8 {
+    return "CASE WHEN " ++ mcpCallSql("action", "operation") ++ " THEN 'mcp' ELSE 'bash' END";
+}
 
 /// Picks the first scanned Attempt no execution slot holds.
 const UncertainChoice = struct {
@@ -725,8 +773,8 @@ pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveO
     a.read(uncertain_facts, .{ .action_id = action_id }, &facts);
     try a.run();
     const found = facts orelse return error.ActionSelectionChanged;
-    const text = if (found.mcp) mcp_indeterminate_text else indeterminate_text;
-    content = if (found.mcp) mcp_indeterminate else indeterminate;
+    const text = found.runner.indeterminateText();
+    content = recoveryContent(found.runner);
     content_domain.lookup(a, &content);
     const turn_id = found.turn_id.get();
     var completion: turn_domain.stopped_turn.Result = undefined;
@@ -742,18 +790,26 @@ pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveO
     return true;
 }
 
+// Reads share a wave; writes fence every unresolved earlier MCP call. An
+// attempted write remains a barrier even if its Action is later in order.
+// Both hints come from the Operations' frozen offers, never today's catalog.
 const mcp_serial_sql = "NOT EXISTS(SELECT 1 FROM action_operation earlier JOIN model_operation earlier_operation ON earlier_operation.operation_id=earlier.parent_operation_id " ++
     "WHERE earlier.session_ref=action.session_ref AND earlier.resolution_code IS NULL " ++
-    "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND " ++ mcpCallSql("earlier", "earlier_operation") ++ ")";
+    "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND EXISTS(" ++ mcpCallSelectSql("earlier", "earlier_operation", "1") ++
+    " AND (tool.read_only=0 OR (" ++ mcpCallSelectSql("action", "operation", "tool.read_only") ++ ")=0)))";
 
-const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position " ++
+// Runner identity is established by mcpCallSql for point lookups and by the
+// frozen-offer joins in the ordered selection. The remaining readiness is shared.
+const mcp_ready_sql = "action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
+    "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
+    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcp_serial_sql;
+
+const mcp_facts_sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,NULL AS timeout_override_ms " ++
     "FROM action_operation action @index(action_operation_executable) " ++
     "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
     "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
-    "WHERE action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-    "AND active.outcome_code IS NULL AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
-    "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) AND " ++ mcpCallSql("action", "operation") ++ " AND " ++ mcp_serial_sql;
-const McpFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: rsql.SessionHead };
+    "WHERE " ++ mcp_ready_sql ++ " AND " ++ mcpCallSql("action", "operation");
+const ReadyFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.Positive, turn_id: rsql.Positive, session: rsql.SessionHead, timeout_override_ms: ?rsql.Positive };
 // Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
 // offers never open their call ranges; candidate calls seek their Action by
 // parent and ordinal. CROSS JOIN keeps that bound before the Action lookup.
@@ -768,33 +824,61 @@ const next_mcp_action = rsql.Read(.{
         "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
         "CROSS JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
         "JOIN session s ON s.session_ref=action.session_ref " ++
-        "WHERE active.outcome_code IS NULL AND action.authorized=1 AND action.resolution_code IS NULL AND action.attempt_ordinal=0 " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop_owed owed WHERE owed.child_ref=s.session_ref AND owed.settled=0) " ++
-        "AND NOT EXISTS(SELECT 1 FROM session_stop stopped WHERE stopped.selected_turn_id=active.turn_id) " ++
-        "AND " ++ mcp_serial_sql ++ " ORDER BY action.action_id LIMIT 1",
+        "WHERE " ++ mcp_ready_sql ++ " ORDER BY action.action_id LIMIT 1",
     .Args = struct {},
     .Row = struct { action_id: rsql.Positive, server: Bounded(tool_catalog.max_server_bytes) },
     .cardinality = .optional,
 });
 pub const next_mcp_action_sql = next_mcp_action.sql;
-pub const McpAction = struct { action_id: u64, server: Bounded(tool_catalog.max_server_bytes) };
-pub fn nextMcpAction(a: anytype) !?McpAction {
+pub const ReadyAction = struct {
+    action_id: u64,
+    runner: tool_catalog.Runner,
+    server: Bounded(tool_catalog.max_server_bytes) = .{},
+};
+pub fn nextAction(a: anytype, comptime runner: tool_catalog.Runner) !?ReadyAction {
+    if (runner == .bash) {
+        var next: next_action_attempt.Result = undefined;
+        queueNextActionAttempt(a, &next);
+        try a.run();
+        const found = next orelse return null;
+        return .{ .action_id = found.action_id.get(), .runner = .bash };
+    }
+    if (runner != .mcp) @compileError("only Action runners can select Actions");
     var row: next_mcp_action.Result = undefined;
     a.read(next_mcp_action, .{}, &row);
     try a.run();
     const found = row orelse return null;
-    return .{ .action_id = found.action_id.get(), .server = found.server };
+    return .{ .action_id = found.action_id.get(), .runner = .mcp, .server = found.server };
 }
 const mcp_facts = rsql.Read(.{
     .sql = mcp_facts_sql ++ " AND action.action_id=?1",
     .Args = struct { action_id: u64 },
-    .Row = McpFacts,
+    .Row = ReadyFacts,
     .cardinality = .optional,
 });
-pub fn resolveMcpAction(a: anytype, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+// bash_timeout_override_ms remains Bash-specific in the Store format.
+const bash_facts = rsql.Read(.{
+    .sql = "SELECT action.action_id,action.parent_operation_id,operation.turn_id,s.session_ref,s.workspace_key,s.next_position,action.bash_timeout_override_ms AS timeout_override_ms " ++
+        "FROM action_operation action JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
+        "JOIN turn active ON active.turn_id=operation.turn_id JOIN session s ON s.session_ref=action.session_ref " ++
+        "WHERE action.action_id=?1 AND " ++ bashReadySql(2),
+    .Args = CoreNames.Args(struct { action_id: u64 }),
+    .Row = ReadyFacts,
+    .cardinality = .optional,
+});
+
+fn queueReadyFacts(a: anytype, selected: ReadyAction, facts: *mcp_facts.Result) void {
+    switch (selected.runner) {
+        .bash => a.read(bash_facts, CoreNames.of().args(.{ .action_id = selected.action_id }), facts),
+        .mcp => a.read(mcp_facts, .{ .action_id = selected.action_id }, facts),
+        .core, .provider => unreachable,
+    }
+}
+
+pub fn resolveAction(a: anytype, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
     var facts: mcp_facts.Result = undefined;
     var content: content_domain.Import = .ofBytes(text, false);
-    a.read(mcp_facts, .{ .action_id = action_id }, &facts);
+    queueReadyFacts(a, selected, &facts);
     content_domain.lookup(a, &content);
     try a.run();
     const found = facts orelse {
@@ -805,15 +889,15 @@ pub fn resolveMcpAction(a: anytype, action_id: u64, code: ActionResolutionCode, 
     };
     if (faults.content_import) return error.InjectedContentImportFailure;
     const content_id = try content_domain.importBytes(a, &content, text);
-    try queueCoreResolution(a, .{ .action_id = action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, code, content_id);
+    try queueResolution(a, .{ .action_id = selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, code, content_id);
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
 }
 
-/// Admission commits the attempt and sender before any network effect.
-pub fn admitMcpActionAttempt(a: anytype, io: std.Io, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
+/// Admission commits the attempt and sender before any adapter effect.
+pub fn admitActionAttempt(a: anytype, io: std.Io, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
     var facts: mcp_facts.Result = undefined;
-    a.read(mcp_facts, .{ .action_id = action_id }, &facts);
+    queueReadyFacts(a, selected, &facts);
     try a.run();
     const found = facts orelse {
         try a.commit();
@@ -822,18 +906,12 @@ pub fn admitMcpActionAttempt(a: anytype, io: std.Io, action_id: u64, timeout_ms:
     var random: [16]u8 = undefined;
     try std.Io.randomSecure(io, &random);
     const sender = std.fmt.bytesToHex(random, .lower);
-    a.write(attempt_mcp, .{ .action_id = action_id, .sender = &sender, .session = found.session, .timeout_ms = timeout_ms });
+    a.write(attempt_action, .{ .action_id = selected.action_id, .sender_handle = &sender, .session = found.session, .timeout_ms = if (found.timeout_override_ms) |value| value.get() else timeout_ms });
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
     try a.commit();
-    return .{ .action_id = action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() };
+    return .{ .action_id = selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() };
 }
-// The column records the timeout this attempt runs under, including MCP.
-// The Host resolves it from the server configuration before admission.
-const attempt_mcp = rsql.Write(.{
-    .sql = "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=@now,bash_timeout_ms=?4,sender_handle=?2 WHERE action_id=?1 AND session_ref=@session(?3) AND attempt_ordinal=0 AND resolution_code IS NULL",
-    .Args = struct { action_id: u64, sender: []const u8, session: rsql.SessionHead, timeout_ms: u64 },
-    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
-});
+// bash_timeout_ms is the legacy Store column for every runner's timeout (D225).
 const mcp_input = rsql.Read(.{
     .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
@@ -868,27 +946,30 @@ const session_parent = rsql.Read(.{
     .Row = struct { parent: ?Bounded(session_id.max_reference_bytes) },
     .cardinality = .optional,
 });
-pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
-    var row: mcp_input.Row = .{ .position = null, .session = &out.session, .sender_handle = &out.sender_handle, .name = &out.name, .server = &out.server, .digest = undefined, .length = undefined, .timeout_ms = undefined };
+pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+    out.binding = binding;
+    out.runner = .{ .mcp = .{ .parent = null, .root = .{ .len = 0 }, .name = .{ .len = 0 }, .server = .{ .len = 0 }, .input_schema = .{ .length = 0, .digest = @splat(0) } } };
+    const specific = &out.runner.mcp;
+    var row: mcp_input.Row = .{ .position = null, .session = &out.session, .sender_handle = &out.sender_handle, .name = &specific.name, .server = &specific.server, .digest = undefined, .length = undefined, .timeout_ms = undefined };
     var found: store_access.Found = undefined;
     a.readInto(mcp_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &row, &found);
     try a.run();
     if (!found.get()) return error.StaleActionAttemptBinding;
-    out.input_schema = .{ .length = row.length, .digest = row.digest };
+    specific.input_schema = .{ .length = row.length, .digest = row.digest };
     out.timeout_ms = row.timeout_ms.get();
     const position = (row.position orelse return error.CorruptStore).get();
     const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(tool_proposal.Field.arguments)];
     out.arguments = .{ .length = reference.length, .digest = reference.digest };
-    out.root = out.session;
-    out.parent = null;
+    specific.root = out.session;
+    specific.parent = null;
     var first = true;
     while (true) {
         var ancestry: session_parent.Result = undefined;
-        a.read(session_parent, .{ .session = out.root.slice() }, &ancestry);
+        a.read(session_parent, .{ .session = specific.root.slice() }, &ancestry);
         try a.run();
         const parent = (ancestry orelse return error.CorruptStore).parent;
-        if (first) out.parent = parent;
+        if (first) specific.parent = parent;
         first = false;
-        out.root = parent orelse break;
+        specific.root = parent orelse break;
     }
 }

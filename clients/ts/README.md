@@ -91,7 +91,8 @@ The real-Host feed test uses a local HTTPS provider and the `openssl` command to
 `create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`, or a `preset` name with optional overrides.
 `provider` may be left out when the Host serves one provider.
 `effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
-An update may leave out any setting, and an omitted setting stays as it is.
+Updates may change the model within the Session's fixed provider; the Workspace also remains fixed.
+An omitted setting stays as it is.
 
 ```ts
 const session = await rui.sessions.create({
@@ -103,6 +104,7 @@ const session = await rui.sessions.create({
 	workspace: "/work/project",
 }, { idempotencyKey: "project:1" });
 await session.update({ compactAt: 200000 });
+await session.update({ model: "gpt-5.5" });
 ```
 
 `await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode`, `latestOutcome` and `archiveState`.

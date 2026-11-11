@@ -158,6 +158,10 @@ Without `--model`, a new Session uses your saved default.
 With no saved default, it uses `gpt-6.1-sol`.
 To pick the default from a list, type `/model` in the overview.
 
+To switch an existing Session within its provider, run `rui session configure --session SESSION --model ID`.
+The next model request replays visible conversation without the old model’s private reasoning or compacted state.
+This preserves the Session and its attached agents, but costs one cache miss.
+
 To change the saved default from the shell, run `rui defaults configure --model ID`.
 To remove it, run `rui defaults configure --clear-model`.
 

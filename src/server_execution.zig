@@ -378,7 +378,7 @@ const Workspace = struct {
     /// `.bash_preparing` slot owns `bash_input` and `bash_preparation`,
     /// `bash_prepared` lives from the last advance to launch, and
     /// `bash_outcome` from completion to settlement.
-    bash_input: store_module.BashExecutionInput,
+    bash_input: store_module.ActionExecutionInput,
     bash_preparation: bash.Preparation,
     bash_prepared: bash.Prepared,
     bash_outcome: bash.Outcome,
@@ -808,7 +808,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
@@ -1547,7 +1547,7 @@ fn admitBashAttempt(
     };
     testTransition(host, .action_attempt_admitted, action_binding);
     const input = &workspace.bash_input;
-    host.store.readBashExecutionInput(action_binding, input) catch |err| {
+    host.store.readActionExecutionInput(.bash, action_binding, input) catch |err| {
         settleActionFailure(host, token, action_binding, .storage_failed, "Bash input could not be read.");
         finishCustodyNow(host, slot);
         if (host.store.isFenced()) fenceDispatch(host, "Bash canonical input", err);
@@ -1679,7 +1679,7 @@ fn launchPreparedBash(host: *Host, slot: *ExecutionSlot, prepared: *bash.Prepare
         }
 
         fn launch(context: anytype) !void {
-            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, std.fs.path.dirname(context.host.lease.paths.socket.slice()), context.refused) };
+            context.work.* = .{ .execution = try context.prepared.launch(context.host.bash_facts, context.base, context.host.lease.paths.runtimeHint(), context.refused) };
         }
     }.handoff) catch |err| {
         if (err == error.SupersededByControl) {
@@ -3041,10 +3041,11 @@ test "cleanup publication follows complete execution retirement" {
     // calls this test drives directly read the plain test clock.
     var scratch = bashScratch(&host);
     scratch.io = std.testing.io;
-    var input: store_module.BashExecutionInput = .{
+    var input: store_module.ActionExecutionInput = .{
+        .binding = .{ .action_id = 11, .parent_operation_id = 1, .turn_id = 1 },
         .session = .{},
         .sender_handle = .{},
-        .workspace = workspace,
+        .runner = .{ .bash = .{ .workspace = workspace } },
         .arguments = .{ .length = arguments.len, .digest = undefined },
         .timeout_ms = 1000,
     };

@@ -1,6 +1,7 @@
 //! The historical view a model request reads: settings, conversation entries,
 //! outputs, parts, tool results and prefix seals.
 
+const replay_recipe = @import("../../replay_recipe.zig");
 const std = @import("std");
 const activity_read = @import("../../activity_read.zig");
 const workspace_path = @import("../../workspace_path.zig");
@@ -70,7 +71,7 @@ pub const HistoricalSettings = struct {
     /// Effective effort frozen at admission; null when the binding has no
     /// inferred default and no override.
     reasoning_effort: ?model_capability.ReasoningEffort = null,
-    /// The effort the Session's first Operation froze.
+    /// The effort the Session's first Operation for this model froze.
     starting_effort: ?model_capability.ReasoningEffort = null,
     /// The codec the Session pinned at creation.
     codec: provider_name.Codec,
@@ -470,6 +471,15 @@ pub const HistoricalView = struct {
         return outputAt(self, position) catch |err| store_core.fence(self.store, err);
     }
 
+    /// Open only the items replayable to this request's model. A skipped
+    /// opaque item owns no content reader or message digest to finish.
+    pub fn replayOutput(self: *HistoricalView, entry: *const HistoricalEntry, model: []const u8) !?HistoricalOutput {
+        const output = try self.openOutput(entry.position);
+        if (output.kind.replayableTo(entry.requested_model.?.slice(), model, if (self.anchor == entry.position) .selected_base else .history)) return output;
+        self.output_parts = null;
+        return null;
+    }
+
     pub fn nextOutputPart(self: *HistoricalView) !?HistoricalPart {
         std.debug.assert(self.active and self.output_parts != null);
         if (partsExhausted(self)) try readHistoricalParts(self.store, self);
@@ -750,7 +760,8 @@ const historical_settings = rsql.Read(.{
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         "o.reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
-        "(SELECT first.reasoning_effort FROM model_operation first WHERE first.session_ref=o.session_ref ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
+        "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
+        "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
         "instructions.byte_length AS instructions_length,instructions.digest AS instructions_digest,instructions.private AS instructions_private," ++
         pageBytesSql("instructions", "instructions_bytes") ++ "," ++
         "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
@@ -815,8 +826,8 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     _ = try model_settlement_domain.attemptKindOf(standing, view.binding);
     if (!found.get() or !row.catalogs_consistent) return error.CorruptStore;
     if (first) {
-        try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
         try sources.finish();
+        try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
     }
     page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
     if (row.member_count > tool_catalog.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
@@ -901,20 +912,39 @@ fn readPrefixSealHeld(self: *Store, binding: AttemptBinding) !?PrefixSeal {
 
 /// The prefix seal of an Operation's Session.
 const session_prefix_seal = rsql.Read(.{
-    .sql = "SELECT s.prefix_seal FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
+    .sql = "SELECT s.prefix_seal,o.admission_position FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
-    .Row = struct { prefix_seal: ?[prefix_seal.encoded_bytes]u8 },
+    .Row = struct { prefix_seal: ?[prefix_seal.encoded_bytes]u8, admission_position: rsql.Positive },
     .cardinality = .one,
 });
 
-/// The Session's recorded seal, in a round of its own. A failed step is
-/// `CorruptStore`, main's answer for it.
+/// Model identity for a seal is derived from its existing Operation
+/// admission position, so neither the seal nor the Store format grows.
+const seal_model = rsql.Read(.{
+    .sql = "SELECT sealed_revision.model=current_revision.model AS same_model " ++
+        "FROM model_operation current JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
+        "JOIN model_operation sealed ON sealed.session_ref=current.session_ref AND sealed.admission_position=?2 " ++
+        "JOIN session_revision sealed_revision ON sealed_revision.session_ref=sealed.session_ref AND sealed_revision.revision=sealed.settings_revision " ++
+        "WHERE current.operation_id=?1",
+    .Args = struct { operation: u64, admission: u64 },
+    .Row = struct { same_model: bool },
+    .cardinality = .one,
+});
+
+/// A recorded span binds only requests for its model. A failed read or
+/// a seal whose producing Operation is missing is canonical corruption.
 pub fn prefixSealOf(a: *ReadAccess, binding: AttemptBinding) !?PrefixSeal {
     var row: session_prefix_seal.Row = undefined;
     a.read(session_prefix_seal, .{ .operation = binding.operation_id }, &row);
     try store_access.runAs(a, error.CorruptStore);
     const bytes = row.prefix_seal orelse return null;
-    return try PrefixSeal.decode(&bytes);
+    const seal = try PrefixSeal.decode(&bytes);
+    // A later view neither binds nor is replaced; its model is irrelevant.
+    if (seal.admission_position > row.admission_position.get()) return seal;
+    var identity: seal_model.Row = undefined;
+    a.read(seal_model, .{ .operation = binding.operation_id, .admission = seal.admission_position }, &identity);
+    try store_access.runAs(a, error.CorruptStore);
+    return if (identity.same_model) seal else null;
 }
 
 pub fn recordPrefixSeal(self: *Store, binding: AttemptBinding, seal: *const PrefixSeal) !void {
@@ -946,11 +976,15 @@ pub fn sealOn(a: anytype, binding: AttemptBinding, seal: *const PrefixSeal) !voi
     try a.commit();
 }
 
-/// The latest compacted Operation of `current`'s Session admitted before
-/// it: its selected Compaction Base.
-const selected_base_sql = "(SELECT selected.operation_id " ++
-    "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
-    "AND " ++ store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<current.admission_position ORDER BY selected.admission_position DESC LIMIT 1)";
+/// The newest accepted compaction before this boundary, without a model
+/// filter or fallback to an older base. Recipe.select owns replay selection.
+pub fn newestBaseSql(comptime session: []const u8, comptime boundary: []const u8) []const u8 {
+    return "(SELECT selected.operation_id FROM model_operation selected @index(model_operation_compaction_bases) " ++
+        "WHERE selected.session_ref=" ++ session ++ " AND selected.purpose=1 AND " ++
+        store_schema.resolutionIs("selected.resolution_code", .compacted) ++ " AND selected.admission_position<" ++ boundary ++
+        " ORDER BY selected.admission_position DESC LIMIT 1)";
+}
+const selected_base_sql = newestBaseSql("current.session_ref", "current.admission_position");
 
 /// The base's compaction items, whose provider bag is the opaque
 /// continuation: a base has exactly one.
@@ -963,13 +997,15 @@ const base_anchors_where = "WHERE anchor.operation_id=base.operation_id AND anch
 /// position, and how many have their bag's row.
 const output_boundary = rsql.Read(.{
     .sql = "SELECT current.admission_position,base.operation_id,coalesce(base.admission_position,0) AS frontier," ++
-        "current.history_floor AS own_floor,base.history_floor AS base_floor," ++
+        "current.history_floor AS own_floor,base.history_floor AS base_floor,current_revision.model AS current_model,base_revision.model AS base_model," ++
         "(SELECT count(*) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchors," ++
         "(SELECT min(anchor.session_position) " ++ base_anchors_from ++ base_anchors_where ++ ") AS anchor_position," ++
         "(SELECT count(*) " ++ base_anchors_from ++ "JOIN content bag ON bag.content_id=anchor.extras_content_id " ++ base_anchors_where ++ ") AS anchor_bags," ++
         "CASE WHEN coalesce(current.history_floor,base.history_floor) IS NULL THEN 0 ELSE coalesce((SELECT min(first.session_position) " ++
         "FROM conversation_entry first @index(conversation_entry_history) WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) END AS first_message " ++
         "FROM model_operation current LEFT JOIN model_operation base ON base.operation_id=" ++ selected_base_sql ++ " " ++
+        "JOIN session_revision current_revision ON current_revision.session_ref=current.session_ref AND current_revision.revision=current.settings_revision " ++
+        "LEFT JOIN session_revision base_revision ON base_revision.session_ref=base.session_ref AND base_revision.revision=base.settings_revision " ++
         "WHERE current.operation_id=?1",
     .Args = struct { operation: u64 },
     .Row = struct {
@@ -978,6 +1014,8 @@ const output_boundary = rsql.Read(.{
         frontier: u64,
         own_floor: ?rsql.Positive,
         base_floor: ?rsql.Positive,
+        current_model: Bounded(model_capability.max_model_bytes),
+        base_model: ?Bounded(model_capability.max_model_bytes),
         anchors: u64,
         anchor_position: ?rsql.Positive,
         anchor_bags: u64,
@@ -1066,12 +1104,31 @@ fn keepOutputBoundary(view: *HistoricalView, row: *const output_boundary.Row) er
     view.selected_base = if (row.operation_id) |id| id.get() else 0;
     view.output_frontier = row.frontier;
     view.anchor = if (row.anchors == 1 and row.anchor_bags == 1) (row.anchor_position orelse return error.CorruptStore).get() else null;
-    const base_floor: u64 = if (row.base_floor) |floor| floor.get() else 0;
+    // Validate the selected base even when its opaque state cannot be sent.
+    if (view.selected_base != 0 and view.anchor == null) return error.CorruptStore;
+    const recipe = replay_recipe.Recipe.select(row.current_model.slice(), if (row.operation_id != null) .{
+        .position = row.frontier,
+        .floor = if (row.base_floor) |floor| floor.get() else 0,
+        .model = (row.base_model orelse return error.CorruptStore).slice(),
+    } else null, if (row.own_floor) |floor| floor.get() else 0);
+    const compatible = (view.selected_base != 0) == (recipe.frontier != 0);
+    if (!compatible) {
+        // Rebuild the visible exchanges the old base (and its floor) covered.
+        // The settings round's speculative first output page began at that
+        // old frontier: restart its validation from the beginning as well.
+        view.selected_base = 0;
+        view.output_frontier = 0;
+        view.anchor = null;
+        view.output_cursor = 0;
+        view.output_cursor_id = 0;
+        view.outputs_validated = false;
+    }
+    const base_floor: u64 = if (compatible) (if (row.base_floor) |floor| floor.get() else 0) else 0;
     const own_floor: u64 = if (row.own_floor) |floor| floor.get() else 0;
     // A compaction keeps its base's floor or goes deeper.
     if (own_floor != 0 and own_floor < base_floor) return error.CorruptStore;
     view.floor = .{
-        .position = @max(own_floor, base_floor),
+        .position = recipe.floor,
         .first_message = row.first_message,
         .own = own_floor > base_floor,
     };
@@ -1177,7 +1234,7 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort," ++ tool_set.offeredSetSql("revision") ++ "," ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL,earlier.reasoning_effort," ++ tool_set.offeredSetSql("revision") ++ "," ++
         "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where(tool_set.offeredSetSql("revision"), "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
@@ -1833,6 +1890,7 @@ fn historicalEntry(view: *HistoricalView, row: *const historical_entries.Row) er
     if (kind == .operation) return .{
         .position = row.session_position.get(),
         .kind = .operation,
+        .requested_model = row.model orelse return error.CorruptStore,
         .effort = row.effort,
         .tool_set_id = (row.tool_set_id orelse return error.CorruptStore).get(),
         .declares = row.declares orelse return error.CorruptStore,

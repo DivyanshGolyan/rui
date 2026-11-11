@@ -37,6 +37,10 @@ pub const Queue = struct {
         context: *anyopaque,
         start: *const fn (*anyopaque) void,
         finish: *const fn (*anyopaque) bool,
+        /// Whether the open batch already committed, with its first write
+        /// (`Store.commitsWithWrites`), so it takes no more: the next
+        /// write opens a batch of its own.
+        closed: *const fn (*anyopaque) bool,
         /// Whether the batch that runs until the next `arm(false)` may run
         /// again: while armed, a lost connection defers its fence to
         /// `recover`.
@@ -140,9 +144,10 @@ pub const Queue = struct {
             batched = job;
         }
         while (true) {
+            const closed = batching and self.batch.closed(self.batch.context);
             self.mutex.lockUncancelable(self.io);
             const next = self.head;
-            if (next) |job| if (!job.own and ran < drain_limit) {
+            if (next) |job| if (!job.own and ran < drain_limit and !closed) {
                 self.pop();
                 self.mutex.unlock(self.io);
                 if (!batching) {
@@ -246,6 +251,14 @@ pub const Queue = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         std.debug.assert(self.head == null);
+    }
+
+    /// Whether a write waits first in line, which the holder would run in
+    /// its open batch.
+    pub fn writeWaiting(self: *Queue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return if (self.head) |job| !job.own else false;
     }
 
     pub fn owned(self: *const Queue) bool {
@@ -396,12 +409,19 @@ const Batches = struct {
     fail: bool = false,
     armed: u32 = 0,
     rerun: u32 = 0,
+    /// Every batch closes with its first write.
+    closes: bool = false,
 
     var ignored: Batches = .{};
     const none: Queue.Batch = hooks(&ignored);
 
     fn hooks(self: *Batches) Queue.Batch {
-        return .{ .context = self, .start = start, .finish = finish, .arm = arm, .recover = recover };
+        return .{ .context = self, .start = start, .finish = finish, .closed = closed, .arm = arm, .recover = recover };
+    }
+
+    fn closed(context: *anyopaque) bool {
+        const self: *Batches = @ptrCast(@alignCast(context));
+        return self.closes;
     }
 
     fn arm(context: *anyopaque, on: bool) void {
@@ -450,6 +470,20 @@ test "writes queued behind the holder share one batch and hear it fail together"
     try std.testing.expectEqualStrings("ahbcd", probe.logged());
     try std.testing.expectEqual(@as(u32, 2), batches.started);
     try std.testing.expectEqual(@as(u32, 2), batches.finished);
+    // A batch its first write closed takes no more: each write behind it
+    // opens its own.
+    batches.closes = true;
+    try queue.callHeld(Probe.note, .{ &probe, 'j' });
+    for (&threads, "klm", 1..) |*thread, mark, queued| {
+        thread.* = try std.Thread.spawn(.{}, Probe.other, .{ &probe, &queue, mark, .write });
+        waitQueued(&queue, queued);
+    }
+    queue.release();
+    for (threads) |thread| thread.join();
+    try std.testing.expectEqualStrings("ahbcdjklm", probe.logged());
+    try std.testing.expectEqual(@as(u32, 5), batches.started);
+    try std.testing.expectEqual(@as(u32, 5), batches.finished);
+    batches.closes = false;
     // A commit that fails reaches every writer in its batch.
     batches.fail = true;
     try queue.callHeld(Probe.note, .{ &probe, 'i' });

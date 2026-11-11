@@ -41,7 +41,7 @@ pub const reserved_key_prefix = idempotency_key.reserved_prefix;
 pub const max_session_bytes = session_id.max_reference_bytes;
 pub const max_store_bytes = store_path.max_bytes;
 pub const max_workspace_bytes = workspace_path.max_bytes;
-/// Content strings one request carries at most: a configure command's
+/// Content values one request carries at most: a configure command's
 /// instructions and output schema, plus a creating Message's text.
 const spec_content_count = count: {
     var total: usize = 0;
@@ -387,8 +387,8 @@ pub const WorkStateJson = struct {
     pub const retrying_shape = .{ "{\"kind\":\"retrying\",\"since\":\"", Hole.decimal, "\",\"due_at_ms\":\"", Hole.decimal, "\",\"cause\":", Hole{ .string = max_code_bytes }, ",\"attempt\":\"", Hole.decimal, "\"}" };
     /// A running Host survives a Rui upgrade, so a reader still meets this
     /// form, from a Host that predates `call`.
-    pub const older_bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
-    pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = max_tool_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
+    pub const older_bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
+    pub const bash_shape = .{ "{\"kind\":\"bash\",\"since\":\"", Hole.decimal, "\",\"call\":\"", Hole.decimal, "\",\"description\":", Hole{ .optional_string = session_work.max_description_bytes }, ",\"running\":\"", Hole.decimal, "\",\"approvals\":\"", Hole.decimal, "\"}" };
     pub const failed_shape = .{ "{\"kind\":\"failed\",\"since\":\"", Hole.decimal, "\",\"code\":", Hole{ .string = max_code_bytes }, ",\"resets_at\":", Hole.optional_id, "}" };
     pub const stopped_shape = .{ "{\"kind\":\"stopped\",\"since\":\"", Hole.decimal, "\",\"cause\":\"", Hole{ .tag = session_work.StopCause }, "\"}" };
     pub const max_json_bytes = maxShapeBytes(.{ plain_shape, retrying_shape, older_bash_shape, bash_shape, failed_shape, stopped_shape });
@@ -484,6 +484,35 @@ pub const FirstMessage = struct {
     }
 };
 
+/// The last thing a Session said to its person, derived by the Host.
+pub const LastLine = struct {
+    position: u64,
+    text: ?Bounded(session_list.max_last_line_bytes),
+
+    pub const json_shape = .{ "{\"position\":\"", Hole.decimal, "\",\"text\":", Hole{ .optional_string = session_list.max_last_line_bytes }, "}" };
+    pub const max_json_bytes = shapeBytes(json_shape);
+
+    /// Borrowed form used while the Store's list-row visitor is running.
+    pub const Fields = struct {
+        position: u64,
+        text: ?[]const u8,
+        pub const json_shape = LastLine.json_shape;
+        pub const max_json_bytes = LastLine.max_json_bytes;
+
+        pub fn writeJson(self: *const Fields, out: *std.Io.Writer) !void {
+            try writeShape(out, LastLine.json_shape, .{ self.position, self.text });
+        }
+    };
+
+    pub fn fields(self: *const LastLine) Fields {
+        return .{ .position = self.position, .text = if (self.text) |*text| text.slice() else null };
+    }
+
+    pub fn writeJson(self: *const LastLine, out: *std.Io.Writer) !void {
+        try self.fields().writeJson(out);
+    }
+};
+
 pub const PermissionMode = cli_value.PermissionMode;
 
 /// One `list-sessions` row. Every fact comes from the Store read that
@@ -504,6 +533,7 @@ pub const SessionRow = struct {
     /// `end` shows what changed since.
     end: u64 = 0,
     first_message: ?FirstMessage = null,
+    last_line: ?LastLine = null,
     work: SessionWork = .{},
     peers: PeerFacts = .{},
 
@@ -512,8 +542,8 @@ pub const SessionRow = struct {
         ",\"provider\":\"",        Hole{ .tag = Provider },               "\",\"model\":",      Hole{ .string = max_model_bytes },           ",\"tools\":",     Hole{ .text = max_tool_names_json_bytes },
         ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },         "\",\"parent\":",     Hole{ .optional_string = session_id_bytes }, ",\"label\":",     Hole{ .optional_string = max_label_bytes },
         ",\"created_at\":\"",      Hole.decimal,                          "\",\"revision\":\"", Hole.decimal,                                "\",\"end\":\"",   Hole.decimal,
-        "\",\"first_message\":",   Hole{ .optional_json = FirstMessage }, ",\"work\":",         Hole{ .json = SessionWork },                 ",\"peers\":",     Hole{ .json = PeerFacts },
-        "}",
+        "\",\"first_message\":",   Hole{ .optional_json = FirstMessage }, ",\"last_line\":",    Hole{ .optional_json = LastLine.Fields },    ",\"work\":",      Hole{ .json = SessionWork },
+        ",\"peers\":",             Hole{ .json = PeerFacts },             "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
@@ -540,6 +570,7 @@ pub const SessionRow = struct {
         revision: u64,
         end: u64,
         first_message: ?FirstMessage,
+        last_line: ?LastLine.Fields,
         work: *const SessionWork,
         peers: *const PeerFacts,
 
@@ -547,9 +578,10 @@ pub const SessionRow = struct {
 
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
             try writeShape(out, json_shape, .{
-                f.archive_state, f.reference,       f.workspace,     f.provider, f.model,
-                f.tools,         f.permission_mode, f.parent,        f.label,    f.created_at,
-                f.revision,      f.end,             f.first_message, f.work,     f.peers,
+                f.archive_state, f.reference,       f.workspace,     f.provider,  f.model,
+                f.tools,         f.permission_mode, f.parent,        f.label,     f.created_at,
+                f.revision,      f.end,             f.first_message, f.last_line, f.work,
+                f.peers,
             });
         }
     };
@@ -580,6 +612,7 @@ pub const SessionRow = struct {
             .revision = self.revision,
             .end = self.end,
             .first_message = self.first_message,
+            .last_line = if (self.last_line) |*last| last.fields() else null,
             .work = &self.work,
             .peers = &self.peers,
         };
@@ -655,7 +688,7 @@ pub const contentHasher = content_string.hasher;
 pub const contentDigest = content_string.digest;
 
 /// The metadata an Ingress has received so far, the Parser's only input.
-/// Content strings never reach it: the Ingress captures them.
+/// Content bodies never reach it: the Ingress captures them.
 pub const MetadataSource = struct {
     input: []const u8,
     start: usize = 0,
@@ -880,11 +913,11 @@ fn ParserOf(comptime Custody: type) type {
                         if (entry.kind == .content) {
                             // Suspend at the colon, before the first content
                             // byte. Ingress may resume with a quote or null.
-                            self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) error.NeedContent else err;
+                            self.skipWhitespace() catch |err| return if (err == error.NeedInput and self.content_ordinal >= self.captured.len) (if (entry.json_object) error.NeedSchema else error.NeedContent) else err;
                             if (!try self.readNull()) {
                                 if (self.content_ordinal == max_request_contents) return error.UnexpectedField;
                                 var counted: ContentField = .{};
-                                try self.readContentString(&counted);
+                                if (entry.json_object) try self.readSchema(&counted) else try self.readContentString(&counted);
                             }
                         } else try self.skipValue();
                     },
@@ -1063,7 +1096,7 @@ fn ParserOf(comptime Custody: type) type {
                         value.state = .value;
                         switch (entry.kind) {
                             .text, .choice => try self.readSmallString(&value.value),
-                            .content => try self.readContentString(value),
+                            .content => if (entry.json_object) try self.readSchema(value) else try self.readContentString(value),
                             .tools => try self.readToolList(value),
                             .decimal_policy => try self.readSpecDecimal(&value.value),
                         }
@@ -1547,6 +1580,20 @@ fn ParserOf(comptime Custody: type) type {
             if (!std.unicode.utf8ValidateSlice(destination.slice())) return error.InvalidUtf8;
         }
 
+        /// Schema custody is out of band. Only the ingress/DOM adapter writes
+        /// this array marker; a wire schema is always an object, never an array.
+        fn readSchema(self: *Parser, field: *ContentField) !void {
+            self.content_ordinal += 1;
+            if (self.content_ordinal > self.captured.len) return error.NeedSchema;
+            try self.expectByte('[');
+            try self.expectByte(']');
+            const original = self.captured[self.content_ordinal - 1];
+            field.length = original.length;
+            field.digest = original.digest;
+            field.capture = self.content_ordinal;
+            field.borrowed = original.borrowed;
+        }
+
         /// Reads the empty placeholder the Ingress left for a captured string.
         fn readContentString(self: *Parser, field: *ContentField) !void {
             self.content_ordinal += 1;
@@ -1649,12 +1696,21 @@ pub fn parseAgentSpec(comptime Custody: type, arena: std.mem.Allocator, spec: st
     while (fields.next()) |field| {
         var value = field.value_ptr.*;
         inline for (session_settings.entries) |entry| {
-            if (entry.kind == .content and std.mem.eql(u8, entry.spec, field.key_ptr.*) and value == .string) {
-                const bytes = value.string;
-                if (!std.unicode.utf8ValidateSlice(bytes)) return try std.fmt.allocPrint(arena, "spec.{s} must be UTF-8 text", .{entry.spec});
-                captured[content_count] = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = contentDigest(bytes) };
-                content_count += 1;
-                value = .{ .string = "" };
+            if (entry.kind == .content and std.mem.eql(u8, entry.spec, field.key_ptr.*)) {
+                if (entry.json_object and value != .object and value != .null)
+                    return try std.fmt.allocPrint(arena, "spec.{s} must be a JSON object or null", .{entry.spec});
+                const content: ?[]const u8 = if (entry.json_object and value == .object)
+                    try std.json.Stringify.valueAlloc(arena, value, .{})
+                else if (!entry.json_object and value == .string)
+                    value.string
+                else
+                    null;
+                if (content) |bytes| {
+                    if (!std.unicode.utf8ValidateSlice(bytes)) return try std.fmt.allocPrint(arena, "spec.{s} must be UTF-8 text", .{entry.spec});
+                    captured[content_count] = .{ .state = .value, .borrowed = bytes.ptr, .length = bytes.len, .digest = contentDigest(bytes) };
+                    content_count += 1;
+                    value = if (entry.json_object) .{ .array = std.json.Array.init(arena) } else .{ .string = "" };
+                }
             }
         }
         try metadata.put(arena, field.key_ptr.*, value);
@@ -2270,21 +2326,31 @@ pub const max_control_response_bytes = @max(max_mutation_response_bytes, command
 /// Holes: Store, instance, Active and intake capacity, descriptor limit
 /// (decimal or `unlimited`), start time, slots in use, whether new Turns
 /// are paused, and each provider's Route.
-pub const host_info_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
-pub const host_info_mysql_reply = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = 32 }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean, ",\"innodb_doublewrite\":", Hole{ .string = 32 }, ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+pub const host_info_reply = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_info\",\"store\":", Hole{ .string = max_store_bytes }, ",\"instance\":\"", Hole{ .hex = @typeInfo(InstanceId).array.len }, "\",\"active_capacity\":\"", Hole.decimal, "\",\"intake_capacity\":\"", Hole.decimal, "\",\"descriptor_limit\":\"", Hole{ .text = Hole.maxBytes(.decimal) }, "\",\"started_at\":\"", Hole.decimal, "\",\"custody_occupied\":\"", Hole.decimal, "\",\"paused\":", Hole.boolean };
+    pub const doublewrite = .{ ",\"innodb_doublewrite\":", Hole{ .string = 32 } };
+    pub const tail = .{ ",\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"", Hole{ .tag = Route }, "\",\"openai\":\"", Hole{ .tag = Route }, "\"}}}" };
+    pub const max_bytes = shapeBytes(head) + shapeBytes(doublewrite) + shapeBytes(tail);
+};
 comptime {
     const names = @typeInfo(Provider).@"enum".field_names;
     if (names.len != 2 or !std.mem.eql(u8, names[0], "codex") or !std.mem.eql(u8, names[1], "openai"))
         @compileError("host_info_reply names one Route hole per provider, in Provider order");
 }
-pub const max_host_info_response_bytes: usize = @max(shapeBytes(host_info_reply), shapeBytes(host_info_mysql_reply));
+pub const max_host_info_response_bytes: usize = host_info_reply.max_bytes;
 
 /// Each served provider's models: `model_list.writeProviders` follows the
 /// head, then the tail.
 pub const model_list_reply = struct {
     pub const head = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"model_list\",\"providers\":";
     pub const tail = "}";
-    pub const max_bytes = head.len + model_list.max_providers_bytes + tail.len;
+    /// Offline fixtures use the shipped bound. A Host sizes from the selected
+    /// generation: saved catalogs are not bounded by the snapshot's ID count.
+    pub const max_bytes = maxBytes(@import("model_catalog.zig").shipped);
+
+    pub fn maxBytes(facts: []const @import("model_catalog.zig").Entry) usize {
+        return head.len + model_list.providersBytes(facts) + tail.len;
+    }
 };
 pub const host_stop_ack = "{\"version\":\"" ++ wire_version ++ "\",\"type\":\"host_stop_reply\",\"status\":\"acknowledged\"}";
 /// Hole: whether new Turns are now paused.
@@ -2884,6 +2950,7 @@ test "SessionRow borrowed fields preserve offered tool names" {
         .revision = 0,
         .end = 0,
         .first_message = null,
+        .last_line = .{ .position = 2, .text = "Done" },
         .work = &.{},
         .peers = &.{},
     };
@@ -2891,6 +2958,7 @@ test "SessionRow borrowed fields preserve offered tool names" {
     defer out.deinit();
     try fields.writeJson(&out.writer);
     try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"tools\":[\"bash\",\"offered_tool\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"last_line\":{\"position\":\"2\",\"text\":\"Done\"}") != null);
     try std.testing.expect(out.written().len <= SessionRow.max_json_bytes);
 }
 
@@ -2979,8 +3047,8 @@ test "the request parser refuses what each command's grammar forbids" {
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .failure = error.RouteKindMismatch, .route = .host_stop },
         .{ .json = v ++ "\"kind\":\"host_info\",\"store\":\"s\"}", .route = .host_info },
         // Content can arrive before the kind, but configure cannot carry text.
-        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":\"\"" ++ ",\"outputSchema\":\"\"" ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
-        .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"outputSchema\":\"\"" ++ "}}" },
+        .{ .json = "{\"text\":" ++ value ++ ",\"configuration\":{\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}," ++ "\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":\"s\"}", .failure = error.UnexpectedField },
+        .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"outputSchema\":[]" ++ "}}" },
         .{ .json = configure ++ "\"instructions\":\"\"" ++ ",\"instructions\":\"\"" ++ "}}", .failure = error.UnexpectedField },
         // A Message to an existing Session carries no configuration and no
         // capability condition.

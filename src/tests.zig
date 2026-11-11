@@ -1,4 +1,9 @@
 test {
+    _ = @import("widgets/Split.zig");
+    _ = @import("widgets/Stack.zig");
+    _ = @import("widgets/Layer.zig");
+    _ = @import("widgets/Footer.zig");
+    _ = @import("widgets/Feed.zig");
     _ = @import("AppScreen.zig");
     _ = @import("PermissionCard.zig");
     _ = @import("widget_style.zig");

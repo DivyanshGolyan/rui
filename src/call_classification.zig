@@ -15,11 +15,10 @@ const Description = records.Description;
 const max_name_bytes = records.max_name_bytes;
 const record = records.record;
 const bash_record = records.bash_record;
-const find_tools_record = records.find_tools_record;
-const skill_record = records.skill_record;
-const read_transcript_record = records.read_transcript_record;
-const message_agent_record = records.message_agent_record;
 const start_agent_record = records.start_agent_record;
+
+/// Bash's argument bound is independent of the saved call-line bound.
+pub const max_bash_description_bytes = 100;
 
 /// One call, as `describe` needs it.
 pub const Call = union(Tool) {
@@ -47,7 +46,11 @@ pub const WebSearchCall = struct {
 
 pub fn describe(call: Call) Description {
     const out: Description = switch (call) {
-        .bash => |arguments| arguments.description,
+        .bash => |arguments| blk: {
+            var out: Description = .{};
+            out.set(arguments.description.slice()) catch unreachable;
+            break :blk out;
+        },
         // The core writes its own tools' lines (D105).
         .message_agent => |arguments| blk: {
             var out: Description = .{};
@@ -196,7 +199,7 @@ fn writeCut(writer: *std.Io.Writer, text: []const u8, width: usize) void {
 
 pub const BashArguments = struct {
     timeout_ms: ?u64 = null,
-    description: Bounded(tool_presentation.max_description_bytes) = .{},
+    description: Bounded(max_bash_description_bytes) = .{},
     stdin_present: bool = false,
 };
 
@@ -274,7 +277,7 @@ pub const BashProblem = enum {
             .missing_cmd => "cmd is required",
             .missing_description => "description is required",
             .cmd_invalid => "cmd must be a string of UTF-8 text with no NUL characters",
-            .description_invalid => std.fmt.comptimePrint("description must be a nonblank, single-line string of UTF-8 text, at most {d} bytes", .{tool_presentation.max_description_bytes}),
+            .description_invalid => std.fmt.comptimePrint("description must be a nonblank, single-line string of UTF-8 text, at most {d} bytes", .{max_bash_description_bytes}),
             .stdin_invalid => "stdin must be a string of UTF-8 text",
             .timeout_invalid => std.fmt.comptimePrint("timeout_ms must be an integer from 1 to {d}", .{std.math.maxInt(i64)}),
         };
@@ -292,10 +295,11 @@ pub fn inspectCall(name_source: anytype, name_length: u64, arguments: anytype, o
     }
     const complete = name_length <= name.len and length == name_length and try name_source.next() == null;
     const named = complete and std.mem.eql(u8, name[0..length], bash_record.name);
-    const finding = complete and std.mem.eql(u8, name[0..length], find_tools_record.name);
-    const skill = complete and std.mem.eql(u8, name[0..length], skill_record.name);
-    const transcript = complete and std.mem.eql(u8, name[0..length], read_transcript_record.name);
-    const messaging = complete and std.mem.eql(u8, name[0..length], message_agent_record.name);
+    const core = if (complete) records.coreTool(name[0..length]) else null;
+    const finding = core == .find_tools;
+    const skill = core == .skill;
+    const transcript = core == .read_transcript;
+    const messaging = core == .message_agent;
     // Provider-run tools return inside the reply, never as function calls.
     const provider = if (complete) if (records.builtIn(name[0..length])) |builtin| record(builtin).owner == .provider else false else false;
     const tool: ?Record = if (complete and !provider) if (offered.find(name[0..length])) |candidate|

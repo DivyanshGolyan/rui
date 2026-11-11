@@ -247,10 +247,10 @@ pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     var digits: [protocol.Hole.maxBytes(.decimal)]u8 = undefined;
     const limit_text = if (info.descriptor_soft_limit) |limit| std.fmt.bufPrint(&digits, "{d}", .{limit}) catch unreachable else "unlimited";
     const routes = info.routes;
-    if (info.doublewrite) |value|
-        try response.appendShape(protocol.host_info_mysql_reply, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused, value, routes.codex, routes.openai })
-    else
-        try response.appendShape(protocol.host_info_reply, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused, routes.codex, routes.openai });
+    const shape = protocol.host_info_reply;
+    try response.appendShape(shape.head, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused });
+    if (info.doublewrite) |value| try response.appendShape(shape.doublewrite, .{value});
+    try response.appendShape(shape.tail, .{ routes.codex, routes.openai });
 }
 
 pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {
@@ -380,13 +380,15 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var host_info: protocol.ResponseBuffer = .{};
     const worst_info: HostInfo = .{ .store = &escaped_store, .instance = @splat(0xff), .active_capacity = max, .intake_capacity = max, .descriptor_soft_limit = max, .started_at = max, .custody_occupied = max, .paused = false, .routes = protocol.routesAll(.chatgpt_device), .doublewrite = null };
     try host_info.render(renderHostInfo, .{worst_info});
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_reply), host_info.len);
+    const shape = protocol.host_info_reply;
+    try std.testing.expectEqual(protocol.shapeBytes(shape.head) + protocol.shapeBytes(shape.tail), host_info.len);
     host_info.len = 0;
-    var mysql_info = worst_info;
-    mysql_info.store = &@as([32]u8, @splat(0x01));
-    mysql_info.doublewrite = &@as([32]u8, @splat(0x01));
-    try host_info.render(renderHostInfo, .{mysql_info});
-    try std.testing.expectEqual(protocol.shapeBytes(protocol.host_info_mysql_reply), host_info.len);
+    var with_diagnostic = worst_info;
+    // The public shape permits the full selector bound and the optional
+    // diagnostic together, not just a MySQL id's narrower runtime bound.
+    with_diagnostic.doublewrite = &@as([32]u8, @splat(0x01));
+    try host_info.render(renderHostInfo, .{with_diagnostic});
+    try std.testing.expectEqual(protocol.max_host_info_response_bytes, host_info.len);
 
     const observations = protocol.command_observation_reply;
     var configured = command_reply.CommandObservation{ .status = .accepted, .code = code, .kind = .{ .configure = .{ .revision = max, .created = false } } };
@@ -424,6 +426,10 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
     try description.set(&@as([protocol.max_tool_description_bytes]u8, @splat(1)));
+    var label: protocol.Bounded(protocol.max_label_bytes) = .{};
+    try label.set(&@as([protocol.max_label_bytes]u8, @splat(1)));
+    var bash_description: protocol.Bounded(protocol.session_work.max_description_bytes) = .{};
+    try bash_description.set(&@as([protocol.session_work.max_description_bytes]u8, @splat(1)));
     const presentation: protocol.ToolPresentation = .{ .description = description, .code = Worst.tag(protocol.ToolPresentation.Code), .publication_position = max };
     var longest_conversation: usize = 0;
     for (std.meta.tags(protocol.ConversationItemKind)) |kind| {
@@ -435,7 +441,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
             .content = content,
             .presentation = if (kind == .tool_result or kind == .hosted_call) presentation else null,
             .admitted_at = if (kind == .user) max else null,
-            .sender = if (kind == .user) .{ .session = session, .label = description } else null,
+            .sender = if (kind == .user) .{ .session = session, .label = label } else null,
         };
         var response: protocol.FixedJsonBuffer(protocol.max_conversation_page_response_bytes) = .{};
         try response.render(renderConversationPage, .{&page});
@@ -445,8 +451,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
 
     var key: protocol.Bounded(protocol.max_key_bytes) = .{};
     try key.set(&escaped_key);
-    // A label is a description's size, so the worst one doubles as both.
-    const peer: protocol.NamedPeer = .{ .session = session, .label = description };
+    const peer: protocol.NamedPeer = .{ .session = session, .label = label };
     const reference: protocol.ActivityItem.Content = .{ .length = max, .digest = content.digest };
     const field: protocol.ProposalFieldReference = .{ .length = max, .digest = content.digest };
     const values = [_]protocol.ActivityItem.Value{
@@ -489,7 +494,7 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
     var longest_state_bytes: usize = 0;
     for ([_]protocol.WorkState{
         .{ .retrying = .{ .since = max, .due_at_ms = max, .cause = code, .attempt = max } },
-        .{ .bash = .{ .since = max, .call = max, .description = description, .running = max, .approvals = max } },
+        .{ .bash = .{ .since = max, .call = max, .description = bash_description, .running = max, .approvals = max } },
         .{ .failed = .{ .since = max, .code = code, .resets_at = max } },
         .{ .stopped = .{ .since = max, .cause = Worst.tag(protocol.session_work.StopCause) } },
         .{ .approval = .{ .since = max } },

@@ -531,14 +531,41 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
         ";CREATE DATABASE " ++ migrated_database ++ ";CREATE DATABASE " ++ fresh_database);
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);
-    inline for (schema.migrations) |step| try load(migrated_database, schema.mysqlMigration(step.from), false);
+    const selector = "/mysql-migration-store";
+    // A persisted format must advance, not be repaired as missing at open.
+    // This older wire predates the step-local 8 -> 9 -> ... updates, so the
+    // composed text must also finish wire-only changes between releases.
+    try load(migrated_database, std.fmt.comptimePrint(
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('wire_version','7'),('store_selector','{s}')",
+        .{ schema.migration_baseline, selector },
+    ), false);
+    try load(migrated_database, schema.mysqlMigrationFrom(schema.migration_baseline).?, false);
     try load(fresh_database, schema.ddl(.mysql), false);
     try load(fresh_database, store_testing.expected_mysql_rows, true);
+    try load(fresh_database, std.fmt.comptimePrint(
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','{d}'),('wire_version','{s}'),('store_selector','{s}')",
+        .{ schema.schema_version, wire_version, selector },
+    ), false);
     try expectSameResults(comptime &shapeQueries(migrated_database), comptime &shapeQueries(fresh_database));
     try expectSameResults(comptime rowQueries(migrated_database), comptime rowQueries(fresh_database));
     // What the engine's open compares, on a fresh and a migrated Store.
     try expectCatalog(fresh_database);
     try expectCatalog(migrated_database);
+
+    // Use the production admission path, including metadata, identity,
+    // catalog digest, ownership and the server's durability requirements.
+    const config = (try configured()).?;
+    const probe = try std.testing.allocator.create(mysql_connection.Connection);
+    defer std.testing.allocator.destroy(probe);
+    var refusal: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer refusal.deinit();
+    try probe.open(.{ .address = .{ .unix_socket = config.socket }, .user = "root", .password = config.password, .database = migrated_database }, &refusal.writer);
+    defer probe.close();
+    var found: u32 = 0;
+    const opened = try @import("engine/mysql_open.zig").open(probe, io, .{ .database = migrated_database, .found_schema_version = &found }, selector);
+    try std.testing.expectEqual(schema.schema_version, found);
+    try std.testing.expect(opened.epoch > 0);
+    try std.testing.expect(schema.isStoreId(&opened.store_id));
     done.migrations += 1;
     writeRecord();
 }
@@ -556,9 +583,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
         if (step.from < 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
     try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(55).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -610,9 +635,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 56) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(56).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -680,9 +703,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(58).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -703,4 +724,55 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     try expectCatalog(migrated_database);
     done.migrations += 1;
     writeRecord();
+}
+
+test "fixture and typed statement PREPARE text retains MySQL index hints" {
+    const text = "SELECT revision FROM session_revision r @index(session_revision_instructions) WHERE r.session_ref=?1 AND r.instructions_content_id=?2";
+    const S = rsql.Read(.{
+        .sql = text,
+        .Args = struct { session: []const u8, content_id: u64 },
+        .Row = struct { revision: u64 },
+        .cardinality = .each,
+    });
+    shadowPrepare(comptime S.mysql.prepared());
+    const fixture = comptime rsql.mysqlRendering(text).rendered.prepared();
+    const pieces = comptime statements(fixture);
+    try std.testing.expectEqual(@as(usize, 1), pieces.len);
+    try std.testing.expectEqualStrings(comptime S.mysql.prepared(), pieces[0]);
+    try std.testing.expectEqualStrings(
+        "PREPARE rui_dialect_check FROM 'SELECT revision FROM session_revision r FORCE INDEX (session_revision_instructions) WHERE r.session_ref=? AND r.instructions_content_id=?';DEALLOCATE PREPARE rui_dialect_check",
+        comptime prepareQuery(pieces[0]),
+    );
+}
+
+test "metadata seed MySQL missing masks retain canonical selector and id" {
+    const id = "0123456789abcdef0123456789abcdef".*;
+    const selector = "/canonical/'\\é";
+    const expected = [_][]const u8{
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','" ++ wire_version ++ "');",
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',_utf8mb4 X'2f63616e6f6e6963616c2f275cc3a9' COLLATE utf8mb4_0900_bin);",
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "');",
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id','0123456789abcdef0123456789abcdef');",
+    };
+    // Independent domain: every subset of all four repaired keys.
+    const repaired = [_]schema.MetaKey{ .wire_version, .store_selector, .format, .store_id };
+    for (0..16) |mask| {
+        var seen: schema.MetaPresence = .empty;
+        var wanted: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer wanted.deinit();
+        for (repaired, expected, 0..) |key, sql, bit| {
+            if (mask & (@as(usize, 1) << @intCast(bit)) != 0) {
+                seen.insert(key);
+            } else try wanted.writer.writeAll(sql);
+        }
+        var actual: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer actual.deinit();
+        try schema.writeMissingMeta(&actual.writer, seen, &id, selector);
+        try std.testing.expectEqualStrings(wanted.written(), actual.written());
+    }
+    const first = schema.drawStoreId(std.testing.io);
+    const second = schema.drawStoreId(std.testing.io);
+    try std.testing.expect(schema.isStoreId(&first));
+    try std.testing.expect(schema.isStoreId(&second));
+    try std.testing.expect(!std.mem.eql(u8, &first, &second));
 }

@@ -12,6 +12,7 @@
 //! hold a marker type (see `Optional`, `ListOf`, `State`, `Content`) for the parts the
 //! Host and client write in code rather than as one shape.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -85,7 +86,7 @@ pub const routes = [_]Route{
         .kind = .host_info,
         .summary = "The Host's identity, capacity and provider routes. Also the readiness probe.",
         .variants = &.{variant(protocol.host_info_request, .{})},
-        .reply = jsonReply(.{ protocol.host_info_reply, protocol.host_info_mysql_reply }),
+        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{Optional(protocol.host_info_reply.doublewrite)} ++ protocol.host_info_reply.tail}),
     },
     .{
         .path = "/v1/control/host-stop",
@@ -421,13 +422,23 @@ fn configurationMembers(comptime index: usize) type {
         .text, .choice => |capacity| Plain(Hole{ .string = capacity }, entry.nullable),
         .decimal_policy => Plain(TokenCount, entry.nullable),
         .tools => Plain(ToolNameList, entry.nullable),
-        .content => Plain(Content, entry.nullable),
+        .content => Plain(if (entry.json_object) SchemaObject else Content, entry.nullable),
     };
     const member = .{ (if (index == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":", value };
     return struct {
         const shape = .{Optional(member)} ++ configurationMembers(index + 1).shape;
     };
 }
+
+/// Schemas have arbitrary JSON members; no object is a content reference.
+const SchemaObject = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "object" }, .additionalProperties = Value{ .bool = true } });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("{}");
+    }
+};
 
 const Configuration = configurationShape("Configuration");
 const MessageConfiguration = Configuration;
@@ -1235,7 +1246,7 @@ test "every launch Wire field parses and conforms to its component schema" {
     var document: Document = .init(allocator);
     _ = try document.build();
     const preset = try std.json.parseFromSliceLeaky(Value, allocator,
-        \\{"review":{"model":"custom","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","provider":"openai","workspace":"/tmp","instructions":"Review","outputSchema":"{\"type\":\"object\"}","label":null}}
+        \\{"review":{"model":"custom","effort":"low","compactAt":1000,"tools":[],"permissionMode":"ask","provider":"openai","workspace":"/tmp","instructions":"Review","outputSchema":{"type":"object"},"label":null}}
     , .{});
     const wire: launch_frame.Wire = .{
         .v = launch_frame.version,
@@ -1429,7 +1440,7 @@ test "replies the Host renders conform to their schemas" {
     // The model list is written in code, not as a shape.
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
-    try model_list.writeProviders(&out.writer, &.{
+    try model_list.writeProviders(&out.writer, model_catalog.shipped, &.{
         .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = ids } } },
     });
@@ -1454,6 +1465,53 @@ test "replies the Host renders conform to their schemas" {
     // These are the Store's real streaming reports, not schema examples:
     // an added hand-written field must fail additionalProperties here.
     try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
+}
+
+test "Host information has one schema with an omittable bounded diagnostic" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    _ = try document.build();
+    const schema = document.schemas.get("HostInfoReply").?;
+    try std.testing.expect(!schema.object.contains("anyOf"));
+    try std.testing.expectEqualStrings("object", schema.object.get("type").?.string);
+    const properties = schema.object.get("properties").?.object;
+    const diagnostic = properties.get("innodb_doublewrite").?.object;
+    try std.testing.expectEqualStrings("string", diagnostic.get("type").?.string);
+    try std.testing.expectEqual(@as(i64, 32), diagnostic.get("maxLength").?.integer);
+    try std.testing.expectEqual(@as(i64, protocol.max_store_bytes), properties.get("store").?.object.get("maxLength").?.integer);
+    for (schema.object.get("required").?.array.items) |required|
+        try std.testing.expect(!std.mem.eql(u8, "innodb_doublewrite", required.string));
+
+    // One schema accepts both Host-emitted forms, and the diagnostic's
+    // presence does not narrow the selector to a MySQL id.
+    const host_reply = @import("host_reply.zig");
+    const stores = [_][]const u8{ "/sqlite", "0123456789abcdef0123456789abcdef", &@as([protocol.max_store_bytes]u8, @splat('s')) };
+    for (stores) |selector| {
+        for ([_]?[]const u8{ null, "OFF", &@as([32]u8, @splat(1)) }) |doublewrite| {
+            var response: protocol.ResponseBuffer = .{};
+            try response.render(host_reply.renderHostInfo, .{host_reply.HostInfo{
+                .store = selector,
+                .instance = @splat(1),
+                .active_capacity = 2,
+                .intake_capacity = 100,
+                .descriptor_soft_limit = 1024,
+                .started_at = 1792918800,
+                .custody_occupied = 0,
+                .paused = false,
+                .routes = protocol.routesAll(.unserved),
+                .doublewrite = doublewrite,
+            }});
+            var json = try std.json.parseFromSliceLeaky(Value, arena.allocator(), response.slice(), .{});
+            try std.testing.expect(conforms(document.schemas, schema, json));
+            try std.testing.expectEqual(doublewrite != null, json.object.contains("innodb_doublewrite"));
+            // Omission is not nullability, and the string has an actual bound.
+            try json.object.put(arena.allocator(), "innodb_doublewrite", .null);
+            try std.testing.expect(!conforms(document.schemas, schema, json));
+            try json.object.put(arena.allocator(), "innodb_doublewrite", .{ .string = &@as([33]u8, @splat('x')) });
+            try std.testing.expect(!conforms(document.schemas, schema, json));
+        }
+    }
 }
 
 test "Message observation schema requires Host state and bounds recovery" {

@@ -368,6 +368,13 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(callers, [], "Store tests reach these Store callers; move the tests that "
                          "import them into the callers")
 
+    def test_store_tests_reach_no_client_reply_decoder(self):
+        # Store/decoder round trips belong to protocol_reply_store_tests.zig,
+        # not Store's root: the decoder can reach caller-only presentation.
+        graph = tree_graph()
+        self.assertNotIn("src/protocol_reply.zig", graph.reached["test-store"],
+                         "Move Store/client decoder contracts to protocol_reply_store_tests.zig")
+
     def test_store_code_imports_no_protocol(self):
         # The Store reads and writes plain values; the Host translates
         # between them and the wire, so a wire change does not reach it.
@@ -1450,6 +1457,8 @@ if [ "$(basename "${1:-}")" = host_process.py ] && [ "$2" = exec ]; then shift 2
 fixture=$(basename "${1:-$0}")
 base_fixture=$fixture
 case "$fixture" in
+    host_status_integration.py)
+        test "$#" -eq 4 && test "$3" = status && test "$4" = mysql-admin || exit 47 ;;
     human_cli_integration.py|terminal_restoration_integration.py|canonical_failure_integration.py)
         test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46 ;;
 esac
@@ -1522,9 +1531,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
                     "    time.monotonic_ns = fail_clock\n")
                 env["PYTHONPATH"] = str(root)
-            arguments = (["parallel", str(root / "native"), "status", "sessions", "activity", "preferences", "notice"]
+            arguments = (["parallel", str(root / "native"), "status", "sessions", "activity", "preferences", "notice", "mysql-admin"]
                          if part == "parallel" else
-                         ["status", "sessions", "activity", "preferences", part, "notice"])
+                         ["status", "sessions", "activity", "preferences", part, "notice", "mysql-admin"])
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]

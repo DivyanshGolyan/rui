@@ -23,11 +23,11 @@ export interface AgentSpec {
 	workspace?: string;
 	/** `openai` or `codex`. Fixed for the Session's life. */
 	provider?: NonNullable<Schemas["AgentSpec"]["provider"]>;
-	/** Fixed for the Session's life. */
+	/** May change within the Session's fixed provider. */
 	model: string;
 	instructions?: string;
-	/** JSON output schema, or its JSON text; `null` clears it. */
-	outputSchema?: Record<string, unknown> | string | null;
+	/** JSON output schema object; `null` clears it. */
+	outputSchema?: Record<string, unknown> | null;
 	/** Tool names the Host offers, such as `bash` and `web_search`. */
 	tools: readonly string[];
 	/** Tools loaded from the first model request. */
@@ -50,7 +50,7 @@ export type SessionSpec = AgentSpec;
 export type SessionCreate = (AgentSpec & { preset?: never }) | ({ preset: string } & Partial<AgentSpec>);
 
 /** The settings `update` may change: everything but the ones fixed at creation. */
-export type SessionUpdate = Partial<Pick<SessionSpec, "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
+export type SessionUpdate = Partial<Pick<SessionSpec, "model" | "instructions" | "outputSchema" | "tools" | "permissionMode" | "effort" | "compactAt" | "label" | "loadedTools" | "outputReservation">>;
 
 export interface WriteOptions {
 	/** Required on `create` and `send`, built as `kind:driftId`. Other writes get a fresh UUIDv4 when it is left out (D123). */
@@ -120,7 +120,7 @@ export function agentSpec(spec: Partial<SessionSpec>): Schemas["Configuration"] 
 		...(spec.tools === undefined ? {} : { tools: [...new Set(spec.tools)].sort() }),
 		...(spec.loadedTools === undefined ? {} : { loadedTools: [...new Set(spec.loadedTools)].sort() }),
 		...(spec.permissionMode === undefined ? {} : { permissionMode: spec.permissionMode }),
-		...(spec.outputSchema === undefined ? {} : { outputSchema: typeof spec.outputSchema === "object" && spec.outputSchema !== null ? JSON.stringify(spec.outputSchema) : spec.outputSchema }),
+		...(spec.outputSchema === undefined ? {} : { outputSchema: spec.outputSchema }),
 		...(spec.compactAt === undefined ? {} : { compactAt: spec.compactAt }),
 		...(spec.outputReservation === undefined ? {} : { outputReservation: spec.outputReservation }),
 		...(spec.effort === undefined ? {} : { effort: spec.effort }),

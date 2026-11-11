@@ -46,11 +46,12 @@ test("launch frame carries the MCP servers, an empty list when none are given", 
 });
 
 test("launch presets preserve creation fields and encode the same plain spec", () => {
-	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: '{"type":"object"}' };
+	const spec = { model: "custom", effort: null, compactAt: 1000, tools: ["bash"] as const, permissionMode: "ask" as const, provider: "openai" as const, workspace: "/w", outputSchema: { type: "object" } };
 	const options = { database: "/s", provider: { baseUrl: "https://example.com", key: "key" }, presets: { review: spec } };
 	const frame = launchFor(options, "/r").frame;
 	assert.deepEqual(frame.presets, { review: spec });
 	for (const text of ["[]", "false", "not JSON"]) {
+		// @ts-expect-error The runtime Host also refuses non-object schemas.
 		const invalid = launchFor({ ...options, presets: { review: { ...spec, outputSchema: text } } }, "/r").frame;
 		assert.deepEqual(JSON.parse(JSON.stringify(invalid)).presets.review.outputSchema, text);
 	}
@@ -263,5 +264,5 @@ test("presets and configure encode one spec including loaded tools and output re
 	assert.deepEqual(configuration, preset);
 	assert.deepEqual(preset.loadedTools, ["find_tools"]);
 	assert.equal(preset.outputReservation, 42);
-	assert.equal(preset.outputSchema, '{"type":"object"}');
+	assert.deepEqual(preset.outputSchema, { type: "object" });
 });

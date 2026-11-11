@@ -11,6 +11,7 @@ const provider_name = @import("provider_name.zig");
 const session_work = @import("session_work.zig");
 
 pub const session_list_page_size: usize = 8;
+pub const max_last_line_bytes = 200;
 pub const ListDelta = enum { not_modified, changed, full };
 
 pub const ListSessions = struct {
@@ -59,9 +60,15 @@ pub const Row = struct {
     /// The last activity position.
     end: u64,
     first_message: ?FirstMessage,
+    last_line: ?LastLine,
     work: session_work.Work,
     peers: Peers,
 };
+
+/// The later of an ended Turn's outcome and the oldest pending approval's
+/// call. Text borrows the row visitor's scratch; failures, stops and private
+/// answers have no text.
+pub const LastLine = struct { position: u64, text: ?[]const u8 };
 
 /// A Session's first admitted Message.
 pub const FirstMessage = struct {

@@ -6,14 +6,13 @@ const protocol_reply = @import("protocol_reply.zig");
 const protocol = @import("protocol.zig");
 const Text = @import("TerminalText.zig");
 const Renderer = @import("AnswerRenderer.zig");
+pub const Destination = Renderer.Destination;
 const tools = @import("tools.zig");
 const failure_class = @import("failure_class.zig");
+const marks = @import("marks.zig");
 const work_line = @import("work_line.zig");
 const queued_line = @import("queued_line.zig");
 const unicode = @import("terminal_unicode");
-const mcp_arguments = @import("mcp/arguments.zig");
-const mcp_shape = @import("mcp/shape.zig");
-const mcp_document = @import("mcp/document.zig");
 
 /// Only presentation-owned foreground changes. Content cannot select a style.
 pub const Style = enum {
@@ -22,6 +21,16 @@ pub const Style = enum {
     attention,
     failure,
     normal,
+
+    fn fromTone(tone: marks.Tone) Style {
+        return switch (tone) {
+            .ink => .user,
+            .normal => .normal,
+            .quiet => .quiet,
+            .attention => .attention,
+            .failure => .failure,
+        };
+    }
 
     pub fn code(self: Style, colour: bool) []const u8 {
         if (!colour) return "";
@@ -111,7 +120,7 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
     try sendFailed(&failed, peer, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "! Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ " — Failed" ++ R ++ "\n", failed.bytes[0..failed.length]);
+    try std.testing.expectEqualStrings("\n" ++ S ++ "× Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", failed.bytes[0..failed.length]);
     try std.testing.expect(!compact);
     // A named peer shows by its name, escaped as a label is, and rows in a
     // row share one group with no blank line between them.
@@ -143,9 +152,9 @@ test "failed peer Messages distinguish absent targets and reset grouping without
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
     const cases = [_]struct { target: ?protocol.NamedPeer, line: []const u8 }{
-        .{ .target = null, .line = "! Message rejected — No valid target reference" },
-        .{ .target = peer, .line = "! Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") ++ " — Failed" },
-        .{ .target = named, .line = "! Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") ++ " — Failed" },
+        .{ .target = null, .line = "× Message not delivered" },
+        .{ .target = peer, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") },
+        .{ .target = named, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") },
     };
     for (cases) |case| {
         for ([_]bool{ false, true }) |grouped| {
@@ -192,10 +201,9 @@ pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, compact: *bool) !v
     compact.* = false;
     try sink.feed("\n" ++ Mark.summary);
     if (target) |peer| {
-        try sink.feed("! Messaged ");
+        try sink.feed("× Messaged ");
         try peerName(sink, peer);
-        try sink.feed(" — Failed");
-    } else try sink.feed("! Message rejected — No valid target reference");
+    } else try sink.feed("× Message not delivered");
     try sink.feed(Mark.reset ++ "\n");
 }
 
@@ -614,28 +622,91 @@ test "a long user Message shows two non-blank lines and what it hides" {
 }
 
 fn toolState(code: protocol.ToolPresentation.Code) struct { glyph: []const u8, suffix: []const u8, style: Style } {
-    return switch (code) {
-        .unresolved => .{ .glyph = "•", .suffix = "", .style = .quiet },
-        .pending_permission => .{ .glyph = "?", .suffix = "", .style = .attention },
-        .succeeded => .{ .glyph = "✓", .suffix = "", .style = .normal },
-        .denied => .{ .glyph = "•", .suffix = " — Denied", .style = .normal },
-        .unknown_tool => .{ .glyph = "•", .suffix = " — Rejected: unknown tool", .style = .normal },
-        .invalid_arguments => .{ .glyph = "•", .suffix = " — Rejected: invalid arguments", .style = .normal },
-        .failed => .{ .glyph = "!", .suffix = " — Failed", .style = .failure },
-        .timed_out => .{ .glyph = "!", .suffix = " — Timed out", .style = .failure },
-        .indeterminate => .{ .glyph = "!", .suffix = " — Outcome unknown; may have run", .style = .failure },
-        .storage_failed => .{ .glyph = "!", .suffix = " — Output capture failed", .style = .failure },
-        .spawn_failed => .{ .glyph = "!", .suffix = " — Could not start", .style = .failure },
-        .cancelled => .{ .glyph = "!", .suffix = " — Cancelled", .style = .failure },
-        .infrastructure_shutdown => .{ .glyph = "!", .suffix = " — Host stopped; outcome unknown", .style = .failure },
+    const state: struct { mark: marks.Mark, suffix: []const u8 } = switch (code) {
+        .unresolved => .{ .mark = .active, .suffix = "" },
+        .pending_permission => .{ .mark = .needs_you, .suffix = "" },
+        .succeeded => .{ .mark = .finished, .suffix = "" },
+        .denied => .{ .mark = .stopped, .suffix = " · denied" },
+        .unknown_tool => .{ .mark = .failed, .suffix = " · rejected" },
+        .invalid_arguments => .{ .mark = .failed, .suffix = " · rejected" },
+        .failed => .{ .mark = .failed, .suffix = "" },
+        .timed_out => .{ .mark = .failed, .suffix = " · timed out" },
+        .indeterminate => .{ .mark = .failed, .suffix = " · may have run" },
+        .storage_failed => .{ .mark = .failed, .suffix = " · output lost" },
+        .spawn_failed => .{ .mark = .failed, .suffix = " · could not start" },
+        .cancelled => .{ .mark = .stopped, .suffix = "" },
+        .infrastructure_shutdown => .{ .mark = .failed, .suffix = " · may have run" },
     };
+    const shown = marks.marks.get(state.mark);
+    return .{ .glyph = shown.unicode, .suffix = state.suffix, .style = Style.fromTone(shown.tone) };
+}
+
+test "list rows share every mark and script with the chat heading table" {
+    const overview = @import("overview_view.zig");
+    const Case = struct {
+        mark: marks.Mark,
+        state: overview.WorkState,
+        colour: overview.Colour,
+        tool: ?protocol.ToolPresentation.Code,
+    };
+    const cases = [_]Case{
+        .{ .mark = .needs_you, .state = .{ .approval = .{ .since = 1 } }, .colour = .attention, .tool = .pending_permission },
+        .{ .mark = .active, .state = .{ .working = .{ .since = 1 } }, .colour = .ink, .tool = .unresolved },
+        .{ .mark = .queued, .state = .{ .pending = .{ .since = 1 } }, .colour = .quiet, .tool = null },
+        .{ .mark = .waiting, .state = .{ .idle = .{ .since = 1 } }, .colour = .normal, .tool = null },
+        .{ .mark = .finished, .state = .{ .finished = .{ .since = 1 } }, .colour = .mark, .tool = .succeeded },
+        .{ .mark = .failed, .state = .{ .failed = .{ .since = 1, .code = .{}, .resets_at = null } }, .colour = .failure, .tool = .failed },
+        .{ .mark = .stopped, .state = .{ .stopped = .{ .since = 1, .cause = .stop } }, .colour = .normal, .tool = .denied },
+    };
+    const Sink = struct {
+        bytes: [128]u8 = undefined,
+        length: usize = 0,
+
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
+            self.length += bytes.len;
+        }
+    };
+    try std.testing.expect(overview.Mark == marks.Mark);
+    var seen: std.enums.EnumSet(marks.Mark) = .empty;
+    for (cases) |case| {
+        seen.insert(case.mark);
+        const shared = marks.marks.get(case.mark);
+        var state: overview.State = undefined;
+        try state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer state.deinit();
+        _ = try overview.step(&state, .{ .tick = 100_000 });
+        _ = try overview.step(&state, .{ .list = .{ .page = .{
+            .rows = &.{.{ .reference = "k7m2qx".*, .workspace = "/work", .label = "Work", .state = case.state }},
+            .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
+        } } });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        for ([_]bool{ true, false }) |unicode_script| {
+            const caps: overview.Caps = .{ .unicode = unicode_script };
+            try std.testing.expect(!overview.markSpins(&state, .{ .row = 0 }, caps));
+            const row = try overview.rowSegments(arena.allocator(), &state, 0, 80, caps, 4);
+            try std.testing.expectEqualStrings("  ", row[0].text);
+            try std.testing.expectEqualStrings(if (unicode_script) shared.unicode else shared.ascii, row[1].text);
+            // List colours remain their own policy, including idle and finished.
+            try std.testing.expectEqual(case.colour, row[1].style.colour);
+        }
+        // Tool headings use Unicode; queued and idle have no Tool outcome.
+        if (case.tool) |code| {
+            var heading: Sink = .{};
+            try toolHeading(.{ .description = null, .code = code, .publication_position = null }, &heading, false, false);
+            const end = std.mem.indexOfScalar(u8, heading.bytes[0..heading.length], ' ').?;
+            try std.testing.expectEqualStrings(shared.unicode, heading.bytes[0..end]);
+        }
+    }
+    try std.testing.expect(seen.eql(.full));
 }
 
 pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {
     return toolHeadingWith(presentation, sink, colour, separate, "");
 }
 
-/// `exit` is a digits-only exit status, shown after the failure suffix.
+/// `exit` is a digits-only exit status, shown only for a failed call.
 fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8) !void {
     const state = toolState(presentation.code);
     if (separate) try sink.feed("\n");
@@ -648,10 +719,9 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try escaped.feed(if (presentation.description) |label| label.slice() else "Tool call");
     try escaped.finish();
     try indented.feed(state.suffix);
-    if (exit.len != 0) {
-        try indented.feed(" (exit ");
+    if (presentation.code == .failed and exit.len != 0) {
+        try indented.feed(" · exit ");
         try indented.feed(exit);
-        try indented.feed(")");
     }
     try indented.finish();
     try sink.feed("\n");
@@ -672,7 +742,7 @@ pub const Live = struct {
     // clock.
     pub const line_bytes = Text.max_bytes_per_byte * protocol.max_tool_description_bytes + 96;
     comptime {
-        std.debug.assert("• ".len + work_line.max_clock_bytes <= line_bytes - Text.max_bytes_per_byte * protocol.max_tool_description_bytes);
+        std.debug.assert(marks.marks.get(.active).unicode.len + " ".len + work_line.max_clock_bytes <= line_bytes - Text.max_bytes_per_byte * protocol.max_tool_description_bytes);
     }
 
     /// The call's row; `running` is the clock after the words of the
@@ -760,8 +830,7 @@ test "hanging indentation survives split windows and trusted styles" {
 
 /// What the Action's `?` row says, for keeping it beside the choice.
 pub const ActionSummary = struct {
-    // The UI keeps the full MCP label without changing the saved 100-byte wire.
-    description: protocol.Bounded(mcp_shape.description_max_bytes) = .{},
+    description: protocol.Bounded(protocol.max_tool_description_bytes) = .{},
 };
 
 /// A time limit as exactly as the model set it, in its largest whole unit.
@@ -802,9 +871,10 @@ test "a time limit shows in its largest whole unit, never rounded" {
 /// its stdin. ConversationViewport hangs wrapped rows under the text after it.
 pub const content_mark = "│ ";
 
-/// Identity from the call's frozen offer, never the Session's latest catalog.
+/// Frozen call identity and its saved conversation line, never the latest catalog.
 pub const ActionTool = struct {
     name: protocol.Bounded(protocol.max_tool_name_bytes),
+    description: protocol.Bounded(protocol.max_tool_description_bytes),
     server: ?protocol.Bounded(64) = null,
 
     pub fn runner(self: *const ActionTool) !tools.Runner {
@@ -819,7 +889,7 @@ pub const ActionTool = struct {
     }
 };
 
-/// Selects one frozen identity from an already verified immutable Current capture.
+/// Selects frozen identity and saved presentation from a verified Current capture.
 pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io, scratch: std.Io.File, action: u64) !?ActionTool {
     const Selection = struct {
         action: u64,
@@ -828,7 +898,7 @@ pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io
             switch (attention) {
                 .unresolved => |row| if (row.action.value == self.action) {
                     if (self.selected != null) return error.InvalidObservation;
-                    var tool: ActionTool = .{ .name = .{} };
+                    var tool: ActionTool = .{ .name = .{}, .description = row.presentation.value.description orelse return error.InvalidObservation };
                     try tool.name.set(row.tool.slice());
                     if (row.server.value) |server| {
                         tool.server = .{};
@@ -845,7 +915,7 @@ pub fn actionToolFromCapture(observed: *const protocol_reply.Current, io: std.Io
     return selection.selected;
 }
 
-/// Reads unresolved call identity before the arguments reuse the capture file.
+/// Reads unresolved call identity and saved line before arguments reuse the capture.
 /// A resolved or absent Action has no current approval metadata.
 pub fn actionTool(requests: client.Requests, store: []const u8, session: []const u8, action: u64, scratch: std.Io.File) !?ActionTool {
     const observed = try current(requests, store, session, scratch);
@@ -931,19 +1001,7 @@ pub fn bashCommand(io: std.Io, scratch: std.Io.File, tool: *const ActionTool, bu
 fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, tool: *const ActionTool) !ActionSummary {
     var buffer: [4096]u8 = undefined;
     var reader = scratch.reader(io, &buffer);
-    var source: ArgumentSource = .{ .reader = &reader.interface };
-    const range = try mcp_arguments.descriptionRange(&source);
-    var summary: ActionSummary = .{};
-    if (range) |value| {
-        // A decoded byte needs at most six source bytes (a \uXXXX escape).
-        var encoded: [6 * mcp_shape.description_max_bytes]u8 = undefined;
-        if (value.length > encoded.len) return error.InvalidObservation;
-        const text = encoded[0..@intCast(value.length)];
-        if (try scratch.readPositionalAll(io, text, value.start) != text.len) return error.TruncatedResult;
-        var decoded = std.Io.Writer.fixed(&summary.description.bytes);
-        try mcp_document.writeDecoded(&decoded, text);
-        summary.description.len = decoded.end;
-    } else try summary.description.set(tool.name.slice());
+    const summary: ActionSummary = .{ .description = tool.description };
     try sink.feed("\n");
     try sink.feed(Style.attention.code(colour));
     try sink.feed("?");
@@ -962,7 +1020,6 @@ fn mcpRequest(io: std.Io, scratch: std.Io.File, sink: anytype, colour: bool, too
     try indented.feed("\nArguments:\n");
     var lines: Indented(*Indented(@TypeOf(sink))) = .{ .sink = &indented, .prefix = content_mark, .marks_empty = true, .line_start = true };
     var escaped: Escaped(@TypeOf(&lines)) = .{ .sink = &lines, .text = .{ .mode = .multiline } };
-    try reader.seekTo(0);
     while (true) {
         const bytes = reader.interface.peekGreedy(1) catch |err| switch (err) {
             error.EndOfStream => break,
@@ -1128,10 +1185,10 @@ pub fn Answer(comptime Sink: type) type {
         writer: std.Io.Writer,
         renderer: Renderer,
         failure: ?anyerror = null,
-        pub fn init(self: *@This(), sink: Sink, home: []const u8) void {
+        pub fn init(self: *@This(), sink: Sink, home: []const u8, colour: bool, destination: Destination) void {
             self.* = .{ .sink = sink, .writer = undefined, .renderer = undefined };
             self.writer = .{ .vtable = &.{ .drain = drain }, .buffer = &self.storage };
-            self.renderer = .{ .out = &self.writer, .home = home };
+            self.renderer = .{ .out = &self.writer, .home = home, .colour = colour, .destination = destination };
         }
         pub fn feed(self: *@This(), bytes: []const u8) anyerror!void {
             if (self.failure) |err| return err;
@@ -1166,6 +1223,77 @@ pub fn Answer(comptime Sink: type) type {
     };
 }
 
+test "answer table columns align in the viewport for every negotiated width and escaped cluster" {
+    const vaxis = @import("vaxis");
+    const Viewport = @import("ConversationViewport.zig");
+    const input = "| Value | X |\n| --- | --- |\n" ++
+        "| **\u{200b}** | X |\n| 雪 | X |\n| 🧑‍🌾 | X |\n" ++
+        "| 🧑‍🧑‍🧑‍🧑‍🧑 | X |\n| \u{feff} | X |\n| \u{ad} | X |\n" ++
+        "| \u{301} | X |\n| \x01 | X |\n| \x1b | X |\n| \u{202e} | X |\n" ++
+        "| e\u{301} | X |\n| \u{600} | X |\n| `a\tb` | X |\n" ++
+        "| e" ++ "\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}\u{301}" ++ " | X |\n";
+    const Sink = struct {
+        document: *Viewport.Sized(4096, true),
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.document.append(bytes);
+        }
+    };
+    for (std.enums.values(Viewport.Method)) |method| for ([_]bool{ false, true }) |colour| {
+        for (0..input.len + 1) |split| {
+            var document: Viewport.Sized(4096, true) = .{ .width_method = method };
+            var answer: Answer(Sink) = undefined;
+            answer.init(.{ .document = &document }, "", colour, .{ .viewport = method });
+            try answer.feed(input[0..split]);
+            try answer.feed(input[split..]);
+            try answer.finish();
+            try document.prepare();
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\u{200b}") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\u{feff}") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\x01") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\x1b") != null);
+            try std.testing.expect(std.mem.indexOf(u8, document.text(), "\\u202e") != null);
+            var cells: [120 * 16]vaxis.Cell = @splat(.{});
+            var screen: vaxis.Screen = .{ .width = 120, .height = 16, .width_method = method, .buf = &cells };
+            const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 120, .height = 16, .screen = &screen };
+            const drawn = document.draw(window, .{}, true, colour, .{}, .{});
+            errdefer std.debug.print("method={s} colour={} split={d} text={s}\n", .{ @tagName(method), colour, split, document.text() });
+            try std.testing.expectEqual(@as(usize, 15), drawn.rows);
+            var column: ?u16 = null;
+            for (0..15) |row| {
+                var found: ?u16 = null;
+                for (0..120) |col| if (std.mem.eql(u8, screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme, "X")) {
+                    try std.testing.expect(found == null);
+                    found = @intCast(col);
+                };
+                try std.testing.expect(found != null);
+                errdefer std.debug.print("row={d} marker={?d} wanted={?d}\n", .{ row, found, column });
+                if (column) |wanted| try std.testing.expectEqual(wanted, found.?) else column = found;
+            }
+        }
+    };
+}
+
+test "answer adapters pass NO_COLOR through inline names tables and fenced code" {
+    const Sink = struct {
+        output: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.output.writeAll(bytes);
+        }
+    };
+    for ([_]Destination{ .terminal, .{ .viewport = .wcwidth } }) |destination| for ([_]bool{ false, true }) |colour| {
+        var output = std.Io.Writer.Allocating.init(std.testing.allocator);
+        defer output.deinit();
+        var answer: Answer(Sink) = undefined;
+        answer.init(.{ .output = &output.writer }, "", colour, destination);
+        for ("`name`\n| A |\n| --- |\n| B |\n```zig\ncode\n\n```\n") |byte| try answer.feed(&.{byte});
+        try answer.finish();
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[94m") != null);
+        try std.testing.expectEqual(colour, std.mem.indexOf(u8, output.written(), "\x1b[90m") != null);
+        try std.testing.expectEqual(destination == .viewport and colour, std.mem.indexOf(u8, output.written(), "\x1b[40m") != null);
+        if (!colour) try std.testing.expectEqualStrings("name\n  A\n  B\n  code\n  \n", output.written());
+    };
+}
+
 fn print(sink: anytype, comptime format: []const u8, args: anytype) !void {
     var storage: [256]u8 = undefined;
     try sink.feed(try std.fmt.bufPrint(&storage, format, args));
@@ -1186,14 +1314,13 @@ pub const Labels = enum {
     }
 };
 
-/// What a Message's state was when read. Only a stop's exclusion asks
-/// something of the person, so only it carries the mark.
+/// What a Message's state was when read; an excluded Message was not sent.
 pub fn messageLabel(state: @FieldType(protocol.ActivityItem.Message, "state"), labels: Labels) ?[]const u8 {
     if (labels == .none) return null;
     return switch (state) {
         .applied => null,
         .queued => if (labels == .excluded_and_queued) "Queued" else null,
-        .excluded => "! Stopped before it ran · send it again to run it",
+        .excluded => "◌ not sent",
     };
 }
 
@@ -1205,7 +1332,7 @@ test "a queued Message is labelled only while work under way holds it" {
     try std.testing.expect(messageLabel(.queued, .lasting(starting.holdsQueue())) == null);
     try std.testing.expectEqualStrings("Queued", messageLabel(.queued, .lasting(working.holdsQueue())).?);
     // A stop's exclusion asks the person to act whatever the work is doing.
-    try std.testing.expectEqualStrings("! Stopped before it ran · send it again to run it", messageLabel(.excluded, .lasting(false)).?);
+    try std.testing.expectEqualStrings("◌ not sent", messageLabel(.excluded, .lasting(false)).?);
     try std.testing.expect(messageLabel(.applied, .excluded_and_queued) == null);
     // Live output's next pages say what became of each Message.
     inline for (.{ .queued, .excluded, .applied }) |state| try std.testing.expect(messageLabel(state, .none) == null);
@@ -1216,7 +1343,7 @@ test "a queued Message is labelled only while work under way holds it" {
 pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool) !void {
     if (messageLabel(value.state, labels)) |text| {
         compact.* = false;
-        try print(sink, "\n{s}", .{text});
+        try print(sink, "\n{s}{s}{s}", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
     if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at, compact);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
@@ -1292,19 +1419,19 @@ test "tool header hides all body lines for every outcome and first-line split" {
         "Capture may be incomplete.\nstdout tail:\nhidden\nstderr tail:\n\x1b[2Jhidden\n" ++
         "[earlier output omitted]\nFull stdout: /secret\n/details for full output.\n";
     const cases = .{
-        .{ protocol.ToolPresentation.Code.unresolved, "• Tool call" },
+        .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
-        .{ protocol.ToolPresentation.Code.failed, "! Tool call — Failed (exit 7)" },
-        .{ protocol.ToolPresentation.Code.timed_out, "! Tool call — Timed out" },
-        .{ protocol.ToolPresentation.Code.indeterminate, "! Tool call — Outcome unknown; may have run" },
-        .{ protocol.ToolPresentation.Code.storage_failed, "! Tool call — Output capture failed" },
-        .{ protocol.ToolPresentation.Code.spawn_failed, "! Tool call — Could not start" },
-        .{ protocol.ToolPresentation.Code.cancelled, "! Tool call — Cancelled" },
-        .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "! Tool call — Host stopped; outcome unknown" },
-        .{ protocol.ToolPresentation.Code.denied, "• Tool call — Denied" },
-        .{ protocol.ToolPresentation.Code.unknown_tool, "• Tool call — Rejected: unknown tool" },
-        .{ protocol.ToolPresentation.Code.invalid_arguments, "• Tool call — Rejected: invalid arguments" },
+        .{ protocol.ToolPresentation.Code.failed, "× Tool call · exit 7" },
+        .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
+        .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
+        .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
+        .{ protocol.ToolPresentation.Code.spawn_failed, "× Tool call · could not start" },
+        .{ protocol.ToolPresentation.Code.cancelled, "■ Tool call" },
+        .{ protocol.ToolPresentation.Code.infrastructure_shutdown, "× Tool call · may have run" },
+        .{ protocol.ToolPresentation.Code.denied, "■ Tool call · denied" },
+        .{ protocol.ToolPresentation.Code.unknown_tool, "× Tool call · rejected" },
+        .{ protocol.ToolPresentation.Code.invalid_arguments, "× Tool call · rejected" },
     };
     try std.testing.expectEqual(std.enums.values(protocol.ToolPresentation.Code).len, cases.len);
     inline for (cases) |case| {
@@ -1320,9 +1447,10 @@ test "tool header hides all body lines for every outcome and first-line split" {
                 try expected.feed("\n");
                 const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
                 if (colour) try expected.feed(switch (case[0]) {
-                    .unresolved => "\x1b[90m",
+                    .unresolved => "\x1b[94m",
                     .pending_permission => "\x1b[33m",
-                    .succeeded, .denied, .unknown_tool, .invalid_arguments => "\x1b[39m",
+                    .succeeded => "\x1b[90m",
+                    .denied, .cancelled => "\x1b[39m",
                     else => "\x1b[91m",
                 });
                 try expected.feed(case[1][0..glyph_end]);
@@ -1333,6 +1461,23 @@ test "tool header hides all body lines for every outcome and first-line split" {
                 try std.testing.expectEqual(case[0] == .succeeded, compact);
             }
         }
+    }
+}
+
+test "failed tool exit status is named rather than read as a count" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    for ([_][]const u8{ "1", "7", "127" }) |exit| {
+        var buffer: [128]u8 = undefined;
+        var out = std.Io.Writer.fixed(&buffer);
+        var sink: Sink = .{ .out = &out };
+        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit);
+        var expected: [128]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n× Tool call · exit {s}\n", .{exit}), out.buffered());
     }
 }
 
@@ -1363,154 +1508,141 @@ test "tool header numeric exit accepts only a complete canonical first line" {
     }
 }
 
-/// Why a Turn ended, in the person's terms, and the one step that helps.
-/// A reason of null shows the saved code itself.
-const Ending = struct { reason: ?[]const u8, next: []const u8 };
+/// One state line. Optional tails are quiet destinations or future key hints.
+const Ending = struct {
+    mark: marks.Mark,
+    words: []const u8,
+    place: ?[]const u8 = null,
+    key: ?[]const u8 = null,
+    agent: ?[]const u8 = null,
+};
 
-comptime {
-    // `ending`'s buffers hold its longest words for every provider.
-    for (std.enums.values(protocol.Provider)) |provider| {
-        std.debug.assert("the  plan does not include this Session's model".len + provider.shown().len <= 128);
-        std.debug.assert("Save a new one with , run rui host pause, then send a message to continue on a new Host.".len + provider.login().len <= 192);
+fn ending(sink: anytype, end: Ending, colour: bool) !void {
+    const mark = marks.marks.get(end.mark);
+    const style = Style.fromTone(mark.tone);
+    try sink.feed("\n");
+    try sink.feed(style.code(colour));
+    try sink.feed(mark.unicode);
+    try sink.feed(Style.normal.code(colour));
+    try sink.feed(" ");
+    if (end.agent) |agent| {
+        try sink.feed("Agent ");
+        var name: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
+        try name.feed(agent);
+        try name.finish();
+        try sink.feed(if (end.mark == .stopped) " " else " · ");
     }
-}
-
-/// `provider` is the Session's, null until its settings are read; its
-/// buffers hold the provider's name and login when the words need them.
-fn ending(provider: ?protocol.Provider, code: []const u8, reason: *[128]u8, next: *[192]u8) Ending {
-    const again = "Send a message to continue.";
-    const name = if (provider) |known| known.shown() else "the provider";
-    const owner = if (provider) |known| known.shown() else "provider";
-    const words = struct {
-        fn of(buffer: []u8, comptime format: []const u8, args: anytype) []const u8 {
-            return std.fmt.bufPrint(buffer, format, args) catch unreachable;
+    try sink.feed(end.words);
+    for ([_]?[]const u8{ end.place, end.key }) |tail| {
+        if (tail) |words| {
+            try sink.feed(Style.quiet.code(colour));
+            try sink.feed(" · ");
+            try sink.feed(words);
+            try sink.feed(Style.normal.code(colour));
         }
-    }.of;
-    return switch (failure_class.of(code)) {
-        .policy => .{ .reason = words(reason, "{s} refused this request", .{name}), .next = "Rephrase it, or start a new Session; sending more here will likely be refused again." },
-        .quota => .{ .reason = words(reason, "the {s} account is out of quota", .{owner}), .next = "Add credit or wait for the limit to reset, then send a message to continue." },
-        .plan => .{ .reason = words(reason, "the {s} plan does not include this Session's model", .{owner}), .next = "Use /model in the overview to start a new Session." },
-        .model => .{ .reason = words(reason, "{s} cannot serve this Session's model", .{name}), .next = "Use /model in the overview to start a new Session." },
-        .sign_in => .{ .reason = "sign-in expired", .next = words(next, "Run {s}, then send a message to continue.", .{(provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()}) },
-        // A running Host keeps the key it started with.
-        .api_key => .{ .reason = words(reason, "the {s} API key was rejected", .{(provider orelse comptime protocol.Provider.onlyWith(.api_key)).shown()}), .next = words(next, "Save a new one with {s}, run rui host pause, then send a message to continue on a new Host.", .{(provider orelse comptime protocol.Provider.onlyWith(.api_key)).login()}) },
-        .overflow => .{ .reason = "the conversation no longer fits the model's context", .next = "Start a new Session; more here will not fit either." },
-        .refused => .{ .reason = null, .next = "Sending this again will likely fail the same way; change what the error names, or start a new Session." },
-        .unreachable_provider => .{ .reason = words(reason, "{s} could not be reached", .{name}), .next = "Check the network, proxy or provider endpoint, then send a message to continue." },
-        .retries_exhausted => .{ .reason = "retries ran out", .next = again },
-        .interrupted => .{ .reason = "it was interrupted", .next = again },
-        .other => .{ .reason = null, .next = again },
-    };
-}
-
-/// `report` is the provider's own words, escaped: never trusted as
-/// terminal text.
-fn workEnded(sink: anytype, provider: ?protocol.Provider, code: []const u8, report: ?[]const u8) !void {
-    var reason: [128]u8 = undefined;
-    var next: [192]u8 = undefined;
-    const end = ending(provider, code, &reason, &next);
-    try sink.feed("\n! Work ended: ");
-    try sink.feed(end.reason orelse code);
-    if (report) |words| {
-        try sink.feed(" (");
-        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
-        try escaped.feed(words);
-        try escaped.finish();
-        try sink.feed(")");
     }
-    try sink.feed(".\n  ");
-    try sink.feed(end.next);
     try sink.feed("\n");
 }
 
-/// A descendant agent's failed or stopped Turn, as one line in an ancestor.
-fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, report: ?[]const u8) !void {
-    try sink.feed("\n! Agent ");
-    var name: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .label } };
-    try name.feed(agent);
-    try name.finish();
-    try sink.feed(" ended: ");
-    try sink.feed(code);
-    if (report) |words| {
-        try sink.feed(" (");
-        var escaped: Escaped(@TypeOf(sink)) = .{ .sink = sink, .text = .{ .mode = .multiline } };
-        try escaped.feed(words);
-        try escaped.finish();
-        try sink.feed(")");
-    }
-    try sink.feed(".\n");
+fn workEnded(sink: anytype, code: []const u8, colour: bool) !void {
+    const cause = marks.cause(code);
+    try ending(sink, .{ .mark = if (failure_class.of(code) == .interrupted) .stopped else .failed, .words = cause.words, .place = cause.place }, colour);
 }
 
-test "a descendant's ending names the agent and gives no advice for this Session" {
-    const Sink = struct {
-        bytes: [256]u8 = undefined,
-        length: usize = 0,
-        pub fn feed(self: *@This(), bytes: []const u8) !void {
-            @memcpy(self.bytes[self.length..][0..bytes.len], bytes);
-            self.length += bytes.len;
-        }
-    };
-    var failed: Sink = .{};
-    try agentEnded(&failed, "9f8e7d", "provider_http_401", "expired\x1b[2J");
-    try std.testing.expectEqualStrings("\n! Agent 9f8e7d ended: provider_http_401 (expired\\x1b[2J).\n", failed.bytes[0..failed.length]);
-    var stopped: Sink = .{};
-    try agentEnded(&stopped, "9f8e7d", "cancelled", null);
-    try std.testing.expectEqualStrings("\n! Agent 9f8e7d ended: cancelled.\n", stopped.bytes[0..stopped.length]);
+/// A descendant's outcome names that agent, never a saved code or report.
+fn agentEnded(sink: anytype, agent: []const u8, code: []const u8, colour: bool) !void {
+    const stopped = failure_class.of(code) == .interrupted;
+    try ending(sink, .{ .mark = if (stopped) .stopped else .failed, .words = if (stopped) "stopped" else marks.cause(code).words, .agent = agent }, colour);
 }
 
-/// A failed outcome's report, read whole before its line is drawn. A
-/// longer one than the Store keeps shows its prefix.
-const ReportBytes = struct {
-    bytes: [protocol.max_report_bytes]u8,
-    len: usize,
-
-    pub fn feed(self: *ReportBytes, bytes: []const u8) !void {
-        const kept = @min(bytes.len, self.bytes.len - self.len);
-        @memcpy(self.bytes[self.len..][0..kept], bytes[0..kept]);
-        self.len += kept;
-    }
-};
-
-test "an ended Turn says why and the one next step that helps, where it ended" {
+test "a descendant's ending names the agent without codes or advice" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
     };
-    const cases = [_]struct { provider: ?protocol.Provider = .openai, code: []const u8, report: ?[]const u8, shown: []const u8 }{
-        // The captured cyber_policy refusal: resending is no next step.
-        .{ .code = "provider_policy", .report = "cyber_policy: This request has been flagged for potentially high-risk cyber activity.", .shown = "\n! Work ended: OpenAI refused this request (cyber_policy: This request has been flagged for potentially high-risk cyber activity.).\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
-        .{ .code = "provider_policy", .report = null, .shown = "\n! Work ended: OpenAI refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
-        .{ .code = "provider_quota", .report = "insufficient_quota: You exceeded your current quota.", .shown = "\n! Work ended: the OpenAI account is out of quota (insufficient_quota: You exceeded your current quota.).\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
-        .{ .code = "provider_model_unavailable", .report = "model_not_found: The model `gpt-x` does not exist.", .shown = "\n! Work ended: OpenAI cannot serve this Session's model (model_not_found: The model `gpt-x` does not exist.).\n  Use /model in the overview to start a new Session.\n" },
-        .{ .provider = .codex, .code = "provider_http_401", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
-        // Each names the Session's provider, or the provider before its
-        // settings are read; a sign-in then names the one that signs in.
-        .{ .provider = .codex, .code = "provider_quota", .report = null, .shown = "\n! Work ended: the ChatGPT account is out of quota.\n  Add credit or wait for the limit to reset, then send a message to continue.\n" },
-        .{ .provider = null, .code = "provider_policy", .report = null, .shown = "\n! Work ended: the provider refused this request.\n  Rephrase it, or start a new Session; sending more here will likely be refused again.\n" },
-        .{ .provider = null, .code = "provider_sign_in_required", .report = null, .shown = "\n! Work ended: sign-in expired.\n  Run rui auth login codex, then send a message to continue.\n" },
-        .{ .provider = null, .code = "provider_api_key_rejected", .report = null, .shown = "\n! Work ended: the OpenAI API key was rejected.\n  Save a new one with rui auth login openai, run rui host pause, then send a message to continue on a new Host.\n" },
-        .{ .code = "provider_api_key_rejected", .report = "Incorrect API key provided", .shown = "\n! Work ended: the OpenAI API key was rejected (Incorrect API key provided).\n  Save a new one with rui auth login openai, run rui host pause, then send a message to continue on a new Host.\n" },
-        .{ .code = "ResourceExceeded", .report = null, .shown = "\n! Work ended: the conversation no longer fits the model's context.\n  Start a new Session; more here will not fit either.\n" },
-        // Retries keep the last Attempt's words.
-        .{ .code = "retry_exhausted", .report = "server_is_overloaded: Try again later.", .shown = "\n! Work ended: retries ran out (server_is_overloaded: Try again later.).\n  Send a message to continue.\n" },
-        .{ .code = "cancelled", .report = null, .shown = "\n! Work ended: it was interrupted.\n  Send a message to continue.\n" },
-        // Any other code shows itself, beside whatever the provider said.
-        .{ .code = "provider_http_400", .report = "invalid_request_error: Unsupported \"x\"\x1b[2J", .shown = "\n! Work ended: provider_http_400 (invalid_request_error: Unsupported \"x\"\\x1b[2J).\n  Sending this again will likely fail the same way; change what the error names, or start a new Session.\n" },
-        .{ .code = "provider_plan", .report = null, .shown = "\n! Work ended: the OpenAI plan does not include this Session's model.\n  Use /model in the overview to start a new Session.\n" },
-        .{ .code = "provider_tls_verification_failed", .report = null, .shown = "\n! Work ended: OpenAI could not be reached.\n  Check the network, proxy or provider endpoint, then send a message to continue.\n" },
-        // The provider's words for an overflow say how far over it went.
-        .{ .code = "ResourceExceeded", .report = "context_length_exceeded: Your input exceeds the context window.", .shown = "\n! Work ended: the conversation no longer fits the model's context (context_length_exceeded: Your input exceeds the context window.).\n  Start a new Session; more here will not fit either.\n" },
-        .{ .code = "malformed_provider_output", .report = null, .shown = "\n! Work ended: malformed_provider_output.\n  Send a message to continue.\n" },
+    var buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
+    try agentEnded(&sink, "9f8e7d", "cancelled", false);
+    try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
+    try std.testing.expectEqualStrings("\n× Agent 9f8e7d · Sign-in expired\n\n■ Agent 9f8e7d stopped\n\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+}
+
+test "an ended Turn shows one plain cause line for every failure class" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
     };
-    for (cases) |case| {
+    const cases = .{
+        .{ "provider_policy", "× Refused by the provider" },
+        .{ "provider_quota", "× Out of quota · Settings" },
+        .{ "provider_plan", "× Model not in plan · Settings" },
+        .{ "provider_model_unavailable", "× Model not served" },
+        .{ "provider_http_401", "× Sign-in expired · Settings" },
+        .{ "provider_api_key_rejected", "× API key rejected · Settings" },
+        .{ "ResourceExceeded", "× Context full" },
+        .{ "provider_tls_verification_failed", "× Provider unreachable" },
+        .{ "retry_exhausted", "× Retries ran out" },
+        .{ "cancelled", "■ Stopped" },
+        .{ "provider_http_400", "× Provider refused the request" },
+        .{ "unknown\x1b[2J", "× Something went wrong" },
+        .{ "malformed_provider_output", "× Model reply unreadable" },
+    };
+    var seen: std.enums.EnumSet(failure_class.Class) = .empty;
+    inline for (cases) |case| {
+        seen.insert(failure_class.of(case[0]));
         var buffer: [512]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try workEnded(&sink, case.provider, case.code, case.report);
-        try std.testing.expectEqualStrings(case.shown, out.buffered());
+        try workEnded(&sink, case[0], false);
+        try std.testing.expectEqualStrings("\n" ++ case[1] ++ "\n", out.buffered());
     }
+    try std.testing.expect(seen.eql(.full));
+}
+
+test "turn and agent ending marks use their table tones" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    var buffer: [512]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    try workEnded(&sink, "malformed_provider_output", true);
+    try workEnded(&sink, "cancelled", true);
+    try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
+    try agentEnded(&sink, "9f8e7d", "cancelled", true);
+    try std.testing.expectEqualStrings("\n\x1b[91m×\x1b[39m Model reply unreadable\n" ++
+        "\n\x1b[39m■\x1b[39m Stopped\n" ++
+        "\n\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
+        "\n\x1b[39m■\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
+}
+
+test "ending tails are quiet and joined in destination then key order" {
+    const Sink = struct {
+        out: *std.Io.Writer,
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.out.writeAll(bytes);
+        }
+    };
+    var buffer: [256]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    var sink: Sink = .{ .out = &out };
+    try workEnded(&sink, "provider_http_401", true);
+    try std.testing.expectEqualStrings("\n\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
+    out.end = 0;
+    try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
+    try std.testing.expectEqualStrings("\n× Cause · Place · Key\n", out.buffered());
+    out.end = 0;
+    try ending(&sink, .{ .mark = .failed, .words = "Cause", .key = "Key" }, false);
+    try std.testing.expectEqualStrings("\n× Cause · Key\n", out.buffered());
 }
 
 /// What a live page needs to show the Messages people and scripts sent as
@@ -1556,9 +1688,9 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
 /// Writes a page and returns the newest Message a person or script sent
 /// that it or an earlier read showed while it waited (`Taking.drawn`). The
 /// sink learns each one as it shows (`drew`).
-/// `provider` is the Session's, for the words of a failed Turn; null until
-/// its settings are read.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking, home: []const u8) !queued_line.Drawn {
+/// `provider` remains accepted for callers; cause words are provider-neutral.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, page: *const protocol_reply.ActivityPage, provider: ?protocol.Provider, sink: anytype, colour: bool, compact_tools: *bool, taking: Taking, home: []const u8, destination: Destination) !queued_line.Drawn {
+    _ = provider;
     const historical = page.facts.direction == .backward;
     var from = taking.from;
     var drawn = taking.drawn;
@@ -1597,7 +1729,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 compact_tools.* = false;
                 try sink.feed("\n");
                 var answer: Answer(@TypeOf(sink)) = undefined;
-                answer.init(sink, home);
+                answer.init(sink, home, colour, destination);
                 try content(requests, store, session, item, assistant.content, &answer);
                 try answer.finish();
                 try sink.feed("\n");
@@ -1619,21 +1751,16 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                 // A done Turn's answer is its final assistant row, never a second answer.
                 if (ended.ending == .done) continue;
                 compact_tools.* = false;
-                // A failed Turn's content is its report.
-                var report: ReportBytes = undefined;
-                report.len = 0;
-                if (ended.content) |reference| try content(requests, store, session, item, reference, &report);
-                const words = if (ended.content != null) report.bytes[0..report.len] else null;
-                // A descendant's ending reaches every ancestor's feed: it is
-                // that agent's outcome, never this Session's, so it names the
-                // agent and gives no advice meant for this Session.
+                // The report is deliberately not read: the shared cause owns the words.
                 if (!std.mem.eql(u8, ended.session.slice(), session)) {
-                    try agentEnded(sink, ended.session.slice(), ended.code.slice(), words);
-                } else try workEnded(sink, provider, ended.code.slice(), words);
+                    try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
+                } else try workEnded(sink, ended.code.slice(), colour);
             },
-            .stop => {
+            .stop => |stop| {
                 compact_tools.* = false;
-                try sink.feed("\n! Session stopped.\n");
+                // A selected Turn owns its terminal line, even across page boundaries.
+                // Without a Turn, the stop itself is the completed outcome.
+                if (stop.turn == null) try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
             },
             .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
             .send_failed => |failed| {
@@ -1647,10 +1774,9 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
 }
 
 /// Shows the Messages a person or script sent that a live page's stop
-/// excluded, oldest first and labelled, before the stop's own line: those
+/// excluded, oldest first and labelled, at the stop: those
 /// waiting just before it, at or below its cutoff and admitted after `from`.
-/// One shown while it waited is labelled here too: the stop is what asks the
-/// person to send it again. Their bytes belong to no item.
+/// One shown while it waited is labelled here too. Their bytes belong to no item.
 fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, from: u64, sink: anytype, colour: bool) !void {
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .position = from, .kinds = .initOne(.admission) };
     var first = true;
@@ -1694,12 +1820,12 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
         try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, .{}, &sink, false, &compact);
     }
     try std.testing.expectEqualStrings(
-        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n! Find “Io” in ziglang.org/x — Failed\n\n✓ Search the web\n",
+        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n× Find “Io” in ziglang.org/x\n\n✓ Search the web\n",
         sink.bytes[0..sink.length],
     );
 }
 
-test "MCP approval renders object arguments and adopts the same Allow once and Deny choices" {
+test "MCP approval uses the saved description and renders exact arguments with Allow once and Deny" {
     const Screen = @import("SessionScreen.zig");
     const Consent = @import("session_consent.zig");
     var environ = try std.testing.environ.createMap(std.testing.allocator);
@@ -1722,17 +1848,18 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
             self.offset += bytes.len;
         }
     };
-    var tool: ActionTool = .{ .name = .{}, .server = .{} };
+    var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = .{} };
     try tool.name.set("fetch_page");
     try tool.server.?.set("docs");
     const Case = struct { arguments: []const u8, description: []const u8 };
     for ([_]Case{
         .{ .arguments = "{}", .description = "fetch_page" },
-        .{ .arguments = " { \"q\" : [1, null] } ", .description = "fetch_page" },
-        .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9\\npage\",\"url\":\"https://example.test\"}", .description = "Fetch é\npage" },
+        .{ .arguments = " { \"q\" : [1, null] } ", .description = "Fetch saved page" },
+        .{ .arguments = "{\"rui_call_description\":\"Fetch \\u00e9\\npage\",\"url\":\"https://example.test\"}", .description = "Fetch saved é page" },
         .{ .arguments = "{\"rui_call_description\":\"" ++ @as([200]u8, @splat('a')) ++ "\"}", .description = &@as([200]u8, @splat('a')) },
         .{ .arguments = "{\"rui_call_description\":\"" ++ @as([201]u8, @splat('a')) ++ "\"}", .description = "fetch_page" },
     }) |case| {
+        try tool.description.set(case.description);
         try scratch.setLength(std.testing.io, 0);
         try scratch.writePositionalAll(std.testing.io, case.arguments, 0);
         try action.setLength(std.testing.io, 0);
@@ -1741,6 +1868,8 @@ test "MCP approval renders object arguments and adopts the same Allow once and D
         try std.testing.expectEqualStrings(case.description, summary.description.slice());
         var rendered: [2048]u8 = undefined;
         const count = try action.readPositionalAll(std.testing.io, &rendered, 0);
+        var heading: [256]u8 = undefined;
+        try std.testing.expect(std.mem.startsWith(u8, rendered[0..count], try std.fmt.bufPrint(&heading, "\n? {s}\n", .{case.description})));
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  Tool: fetch_page\n  Server: docs\n  Arguments:\n  │ ") != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], case.arguments) != null);
         try std.testing.expect(std.mem.indexOf(u8, rendered[0..count], "\n  $ ") == null);
@@ -1762,12 +1891,12 @@ test "only a Bash Action names a command for its row, whatever another tool's ar
     defer tmp.cleanup();
     const scratch = try tmp.dir.createFile(std.testing.io, "arguments", .{ .read = true });
     defer scratch.close(std.testing.io);
-    var bash: ActionTool = .{ .name = .{} };
+    var bash: ActionTool = .{ .name = .{}, .description = .{} };
     try bash.name.set("bash");
-    var mcp: ActionTool = .{ .name = .{}, .server = .{} };
+    var mcp: ActionTool = .{ .name = .{}, .description = .{}, .server = .{} };
     try mcp.name.set("run");
     try mcp.server.?.set("shell");
-    var other: ActionTool = .{ .name = .{} };
+    var other: ActionTool = .{ .name = .{}, .description = .{} };
     try other.name.set("web_search");
     // Arguments every one of the three would accept as Bash's.
     const arguments = "{\"cmd\":\"rm -rf build\\nzig build\",\"description\":\"Clean and build\"}";
@@ -1810,9 +1939,10 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
             self.offset += bytes.len;
         }
     };
-    var tool: ActionTool = .{ .name = .{}, .server = .{} };
+    var tool: ActionTool = .{ .name = .{}, .description = .{}, .server = .{} };
     try tool.name.set("fetch_page");
     try tool.server.?.set("docs");
+    try tool.description.set("Saved \x1b[2J");
     const prefix = "{\n\"rui_call_description\":\"Fetch \\u001b[2J\",\n\"body\":\"";
     try scratch.writePositionalAll(std.testing.io, prefix, 0);
     // Literal bidi content is valid JSON, but cannot direct the terminal.
@@ -1826,6 +1956,7 @@ test "MCP approval marks argument lines escapes controls and refuses a viewport 
     var beginning: [512]u8 = undefined;
     const count = try action.readPositionalAll(std.testing.io, &beginning, 0);
     const shown = beginning[0..count];
+    try std.testing.expect(std.mem.startsWith(u8, shown, "\n? Saved \\x1b[2J\n"));
     try std.testing.expect(std.mem.indexOf(u8, shown, "\x1b") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "‮") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "\n  │ \"rui_call_description\"") != null);

@@ -1,10 +1,11 @@
 //! What a Session's work is doing now, in the words both screens use: the
-//! conversation's last line ("• Waiting · 12s"), the clock on a running
+//! conversation's last line ("⠹ Waiting · 12s"), the clock on a running
 //! call's own row (" · 42s"), and the word on the Session's overview row
 //! ("Run the tests", beside the row's own age). Only work under way has a
 //! line; an ended or idle Session has none. This core takes the work its
 //! shell read and the shell's clock; it holds neither.
 const std = @import("std");
+const marks = @import("marks.zig");
 const session_work = @import("session_work.zig");
 const session_line = @import("session_line.zig");
 const failure_class = @import("failure_class.zig");
@@ -57,11 +58,11 @@ const Look = struct { mark: []const u8, tone: Tone = .normal, words: []const u8,
 /// `words` when it has one, and `retrying` says a rate limit by its cause.
 const looks = std.enums.EnumArray(session_work.Kind, ?Look).init(.{
     .idle = null,
-    .pending = .{ .mark = "•", .words = "Queued", .clock = .elapsed },
-    .working = .{ .mark = "•", .words = "Waiting", .clock = .elapsed },
-    .retrying = .{ .mark = "!", .tone = .attention, .words = "Provider error", .clock = .retry },
-    .bash = .{ .mark = "•", .words = "Running a command", .clock = .elapsed },
-    .approval = .{ .mark = "?", .tone = .attention, .words = "Needs approval", .clock = .elapsed },
+    .pending = .{ .mark = marks.marks.get(.queued).unicode, .words = "Queued", .clock = .elapsed },
+    .working = .{ .mark = marks.marks.get(.active).unicode, .words = "Waiting", .clock = .elapsed },
+    .retrying = .{ .mark = marks.marks.get(.active).unicode, .tone = .attention, .words = "Provider error", .clock = .retry },
+    .bash = .{ .mark = marks.marks.get(.active).unicode, .words = "Running a command", .clock = .elapsed },
+    .approval = .{ .mark = marks.marks.get(.needs_you).unicode, .tone = .attention, .words = "Needs approval", .clock = .elapsed },
     .stopping = .{ .mark = "", .tone = .quiet, .words = "Stopping", .clock = .ellipsis },
     .finished = null,
     .failed = null,
@@ -236,12 +237,12 @@ test "every work state has the approved words on both screens, and ended work ha
     const retry: WorkState = .{ .retrying = .{ .since = test_now_s - 4, .due_at_ms = test_now_ms + 17_200, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_429"), .attempt = 2 } };
     const cases = [_]struct { state: WorkState, conversation: []const u8, row: []const u8, ascii: []const u8, tone: Tone = .normal }{
         .{ .state = .{ .idle = .{ .since = 1 } }, .conversation = "", .row = "", .ascii = "" },
-        .{ .state = .{ .pending = .{ .since = test_now_s - 3 } }, .conversation = "• Queued · 3s", .row = "Queued", .ascii = "Queued" },
-        .{ .state = .{ .working = .{ .since = test_now_s - 12 } }, .conversation = "• Waiting · 12s", .row = "Waiting", .ascii = "Waiting" },
-        .{ .state = retry, .conversation = "! Rate limited · retry 2 in 18s", .row = "Rate limited · retry in 18s", .ascii = "Rate limited - retry in 18s", .tone = .attention },
-        .{ .state = .{ .retrying = .{ .since = test_now_s, .due_at_ms = test_now_ms + 1, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_503"), .attempt = 1 } }, .conversation = "! Provider error · retry 1 in 1s", .row = "Provider error · retry in 1s", .ascii = "Provider error - retry in 1s", .tone = .attention },
-        .{ .state = .{ .bash = .{ .since = test_now_s - 42, .call = 1, .description = bounded(session_work.max_description_bytes, "Run zig build test-store"), .running = 1, .approvals = 0 } }, .conversation = "• Run zig build test-store · 42s", .row = "Run zig build test-store", .ascii = "Run zig build test-store" },
-        .{ .state = .{ .bash = .{ .since = test_now_s - 72, .call = 0, .description = null, .running = 2, .approvals = 1 } }, .conversation = "• Running a command · 1m 12s", .row = "Running a command", .ascii = "Running a command" },
+        .{ .state = .{ .pending = .{ .since = test_now_s - 3 } }, .conversation = "◌ Queued · 3s", .row = "Queued", .ascii = "Queued" },
+        .{ .state = .{ .working = .{ .since = test_now_s - 12 } }, .conversation = "⠹ Waiting · 12s", .row = "Waiting", .ascii = "Waiting" },
+        .{ .state = retry, .conversation = "⠹ Rate limited · retry 2 in 18s", .row = "Rate limited · retry in 18s", .ascii = "Rate limited - retry in 18s", .tone = .attention },
+        .{ .state = .{ .retrying = .{ .since = test_now_s, .due_at_ms = test_now_ms + 1, .cause = bounded(session_work.max_code_bytes, "provider_temporary_http_503"), .attempt = 1 } }, .conversation = "⠹ Provider error · retry 1 in 1s", .row = "Provider error · retry in 1s", .ascii = "Provider error - retry in 1s", .tone = .attention },
+        .{ .state = .{ .bash = .{ .since = test_now_s - 42, .call = 1, .description = bounded(session_work.max_description_bytes, "Run zig build test-store"), .running = 1, .approvals = 0 } }, .conversation = "⠹ Run zig build test-store · 42s", .row = "Run zig build test-store", .ascii = "Run zig build test-store" },
+        .{ .state = .{ .bash = .{ .since = test_now_s - 72, .call = 0, .description = null, .running = 2, .approvals = 1 } }, .conversation = "⠹ Running a command · 1m 12s", .row = "Running a command", .ascii = "Running a command" },
         .{ .state = .{ .approval = .{ .since = test_now_s - 3 * 3600 - 5 * 60 } }, .conversation = "? Needs approval · 3h 5m", .row = "Needs approval", .ascii = "Needs approval", .tone = .attention },
         .{ .state = .{ .stopping = .{ .since = test_now_s - 9 } }, .conversation = "Stopping…", .row = "Stopping…", .ascii = "Stopping.", .tone = .quiet },
         .{ .state = .{ .finished = .{ .since = 1 } }, .conversation = "", .row = "", .ascii = "" },
@@ -265,16 +266,16 @@ test "every work state has the approved words on both screens, and ended work ha
     try std.testing.expectEqual(stopping.tone, host_stopping.tone);
     try std.testing.expectEqual(Clock.ellipsis, host_stopping.clock);
     // A due retry says what it became: eligible work queued again.
-    try std.testing.expectEqualStrings("• Queued · 0s", try conversation(retry, retry.retrying.due_at_ms));
+    try std.testing.expectEqualStrings("◌ Queued · 0s", try conversation(retry, retry.retrying.due_at_ms));
     // Its time is from the due second: due 17.2 s ahead, read 23.199 s ahead.
-    try std.testing.expectEqualStrings("• Queued · 6s", try conversation(retry, retry.retrying.due_at_ms + 5_999));
+    try std.testing.expectEqualStrings("◌ Queued · 6s", try conversation(retry, retry.retrying.due_at_ms + 5_999));
     // A clock behind the state's own second shows none elapsed.
-    try std.testing.expectEqualStrings("• Waiting · 0s", try conversation(.{ .working = .{ .since = test_now_s + 3 } }, test_now_ms));
+    try std.testing.expectEqualStrings("⠹ Waiting · 0s", try conversation(.{ .working = .{ .since = test_now_s + 3 } }, test_now_ms));
 }
 
 test "a description's controls read escaped on both screens, as its call row shows them" {
     const state: WorkState = .{ .bash = .{ .since = test_now_s - 42, .call = 0, .description = bounded(session_work.max_description_bytes, "Run\t\x1b[2J\u{202e}tests"), .running = 1, .approvals = 0 } };
-    try std.testing.expectEqualStrings("• Run\\t\\x1b[2J\\u202etests · 42s", try conversation(state, test_now_ms));
+    try std.testing.expectEqualStrings("⠹ Run\\t\\x1b[2J\\u202etests · 42s", try conversation(state, test_now_ms));
     try std.testing.expectEqualStrings("Run\\t\\x1b[2J\\u202etests", try row(state, test_now_ms, .unicode));
     // The widest description escapes within the words' bound.
     const widest: WorkState = .{ .bash = .{ .since = test_now_s, .call = 0, .description = bounded(session_work.max_description_bytes, &@as([session_work.max_description_bytes]u8, @splat(0x1b))), .running = 1, .approvals = 0 } };
@@ -312,11 +313,11 @@ test "a running span is seconds, then minutes and seconds, then hours and minute
 }
 
 test "a fitted line never takes more than its width and keeps the clock while words fit beside it" {
-    var long: [100]u8 = undefined;
-    for (0..50) |at| @memcpy(long[at * 2 ..][0..2], "é");
+    var long: [session_work.max_description_bytes]u8 = undefined;
+    for (0..long.len / 2) |at| @memcpy(long[at * 2 ..][0..2], "é");
     const descriptions = [_][]const u8{ "Run zig build test-store", &long, "a" };
     const clock = " · 42s";
-    for (descriptions) |description| for ([_]Method{ .unicode, .wcwidth }) |method| for (0..120) |width| {
+    for (descriptions) |description| for ([_]Method{ .unicode, .wcwidth }) |method| for (0..240) |width| {
         const state: WorkState = .{ .bash = .{ .since = test_now_s - 42, .call = 0, .description = bounded(session_work.max_description_bytes, description), .running = 1, .approvals = 0 } };
         var buffer: [max_clock_bytes]u8 = undefined;
         const fitted = fit(&buffer, of(&test_words, &state, null, test_now_ms).?, width, method);
