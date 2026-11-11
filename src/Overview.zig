@@ -625,7 +625,9 @@ fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
         .leave => ctx.quit = true,
         .open => |reference| {
             if (self.root.session != null) {
-                try self.app_session.?.frontend.?.openPeer(ctx, &reference);
+                if (std.mem.eql(u8, &reference, &self.app_session.?.session)) {
+                    try self.root.revealSession(ctx);
+                } else try self.app_session.?.frontend.?.openPeer(ctx, &reference);
                 return;
             }
             _ = self.composer.blur();
@@ -5438,6 +5440,139 @@ test "App list clicks validate present and removed targets with open and closed 
                 try std.testing.expectEqual(selected, overview.state.selected);
                 try std.testing.expectEqual(@as(usize, 0), overview.retired.items.len);
                 if (previous) |widget_| try std.testing.expect(overview.root.session.?.eql(widget_)) else try std.testing.expect(overview.root.session == null);
+            }
+        }
+    }
+}
+
+test "App root navigation derives the visible pane across settings and Session selections" {
+    const Nav = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        var inits: usize = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
+            try std.testing.expect(overview.root.session == null);
+            Seen.now.conversations += 1;
+            Seen.now.conversed = overview.opened;
+            try overview.root.openSession(ctx, @This().widget(overview));
+        }
+        fn widget(overview: *Self) vxfw.Widget {
+            return .{ .userdata = overview, .eventHandler = @This().event, .drawFn = @This().draw };
+        }
+        fn event(_: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event) !void {
+            if (input == .init) inits += 1;
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const overview: *Self = @ptrCast(@alignCast(raw));
+            return .{ .widget = @This().widget(overview), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+        fn contains(surface: vxfw.Surface, target: vxfw.Widget) bool {
+            if (surface.widget.eql(target)) return true;
+            for (surface.children) |child| if (contains(child.surface, target)) return true;
+            return false;
+        }
+        fn focus(ctx: *vxfw.EventContext) !vxfw.Widget {
+            var i = ctx.cmds.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Nav.dir = tmp.dir;
+    for ([_]u16{ 46, 140 }) |width| {
+        for ([_]bool{ false, true }) |retained| {
+            for ([_]view.Reference{ "k7m2qx".*, "b4n8wd".* }) |target| {
+                Nav.files = 0;
+                Nav.inits = 0;
+                var cancellation: client.Cancellation = .{};
+                const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+                defer rig.close();
+                const overview = rig.overview;
+                Seen.now.listed = 2;
+                try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+                try std.testing.expect(try rig.settle() == null);
+                defer {
+                    if (overview.app_session) |left| {
+                        if (left.frontend) |frontend| frontend.stop();
+                        overview.disposeSession(left);
+                        overview.app_session = null;
+                    }
+                    for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
+                    overview.retired.deinit(std.testing.allocator);
+                }
+                if (retained) {
+                    overview.hooks.scratch = Nav.scratch;
+                    overview.ops.open = openSession;
+                    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+                }
+                overview.ops.open = Nav.open;
+                const original = overview.root.session;
+                const frontend = if (overview.app_session) |left| left.frontend else null;
+                const same = retained and std.mem.eql(u8, &target, "k7m2qx");
+                var ctx = rig.context();
+                defer ctx.cmds.deinit(std.testing.allocator);
+                if (same) try app_events.send(&ctx, "kept draft", overview.root.widget(), frontend.?.widget());
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+                _ = try overview.root.widget().draw(draw_context);
+                try overview.root.openSettings(&ctx);
+                const settings = try overview.root.widget().draw(draw_context);
+                const layout = settings.children[0].surface;
+                const layer = if (width >= Root.split_at) layout.children[2].surface else layout;
+                try std.testing.expect(Nav.contains(layer, overview.root.settings_page.widget()));
+                // Deliver Escape through the drawn Layer's capture, as App's
+                // settings focus ancestry does, not by calling closeSettings.
+                try app_events.send(&ctx, "\x1b", layer.widget, overview.root.settings_page.widget());
+                try std.testing.expect(ctx.consume_event);
+                try std.testing.expect(!overview.root.settings_open);
+                const closed = try overview.root.widget().draw(draw_context);
+                const return_focus = try Nav.focus(&ctx);
+                try std.testing.expect(return_focus.eventHandler != null);
+                try std.testing.expect(Nav.contains(closed, return_focus));
+                try std.testing.expectEqual(width >= Root.split_at or !retained, overview.root.listVisible());
+                if (retained) {
+                    try std.testing.expect(overview.root.session.?.eql(original.?));
+                    try std.testing.expect(Nav.contains(closed, original.?));
+                    if (width < Root.split_at) try std.testing.expect(return_focus.eql(original.?));
+                } else try std.testing.expect(overview.root.session == null);
+
+                ctx.cmds.clearRetainingCapacity();
+                ctx.redraw = false;
+                // Use the list's semantic selection; at phone width an open
+                // conversation intentionally occupies the whole screen.
+                try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .open = target } }));
+                try std.testing.expect(!ctx.quit);
+                try std.testing.expect(ctx.redraw);
+                try std.testing.expect(overview.follow.pending == null);
+                try std.testing.expectEqual(@as(usize, @intFromBool(!same)), Seen.now.conversations);
+                try std.testing.expectEqual(@as(usize, @intFromBool(!same)), Nav.inits);
+                try std.testing.expectEqual(@as(usize, @intFromBool(retained and !same)), overview.retired.items.len);
+                const selected = try overview.root.widget().draw(draw_context);
+                try std.testing.expect(Nav.contains(selected, overview.root.session.?));
+                try std.testing.expect(Nav.contains(selected, try Nav.focus(&ctx)));
+                try std.testing.expectEqual(width >= Root.split_at, overview.root.listVisible());
+                if (same) {
+                    try std.testing.expect(overview.root.session.?.eql(original.?));
+                    try std.testing.expect(overview.app_session.?.frontend.? == frontend.?);
+                    try std.testing.expectEqualStrings("kept draft", frontend.?.input.composition().bytes);
+                    try std.testing.expect((try Nav.focus(&ctx)).eql(original.?));
+                    // Selecting the retained Session also reveals it directly
+                    // from settings, without waiting for Escape or a reopen.
+                    try overview.root.openSettings(&ctx);
+                    try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .open = target } }));
+                    try std.testing.expect(!overview.root.settings_open);
+                    try std.testing.expect((try Nav.focus(&ctx)).eql(original.?));
+                    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+                } else try std.testing.expectEqualStrings(&target, &Seen.now.conversed);
             }
         }
     }
