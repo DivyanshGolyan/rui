@@ -1774,16 +1774,12 @@ def renderer_cases():
         with terminal(session) as tty:
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
-            for _ in range(3):
-                # A scroll that changes nothing draws no frame to wait for.
-                os.write(tty.master, b"\x1b[5~")
-                time.sleep(0.3)
-                fixture.wait_for(tty.draining(lambda: "› fresh start" in tty.capture.completed
-                    and marker in tty.capture.completed), "the fresh feed after PgUp", timeout=10)
-                shown = tty.capture.completed
-                assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
-                assert shown.index("› fresh start") < shown.index(marker), shown
-                assert "Start of conversation" not in shown, shown
+            # Only the first PgUp moves a feed this short; the rest draw nothing.
+            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in tty.capture.completed
+                and marker in tty.capture.completed and "↓" in tty.capture.completed)
+            assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
+            assert shown.index("› fresh start") < shown.index(marker), shown
+            assert "Start of conversation" not in shown, shown
             for frame in frames:
                 assert "Earlier messages unavailable" not in frame and "Start of conversation" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
