@@ -3370,9 +3370,10 @@ test "historical tool-result EOF revalidates complete canonical coverage" {
                 position = entry.position;
                 if (entry.kind == .tool_results) break;
             }
-            try std.testing.expect((try view.nextToolResult()) != null);
-
+            // The group's results are read a page at a time, so the call
+            // goes missing before its page is read.
             try store_testing.withoutForeignKeys(&storage, "DELETE FROM model_tool_call WHERE call_ordinal=1", .{});
+            try std.testing.expect((try view.nextToolResult()) != null);
             try std.testing.expectError(error.CorruptStore, view.nextToolResult());
             try std.testing.expect(storage.isFenced());
         }
@@ -6893,12 +6894,6 @@ fn pageRounds(storage: *Store, conversation: *const protocol.ConversationPage, a
     return result;
 }
 
-test "the tool-group scan answers a missing Proposal as main did, before its outcome" {
-    // The scan reads a call's Proposal and outcome in one round; main read
-    // the Proposal first, so neither row answers ContentNotFound.
-    try std.testing.expectError(error.ContentNotFound, historical_domain.scannedCall(&.{ .position = 7 }, null, 1, 0));
-}
-
 test "an activity page reports the queued Messages at its end, until applied or stopped" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -7642,6 +7637,84 @@ test "a request reads its settings in one round and its history and tools in one
                 try std.testing.expectEqual(@as(u16, 2), rounds.taken().rounds);
                 try std.testing.expectEqual(@as(u16, 0), rounds.taken().content_rounds);
             }
+        }
+    }.run);
+}
+
+test "the tool-group scan reads sixteen sources and sixty-four of their calls a round" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "group-pages");
+            try submitTestMessage(&storage, &tmp, "group-pages-input", "group-pages-key", session.slice(), "tools");
+            var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var calls: [70]TestingCall = undefined;
+            var ids: [70][16]u8 = undefined;
+            for (&calls, 0..) |*call, i| {
+                const id = try std.fmt.bufPrint(&ids[i], "call-{d}", .{i});
+                call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            }
+            // A full page of sources, then one whose calls outrun a page
+            // alone, and one whose calls a page it shares cuts short.
+            const sizes = @as([16]usize, @splat(3)) ++ [_]usize{ 70, 3, 70 };
+            for (sizes, 0..) |size, i| {
+                var prefix: [32]u8 = undefined;
+                try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "group-pages-{d}", .{i}), calls[0..size]);
+                binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            }
+            var view: HistoricalView = undefined;
+            storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var settings: HistoricalSettings = undefined;
+            try view.settings(&settings);
+            while (!try view.validateOutputsStep()) {}
+            var group: usize = 0;
+            var pending: usize = 0;
+            var rounds: u16 = 0;
+            var after: u64 = 0;
+            while (true) {
+                var bytes: usize = 1 << 20;
+                var items: usize = 1 << 20;
+                const before = ViewRounds.start(&storage);
+                const step = try view.nextEntryStep(after, &bytes, &items);
+                rounds += before.taken().rounds;
+                const entry = switch (step) {
+                    .pending => {
+                        pending += 1;
+                        continue;
+                    },
+                    .ready => |served| served orelse break,
+                };
+                try std.testing.expect(entry.position > after);
+                after = entry.position;
+                if (entry.kind != .tool_results) continue;
+                var results: usize = 0;
+                const reading = ViewRounds.start(&storage);
+                while (try view.nextToolResult()) |result| {
+                    // A small result's bytes came with its row.
+                    var text: [256]u8 = undefined;
+                    var out = std.Io.Writer.fixed(&text);
+                    try readTestingContent(&view, result.call_id, &out);
+                    try std.testing.expectEqualStrings(calls[results].decoded_call_id, out.buffered());
+                    results += 1;
+                }
+                try std.testing.expectEqual(sizes[group], results);
+                // Sixteen results a round, and one more when the last is full.
+                try std.testing.expectEqual(@as(u16, @intCast(results / 16 + 1)), reading.taken().rounds);
+                try std.testing.expectEqual(@as(u16, 0), reading.taken().content_rounds);
+                group += 1;
+            }
+            try std.testing.expectEqual(sizes.len, group);
+            // The first seventy calls fill a page with no group whole, so
+            // one step ends with none.
+            try std.testing.expectEqual(@as(usize, 1), pending);
+            // The entry batches' rounds and the scan's four, the first of
+            // which an entry batch shares; no round per item or call.
+            try std.testing.expectEqual(@as(u16, 17), rounds);
         }
     }.run);
 }
@@ -9773,13 +9846,13 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .openContentIdentity = 1,
     .readOwnedContent = 0,
     .readHistoricalSettings = 1,
-    .readHistoricalEntry = 9,
+    .readHistoricalEntry = 1,
     .validateHistoricalOutputsStep = 1,
     .readPrefixSeal = 1,
     .recordPrefixSeal = 2,
     // The entry batch's page already holds the item's parts.
     .readHistoricalParts = 0,
-    .readHistoricalToolResult = 2,
+    .readHistoricalToolResult = 1,
     // A page of a tool walk, which holds the tools after its first.
     .readTools = 1,
     .readProviderTool = 1,
