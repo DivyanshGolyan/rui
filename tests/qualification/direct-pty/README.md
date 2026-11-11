@@ -37,7 +37,7 @@ Navigation moves the continuous-feed anchor without switching documents; its
 reserved chip row never changes feed height. Checks cover exact seeded-history
 ranges after entry, intermediate Down/PgDn steps and End/Esc/Ctrl-G return,
 distinguishing one-line movement from page movement. At 80×24, the feed shows
-19 numbered lines away from end, or 18 plus the answer’s last line at end.
+18 numbered lines away from end, or 17 plus the answer’s last line at end.
 It observes a later printable composer marker before checking each range, then
 clears that marker with Ctrl-U. The ordered marker prevents an intermediate
 frame from crediting an overshooting key batch; it never submits a Message.

@@ -88,29 +88,29 @@ def inventory():
                        ("malformed-utf8", b"bad\xc3(\r")):
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
-    # The continuous feed has 19 rows (scenarios.navigation), starting at
-    # line 82 at end. Half-page movement is 9 rows; the reserved chip row
+    # The continuous feed has 18 rows (scenarios.navigation), starting at
+    # line 83 at end. Half-page movement is 9 rows; the reserved chip row
     # never changes that geometry. End, Esc and Ctrl-G return to end.
     for name, enter, leave, first in (
-        ("key-pgup", b"\x1b[5~", b"\x07", 73),
-        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 64),
-        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 73),
-        ("key-shift-up", b"\x1b[1;2A", b"\x07", 73),
-        ("key-up-csi", b"\x1b[A", b"\x07", 81),
-        ("key-up-ss3", b"\x1bOA", b"\x07", 81),
-        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 73),
-        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 73),
-        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 73),
-        ("key-esc", b"\x1b[5~", b"\x1b", 73),
-        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 79),
+        ("key-pgup", b"\x1b[5~", b"\x07", 74),
+        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 65),
+        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 74),
+        ("key-shift-up", b"\x1b[1;2A", b"\x07", 74),
+        ("key-up-csi", b"\x1b[A", b"\x07", 82),
+        ("key-up-ss3", b"\x1bOA", b"\x07", 82),
+        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 74),
+        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 74),
+        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 74),
+        ("key-esc", b"\x1b[5~", b"\x1b", 74),
+        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 80),
         ("status", b"/status\r", b"\x1b", None),
     ):
         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
                   "return_chunks": [chunk(leave)], "status": name == "status", "first_history": first}
         if name == "key-pgdn":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 73}]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 74}]
         elif name == "wheel-alt-scroll":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (80, 81)]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (81, 82)]
         rows.append(vector)
     return rows
 

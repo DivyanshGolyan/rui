@@ -28,18 +28,18 @@ class NavigationTests(unittest.TestCase):
         return "\n".join([f"History line {n:03d}" for n in range(first, first + count)] + [chip])
 
     def test_continuous_feed_ranges_and_reserved_chip(self):
-        self.check(self.screen(82, 18, "TD4 history end\n"), 82, False)
-        for first in (64, 73, 79, 80, 81):
+        self.check(self.screen(83, 17, "TD4 history end\n"), 83, False)
+        for first in (65, 74, 80, 81, 82):
             with self.subTest(first=first):
-                self.check(self.screen(first, 19), first, True)
-                # Reject the old separate-history screen and any one-row
+                self.check(self.screen(first, 18), first, True)
+                # Reject the old live-sized screen and any one-row
                 # distance/direction error, not merely marker presence.
-                for actual, count in ((first, 18), (first - 1, 19), (first + 1, 19)):
+                for actual, count in ((first, 19), (first - 1, 18), (first + 1, 18)):
                     with self.assertRaisesRegex(AssertionError, "navigation history anchor/distance"):
                         self.check(self.screen(actual, count), first, True)
         for chip in ("", "↓ 1 new"):
             with self.assertRaisesRegex(AssertionError, "navigation marker"):
-                self.check(self.screen(73, 19, chip), 73, True)
+                self.check(self.screen(74, 18, chip), 74, True)
 
     def test_all_navigation_vectors_keep_their_input_intent(self):
         rows = inventory()
@@ -53,8 +53,8 @@ class NavigationTests(unittest.TestCase):
                               ("key-end-ss3-f", b"\x1bOF"),
                               ("key-end-csi-4", b"\x1b[4~")):
             self.assertEqual(navigation[name]["return_chunks"][0]["hex"], encoded.hex())
-        self.assertEqual([step["first_history"] for step in navigation["key-pgdn"]["middle"]], [73])
-        self.assertEqual([step["first_history"] for step in navigation["wheel-alt-scroll"]["middle"]], [80, 81])
+        self.assertEqual([step["first_history"] for step in navigation["key-pgdn"]["middle"]], [74])
+        self.assertEqual([step["first_history"] for step in navigation["wheel-alt-scroll"]["middle"]], [81, 82])
 
 
 class DriverTests(unittest.TestCase):

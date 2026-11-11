@@ -192,11 +192,11 @@ def recovery(fixture, row):
 
 def assert_navigation_history(screen, first, browsing):
     # 24 terminal rows minus the composer between its two rules, the
-    # facts, status and permanently reserved chip row leave 19 feed rows.
-    # At end the answer's last line takes one; away from end all 19 show
+    # facts, status and permanently reserved chip row leave 18 feed rows.
+    # At end the answer's last line takes one; away from end all 18 show
     # numbered lines. Moving the anchor never switches documents or
     # borrows the chip row. These literal anchors are fixture-owned.
-    count = 19 if browsing else 18
+    count = 18 if browsing else 17
     expected = [f"History line {number:03d}" for number in range(first, min(first + count, 100))]
     lines = screen.splitlines()
     actual = [found.group(0) for found in (re.match(r"History line \d{3}", line.strip()) for line in lines) if found]
@@ -235,7 +235,7 @@ def navigation(fixture, row):
         assert_navigation_history(tty.screen.completed, first, browsing)
         tty.send(b"\x15")
         tty.draft("", 2)
-    history(82, False)
+    history(83, False)
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
     if row.get("status"):
@@ -256,7 +256,7 @@ def navigation(fixture, row):
     chunks(tty, row["return_chunks"])
     tty.wait(lambda: not scrolled_back() and tty.screen.draft("", 2),
              label="navigation returned to live empty composer", after=generation)
-    history(82, False)
+    history(83, False)
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"
