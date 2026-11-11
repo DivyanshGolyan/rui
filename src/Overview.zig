@@ -4485,7 +4485,13 @@ test "memory counts this TUI alone while no Host runs, at open and after a Host 
     try std.testing.expect(after.rui > 0 and after.tools == null);
 }
 
-test "a conversation's /upgrade waits for the conversation's queued command, though the overview ticks first" {
+test "a conversation's /upgrade waits for the conversation's running read, though the overview ticks first" {
+    const Worker = struct {
+        fn read(_: *anyopaque, task: *ClientTask) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            return error.Cancelled;
+        }
+    };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -4516,15 +4522,16 @@ test "a conversation's /upgrade waits for the conversation's queued command, tho
     try std.testing.expect(overview.root.session != null);
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    // A command the conversation accepted, then /upgrade before its tick.
-    frontend.input.queueCommand("/requests");
+    // A read the conversation still runs, then /upgrade before its tick.
+    try frontend.reader.start(std.testing.io, frontend, Worker.read);
     try conversed(overview, .idle, .upgrade);
     try std.testing.expect(overview.state.upgrading());
     for (0..3) |_| try overview.appUpgrade(&ctx);
     try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
     // Esc ends the run that never started, as on the overview.
     try conversed(overview, .idle, .cancel_upgrade);
-    _ = frontend.input.takeCommand();
+    frontend.reader.cancel();
+    frontend.reader.join() catch {};
     var turns: usize = 0;
     while (overview.state.upgrading()) : (turns += 1) {
         try std.testing.expect(turns < 100);

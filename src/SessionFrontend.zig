@@ -1834,17 +1834,19 @@ fn upgradeHeld(self: *const Self) bool {
     return self.upgradePhase() != .active;
 }
 
-/// No Client work of this conversation's is in flight or accepted and
-/// waiting its turn, so an Upgrade's run may start. A queued command runs
-/// first: `quiesceUpgrade` starts it, and its read is joined before this
-/// holds.
+/// No Client work of this conversation's is in flight, so an Upgrade's run
+/// may start. A command's read still running is joined before this holds.
 pub fn atRest(self: *const Self) bool {
-    return self.input.queuedCommand() == null and self.reader.thread == null and self.submission.task.thread == null and self.skill_task.thread == null;
+    return self.reader.thread == null and self.submission.task.thread == null and self.skill_task.thread == null;
 }
 
 /// Settles this conversation's Client work for an Upgrade's run. The
-/// overview starts the run once `atRest` says so.
+/// overview starts the run once `atRest` says so. No command waits its
+/// turn here: /upgrade is admitted only while none does, and the run's
+/// hold refuses every command after it, so only a running one is left to
+/// finish.
 fn quiesceUpgrade(self: *Self) !void {
+    std.debug.assert(self.input.queuedCommand() == null);
     self.upgrade_stale = true;
     self.submission.retry = null;
     self.submission.cancel();
@@ -1859,7 +1861,6 @@ fn quiesceUpgrade(self: *Self) !void {
     }
     if (self.reading.pending_diagnostic != null and self.reader.thread == null) try self.presentReadDiagnostic(self.screen);
     if (self.dropSkills()) |err| return err;
-    try self.startQueuedCommand();
 }
 
 fn startQueuedCommand(self: *Self) !void {
@@ -4277,7 +4278,7 @@ test "a run quiesces the conversation's Client work, and its end holds Host requ
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), session_upgrade.rereading) == null);
 }
 
-test "a conversation is at rest for an Upgrade only with no work queued, running or finished and not yet joined" {
+test "a conversation is at rest for an Upgrade only with no work running or finished and not yet joined" {
     const Worker = struct {
         fn read(_: *anyopaque, task: *Task) !void {
             while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
@@ -4292,11 +4293,6 @@ test "a conversation is at rest for an Upgrade only with no work queued, running
     defer held.destroy();
     const self = &held.self;
     try std.testing.expect(self.atRest());
-    // Accepted and waiting its turn.
-    self.input.queueCommand("/requests");
-    try std.testing.expect(!self.atRest());
-    _ = self.input.takeCommand();
-    try std.testing.expect(self.atRest());
     // Running, then finished and not yet joined.
     try self.reader.start(std.testing.io, self, Worker.read);
     try std.testing.expect(!self.atRest());
@@ -4308,6 +4304,36 @@ test "a conversation is at rest for an Upgrade only with no work queued, running
     try std.testing.expect(!self.atRest());
     _ = self.joinReader();
     try std.testing.expect(self.atRest());
+}
+
+test "no command waits its turn across an Upgrade: /upgrade is refused while one does, and a run's hold refuses every one after" {
+    const lines = [_][]const u8{ "/status", "/requests", "/help", "/copy", "/configure --reasoning-effort low" };
+    for (lines) |line| {
+        errdefer std.debug.print("line={s}\n", .{line});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        const self = &held.self;
+        // Queued, then /upgrade before the conversation's next pass.
+        self.input.queueCommand(line);
+        try sendKeys(self, "/upgrade\r");
+        try std.testing.expect(!overview.state.upgrading());
+        try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
+        try std.testing.expectEqualStrings(line, self.input.queuedCommand().?);
+        // The other order: the run first, then the command.
+        _ = self.input.takeCommand();
+        try sendKeys(self, "\r");
+        try std.testing.expect(overview.state.upgrading());
+        try sendKeys(self, line);
+        try sendKeys(self, "\r");
+        try std.testing.expect(self.input.queuedCommand() == null);
+        try std.testing.expectEqualStrings(line, self.input.composition().bytes);
+        try std.testing.expectEqual(Updated.waiting, try self.update());
+        try std.testing.expect(self.atRest());
+    }
 }
 
 test "upgrade quiescing reobservation and protocol holds refuse a fresh Message without clearing its draft" {
