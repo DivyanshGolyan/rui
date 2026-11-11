@@ -1588,6 +1588,16 @@ noinline fn submitMessage(host: *Host, command: *const wire_request.MessageComma
     const initial_skills = prepared.initial;
     const captured_skill = prepared.captured;
     const faults = host.hooks.storeFaults(.command);
+    if (command.configuration) |*configuration| if (configuration.parent.state == .value) {
+        // A creating child inherits, rather than treating the caller's task
+        // environment as a new person's environment for that child.
+        var inheritance = @import("child_environment.zig").Inheritance.init(host.environments, configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| {
+            if (host.store.isFenced()) return .infrastructure_failure;
+            return if (err == error.OutOfMemory) error.OutOfMemory else .infrastructure_failure;
+        };
+        defer inheritance.deinit(host.allocator);
+        return host.store.submitMessageCapturedSkills(command, inheritance.messageCallback(), initial_skills, if (captured_skill) |*value| value else null, faults);
+    };
     const environments = host.environments orelse return host.store.submitMessageCapturedSkills(command, null, initial_skills, if (captured_skill) |*value| value else null, faults);
     const Install = struct {
         environments: *SessionEnvironments,
@@ -1662,7 +1672,12 @@ noinline fn configureCapturedSkills(host: *Host, command: *const wire_request.Co
         @import("session_skills.zig").initial(memory.allocator(), host.allocator, host.io, host.store, command.key.slice(), &command.configuration, host.bash_facts.home) catch |err| return configureFailure(host, err)
     else
         null;
-    return host.store.configureWithCapturedSkills(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, host.hooks.storeFaults(.command));
+    var inheritance = if (command.session.len == 0 and command.configuration.parent.state == .value)
+        @import("child_environment.zig").Inheritance.init(host.environments, command.configuration.parent.value.slice(), host.allocator, memory.allocator()) catch |err| return configureFailure(host, err)
+    else
+        @import("child_environment.zig").Inheritance{ .environments = null };
+    defer inheritance.deinit(host.allocator);
+    return host.store.configureWithCreationCommitted(command, preset, initial_skills, if (reload_capture) |*value| value else null, host.allocator, inheritance.creationCallback(), host.hooks.storeFaults(.command));
 }
 
 /// `client_environment` holds a Message's checked environment.
@@ -4785,4 +4800,63 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         try std.testing.expect(std.mem.indexOf(u8, script.seen[0..script.seen_len], "tools/list") != null);
         try std.testing.expect(!storage.isFenced());
     }
+}
+
+test "configure parent inherits the Host environment only after a fresh creation" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [platform.max_scratch_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var lease: platform.StoreLease = undefined;
+    lease.paths = .{};
+    try lease.paths.scratch.set(root);
+    try lease.paths.store.set("s");
+    var storage: store_module.Store = undefined;
+    try store_module.testing.testingSqliteStore(&storage, &tmp, io);
+    defer storage.close() catch unreachable;
+    var environments: SessionEnvironments = undefined;
+    try environments.init(io, allocator);
+    defer environments.deinit();
+    var host: Host = .{ .io = io, .allocator = allocator, .lease = &lease, .store = &storage, .environments = &environments };
+    var create = try store_module.testing.completeConfiguration("env-parent", "", root, "model-a");
+    create.configuration.tools = try .of(&.{"bash"});
+    const parent = (try storage.configure(&create, .{})).accepted.session;
+    var offer = try SessionEnvironments.Offer.init(allocator, 4);
+    defer offer.deinit(allocator);
+    @memcpy(offer.room(), "A=1\x00");
+    environments.offer(parent.slice(), .{ .origin = .person, .admission = 1 }, &offer);
+    var child: wire_request.ConfigureCommand = .{};
+    try child.key.set("env-child");
+    child.configuration = (try store_module.testingCompleteConfiguration("unused", "", root, "model-a")).configuration;
+    child.configuration.workspace.state = .omitted;
+    child.configuration.provider.state = .omitted;
+    child.configuration.tools = try .of(&.{"bash"});
+    try child.configuration.permission_mode.value.set("ask");
+    child.configuration.parent.state = .value;
+    try child.configuration.parent.value.set(parent.slice());
+    const result = try submitConfigure(&host, &child);
+    try std.testing.expect(result == .accepted);
+    const session = result.accepted.session;
+    const copied = (try environments.copy(session.slice(), allocator)).?;
+    defer allocator.free(copied);
+    try std.testing.expectEqualStrings("A=1\x00", copied);
+    const count = environments.len;
+    var newer = try SessionEnvironments.Offer.init(allocator, 4);
+    defer newer.deinit(allocator);
+    @memcpy(newer.room(), "B=2\x00");
+    environments.offer(parent.slice(), .{ .origin = .person, .admission = 2 }, &newer);
+    const replay = try submitConfigure(&host, &child);
+    try std.testing.expect(replay == .accepted and replay.accepted.replayed);
+    const retained = (try environments.copy(session.slice(), allocator)).?;
+    defer allocator.free(retained);
+    try std.testing.expectEqualStrings("A=1\x00", retained);
+    try child.key.set("env-child-refused");
+    child.configuration.provider.state = .value;
+    try child.configuration.provider.value.set("codex");
+    const refusal = try submitConfigure(&host, &child);
+    try std.testing.expect(refusal == .rejected);
+    try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
+    try std.testing.expectEqual(count, environments.len);
 }

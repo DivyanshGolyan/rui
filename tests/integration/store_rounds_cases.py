@@ -50,10 +50,10 @@ BUDGET = {
     "commits": 3,
     "write_round_trips": 6,
     # Any operation, upper bound: rescans and the observe loop below make
-    # the total vary (19 for a first operation and 14 for a later one
+    # the total vary (18 for a first operation and 13 for a later one
     # over four runs once an observation read its command and Message
     # in one round; earlier work varied by up to 6).
-    "round_trips": 25,
+    "round_trips": 24,
     # Over IDLE_SECONDS with no Session, exact: the Host asks again only
     # after a commit, a slot change or a scheduled retry falling due.
     "idle_round_trips": 0,
