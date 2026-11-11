@@ -623,6 +623,7 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => ctx.quit = true,
+        .open_settings => try self.root.openSettings(ctx),
         .open => |reference| {
             try self.root.showMain(ctx);
             if (self.root.session != null) {
@@ -1097,18 +1098,17 @@ fn destroy(self: *Self) void {
 
 const Ending = union(enum) { overview, conversation: Left };
 
-/// What the core asks of the loop: to leave, or to lend the terminal to a
-/// Session.
-const Next = union(enum) { leave, open: view.Reference };
+/// What the core asks of the loop: to leave or present a pane under Root.
+const Next = union(enum) { leave, open: view.Reference, open_settings };
 
-/// Steps the core with one event and queues the jobs it asks for. Opening a
-/// Session and leaving are the loop's to do.
+/// Steps the core with one event and queues the jobs it asks for. Presenting
+/// panes and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
     const effects = try view.step(&self.state, value);
     var next: ?Next = null;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
-        .open_settings => {},
+        .open_settings => next = .open_settings,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1626,6 +1626,8 @@ fn quiesceUpgrade(self: *Self) !bool {
             if (try self.complete()) |next| switch (next) {
                 .leave => return error.InteractiveInterrupted,
                 .open => |reference| self.started = reference,
+                // Only direct list input asks for settings, never a worker answer.
+                .open_settings => unreachable,
             };
         }
     }
@@ -5614,6 +5616,91 @@ test "App root navigation shows and focuses the main pane before every Session s
                     }
                 }
             }
+        }
+    }
+}
+
+test "App settings Enter reaches Root at both widths with and without a retained Session" {
+    const Settings = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Settings.dir = tmp.dir;
+    for ([_]u16{ 46, 140 }) |width| {
+        for ([_]bool{ false, true }) |retained| {
+            errdefer std.debug.print("Settings row: width={d}, retained={any}\n", .{ width, retained });
+            Settings.files = 0;
+            var cancellation: client.Cancellation = .{};
+            const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+            defer rig.close();
+            const overview = rig.overview;
+            Seen.now.listed = 2;
+            try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+            try std.testing.expect(try rig.settle() == null);
+            defer {
+                if (overview.app_session) |left| {
+                    if (left.frontend) |frontend| frontend.stop();
+                    overview.disposeSession(left);
+                    overview.app_session = null;
+                }
+                overview.retired.deinit(std.testing.allocator);
+            }
+            if (retained) {
+                overview.hooks.scratch = Settings.scratch;
+                overview.ops.open = openSession;
+                try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+                _ = overview.app_session.?.frontend.?.input.append("retained draft");
+            }
+            const previous = overview.root.session;
+            const frontend = if (overview.app_session) |left| left.frontend else null;
+            var ctx = rig.context();
+            defer ctx.cmds.deinit(std.testing.allocator);
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+            _ = try overview.root.widget().draw(draw_context);
+            // Real parser/overview handlers select the last list row;
+            // do not synthesize a core click or set selected directly.
+            try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
+            try std.testing.expect(overview.state.selected == .settings);
+            try std.testing.expect(!overview.root.settings_open);
+            try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
+            try std.testing.expect(overview.root.settings_open);
+            try std.testing.expect(overview.state.selected == .settings);
+            try std.testing.expect(!ctx.quit);
+            try std.testing.expect(ctx.redraw);
+            const focus = ctx.cmds.items[ctx.cmds.items.len - 1].request_focus;
+            try std.testing.expect(focus.eql(overview.root.settings_page.widget()));
+            try focus.handleEvent(&ctx, .focus_in);
+            const opened = try overview.root.widget().draw(draw_context);
+            try std.testing.expect(Settings.origin(opened, focus, .{ .row = 0, .col = 0 }) != null);
+            try std.testing.expectEqual(width < Root.split_at, overview.root.settings_page.narrow);
+            try std.testing.expectEqual(width >= Root.split_at, overview.root.listVisible());
+            var shown = try rig.shown(width, 24);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "Rui") != null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Notifications") != null);
+            if (previous) |widget_| {
+                try std.testing.expect(overview.root.session.?.eql(widget_));
+                try std.testing.expect(overview.app_session.?.frontend.? == frontend.?);
+                try std.testing.expectEqualStrings("retained draft", frontend.?.input.composition().bytes);
+                try std.testing.expect(Settings.origin(opened, widget_, .{ .row = 0, .col = 0 }) == null);
+            } else try std.testing.expect(overview.root.session == null);
+            try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+            try std.testing.expectEqual(@as(usize, 0), overview.retired.items.len);
         }
     }
 }

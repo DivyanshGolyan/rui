@@ -157,6 +157,17 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
+    def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        state = next(state for state in scenario["states"] if state["name"] == "settings")
+        self.assertEqual(state["open"], "overview")
+        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(state["steps"], [
+            {"keys": ["End", "Enter"]},
+            {"wait": "Rui"}, {"wait": "Notifications"},
+        ])
+        self.assertEqual(state["expect"], ["Rui", "Notifications", "Sign-in", "Version"])
+
     def test_markdown_frames_show_the_compact_answer_at_both_sizes_and_colours(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
