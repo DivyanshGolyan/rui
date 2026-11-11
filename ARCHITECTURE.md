@@ -3631,7 +3631,15 @@ reclaiming each other's endpoint.
 Scratch and diagnostics live in
 `runtimeDir`.
 Requests use the persistent `store_meta.store_id` (32 lowercase
-hex characters), never the URL or runtime path.
+hex characters), never the URL or runtime path. This durable id survives a
+restore to a differently named database, but canonical identity is validated
+separately: MySQL requires a saved `store_selector` to match the selector passed
+at admission (the database name for a launched Host). A mismatch or malformed
+saved id refuses startup before any write. A missing selector is repaired
+atomically with ownership acquisition without changing an existing durable id.
+Restoring under another database name therefore requires explicitly updating
+the saved selector to that name; the durable id remains unchanged. SQLite still
+validates its saved id and canonical directory selector.
 An initial MySQL
 `host_info` probe may send an empty `store` to discover that id; every other
 request must match it.
@@ -3646,7 +3654,13 @@ MySQL readiness and `host_status` also report `innodb_doublewrite`, including
 Admission refusals use a single stdout
 `{"rui_start_error":{"code":"...","message":"..."}}` line and exit 1:
 `store_locked`, `store_schema_missing`, `store_schema_behind`, or a MySQL
-start refusal (D222):
+start refusal (D222). The existing `store_schema_behind` code has distinct,
+bounded static messages for older, newer or malformed numeric format metadata,
+a wire-version mismatch, an unexpected metadata key, a catalog mismatch and
+invalid identity metadata or connection target. These refusals precede metadata
+repair, ownership changes and sender cleanup, and expose no saved values or
+connection secrets. They add no public code or Store-format change; MySQL DDL,
+backup and forward migration application remain operator-owned:
 
 - `mysql_version`: the server is older than MySQL 8.4, or its version cannot be parsed.
 - `mariadb`: the version or version comment identifies MariaDB, separately from an old MySQL version.
@@ -3678,6 +3692,9 @@ A write that is alone in its batch sends its last writes and its COMMIT as one m
 The fence, and each write whose row count the statement itself does not fix, is followed by a statement that fails unless the count is the expected one; the server runs nothing of a message after a failed statement, so COMMIT never saves past a wrong count.
 The batch is then saved and takes no more writes: a write that queued meanwhile opens the next batch.
 A batch that runs again commits at its end.
+That message also carries the dispatch survey the Host asks for after every commit, as reads after COMMIT: the Store keeps the answer until the Host asks, once, and drops it when anything else commits first.
+The write sends that message, and the survey is in it whole or not at all: reads that do not fit after COMMIT are left out, and the Host then asks as usual, as it does when the survey's checks need a second round.
+A survey read that fails after COMMIT fences, as it does when the Host asks; the commit stands.
 
 Host information is a read-only, bounded `/v1/host-info` exchange for the canonical selected Store.
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.

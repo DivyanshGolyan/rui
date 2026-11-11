@@ -750,3 +750,35 @@ test "fixture and typed statement PREPARE text retains MySQL index hints" {
         comptime prepareQuery(pieces[0]),
     );
 }
+
+test "metadata seed MySQL missing masks retain canonical selector and id" {
+    const id = "0123456789abcdef0123456789abcdef".*;
+    const selector = "/canonical/'\\é";
+    const expected = [_][]const u8{
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','" ++ wire_version ++ "');",
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_selector',_utf8mb4 X'2f63616e6f6e6963616c2f275cc3a9' COLLATE utf8mb4_0900_bin);",
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','" ++ std.fmt.comptimePrint("{d}", .{schema.schema_version}) ++ "');",
+        "INSERT INTO store_meta(meta_key,meta_value) VALUES('store_id','0123456789abcdef0123456789abcdef');",
+    };
+    // Independent domain: every subset of all four repaired keys.
+    const repaired = [_]schema.MetaKey{ .wire_version, .store_selector, .format, .store_id };
+    for (0..16) |mask| {
+        var seen: schema.MetaPresence = .empty;
+        var wanted: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer wanted.deinit();
+        for (repaired, expected, 0..) |key, sql, bit| {
+            if (mask & (@as(usize, 1) << @intCast(bit)) != 0) {
+                seen.insert(key);
+            } else try wanted.writer.writeAll(sql);
+        }
+        var actual: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer actual.deinit();
+        try schema.writeMissingMeta(&actual.writer, seen, &id, selector);
+        try std.testing.expectEqualStrings(wanted.written(), actual.written());
+    }
+    const first = schema.drawStoreId(std.testing.io);
+    const second = schema.drawStoreId(std.testing.io);
+    try std.testing.expect(schema.isStoreId(&first));
+    try std.testing.expect(schema.isStoreId(&second));
+    try std.testing.expect(!std.mem.eql(u8, &first, &second));
+}
