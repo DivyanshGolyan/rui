@@ -1537,7 +1537,7 @@ const Page = struct {
     /// A source Operation's tool group as the scan's rounds build it:
     /// how many of its `expected` calls they have `seen`, the latest
     /// position one was accepted at, and the last one's item.
-    const Group = struct { source: u64, expected: u64, whole: bool, seen: u64, position: u64, last_item: ?u64 };
+    const Group = struct { source: u64, expected: u64, called: u64, whole: bool, seen: u64, position: u64, last_item: ?u64 };
     const arena_bytes = 128 * 1024;
 
     const rows = .{ historical_settings.Row, historical_entries.Row, page_items.Row, page_parts.Row, ToolRow, GroupCallRow, group_results.Row };
@@ -1898,11 +1898,13 @@ const group_sources_from = "FROM model_operation current JOIN model_operation so
 
 /// Each of those sources, in order, with whether its items are the whole
 /// immutable population its Operation counted, between its admission and
-/// the view's (`outputSourceColumns`), and how many of them are calls.
+/// the view's (`outputSourceColumns`), how many of them are calls, and how
+/// many calls the Operation has.
 const group_sources = rsql.Read(.{
-    .sql = "SELECT " ++ outputSourceColumns("current.admission_position") ++ "," ++ reads_domain.expectedCallsSql("source.operation_id") ++ " " ++ group_sources_from,
+    .sql = "SELECT " ++ outputSourceColumns("current.admission_position") ++ "," ++ reads_domain.expectedCallsSql("source.operation_id") ++ "," ++
+        "(SELECT count(*) FROM model_tool_call called WHERE called.operation_id=source.operation_id) AS called " ++ group_sources_from,
     .Args = struct { operation: u64, from: u64, floor: u64 },
-    .Row = struct { operation_id: rsql.Positive, admission_position: rsql.Positive, output_item_count: u64, purpose: u8, complete: bool, expected: u64 },
+    .Row = struct { operation_id: rsql.Positive, admission_position: rsql.Positive, output_item_count: u64, purpose: u8, complete: bool, expected: u64, called: u64 },
     .cardinality = .each,
 });
 
@@ -1978,10 +1980,10 @@ const group_bounds = rsql.Read(.{
 /// One round of the tool-group scan: a page of source Operations and a
 /// page of their calls, judged as main judged each item and call in
 /// rounds of their own. A source's items are its whole population
-/// (`group_sources`). Its calls run from ordinal zero with none missing,
-/// each on a call item later than the one before, and there are as many
-/// as it has call items: so every call item has its call, in order, and
-/// no call lies past them. Each call's Proposal is consistent and its
+/// (`group_sources`). It has as many calls as call items, and the calls
+/// read run from ordinal zero with none missing, each on a call item later
+/// than the one before, up to that count: so every call item has its
+/// call, in order, and no call lies past them, whichever page ends it. Each call's Proposal is consistent and its
 /// fields certified; its result is accepted, public and its own. The
 /// group lies where its last result was accepted, below the view's
 /// admission. Every failure is `CorruptStore`.
@@ -2002,6 +2004,7 @@ const GroupRead = struct {
             page.groups[page.groups_end] = .{
                 .source = source,
                 .expected = row.expected,
+                .called = row.called,
                 .whole = row.complete and row.output_item_count != 0,
                 .seen = if (resumed) scan.calls else 0,
                 .position = if (resumed) scan.position else 0,
@@ -2096,6 +2099,7 @@ const GroupRead = struct {
         if (read.calls.failed) return error.CorruptStore;
         const cut = read.calls.rows == Page.call_batch;
         for (page.groups[0..page.groups_end], 0..) |*group, index| {
+            if (group.called != group.expected) return error.CorruptStore;
             if (group.seen != group.expected) {
                 // Only the source the page's last call belongs to, or the
                 // one after it, can lack calls the page had no room for.

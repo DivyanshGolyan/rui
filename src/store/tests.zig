@@ -7641,6 +7641,72 @@ test "a request reads its settings in one round and its history and tools in one
     }.run);
 }
 
+test "the tool-group scan refuses a source with a call past its call items or one missing, wherever a page ends" {
+    try store_testing.forEachEngine(struct {
+        fn walk(storage: *Store, binding: AttemptBinding) !usize {
+            var view: HistoricalView = undefined;
+            storage.openHistoricalView(binding, &view);
+            defer view.close();
+            var settings: HistoricalSettings = undefined;
+            try view.settings(&settings);
+            while (!try view.validateOutputsStep()) {}
+            var groups: usize = 0;
+            var after: u64 = 0;
+            while (true) {
+                var bytes: usize = 1 << 20;
+                var items: usize = 1 << 20;
+                const entry = switch (try view.nextEntryStep(after, &bytes, &items)) {
+                    .pending => continue,
+                    .ready => |served| served orelse return groups,
+                };
+                after = entry.position;
+                if (entry.kind != .tool_results) continue;
+                while (try view.nextToolResult()) |_| {}
+                groups += 1;
+            }
+        }
+
+        fn run(case: *store_testing.Case) !void {
+            var calls: [65]TestingCall = undefined;
+            var ids: [65][16]u8 = undefined;
+            for (&calls, 0..) |*call, i| {
+                const id = try std.fmt.bufPrint(&ids[i], "call-{d}", .{i});
+                call.* = .{ .item_id = id, .name = "unknown", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            }
+            // The source's calls end one short of a page of calls, on its
+            // last row and one past it; a source before and after share
+            // its pages.
+            for ([_]usize{ 60, 61, 62 }) |size| for ([_]bool{ true, false }) |extra| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "group-bounds");
+                try submitTestMessage(&storage, &tmp, "group-bounds-input", "group-bounds-key", session.slice(), "tools");
+                var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                var tampered: u64 = 0;
+                for ([_]usize{ 3, size, 3 }, 0..) |count, i| {
+                    if (i == 1) tampered = binding.operation_id;
+                    var prefix: [32]u8 = undefined;
+                    try settleCallsForTesting(&storage, &tmp, binding, try std.fmt.bufPrint(&prefix, "group-bounds-{d}", .{i}), calls[0..count]);
+                    binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                }
+                try std.testing.expectEqual(@as(usize, 3), try walk(&storage, binding));
+                if (extra) {
+                    // A call no call item has, past the last.
+                    try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_tool_call(operation_id,session_ref,call_ordinal,item_ordinal,name_content_id,call_id_content_id,arguments_content_id,field_metadata,action_kind) " ++
+                        "SELECT operation_id,session_ref,?2,item_ordinal+100000,name_content_id,rejection_content_id,arguments_content_id,field_metadata,1 FROM model_tool_call WHERE operation_id=?1 AND call_ordinal=0", .{ tampered, size });
+                } else {
+                    // Its last call item's call missing.
+                    try store_testing.withoutForeignKeys(&storage, "DELETE FROM model_tool_call WHERE operation_id=?1 AND call_ordinal=?2", .{ tampered, size - 1 });
+                }
+                try std.testing.expectError(error.CorruptStore, walk(&storage, binding));
+            };
+        }
+    }.run);
+}
+
 test "the tool-group scan reads sixteen sources and sixty-four of their calls a round" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
