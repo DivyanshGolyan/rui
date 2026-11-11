@@ -19,7 +19,7 @@ const session_id = @import("../../session_id.zig");
 const session_list = @import("../../session_list.zig");
 const ScratchBudget = @import("../../ScratchBudget.zig");
 const model_capability = @import("../../model_capability.zig");
-const tool_catalog = @import("../../tool_record.zig");
+const tool_defs = @import("../../tool_record.zig");
 const tool_set = @import("tool_set.zig");
 const turn_policy = @import("../../turn_policy.zig");
 const session_work = @import("../../session_work.zig");
@@ -303,7 +303,7 @@ pub const first_message = rsql.Read(.{
 /// The names `tool_set.namesSql` joined, in name order, the order
 /// configure gave the set's members. A bad or repeated name, or too many,
 /// is `CorruptStore`.
-pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_catalog.max_tools][]const u8) ![]const []const u8 {
+pub fn sortedToolNames(names: ?[]const u8, sorted: *[tool_defs.max_tools][]const u8) ![]const []const u8 {
     var count: usize = 0;
     if (names) |joined| {
         var each = std.mem.splitScalar(u8, joined, ',');
@@ -453,76 +453,110 @@ comptime {
 /// The Session's latest Turn and its current Operation. The quota
 /// diagnostic is read only for a failed outcome, and only while it is
 /// small enough to be one (`Quota.max_bytes`).
-const work_latest = rsql.Read(.{
-    .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
-        "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
-        "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
-        " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
-        "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
-        "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
-        "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1",
-    .Args = struct { session: []const u8 },
-    .Row = struct {
-        turn_id: rsql.Positive,
-        operation_id: rsql.Positive,
-        input_cutoff: rsql.Positive,
-        outcome_code: ?Code,
-        outcome_content_id: ?rsql.Positive,
-        outcome_at: ?rsql.Positive,
-        outcome_position: ?rsql.Positive,
-        /// The resolution once resolved, else the last failure's code:
-        /// the schema's checks make a resolution exactly a `resolved_at`.
-        operation_code: ?Code,
-        retry_due_at_ms: ?u64,
-        attempt_ordinal: ?rsql.Positive,
-        attempt_at: ?rsql.Positive,
-        retry_scheduled_at: ?rsql.Positive,
-        resolved_at: ?rsql.Positive,
-        /// Bytes `quotaResetsAt` parses; ones that are not UTF-8 give
-        /// no reset time, as on main.
-        diagnostic: ?rsql.Blob(Quota.max_bytes),
-        stopped_at: ?rsql.Positive,
-    },
-    .cardinality = .each,
-});
+const work_latest = WorkLatest(struct { session: []const u8 }, "?1");
+
+fn WorkLatest(comptime Args: type, comptime session: []const u8) type {
+    return rsql.Read(.{
+        .sql = "SELECT t.turn_id,t.operation_id,t.input_cutoff,t.outcome_code,t.outcome_content_id,t.outcome_at,t.outcome_position," ++
+            "coalesce(o.resolution_code,o.last_failure_code) AS operation_code,o.retry_due_at_ms,o.attempt_ordinal,o.attempt_at,o.retry_scheduled_at,o.resolved_at," ++
+            "(SELECT @payload(content) FROM content WHERE content_id=o.resolution_content_id AND byte_length<=" ++ std.fmt.comptimePrint("{d}", .{Quota.max_bytes}) ++
+            " AND t.outcome_code NOT IN ('completed','cancelled')) AS diagnostic," ++
+            "(SELECT stopped_at FROM session_stop @index(session_stop_turn) WHERE selected_turn_id=t.turn_id ORDER BY position LIMIT 1) AS stopped_at " ++
+            "FROM turn t @index(turn_session_latest) JOIN model_operation o ON o.operation_id=t.operation_id " ++
+            "WHERE t.session_ref=" ++ session ++ " ORDER BY t.turn_id DESC LIMIT 1",
+        .Args = Args,
+        .Row = WorkLatestRow,
+        .cardinality = .each,
+    });
+}
+
+const WorkLatestRow = struct {
+    turn_id: rsql.Positive,
+    operation_id: rsql.Positive,
+    input_cutoff: rsql.Positive,
+    outcome_code: ?Code,
+    outcome_content_id: ?rsql.Positive,
+    outcome_at: ?rsql.Positive,
+    outcome_position: ?rsql.Positive,
+    /// The resolution once resolved, else the last failure's code:
+    /// the schema's checks make a resolution exactly a `resolved_at`.
+    operation_code: ?Code,
+    retry_due_at_ms: ?u64,
+    attempt_ordinal: ?rsql.Positive,
+    attempt_at: ?rsql.Positive,
+    retry_scheduled_at: ?rsql.Positive,
+    resolved_at: ?rsql.Positive,
+    /// Bytes `quotaResetsAt` parses; ones that are not UTF-8 give
+    /// no reset time, as on main.
+    diagnostic: ?rsql.Blob(Quota.max_bytes),
+    stopped_at: ?rsql.Positive,
+};
 
 /// One aggregate over an active Turn's Operation's Actions, bounded by
 /// its calls. Its last resolution seeks the Session's results index.
-const work_actions = rsql.Read(.{
-    .sql = "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
-        "@count_where(a.resolution_code IS NULL AND a.authorized=0) AS awaiting," ++
-        "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END) AS first_awaiting," ++
-        "@count_where(a.resolution_code IS NULL AND a.attempt_ordinal=1) AS running," ++
-        // The last resolution is the one at the greatest position.
-        "(SELECT resolved_at FROM action_operation WHERE session_ref=?2 AND parent_operation_id=?1 AND acceptance_position IS NOT NULL " ++
-        "ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
-        // Under an `ask` revision only an `allow_once` decision
-        // authorizes; under `bypass` the proposal did.
-        "@max_where(a.decided_at,a.resolution_code IS NULL AND r.permission_mode=0) AS latest_decision_at " ++
-        "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
-        "WHERE a.parent_operation_id=?1",
-    .Args = struct { operation: u64, session: []const u8 },
-    .Row = struct {
-        total: u64,
-        unresolved: u64,
-        awaiting: u64,
-        first_awaiting: ?rsql.Positive,
-        running: u64,
-        latest_resolution_at: ?rsql.Positive,
-        latest_decision_at: ?rsql.Positive,
-    },
-    .cardinality = .each,
-});
+const work_actions = WorkActions(struct { operation: u64, session: []const u8 }, "?1", "?2");
+
+fn WorkActions(comptime Args: type, comptime operation: []const u8, comptime session: []const u8) type {
+    return rsql.Read(.{
+        .sql = "SELECT count(*) AS total,@count_where(a.resolution_code IS NULL) AS unresolved," ++
+            "@count_where(a.resolution_code IS NULL AND a.authorized=0) AS awaiting," ++
+            "min(CASE WHEN a.resolution_code IS NULL AND a.authorized=0 THEN a.action_id END) AS first_awaiting," ++
+            "@count_where(a.resolution_code IS NULL AND a.attempt_ordinal=1) AS running," ++
+            // The last resolution is the one at the greatest position.
+            "(SELECT resolved_at FROM action_operation WHERE session_ref=" ++ session ++ " AND parent_operation_id=" ++ operation ++ " AND acceptance_position IS NOT NULL " ++
+            "ORDER BY acceptance_position DESC LIMIT 1) AS latest_resolution_at," ++
+            // Under an `ask` revision only an `allow_once` decision
+            // authorizes; under `bypass` the proposal did.
+            "@max_where(a.decided_at,a.resolution_code IS NULL AND r.permission_mode=0) AS latest_decision_at " ++
+            "FROM action_operation a LEFT JOIN session_revision r ON r.session_ref=a.session_ref AND r.revision=a.permission_revision " ++
+            "WHERE a.parent_operation_id=" ++ operation,
+        .Args = Args,
+        .Row = WorkActionsRow,
+        .cardinality = .each,
+    });
+}
+
+const WorkActionsRow = struct {
+    total: u64,
+    unresolved: u64,
+    awaiting: u64,
+    first_awaiting: ?rsql.Positive,
+    running: u64,
+    latest_resolution_at: ?rsql.Positive,
+    latest_decision_at: ?rsql.Positive,
+};
 
 /// The oldest running Action's call ordinal and saved description.
-const work_oldest = rsql.Read(.{
-    .sql = "SELECT a.attempt_at,tool_call.description,a.call_ordinal FROM action_operation a " ++
-        "JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
-        "WHERE a.parent_operation_id=?1 AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
-    .Args = struct { operation: u64 },
-    .Row = struct { attempt_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes), call_ordinal: u64 },
-    .cardinality = .each,
-});
+const work_oldest = WorkOldest(struct { operation: u64 }, "?1");
+
+fn WorkOldest(comptime Args: type, comptime operation: []const u8) type {
+    return rsql.Read(.{
+        .sql = "SELECT a.attempt_at,tool_call.description,a.call_ordinal FROM action_operation a " ++
+            "JOIN model_tool_call tool_call ON tool_call.operation_id=a.parent_operation_id AND tool_call.call_ordinal=a.call_ordinal " ++
+            "WHERE a.parent_operation_id=" ++ operation ++ " AND a.resolution_code IS NULL AND a.attempt_ordinal=1 ORDER BY a.attempt_at,a.action_id LIMIT 1",
+        .Args = Args,
+        .Row = WorkOldestRow,
+        .cardinality = .each,
+    });
+}
+
+const WorkOldestRow = struct { attempt_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes), call_ordinal: u64 };
+
+/// The Session of the Message the command ?1 accepted, while that Message
+/// is pending: queued, or applied by a Turn that has no outcome yet.
+const pending_session_sql = "(SELECT pending.session_ref FROM message_admission pending LEFT JOIN turn own ON own.turn_id=pending.turn_id " ++
+    "WHERE pending.command_key=?1 AND own.outcome_code IS NULL)";
+
+/// That Session's latest Turn's Operation, while the Turn is active.
+const pending_operation_sql = "(SELECT CASE WHEN latest.outcome_code IS NULL THEN latest.operation_id END FROM turn latest @index(turn_session_latest) " ++
+    "WHERE latest.session_ref=" ++ pending_session_sql ++ " ORDER BY latest.turn_id DESC LIMIT 1)";
+
+/// The active Turn's stages keyed by a pending Message's command, so they
+/// share the round that reads the command (`WorkRead.queuePending`).
+const PendingArgs = struct { key: []const u8 };
+const pending_latest = WorkLatest(PendingArgs, pending_session_sql);
+const pending_actions = WorkActions(PendingArgs, pending_operation_sql, pending_session_sql);
+const pending_oldest = WorkOldest(PendingArgs, pending_operation_sql);
 
 /// The oldest Message queued after the cutoff ?2.
 const work_queued = rsql.Read(.{
@@ -570,6 +604,12 @@ pub const work_failures = .{
     .{ work_excluded, error.MessageAdmissionReadFailed },
 };
 
+/// The same names for the stages `queuePending` reads ahead.
+pub const pending_failures = .{
+    .{ pending_latest, error.TurnReadFailed },
+    .{ pending_actions, error.ActionReadFailed },
+};
+
 /// Ends a round of this file's reads, naming a failed step by
 /// `report_failures`.
 fn runReport(a: *ReadAccess) !void {
@@ -591,6 +631,9 @@ pub const WorkRead = struct {
     session: []const u8,
     stage: Stage = .latest,
     count: reads_domain.RowCount = .{},
+    /// The active Turn's stages `queuePending` read ahead, and the rows
+    /// its Actions and oldest running Action read found.
+    ahead: ?[2]reads_domain.RowCount = null,
     /// What `session_work.derive` weighs, but its texts, which `work`
     /// points at this read's own copies.
     inputs: session_work.Inputs = .{ .now_ms = 0, .created_at = 0 },
@@ -606,6 +649,7 @@ pub const WorkRead = struct {
 
     /// Queues this stage's read; false once the work is read.
     pub fn queue(w: *WorkRead, a: *ReadAccess) bool {
+        if (w.stage == .latest and w.ahead != null) return false;
         switch (w.stage) {
             .latest => reads_domain.readFirst(a, work_latest, .{ .session = w.session }, w),
             .actions => reads_domain.readFirst(a, work_actions, .{ .operation = w.inputs.latest.?.operation_id, .session = w.session }, w),
@@ -619,14 +663,49 @@ pub const WorkRead = struct {
         return true;
     }
 
+    /// Queues the active Turn's stages for the Session of the pending
+    /// Message the command `key` accepted, in the round its caller runs,
+    /// which names a failed step by `pending_failures`. They find nothing for
+    /// a command that accepted no pending Message. After that round the
+    /// caller sets `session` and reads the rest (`readWorks`), which is no
+    /// round while a Turn is active.
+    pub fn queuePending(w: *WorkRead, a: *ReadAccess, key: []const u8) void {
+        std.debug.assert(w.stage == .latest);
+        w.count = .{};
+        w.ahead = @splat(.{});
+        a.readEach(pending_latest, .{ .key = key }, 1, w);
+        a.readEach(pending_actions, .{ .key = key }, 1, w);
+        a.readEach(pending_oldest, .{ .key = key }, 1, w);
+    }
+
     pub fn visit(w: *WorkRead, row: anytype) bool {
-        return reads_domain.visitRow(w, row);
+        return reads_domain.countRow(w.rowCount(@TypeOf(row.*)), w, row);
+    }
+
+    /// The count of the stage that reads `Row`.
+    fn rowCount(w: *WorkRead, comptime Row: type) *reads_domain.RowCount {
+        if (w.ahead) |*ahead| {
+            if (Row == WorkActionsRow) return &ahead[0];
+            if (Row == WorkOldestRow) return &ahead[1];
+        }
+        return &w.count;
     }
 
     /// After the round that ran this stage's read: judges what it found
     /// and picks the next stage.
     pub fn advance(w: *WorkRead) !void {
-        const found = try w.count.found();
+        if (w.stage == .latest) if (w.ahead) |ahead| {
+            // The round that read the latest Turn read these too.
+            try w.step(w.count);
+            if (w.stage == .actions) try w.step(ahead[0]);
+            if (w.stage == .oldest) try w.step(ahead[1]);
+            return;
+        };
+        try w.step(w.count);
+    }
+
+    fn step(w: *WorkRead, count: reads_domain.RowCount) !void {
+        const found = try count.found();
         w.stage = switch (w.stage) {
             .latest => if (found and w.inputs.latest.?.terminal == null) .actions else .cutoff,
             // An aggregate always has a row.
@@ -641,9 +720,11 @@ pub const WorkRead = struct {
 
     pub fn keep(w: *WorkRead, row: anytype) error{CorruptStore}!void {
         const Row = @TypeOf(row.*);
-        if (Row == work_latest.Row) return w.keepLatest(row);
-        if (Row == work_actions.Row) {
-            const turn = &w.inputs.latest.?;
+        if (Row == WorkLatestRow) return w.keepLatest(row);
+        if (Row == WorkActionsRow) {
+            // Read ahead, the aggregate has a row with no active Turn too.
+            const turn = if (w.inputs.latest) |*latest| latest else return;
+            if (turn.terminal != null) return;
             turn.actions = .{
                 .total = row.total,
                 .unresolved = row.unresolved,
@@ -653,7 +734,7 @@ pub const WorkRead = struct {
                 .latest_resolution_at = optional(row.latest_resolution_at),
                 .latest_decision_at = optional(row.latest_decision_at),
             };
-        } else if (Row == work_oldest.Row) {
+        } else if (Row == WorkOldestRow) {
             w.description = row.description;
             w.inputs.latest.?.actions.oldest_running = .{ .at = row.attempt_at.get(), .call = row.call_ordinal, .description = null };
         } else if (Row == command_domain.stop_cutoff.Row) {
@@ -669,7 +750,7 @@ pub const WorkRead = struct {
         } else @compileError("WorkRead reads no " ++ @typeName(Row));
     }
 
-    fn keepLatest(w: *WorkRead, row: *const work_latest.Row) error{CorruptStore}!void {
+    fn keepLatest(w: *WorkRead, row: *const WorkLatestRow) error{CorruptStore}!void {
         var turn: session_work.Inputs.Turn = .{
             .turn_id = row.turn_id.get(),
             .operation_id = row.operation_id.get(),
@@ -1357,8 +1438,8 @@ fn RevisionChunk(comptime Watcher: type) type {
         failure: ?Failure = null,
         decoded: RevisionRow = undefined,
         /// The row's tool sets in name order, which its settings borrow.
-        tools: [tool_catalog.max_tools][]const u8 = undefined,
-        loaded_tools: [tool_catalog.max_tools][]const u8 = undefined,
+        tools: [tool_defs.max_tools][]const u8 = undefined,
+        loaded_tools: [tool_defs.max_tools][]const u8 = undefined,
 
         const Failure = error{CorruptStore} || RowError(Watcher);
 

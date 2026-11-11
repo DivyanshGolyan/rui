@@ -29,6 +29,34 @@ DEVICE_ANSWER = b"\x1b[?62;22c"
 
 
 class TerminalProcessTest(unittest.TestCase):
+    def test_composer_oracles_follow_the_caret_pane(self):
+        from human_cli_fixture import composer_empty, composer_ready, overview_composer
+
+        for prefix in (" ", "list text│ ", "中       │ "):
+            for text, caret in (("café", 6), ("x │ y", 7)):
+                with self.subTest(prefix=prefix, text=text):
+                    capture = ScreenCapture(columns=80, rows=4)
+                    self.assertFalse(capture.draft("", 2))
+                    # An earlier identical User row is not the focused draft.
+                    capture.feed(("\x1b[?2026h\x1b[2J\x1b[H › " + text + "\r\n" +
+                                  prefix + "› " + text + "\x1b[?2026l").encode())
+                    cursor = capture.screen.cursor
+                    self.assertTrue(capture.draft(text, caret))
+                    self.assertFalse(capture.draft(text, caret - 1))
+                    self.assertFalse(capture.draft("wrong", caret))
+                    self.assertTrue(composer_ready(capture.completed, cursor.x, cursor.y))
+                    self.assertTrue(overview_composer(capture.completed, cursor.x, cursor.y))
+                    self.assertFalse(composer_empty(capture.completed, cursor.y))
+                    capture.feed(("\x1b[?2026h\r\x1b[2K" + prefix + "› \x1b[?2026l").encode())
+                    self.assertTrue(capture.draft("", 2))
+                    self.assertTrue(composer_empty(capture.completed, capture.screen.cursor.y))
+                    capture.feed(b"\x1b[D")
+                    self.assertFalse(capture.draft("", 2))
+
+        from human_cli_fixture import conversation_text
+        self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
+                         "› line1    01:23\n  line2\nedited 2")
+
     def setUp(self):
         self.descriptors = []
         real_openpty = pty.openpty
@@ -201,6 +229,41 @@ class TerminalProcessTest(unittest.TestCase):
         os.write(slave, "\x1b[?2026h\x1b[H\x1b[2Janswer\r\n › \x1b[?2026l".encode())
         wait_for(lambda: "answer" in human.current_screen(master), "drained composer")
         self.assertIn("answer", human.read_terminal(master, "answer", timeout=.1, composer=True))
+
+    def test_approval_title_count_uses_one_committed_frame_not_read_history(self):
+        import human_cli_fixture as human
+
+        title = "? Check successful shell exit"
+        for history, expected_titles in ((True, 2), (False, 1)):
+            with self.subTest(history=history):
+                master, slave = open_pty()
+                capture = human.terminal_capture(master)
+                capture.feed(("\x1b[?1049h\x1b[?2026h\x1b[H\x1b[2J" + title +
+                              "\r\n? Needs approval\x1b[?2026l").encode())
+                generation = capture.generation
+                # The next frame contains the request and the choice, but its
+                # final synchronized-write boundary arrives in a separate read.
+                capture.feed(("\x1b[?2026h\x1b[H\x1b[2J  " + title +
+                              "\r\n    $ true\r\n────────────────────────\r\n"
+                              " › " + human.CHOICE + "\r\n────────────────────────").encode())
+                self.assertEqual(capture.generation, generation)
+                self.assertNotIn(human.CHOICE, capture.completed)
+                os.write(slave, b"\x1b[?2026l")
+                if history:
+                    proposal = human.read_terminal(master, human.CHOICE)
+                else:
+                    proposal = human.keyed_frame(master, b"",
+                        lambda frame, x, y: human.CHOICE in frame and title in frame)
+                rows = [row.strip() for row in proposal.splitlines()]
+                self.assertEqual(rows.count(title), expected_titles)
+                self.assertIn("$ true", rows)
+                self.assertIn(human.CHOICE, proposal)
+                # The committed choice frame itself always has exactly one
+                # title and the command above it, never an intermediate write.
+                current = [row.strip() for row in capture.completed.splitlines()]
+                self.assertEqual(current.count(title), 1)
+                self.assertLess(current.index(title), current.index("› " + human.CHOICE))
+                self.assertLess(current.index("$ true"), current.index("› " + human.CHOICE))
 
     def test_failed_launch_closes_terminal(self):
         with self.assertRaises(FileNotFoundError):

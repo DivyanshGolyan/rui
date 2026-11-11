@@ -16,10 +16,10 @@ from textwrap import dedent
 from unittest.mock import patch
 
 import build_files
-from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_MYSQL_TARGETS, LIVE_POSTGRES_TARGETS, LIVE_RULES,
+from select_tests import (BUILD_HUB, BUILD_MODULES, CACHE_POLICY, CHECK_COVERS, FIXTURE_COVERS, FIXTURES, LIVE_POSTGRES_TARGETS, LIVE_RULES,
                           POLICY_SELF_CHECKS, RENDERER_HARNESSES, RULES, SCREEN_TARGETS, SETUP_PARTS, TEST_CODE, UNIT_ROOTS, Graph, execution_batches, matches, select,
-                          setup_requirements, tree_graph)
-from qualification import NATIVE, RESOURCES, qualification, shards
+                          setup_requirements, tree_graph, uses_live_mysql, live_mysql_suites, mysql_provisioning)
+from qualification import LONG_GATES, NATIVE, RESOURCES, SHARDS_BESIDE_LONG_GATE, qualification, shards
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 from host_process import dispose_all, wait_for
@@ -45,6 +45,200 @@ def covered(target, targets):
             or any(target in cases and broad in targets for broad, cases in FIXTURE_COVERS.items())
             or target in {"check", "stack-frames"} and "check-full" in targets
             or target == "stack-frames" and "check" in targets)
+
+
+class AssertedTextSelectionTest(unittest.TestCase):
+    def test_fixture_reader_collects_python_fstring_and_shell_literals(self):
+        from select_tests import tree_fixture_literals
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "fixture.py").write_text(dedent('''
+                import helper
+                # "Comments are not asserted text"
+                expected = "A plain Python literal"
+                screen = f"Waiting for session: {session_id} has finished drawing"
+                ignored = b"Bytes are not string literals"
+            '''))
+            (root / "fixture.sh").write_text(
+                "printf '%s' \"A shell double-quoted literal\"\n"
+                "test \"$output\" = 'A shell single-quoted literal'\n")
+            (root / "helper.py").write_text('import nested\nmessage = "A helper waits for this message"\n')
+            (root / "nested.py").write_text('message = "A nested helper checks this message"\n')
+            fixtures = {"sample-integration": (("fixture.py", "fixture.sh", "absent.py"), (), ()),
+                        "other-integration": (("fixture.py",), (), ())}
+            graph = Graph.__new__(Graph)
+            graph.python = {"fixture.py": {"helper.py"}, "helper.py": {"nested.py"}}
+            with (patch("select_tests.ROOT", root), patch("select_tests.FIXTURES", fixtures),
+                  patch("select_tests.tree_graph", return_value=graph)):
+                # Bypass the cache so the miniature tree cannot poison the real reader.
+                literals = tree_fixture_literals.__wrapped__()
+            python = {"A plain Python literal", "Waiting for session:", "has finished drawing",
+                      "A helper waits for this message", "A nested helper checks this message"}
+            self.assertEqual(literals, {"other-integration": python,
+                                       "sample-integration": python | {"A shell double-quoted literal",
+                                                                        "A shell single-quoted literal"}})
+
+    def test_session_chrome_text_selects_human_cli_integration(self):
+        path = "src/session_chrome.zig"
+        text = (Path(__file__).resolve().parents[2] / path).read_text()
+        self.assertIn("shift+enter or ctrl+j new line", text)
+        result = select([path], "review", AVAILABLE, contents={path: (text, text)})
+        self.assertIn("human-cli-integration", result["targets"])
+        self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
+
+    def test_fixture_reader_bounds_shared_text_by_production_file_count(self):
+        from select_tests import tree_uncommon_texts
+
+        text = "A fixture waits for this message"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            # Multiple occurrences count once; test-code files do not count.
+            (root / "src/source_test.zig").write_text(json.dumps(text))
+            (root / "src/other_tests.zig").write_text(json.dumps(text))
+            for count in range(5):
+                with self.subTest(production_files=count):
+                    names = ["src/source_test.zig", "src/other_tests.zig"]
+                    for index in range(count):
+                        name = f"src/owner{index}.zig"
+                        (root / name).write_text(json.dumps(text) + "\n" + json.dumps(text))
+                        names.append(name)
+                    tracked = "\0".join(names).encode() + b"\0"
+                    with (patch("select_tests.ROOT", root),
+                          patch("select_tests.subprocess.check_output", return_value=tracked)):
+                        uncommon = tree_uncommon_texts.__wrapped__((text,))
+                    self.assertEqual(uncommon, {text} if count < 3 else set())
+
+    def test_asserted_text_ownership_domain(self):
+        from select_tests import script_literals
+
+        graph = SimpleNamespace(targets=lambda path: {"test-logic"}, host=set(),
+                                live_conformance=set(), reached={"test-store": set()},
+                                compiled=set(), live_mysql=set())
+        text = "A fixture waits for this message"
+        path = "src/render.zig"
+        cases = [
+            ("removed", path, repr(text), (text, "Replacement message"), True, True),
+            ("still present elsewhere", path, repr(text), (text + text, text), True, True),
+            ("added", path, repr(text), ("", text), True, True),
+            ("unchanged occurrence, other lines changed", path, repr(text),
+             (text + " old line", text + " new line"), True, True),
+            ("absent both", path, repr(text), ("old line", "new line"), True, False),
+            ("identifier", path, repr("long_identifier"), ("long_identifier", ""), True, False),
+            ("no contents", path, repr(text), (text, ""), False, False),
+            ("deleted file", path, repr(text), (text, None), True, True),
+            ("added file", path, repr(text), (None, text), True, True),
+            ("non-source", "tests/render.zig", repr(text), (text, ""), True, False),
+            ("f-string constant", path, 'f"Waiting for session: {session_id}"',
+             ("Waiting for session: ", ""), True, True),
+        ]
+        # Exercise the exact bound, including whitespace that must not count.
+        cases += [(f"length {length}", path, repr("  " + "x" * (length - 2) + " y  "),
+                   ("x" * (length - 2) + " y", ""), True, length >= 12) for length in range(3, 14)]
+        cases += [(f"test code {name}", name, repr(text), (text, ""), True, False)
+                  for name in named_paths(TEST_CODE)]
+        for label, changed, script, texts, supplied, expected in cases:
+            with self.subTest(case=label):
+                strings = script_literals(script, ".py")
+                table = {"host-launch-integration": strings, "login-signal-integration": strings}
+                contents = {changed: tuple(json.dumps(value) if value is not None else None for value in texts)} if supplied else {}
+                baseline = select([changed], "review", AVAILABLE, graph, contents, fixture_literals={})
+                result = select([changed], "review", AVAILABLE, graph, contents, fixture_literals=table)
+                self.assertEqual(set(result["targets"]) - set(baseline["targets"]),
+                                 {"host-launch-integration", "login-signal-integration"} if expected else set())
+                self.assertEqual(set(result["native_targets"]) - set(baseline["native_targets"]),
+                                 {"host-launch-integration"} if expected else set())
+                reason = "Asserted text: a fixture waits for text this file draws"
+                self.assertEqual(set(result["reasons"]) - set(baseline["reasons"]),
+                                 {reason} if expected else set())
+                self.assertTrue(set(baseline["targets"]) <= set(result["targets"]))
+                self.assertTrue(set(baseline["native_targets"]) <= set(result["native_targets"]))
+
+    def test_source_strings_include_quotes_and_multiline_but_not_comments(self):
+        from select_tests import source_strings
+
+        source = '\n'.join([
+            '// "Comment text is not drawn"',
+            'const label = "A quoted screen message";',
+            r'const escaped = "A quote: \" and a path: \\";',
+            r'    \\First multiline screen line',
+            r'    \\Second multiline screen line',
+            'identifier_text_is_not_drawn',
+        ])
+        self.assertEqual(source_strings(source), '\n'.join([
+            "A quoted screen message", r'A quote: \" and a path: \\',
+            "First multiline screen line", "Second multiline screen line",
+        ]))
+
+    def test_only_changed_source_prose_gets_a_prevalence_scan(self):
+        graph = SimpleNamespace(targets=lambda path: {"test-logic"}, host=set(),
+                                live_conformance=set(), reached={"test-store": set()},
+                                compiled=set(), live_mysql=set())
+        text = "A fixture waits for this message"
+        table = {"host-launch-integration": {text, "Other unrelated screen prose"}}
+        with (patch("select_tests.tree_fixture_literals", return_value=table) as scripts,
+              patch("select_tests.tree_uncommon_texts", return_value={text}) as prevalence):
+            result = select(["src/render.zig"], "review", AVAILABLE, graph,
+                            {"src/render.zig": (json.dumps(text), json.dumps(text))})
+            self.assertIn("host-launch-integration", result["targets"])
+            prevalence.assert_called_once_with((text,))
+            scripts.assert_called_once_with()
+            for path in ("tests/ci/policy.py", "src/render.zig", "src/render_test.zig"):
+                scripts.reset_mock()
+                prevalence.reset_mock()
+                select([path], "review", AVAILABLE, graph)
+                scripts.assert_not_called()
+                prevalence.assert_not_called()
+        # Shared prose may match a changed file but cannot grant ownership.
+        with (patch("select_tests.tree_fixture_literals", return_value=table),
+              patch("select_tests.tree_uncommon_texts", return_value=set())):
+            result = select(["src/render.zig"], "review", AVAILABLE, graph,
+                            {"src/render.zig": (json.dumps(text), json.dumps(text))})
+            self.assertNotIn("host-launch-integration", result["targets"])
+
+    def test_main_reads_changed_source_text(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from select_tests import main
+
+        path = "src/render.zig"
+        with (patch.object(sys, "argv", ["select_tests.py", "--base", "base", "--head", "head"]),
+              patch("select_tests.build_files.steps", return_value=AVAILABLE),
+              patch("select_tests.changed_paths", return_value=([path], "base-commit")),
+              patch("select_tests.subprocess.check_output", return_value="head-commit\n"),
+              patch("select_tests.revision_text", side_effect=["Old fixture message", "New fixture message"]) as read,
+              patch("select_tests.select", return_value={}) as selected,
+              redirect_stdout(StringIO())):
+            main()
+        self.assertEqual(read.call_args_list,
+                         [unittest.mock.call("base-commit", path), unittest.mock.call("head-commit", path)])
+        self.assertEqual(selected.call_args.kwargs["contents"],
+                         {path: ("Old fixture message", "New fixture message")})
+
+    def test_pr_1290_overview_text_selects_host_launch(self):
+        base, head = "7648d81", "c1fc02c545521fb2c2017cf2b488aa5e4f723872"
+        for ref in (base, head):
+            if subprocess.run(["git", "cat-file", "-e", f"{ref}^{{commit}}"],
+                              capture_output=True).returncode:
+                self.skipTest(f"#1290 replay requires historical commit {ref}; object is absent")
+        paths = ["src/overview_view.zig", "src/Overview.zig"]
+        contents = {path: tuple(subprocess.check_output(["git", "show", f"{ref}:{path}"], text=True)
+                                for ref in (base, head)) for path in paths}
+        from select_tests import fixture_text, script_literals
+
+        scripts = FIXTURES["host-launch-integration"][0]
+        literals = {text for script in scripts if Path(script).suffix in {".py", ".sh"}
+                    for literal in script_literals(
+                        subprocess.check_output(["git", "show", f"{base}:{script}"], text=True),
+                        Path(script).suffix)
+                    if (text := fixture_text(literal))}
+        result = select(paths, "review", AVAILABLE, contents=contents,
+                        fixture_literals={"host-launch-integration": literals})
+        for field in ("targets", "native_targets"):
+            self.assertIn("host-launch-integration", result[field])
+        self.assertEqual(result["reasons"].count(
+            "Asserted text: a fixture waits for text this file draws"), 1)
 
 
 class WorkflowEntrypointsTest(unittest.TestCase):
@@ -160,6 +354,100 @@ class BuildModuleTest(unittest.TestCase):
 
 
 class SelectionTest(unittest.TestCase):
+    def test_live_mysql_case_detection_ignores_forwarding_and_provisioning(self):
+        for source in (
+            'import live_engines\nsocket = env.get(live_engines.MYSQL_SOCKET)',
+            'import live_engines as engines\nsocket = env.get(engines.MYSQL_SOCKET)',
+            'from live_engines import MYSQL_SOCKET as socket\nvalue = env.get(socket)',
+            'import os\nsocket = os.environ.get("RUI_TEST_MYSQL_SOCKET")',
+            'import os\nsocket = os.environ["RUI_TEST_MYSQL_SOCKET"]',
+            'import os\nsocket = os.environ.get(str("RUI_TEST_MYSQL_SOCKET"))',
+        ):
+            with self.subTest(source=source):
+                self.assertTrue(uses_live_mysql(source, entry=False))
+        for source in (
+            'import live_engines\nINHERITED = (*live_engines.VARIABLES,)',
+            '"""RUI_TEST_MYSQL_SOCKET is documented here."""',
+        ):
+            self.assertFalse(uses_live_mysql(source, entry=True))
+        provisioner = ('import live_engines\nif __name__ == "__main__":\n'
+                       '    password = env.get(live_engines.MYSQL_ROOT_PASSWORD)')
+        self.assertFalse(uses_live_mysql(provisioner, entry=False))
+        self.assertTrue(uses_live_mysql(provisioner, entry=True))
+
+    def test_new_helper_case_automatically_provisions_mysql(self):
+        fixtures = {
+            "sample-integration": (("tests/integration/sample.py",), (), ()),
+            "other-integration": (("tests/integration/other.py",), (), ()),
+        }
+        files = {
+            "src/logic_tests.zig": "const cores = .{\n};\n",
+            "src/cli.zig": "",
+            "tests/integration/sample.py": "import helper\n",
+            "tests/integration/other.py": "",
+            "tests/integration/helper.py": "import nested\n",
+            "tests/integration/nested.py": "",
+            "tests/integration/live_engines.py": 'MYSQL_SOCKET = "RUI_TEST_MYSQL_SOCKET"\n',
+        }
+        for source, expected in (("", False),
+                                 ("import live_engines\nsocket = env.get(live_engines.MYSQL_SOCKET)\n", True)):
+            with self.subTest(live_case=expected), patch("select_tests.FIXTURES", fixtures):
+                files["tests/integration/nested.py"] = source
+                graph = Graph(files, files.__getitem__)
+                result = select(["tests/integration/nested.py"], "review", set(fixtures), graph)
+                self.assertEqual(result["targets"], ["sample-integration"])
+                rows = shards(result["targets"], mysql_suites=graph.live_mysql)["include"]
+                self.assertEqual(rows[0]["live_mysql"], expected)
+                self.assertFalse(rows[0]["mysql_dialect"])
+                self.assertFalse(shards(["other-integration"], mysql_suites=graph.live_mysql)["include"][0]["live_mysql"])
+
+    def test_mysql_provisioning_owner_combinations(self):
+        cases = (([], "all", False, False),
+                 (["plain"], "all", False, False),
+                 (["fixture"], "all", True, False),
+                 (["test-native"], "all", False, False),
+                 (["test"], "all", True, True),
+                 (["test-store"], "all", True, True),
+                 (["check"], "all", True, True),
+                 (["check-full"], "all", True, True),
+                 (["check-full"], "execution", True, True),
+                 (["check-full"], "callers", False, False),
+                 (["check-full", "fixture"], "callers", True, False),
+                 (["check-full", "test-store"], "callers", True, True))
+        for targets, part, live, dialect in cases:
+            for platform in ("linux", "macos"):
+                with self.subTest(targets=targets, part=part, platform=platform):
+                    self.assertEqual(mysql_provisioning(targets, part, platform, {"fixture"}),
+                                     {"live_mysql": live and platform == "linux",
+                                      "mysql_dialect": dialect and platform == "linux"})
+                    for row in shards(targets, platform, mysql_suites={"fixture"})["include"]:
+                        self.assertEqual(row["live_mysql"], platform == "linux" and (
+                            "fixture" in row["targets"] or row["mysql_dialect"]))
+
+    def test_full_callers_keeps_a_separate_live_mysql_shard(self):
+        graph = SimpleNamespace(live_mysql={"caller-fixture"})
+        with patch("select_tests.CHECK_COVERS", {"caller-fixture"}):
+            targets = {"check-full"} | live_mysql_suites(["check-full"], graph.live_mysql)
+            self.assertEqual(live_mysql_suites(["check"], graph.live_mysql), set())
+        rows = shards(sorted(targets), mysql_suites=graph.live_mysql)["include"]
+        callers = next(row for row in rows if row["part"] == "callers")
+        self.assertFalse(callers["live_mysql"])
+        self.assertFalse(callers["mysql_dialect"])
+        fixture = next(row for row in rows if "caller-fixture" in row["targets"])
+        self.assertTrue(fixture["live_mysql"])
+        self.assertFalse(fixture["mysql_dialect"])
+
+    def test_real_host_status_change_has_a_live_mysql_shard(self):
+        # One real-repo boundary check for #1260; owner combinations above
+        # use tiny fixtures and never rebuild or repeatedly select the repo.
+        graph = tree_graph()
+        result = select(["tests/integration/host_status_integration.py", "tests/integration/check.sh"],
+                        "review", AVAILABLE, graph)
+        rows = shards(result["targets"], mysql_suites=graph.live_mysql)["include"]
+        self.assertTrue(any("host-status-integration" in row["targets"] and row["live_mysql"] for row in rows))
+        for suite in graph.live_mysql:
+            self.assertTrue(shards([suite], mysql_suites=graph.live_mysql)["include"][0]["live_mysql"])
+
     def test_native_conformance_dependencies_keep_live_mysql(self):
         graph = tree_graph()
         for path in ("src/find_tools.zig", "src/find_tools_tests.zig", "src/read_transcript.zig",
@@ -172,7 +460,7 @@ class SelectionTest(unittest.TestCase):
         for path in graph.live_conformance & graph.reached["test-native"]:
             with self.subTest(path=path):
                 result = select([path], "review", AVAILABLE, graph)
-                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS)
+                self.assertTrue(any(row["mysql_dialect"] for row in shards(result["targets"], mysql_suites=graph.live_mysql)["include"]))
 
     def test_unit_roots_follow_store_imports(self):
         native = select(["src/session_consent.zig"], "review", AVAILABLE)["targets"]
@@ -268,7 +556,7 @@ class SelectionTest(unittest.TestCase):
         for phase in ("development", "review"):
             with self.subTest(phase=phase):
                 result = select(["src/store/rsql.zig"], phase, AVAILABLE)
-                self.assertTrue(set(result["targets"]) & LIVE_MYSQL_TARGETS, result["targets"])
+                self.assertTrue(any(row["mysql_dialect"] for row in shards(result["targets"])["include"]), result["targets"])
 
     def test_every_live_rule_selects_a_target_that_starts_its_server(self):
         for patterns, _, _, reason, served_by in LIVE_RULES:
@@ -285,14 +573,14 @@ class SelectionTest(unittest.TestCase):
                 builds = [command for name, command in prepush.checks([path], AVAILABLE, "HEAD") if name == "development selection"]
                 self.assertEqual(builds, [["zig", "build", "test-logic", "--summary", "line"]])
 
-    def test_live_server_targets_match_the_workflow_conditions_that_start_the_servers(self):
+    def test_workflow_consumes_mysql_provisioning_and_postgres_condition(self):
         workflow = Path(".github/workflows/check.yml").read_text()
 
         def named(line):
             return frozenset(re.findall(r"contains\(matrix\.targets, '([a-z0-9-]+)'\)", line))
 
-        live_mysql = next(line for line in workflow.splitlines() if line.strip().startswith("LIVE_MYSQL:"))
-        self.assertEqual(named(live_mysql), LIVE_MYSQL_TARGETS)
+        self.assertIn("LIVE_MYSQL: ${{ matrix.live_mysql }}", workflow)
+        self.assertIn("if: ${{ !cancelled() && matrix.mysql_dialect }}", workflow)
         postgres = workflow.split("- name: Start Postgres 15", 1)[1].splitlines()[1]
         self.assertTrue(postgres.strip().startswith("if:"), postgres)
         self.assertEqual(named(postgres), LIVE_POSTGRES_TARGETS)
@@ -583,7 +871,7 @@ class SelectionTest(unittest.TestCase):
                 actual = 'skipped'
                 if admitted:
                     result = subprocess.run(['bash', '-e', '-c', script], capture_output=True,
-                                            env={**os.environ, 'TARGETS': targets, 'PLAN_RESULT': plan,
+                                            env={**os.environ, 'DRAFT_RUN': 'false', 'TARGETS': targets, 'PLAN_RESULT': plan,
                                                  'POLICY_RESULT': policy, 'BUILD_RESULT': build,
                                                  'NATIVE_RESULT': native, 'TYPECHECK_RESULT': typecheck,
                                                  'TYPECHECK': typecheck_selected,
@@ -1179,6 +1467,26 @@ fi
                           ["codex-credential-integration"], ["test-full"], ["measurement-check"]])
         self.assertEqual(shards([]), {"include": []})
 
+    def test_long_gate_runs_alone_and_short_suites_share_three_shards(self):
+        short = [f"suite-{index}-integration" for index in range(14)]
+        for gates in (["check"], ["test"], ["check-full"], ["check-full", "stack-frames"]):
+            with self.subTest(gates=gates):
+                rows = shards(sorted(gates + short))["include"]
+                packed = [row for row in rows if not LONG_GATES.intersection(row["targets"])]
+                # Each long gate keeps its own shard: a passenger lengthens the longest one.
+                alone = [name for gate in gates
+                         for name in (("full-execution", "full-callers") if gate == "check-full" else (gate,))]
+                self.assertCountEqual([row["name"] for row in rows if row not in packed], alone)
+                self.assertEqual(len(packed), SHARDS_BESIDE_LONG_GATE)
+                self.assertCountEqual([target for row in packed for target in row["targets"]], short)
+        # Without a long gate the short suites set the run's length: every slot.
+        rows = shards(short)["include"]
+        self.assertEqual(len(rows), 10)
+        self.assertCountEqual([target for row in rows for target in row["targets"]], short)
+        self.assertEqual([row["targets"] for row in shards(["test", "test-logic"])["include"]], [["test"], ["test-logic"]])
+        # Qualification still isolates every suite.
+        self.assertTrue(all(len(row["targets"]) == 1 for row in shards(["check", *short], limit=None)["include"]))
+
     def test_macos_native_work_fits_three_workers_without_losing_selected_checks(self):
         rows = qualification("native", "macos")["include"]
         self.assertEqual(len(rows), 3, "avoid queuing twelve setup/build copies on three Mac workers")
@@ -1457,6 +1765,8 @@ if [ "$(basename "${1:-}")" = host_process.py ] && [ "$2" = exec ]; then shift 2
 fixture=$(basename "${1:-$0}")
 base_fixture=$fixture
 case "$fixture" in
+    host_status_integration.py)
+        test "$#" -eq 4 && test "$3" = status && test "$4" = mysql-admin || exit 47 ;;
     human_cli_integration.py|terminal_restoration_integration.py|canonical_failure_integration.py)
         test "$RUI_TEST_TERMINAL_NOTICE" = notice || exit 46 ;;
 esac
@@ -1529,9 +1839,9 @@ if [ "$fixture" = "$FAIL_FIXTURE" ] || [ "$base_fixture" = "$FAIL_FIXTURE" ]; th
                     f"if (len(sys.argv) == 1) == {clock_error == 'start'!r}:\n"
                     "    time.monotonic_ns = fail_clock\n")
                 env["PYTHONPATH"] = str(root)
-            arguments = (["parallel", str(root / "native"), "status", "sessions", "activity", "preferences", "notice"]
+            arguments = (["parallel", str(root / "native"), "status", "sessions", "activity", "preferences", "notice", "mysql-admin"]
                          if part == "parallel" else
-                         ["status", "sessions", "activity", "preferences", part, "notice"])
+                         ["status", "sessions", "activity", "preferences", part, "notice", "mysql-admin"])
             command = [
                 "/bin/sh", "tests/integration/check.sh", "release", "debug", *arguments,
             ]

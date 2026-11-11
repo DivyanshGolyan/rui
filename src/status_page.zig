@@ -2,6 +2,7 @@
 //! line, the draft that changes a row, and the work. Rows of the Session
 //! come before the defaults new Sessions start from.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const built_in_tool = @import("built_in_tool.zig");
 const command_value = @import("command_value.zig");
@@ -322,7 +323,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
             }
             // D111/D207: compare against the provider-aware client default.
             const client_default = client_defaults.compactionTrigger(session.provider, session.model.slice());
-            return if (session.compaction_override and tokens != client_default) "Session override" else if (model_capability.supportsModel(session.model.slice())) "model default" else "assumed for an unlisted model";
+            return if (session.compaction_override and tokens != client_default) "Session override" else if (model_capability.supportsModel(model_catalog.shipped, session.model.slice())) "model default" else "assumed for an unlisted model";
         },
         .headroom => {
             try writeTokens(out, session.output_reservation);
@@ -367,7 +368,7 @@ fn unreadable(out: *std.Io.Writer, err: anyerror) !?[]const u8 {
     return null;
 }
 
-/// Names `tools` in catalog order, with spaces for underscores, or "none".
+/// Names `tools` in built-in declaration order, with spaces for underscores, or "none".
 fn writeTools(out: *std.Io.Writer, tools: built_in_tool.Selection) !void {
     if (tools.count() == 0) return out.writeAll("none");
     var named = false;

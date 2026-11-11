@@ -8,7 +8,7 @@ const std = @import("std");
 const Sqlite = @import("engine/Sqlite.zig");
 pub const Mysql = @import("engine/Mysql.zig");
 
-pub const Kind = enum { sqlite, mysql };
+pub const Kind = @import("../store_target.zig").Kind;
 
 /// An engine's handle on one queued statement.
 pub const Statement = *opaque {};
@@ -57,6 +57,42 @@ pub const Pass = enum { access, identity };
 pub const Engine = union(Kind) {
     sqlite: Sqlite,
     mysql: Mysql,
+
+    pub fn publicSelector(e: *const Engine, sqlite_selector: []const u8) []const u8 {
+        return switch (e.*) {
+            .sqlite => sqlite_selector,
+            .mysql => |s| &s.state.store_id,
+        };
+    }
+
+    /// Called only once the Store and its routes have their final addresses.
+    pub fn serve(e: *Engine, served: *@import("../provider_route.zig").Routes) !void {
+        switch (e.*) {
+            .sqlite => |*s| try s.serve(served),
+            .mysql => |*s| s.state.served = served,
+        }
+    }
+
+    pub fn prepareRollback(e: *Engine) !void {
+        switch (e.*) {
+            .sqlite => |*s| try s.prepareRollback(),
+            .mysql => {},
+        }
+    }
+
+    pub fn admissionDoublewrite(e: *const Engine) ?[]const u8 {
+        return switch (e.*) {
+            .sqlite => null,
+            .mysql => |s| s.state.doublewrite.slice(),
+        };
+    }
+
+    pub fn diagnostic(e: *Engine) @import("Store.zig").Diagnostic {
+        return switch (e.*) {
+            .sqlite => |*s| .{ .sqlite = s.diagnostic() },
+            .mysql => |*s| .{ .mysql = s.diagnostic() },
+        };
+    }
 
     // Each method only picks the variant, so it is inline: one variant
     // costs no call.

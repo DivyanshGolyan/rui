@@ -2,6 +2,7 @@
 //! name, argument shape and one-line description. The screen's parser, the
 //! list typing "/" shows, Tab and /help all read it.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const cli_args = @import("cli_args.zig");
 const model_capability = @import("model_capability.zig");
@@ -135,12 +136,10 @@ const ConversationName = enum {
     archive,
     configure,
     copy,
-    details,
     discard,
     effort,
     exit,
     help,
-    history,
     @"inspect-action",
     login,
     model,
@@ -161,12 +160,10 @@ pub const conversation = Commands(ConversationName, .{
     .archive = .{ .description = "stop active work and archive this Session" },
     .configure = .{ .argument = .{ .options = live_options }, .description = "change this Session's settings" },
     .copy = .{ .argument = .{ .choice = copy_words }, .description = "copy the last answer; code its last block, file saves it here" },
-    .details = .{ .description = "saved tool output" },
     .discard = .{ .description = "release rejected input, retaining the draft", .listed = false },
     .effort = .{ .argument = .effort, .description = "this Session's effort, also the default for new ones" },
     .exit = .{ .description = "detach; Host work continues, unsent draft is lost" },
     .help = .{ .description = "keys and commands" },
-    .history = .{ .description = "older conversation" },
     .@"inspect-action" = .{ .description = "exact one-shot diagnostics", .listed = false },
     .login = .{ .description = null },
     .model = .{ .description = "this Session's model and sign-in" },
@@ -450,7 +447,7 @@ pub const List = struct {
     /// `default`, which clears the choice.
     fn offerEfforts(self: *List, context: Context) void {
         const model = context.model orelse return;
-        for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
+        for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model_catalog.shipped, model, effort)) {
             self.offer(@tagName(effort), @tagName(effort), if (context.effort == effort) "current" else "");
         };
         self.offer("default", "default", "the model's own");
@@ -789,7 +786,7 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "details", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "effort ", "exit", "help", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
@@ -847,7 +844,7 @@ test "/effort lists the efforts the screen's model offers, the one in force mark
     const model = "gpt-5.5";
     const list = conversation.suggest("/effort ", .{ .model = model, .effort = .high }).?;
     var expected: usize = 0;
-    for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model, effort)) {
+    for (std.enums.values(ReasoningEffort)) |effort| if (model_capability.supportsReasoningEffort(model_catalog.shipped, model, effort)) {
         const entry = list.shown()[expected];
         try std.testing.expectEqualStrings(@tagName(effort), entry.word);
         try std.testing.expectEqualStrings(if (effort == .high) "current" else "", entry.description);
@@ -1057,4 +1054,13 @@ test "Session settings slash options retain both screens membership and order" {
         try std.testing.expectEqual(case[1].len, case[0].entries.len);
         for (case[0].entries, 0..) |entry, index| try std.testing.expectEqualStrings(case[1][index], entry.word);
     }
+}
+
+test "older conversation is feed navigation, not a slash command" {
+    try std.testing.expect(conversation.parse("/history") == .unknown);
+    try std.testing.expectEqual(@as(usize, 0), conversation.suggest("/history", .{}).?.count);
+    const list = conversation.suggest("/h", .{}).?;
+    try std.testing.expectEqual(@as(usize, 1), list.count);
+    try std.testing.expectEqualStrings("help", list.shown()[0].word);
+    try std.testing.expect(conversation.parse("/details") == .unknown);
 }

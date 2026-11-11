@@ -72,19 +72,13 @@ def main():
             # A rejected configuration creates a request fact but no Session.
             def configure(key, reference, workspace, model="gpt-6-sol", label=None):
                 config = {
-                    "workspace": {"state": "value", "value": workspace},
-                    "provider": {"state": "value", "value": "codex"},
-                    "model": {"state": "value", "value": model},
-                    "instructions": {"state": "omitted"},
-                    "tools": {"state": "value", "value": ["bash", "web_search"]},
-                    "permission_mode": {"state": "value", "value": "bypass"},
-                    "output_schema": {"state": "omitted"},
-                    "compaction_trigger": {"state": "value", "value": "100000"},
+                    "workspace": workspace, "provider": "codex", "model": model,
+                    "tools": ["bash", "web_search"], "permissionMode": "bypass", "compactAt": 100000,
                     # D111: a model the catalog does not list states no effort.
-                    "reasoning_effort": {"state": "value", "value": "low"} if model == "gpt-6-sol" else {"state": "null"},
+                    "effort": "low" if model == "gpt-6-sol" else None,
                 }
                 if label is not None:
-                    config["label"] = {"state": "value", "value": label}
+                    config["label"] = label
                 return exchange(address, "configure", {**base("configure"), "key": key, "session": reference, "configuration": config})
 
             def create(key, workspace, model="gpt-6-sol"):
@@ -164,10 +158,12 @@ def main():
             dormant = [create(f"dormant-{index}", str(root)) for index in range(88)]
             after_growth = listing(str(root))
             assert after_growth[0] == 200 and len(after_growth[1]["sessions"]) == 8
-            # Preserve the pre-archive 4 KiB budget plus one wire field per row.
+            # Preserve the pre-archive 4 KiB budget plus added wire fields per row.
             # The independent archive-state contract's longest value is archiving.
             archive_field_bytes = len(', "archive_state": "archiving"'.encode())
-            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * archive_field_bytes
+            # Each dormant row carries one last_line field in its null form.
+            last_line_field_bytes = len(', "last_line": null'.encode())
+            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + last_line_field_bytes)
             safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
                 cwd=root, capture_output=True, text=True, timeout=10)
             assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe

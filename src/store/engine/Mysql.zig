@@ -182,6 +182,10 @@ pub fn open(io: std.Io, options: wire.Options, selector: []const u8, store_optio
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(state));
     var refusal_buffer: [1024]u8 = undefined;
     var refusal = std.Io.Writer.fixed(&refusal_buffer);
+    if (@import("builtin").is_test) {
+        if (options.database.len >= state.testing_database.len) return error.MysqlConfigTooLong;
+        @memcpy(state.testing_database[0..options.database.len], options.database);
+    }
     try state.connection.open(options, &refusal);
     const opened = try @import("mysql_open.zig").open(&state.connection, io, .{ .database = options.database, .found_schema_version = store_options.found_schema_version }, selector);
     state.doublewrite = opened.doublewrite;

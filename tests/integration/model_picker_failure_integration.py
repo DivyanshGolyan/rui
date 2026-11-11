@@ -55,7 +55,8 @@ def main():
         close_pty(slave)
         master = slave = None
 
-        master, slave = open_pty(columns=120, rows=24)
+        # Keep 120 columns for the compose pane; the notice fits before its keys.
+        master, slave = open_pty(columns=161, rows=24)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
@@ -68,8 +69,8 @@ def main():
         overview_frame(master, lambda screen: any(
             "gpt-6-luna" in row and "‹ medium ›" in row for row in screen.splitlines()), b"\x1b[C")
         failed = overview_frame(master, lambda screen: "Default not saved" in screen, b"\r")
-        assert "new Sessions here still use gpt-6-luna · medium · ChatGPT" in failed, failed
-        assert "new Session · gpt-6-luna · medium" in failed, failed
+        assert "new Sessions here still use gpt-6-luna · medium" in failed, failed
+        assert "enter start" in failed, failed
         assert preferences.read_bytes() == b"version=1\n"
         preferences.write_bytes(original)
 

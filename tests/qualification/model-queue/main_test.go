@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"flag"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -11,6 +12,20 @@ import (
 )
 
 var sqliteTestBinary = flag.String("sqlite", "", "pinned SQLite shell for query-level tests")
+
+func pinnedSQLite(t *testing.T) string {
+	t.Helper()
+	if *sqliteTestBinary == "" {
+		t.Skip("requires Rui's pinned SQLite shell")
+	}
+	sqliteBinary := *sqliteTestBinary
+	if !filepath.IsAbs(sqliteBinary) {
+		// go test runs this package from model-queue/, while Zig renders the
+		// artifact relative to the tests/qualification command directory.
+		sqliteBinary = filepath.Join("..", sqliteBinary)
+	}
+	return sqliteBinary
+}
 
 func TestDiscoveryStatusInclusiveBoundary(t *testing.T) {
 	tests := []struct {
@@ -121,15 +136,7 @@ func cloneExecutionFacts(facts executionFacts) executionFacts {
 }
 
 func TestExecutionAuditQueryRejectsHiddenEntities(t *testing.T) {
-	if *sqliteTestBinary == "" {
-		t.Skip("requires Rui's pinned SQLite shell")
-	}
-	sqliteBinary := *sqliteTestBinary
-	if !filepath.IsAbs(sqliteBinary) {
-		// go test runs this package from model-queue/, while Zig renders the
-		// artifact relative to the tests/qualification command directory.
-		sqliteBinary = filepath.Join("..", sqliteBinary)
-	}
+	sqliteBinary := pinnedSQLite(t)
 	tests := []struct {
 		name           string
 		fixture        string
@@ -254,5 +261,49 @@ func TestProvenanceFailuresExitNonzeroAfterPublication(t *testing.T) {
 	}
 	if got := failureExitCode("passed", nil, errors.New("sqlite hash")); got != 1 {
 		t.Fatalf("SQLite provenance failure exit = %d, want 1", got)
+	}
+}
+
+// Query-level evidence for the synthetic history writer: set identities come
+// from the initialized Session, including an explicit loaded subset, not a
+// fixed ID or a nullable fallback for the new frozen-offer column.
+func TestPopulateFreezesSessionOffer(t *testing.T) {
+	sqliteBinary := pinnedSQLite(t)
+	for _, test := range []struct{ name, loaded, want string }{
+		{"all configured", "NULL", "7"},
+		{"loaded subset", "11", "11"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := t.TempDir()
+			deadline := measurement.NewDeadline(measurement.TeardownAllowance)
+			_, err := sql(deadline, sqliteBinary, store, fmt.Sprintf(`
+CREATE TABLE content(content_id INTEGER PRIMARY KEY,byte_length INTEGER);
+INSERT INTO content VALUES(1,1);
+CREATE TABLE tool_set(tool_set_id INTEGER PRIMARY KEY);
+INSERT INTO tool_set VALUES(7),(11);
+CREATE TABLE session(session_ref TEXT PRIMARY KEY,tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),loaded_tool_set_id INTEGER REFERENCES tool_set(tool_set_id),next_position INTEGER);
+INSERT INTO session VALUES('k7m2qx',7,%s,1);
+CREATE TABLE core_command(command_key TEXT PRIMARY KEY,kind INTEGER,target TEXT,input_digest BLOB,primary_content_id INTEGER,secondary_content_id INTEGER,accepted INTEGER,code TEXT,revision INTEGER,created INTEGER,command_seq INTEGER);
+INSERT INTO core_command VALUES('template-configure',1,'k7m2qx',zeroblob(32),NULL,NULL,1,'',1,1,1);
+CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,session_ref TEXT,command_key TEXT,content_id INTEGER,admission_position INTEGER,turn_id INTEGER,admitted_at INTEGER);
+CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,first_admission_id INTEGER,input_cutoff INTEGER,operation_id INTEGER,outcome_code TEXT,outcome_content_id INTEGER,outcome_position INTEGER,outcome_at INTEGER);
+CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,settings_revision INTEGER,input_cutoff INTEGER,admission_position INTEGER,attempt_ordinal INTEGER,retry_due_at_ms INTEGER,resolution_code TEXT,output_reservation INTEGER,resolved_at INTEGER,tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id));
+CREATE TABLE conversation_entry(session_ref TEXT,entry_ordinal INTEGER,session_position INTEGER,entry_kind INTEGER,turn_id INTEGER,source_admission_id INTEGER,source_revision INTEGER,source_operation_id INTEGER,content_id INTEGER,recorded_at INTEGER);
+CREATE TABLE session_stop(command_key TEXT,session_ref TEXT,selected_turn_id INTEGER,admission_cutoff INTEGER,position INTEGER,stopped_at INTEGER);
+`, test.loaded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := populate(deadline, sqliteBinary, store, population{History: 2}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := sql(deadline, sqliteBinary, store, "SELECT tool_set_id FROM model_operation ORDER BY operation_id;")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := test.want + "\n" + test.want; rows != want {
+				t.Fatalf("offers = %q, want %q", rows, want)
+			}
+		})
 	}
 }

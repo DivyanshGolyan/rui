@@ -1,6 +1,6 @@
-//! Composer and the two independent rows beneath it, shared by both screens.
-//! Screens supply terminal-safe facts and status text; notices never take the
-//! facts row. The floating palette belongs to the content above this area.
+//! Shared input stack. The composer's lower rule and identity/keys line form
+//! the chat footer; the bottom state slot stays below it, blank while idle.
+//! The floating palette belongs to the content above this area.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -15,6 +15,8 @@ composer: Composer,
 permission: ?*PermissionCard = null,
 facts: vxfw.Widget = empty.widget(),
 status: vxfw.Widget = empty.widget(),
+/// Where the facts row sits: under the composer, or last, under the status.
+facts_at: enum { top, bottom } = .top,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .drawFn = draw };
@@ -34,13 +36,16 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // A draft grows to a third of the screen at most, between its two rules.
     const room = size.height - footer_rows;
     const content = if (self.permission) |card|
-        try card.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }))
+        try card.drawInput(ctx.withConstraints(.{}, .{ .width = size.width, .height = room }), if (card.consent.row == .draft) self.composer.widget() else null)
     else
         try self.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(room, @import("draft_layout.zig").cap(size.height) + 2) }));
     const row = ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = 1 });
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = content };
-    if (facts_rows == 1) children[1] = .{ .origin = .{ .row = content.size.height, .col = 0 }, .surface = try self.facts.draw(row) };
-    if (status) |drawn| children[1 + facts_rows] = .{ .origin = .{ .row = content.size.height + facts_rows, .col = 0 }, .surface = drawn };
+    const status_rows = footer_rows - facts_rows;
+    const facts_row = content.size.height + if (self.facts_at == .bottom) status_rows else 0;
+    const status_row = content.size.height + if (self.facts_at == .top) facts_rows else 0;
+    if (facts_rows == 1) children[1] = .{ .origin = .{ .row = facts_row, .col = 0 }, .surface = try self.facts.draw(row) };
+    if (status) |drawn| children[1 + facts_rows] = .{ .origin = .{ .row = status_row, .col = 0 }, .surface = drawn };
     return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = content.size.height + footer_rows }, .buffer = &.{}, .children = children };
 }
 
@@ -170,4 +175,98 @@ test "a draft grows to a third of the screen at most, and the content keeps the 
         const draft_rows = drawn.children[0].surface.size.height - 2;
         try std.testing.expectEqual(@min(@as(u16, 9), @import("draft_layout.zig").cap(height)), draft_rows);
     }
+}
+
+test "InputArea approval has one document title above a choice between composer rules at 140 and 46 columns" {
+    const Owner = struct {
+        fn decide(_: *anyopaque, _: *vxfw.EventContext, _: @import("session_consent.zig").Decision) !void {}
+    };
+    var owner: u8 = 0;
+    var bytes = "kept draft".*;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 4 };
+    var consent: @import("ActionConsent.zig") = .{};
+    const document: vxfw.Text = .{ .text = "? Record thirty progress steps\n$ set -eu\n│ printf 'step 01'" };
+    const pasting = false;
+    var card: PermissionCard = .{ .consent = &consent, .pasting = &pasting, .description = "Record thirty progress steps", .body = document.widget(), .userdata = &owner, .on_decision = Owner.decide };
+    var input: Self = .{ .composer = .{ .editor = &editor }, .permission = &card };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 140, 46 }) |width| {
+        consent.adopt(width);
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
+        const shown = try input.widget().draw(ctx);
+        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .rows = shown.size.height, .cols = width, .x_pixel = 0, .y_pixel = 0 });
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = shown.size.height, .screen = &screen };
+        shown.render(window, card.widget());
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..shown.size.height) |row| {
+            for (0..width) |col| try text.writer.writeAll(screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+            try text.writer.writeByte('\n');
+        }
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Record thirty progress steps"));
+        const choice = card.choice_row.?;
+        try std.testing.expect(choice > 2);
+        try std.testing.expectEqualStrings("?", screen.readCell(2, 0).?.char.grapheme);
+        try std.testing.expectEqualStrings("$", screen.readCell(2, 1).?.char.grapheme);
+        try std.testing.expectEqualStrings("›", screen.readCell(1, choice).?.char.grapheme);
+        try std.testing.expectEqualStrings("A", screen.readCell(3, choice).?.char.grapheme);
+        try std.testing.expect(screen.readCell(3, choice).?.style.reverse);
+        for (0..width) |col| for ([_]u16{ choice - 1, choice + 1 }) |row| {
+            try std.testing.expectEqualStrings("─", screen.readCell(@intCast(col), row).?.char.grapheme);
+        };
+        _ = consent.route(.printable);
+        const drafting = try input.widget().draw(ctx);
+        try std.testing.expectEqual(null, card.choice_row);
+        const composed = drafting.children[0].surface.children[1];
+        try std.testing.expect(composed.surface.widget.eql(input.composer.widget()));
+        try std.testing.expectEqual(@as(u16, 7), composed.surface.cursor.?.col);
+        try std.testing.expect(composed.origin.row > 0); // The request stays above the draft.
+        try std.testing.expectEqualStrings("kept draft", editor.buffer[0..editor.length]);
+        _ = consent.route(.escape);
+        _ = try input.widget().draw(ctx);
+        try std.testing.expectEqual(choice, card.choice_row.?);
+    }
+}
+
+test "InputArea chat keeps a two-row footer above the unchanged bottom state slot" {
+    var bytes: [16]u8 = undefined;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    const footer: @import("widgets/Footer.zig") = .{ .left = "Chat · model", .right = "ctrl+x stop" };
+    var notice: vxfw.Text = .{ .text = "" };
+    var input: Self = .{ .composer = .{ .editor = &editor }, .facts = footer.widget(), .status = notice.widget() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
+
+        const idle = try input.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 5), idle.size.height);
+        try std.testing.expectEqual(@as(usize, 3), idle.children.len);
+        try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
+        try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
+
+        notice.text = "Copied 12 lines";
+        const noticed = try input.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 5), noticed.size.height);
+        try std.testing.expectEqual(@as(i17, 4), noticed.children[2].origin.row);
+        try std.testing.expectEqual(@as(i17, 0), noticed.children[0].origin.row);
+        try std.testing.expectEqualDeep(idle.children[1].surface.buffer, noticed.children[1].surface.buffer);
+        notice.text = "";
+    }
+}
+
+test "InputArea puts the facts row last, under the status's rows, when asked" {
+    var bytes: [16]u8 = undefined;
+    var editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    const facts: vxfw.RichText = .{ .text = &.{.{ .text = "facts" }}, .softwrap = false, .width_basis = .parent };
+    const status: vxfw.RichText = .{ .text = &.{.{ .text = "Configured.\n! warning" }}, .softwrap = false, .width_basis = .parent };
+    var input: Self = .{ .composer = .{ .editor = &editor }, .facts = facts.widget(), .status = status.widget(), .facts_at = .bottom };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} });
+    try std.testing.expectEqual(@as(u16, 6), drawn.size.height);
+    try std.testing.expectEqual(@as(i17, 3), drawn.children[2].origin.row);
+    try std.testing.expectEqual(@as(i17, 5), drawn.children[1].origin.row);
+    try std.testing.expectEqualStrings("f", drawn.children[1].surface.readCell(0, 0).char.grapheme);
 }

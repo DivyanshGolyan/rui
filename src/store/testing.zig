@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const platform = @import("../store_path.zig");
-const tool_catalog = @import("../tools.zig");
+const tool_defs = @import("../tools.zig");
 const named_scratch = @import("../named_scratch.zig");
 const protocol = @import("../protocol.zig");
 const wire_request = @import("../wire_request.zig");
@@ -30,36 +30,36 @@ pub const OutputMetadataWriter = output_format.OutputMetadataWriter;
 pub const offeredSetSql = @import("domain/tool_set.zig").offeredSetSql;
 
 /// Compose fixture records with the canonical required runners.
-pub fn catalogRecordsWith(comptime extra: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record {
-    var records: [tool_catalog.built_in.records.len + extra.len]tool_catalog.Record = undefined;
-    @memcpy(records[0..tool_catalog.built_in.records.len], tool_catalog.built_in.records);
-    @memcpy(records[tool_catalog.built_in.records.len..], extra);
-    sortCatalogRecords(&records);
+pub fn hostToolRecordsWith(comptime extra: []const tool_defs.Record) [tool_defs.built_in_tool_set.records.len + extra.len]tool_defs.Record {
+    var records: [tool_defs.built_in_tool_set.records.len + extra.len]tool_defs.Record = undefined;
+    @memcpy(records[0..tool_defs.built_in_tool_set.records.len], tool_defs.built_in_tool_set.records);
+    @memcpy(records[tool_defs.built_in_tool_set.records.len..], extra);
+    sortHostToolRecords(&records);
     return records;
 }
 
-pub fn sortCatalogRecords(records: []tool_catalog.Record) void {
-    std.mem.sort(tool_catalog.Record, records, {}, struct {
-        fn lessThan(_: void, left: tool_catalog.Record, right: tool_catalog.Record) bool {
+pub fn sortHostToolRecords(records: []tool_defs.Record) void {
+    std.mem.sort(tool_defs.Record, records, {}, struct {
+        fn lessThan(_: void, left: tool_defs.Record, right: tool_defs.Record) bool {
             return std.mem.lessThan(u8, left.name, right.name);
         }
     }.lessThan);
 }
 
-pub fn testingStoreCatalog(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, catalog: ?*const tool_catalog.Catalog) !void {
+pub fn testingStoreToolSet(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, host_tool_set: ?*const tool_defs.HostToolSet) !void {
     var root_buffer: [protocol.max_store_bytes]u8 = undefined;
     const root_length = try tmp.dir.realPath(io, &root_buffer);
     const root = root_buffer[0..root_length];
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
-    return storage.openWithOptions(io, database, root, .{ .catalog = catalog });
+    return storage.openTarget(io, .{ .sqlite = database }, root, .{ .host_tool_set = host_tool_set });
 }
 
 pub fn testingSqliteStore(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io) !void {
     return openSqlite(storage, tmp, io, .{});
 }
 
-/// Opens the SQLite Store in `tmp`. A new Store with the default catalog and
+/// Opens the SQLite Store in `tmp`. A new Store with the default tool set and
 /// providers starts as a copy of one built once per process, with its own
 /// selector and Store id: building one runs the whole schema bootstrap,
 /// about five times the cost of writing and reopening a copy.
@@ -70,14 +70,14 @@ fn openSqlite(storage: *Store, tmp: *std.testing.TmpDir, io: std.Io, options: Te
     var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const database = try std.fmt.bufPrint(&database_buffer, "{s}/store.sqlite3", .{root});
     const selector = options.identity orelse root;
-    const default = options.catalog == &tool_catalog.built_in and
+    const default = options.host_tool_set == &tool_defs.built_in_tool_set and
         std.meta.eql(options.served, (TestingStoreOptions{}).served);
     if (default) if (tmp.dir.statFile(io, "store.sqlite3", .{})) |_| {} else |err| switch (err) {
         error.FileNotFound => try copyTemplate(tmp, io, database, selector),
         else => return err,
     };
     var mismatch: @import("schema.zig").IdentityMismatch = .{};
-    return storage.openWithOptions(io, database, selector, .{ .served = options.served, .catalog = options.catalog, .identity_mismatch = &mismatch }) catch |err| {
+    return storage.openTarget(io, .{ .sqlite = database }, selector, .{ .served = options.served, .host_tool_set = options.host_tool_set, .identity_mismatch = &mismatch }) catch |err| {
         std.debug.print("testing Store open failed: {s}, selector={s}, saved={s}\n", .{ @errorName(err), selector, mismatch.saved_selector.slice() });
         return err;
     };
@@ -206,7 +206,7 @@ pub fn testingStore(case: *const Case, storage: *Store, tmp: *std.testing.TmpDir
 /// How `testingStoreWith` opens a Store beyond `testingStore`'s defaults.
 pub const TestingStoreOptions = struct {
     /// The tools the Host offers.
-    catalog: *const tool_catalog.Catalog = &tool_catalog.built_in,
+    host_tool_set: *const tool_defs.HostToolSet = &tool_defs.built_in_tool_set,
     /// The canonical identity the Store is opened under, when not `tmp`'s
     /// real path.
     identity: ?[]const u8 = null,
@@ -386,6 +386,7 @@ pub fn setLoadedToolsForTesting(storage: *Store, session: []const u8, source: []
 pub fn setLegacyNullEffortForTesting(storage: *Store, session: []const u8) !void {
     try exec(storage, "UPDATE session SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
     try exec(storage, "UPDATE session_revision SET reasoning_effort=NULL WHERE session_ref=?1", .{session});
+    try exec(storage, "UPDATE model_operation SET previous_effort_override=NULL WHERE session_ref=?1", .{session});
 }
 
 /// The first column of `sql`'s first row: `QueryFailed` with no row, and
@@ -765,3 +766,50 @@ pub fn observeCommandForTesting(storage: *Store, key: []const u8) !command_domai
     try storage.observeCommand(key, null, &out);
     return out.full.observation;
 }
+
+/// A format-64 Session whose latest loaded subset differs from its first
+/// Operation's full offer. Shared by the SQLite and live MySQL migration tests.
+pub const operation_offer_migration_seed: [:0]const u8 =
+    "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) " ++
+    "SELECT 'offer-migration-update',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
+    "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,loaded_tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+    "SELECT session_ref,2,'offer-migration-update',workspace,provider,model,instructions_content_id,0,tool_set_id,2,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label FROM session_revision WHERE session_ref='d8mv7p' AND revision=1;" ++
+    "UPDATE session SET revision=2,loaded_tool_set_id=2,next_position=100 WHERE session_ref='d8mv7p';" ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at) " ++
+    "VALUES(99,1,'d8mv7p',2,1,99,0,1,'failed',1)";
+
+/// Format-65 request history: low, high, a high compaction, and its first
+/// successor. Tests vary the last choice/codec before applying pending 66.
+pub const operation_effort_migration_seed: [:0]const u8 =
+    "UPDATE session SET codec='openai-responses/2',revision=3,reasoning_effort='high',next_position=16,label='unrelated' WHERE session_ref='d8mv7p';" ++
+    "UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=1;" ++
+    // Revision one remains a legacy null spec with a concrete frozen value.
+    "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-high',1,'d8mv7p',input_digest,1,'',2,0,100 FROM core_command WHERE command_key='fixture-answer-config';" ++
+    "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) SELECT 'effort-migration-last',1,'d8mv7p',input_digest,1,'',3,0,101 FROM core_command WHERE command_key='fixture-answer-config';" ++
+    "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+    "SELECT session_ref,2,'effort-migration-high',workspace,provider,model,instructions_content_id,0,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,'high',label FROM session_revision WHERE session_ref='d8mv7p' AND revision=1;" ++
+    "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
+    "SELECT session_ref,3,'effort-migration-last',workspace,provider,model,instructions_content_id,0,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,'high','unrelated' FROM session_revision WHERE session_ref='d8mv7p' AND revision=1;" ++
+    "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) VALUES('d8mv7p',6,0,2,'reasoning_effort',1793781800),('d8mv7p',14,0,3,'label',1793781801);" ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+    "VALUES(99,1,'d8mv7p',2,1,7,0,0,'high',0,1,'answer',1793781800,4),(100,1,'d8mv7p',2,1,11,1,0,'high',1,1,'compacted',1793781800,4);" ++
+    "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) " ++
+    "SELECT 100,0,'d8mv7p',12,4,1,item_id_digest,0,0,4,0 FROM model_output_item WHERE operation_id=1 AND item_ordinal=0;" ++
+    "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id) " ++
+    "VALUES(101,1,'d8mv7p',3,1,15,0,'high',1,0,1793781801,4)";
+
+pub const EffortMigrationChoice = enum {
+    retained,
+    back_to_top,
+    new_choice,
+    legacy_new_choice,
+
+    pub fn sql(choice: EffortMigrationChoice) [:0]const u8 {
+        return switch (choice) {
+            .retained => "UPDATE session SET label=label WHERE session_ref='d8mv7p'",
+            .back_to_top => "UPDATE session_revision SET reasoning_effort='low' WHERE session_ref='d8mv7p' AND revision=3;UPDATE session SET reasoning_effort='low' WHERE session_ref='d8mv7p';UPDATE model_operation SET reasoning_effort='low' WHERE operation_id=101;UPDATE session_change SET field='reasoning_effort' WHERE session_ref='d8mv7p' AND revision=3",
+            .new_choice => "UPDATE session_revision SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p' AND revision=3;UPDATE session SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p';UPDATE model_operation SET reasoning_effort='xhigh' WHERE operation_id=101;UPDATE session_change SET field='reasoning_effort' WHERE session_ref='d8mv7p' AND revision=3",
+            .legacy_new_choice => "UPDATE session_revision SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p' AND revision=3;UPDATE session SET reasoning_effort='xhigh' WHERE session_ref='d8mv7p';UPDATE model_operation SET reasoning_effort='xhigh' WHERE operation_id=101",
+        };
+    }
+};

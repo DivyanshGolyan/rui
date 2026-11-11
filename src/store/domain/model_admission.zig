@@ -18,10 +18,12 @@ const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
+const operation_effort = @import("operation_effort.zig");
 const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
+const tool_offer = @import("tool_offer.zig");
 const store_schema = @import("../schema.zig");
 const turn_domain = @import("turn.zig");
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
@@ -74,7 +76,7 @@ const queued_input_sql =
 /// The Session's open Turn takes waiting input at its next model call.
 const open_turn_takes_input_sql =
     "EXISTS(" ++
-    " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+    " SELECT 1 FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id AND current.session_ref=active.session_ref " ++
     " WHERE active.session_ref=m.session_ref AND active.outcome_code IS NULL " ++
     " AND " ++ continues_with_input_sql ++
     ")";
@@ -166,6 +168,9 @@ pub const DispatchPermit = attempt.DispatchPermit;
 
 pub const AttemptAdmission = struct {
     permit: DispatchPermit,
+    /// The admission's commit read the request's settings into the
+    /// caller's `historical_domain.Start`, whose view is open.
+    request_started: bool = false,
 };
 
 /// The latest Turn as `previousTurn` weighs it: its current Operation's
@@ -353,30 +358,30 @@ fn latestUsageSql(comptime session: []const u8, comptime provider: []const u8, c
 
 /// The bytes the usage at `usage_position` does not cover, from the
 /// compaction base `frontier`, counting provider results from the
-/// Operation admitted at `result_admission`. The Session is ?1.
-fn uncoveredBytesSql(comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
+/// Operation admitted at `result_admission`, in the Session `session`.
+fn uncoveredBytesSql(comptime session: []const u8, comptime usage_position: []const u8, comptime frontier: []const u8, comptime result_admission: []const u8) []const u8 {
     const later = "max(" ++ usage_position ++ "," ++ frontier ++ ")";
     return "(SELECT coalesce(sum(c.byte_length),0) FROM conversation_entry e JOIN content c ON c.content_id=e.content_id " ++
-        "WHERE e.session_ref=?1 AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ") + " ++
+        "WHERE e.session_ref=" ++ session ++ " AND e.entry_kind IN (1,2,4) AND e.session_position>" ++ usage_position ++ ") + " ++
         "(SELECT coalesce(sum(" ++ history_floor_domain.item_bytes_sql ++ "),0) FROM model_output_item i " ++
-        "WHERE i.session_ref=?1 AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
-        "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id " ++
-        "WHERE b.session_ref=?1 AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0))) + " ++
+        "WHERE i.session_ref=" ++ session ++ " AND i.session_position>=max(" ++ usage_position ++ "+1,coalesce((SELECT max(anchor.session_position) " ++
+        "FROM model_operation b @index(model_operation_compaction_bases) JOIN model_output_item anchor ON anchor.operation_id=b.operation_id AND anchor.session_ref=b.session_ref " ++
+        "WHERE b.session_ref=" ++ session ++ " AND b.purpose=1 AND " ++ store_schema.resolutionIs("b.resolution_code", .compacted) ++ " AND b.admission_position=" ++ frontier ++ " AND anchor.item_kind=4),0))) + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM model_operation o @index(model_operation_context_history) " ++
-        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id " ++
-        "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=?1 AND o.admission_position>=" ++ result_admission ++ " " ++
+        "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=o.operation_id AND tool_call.session_ref=o.session_ref " ++
+        "JOIN content c ON c.content_id=tool_call.rejection_content_id WHERE o.session_ref=" ++ session ++ " AND o.admission_position>=" ++ result_admission ++ " " ++
         "AND " ++ store_schema.oneOf("o.resolution_code", &accepted_resolutions) ++ " AND tool_call.acceptance_position>" ++ later ++ ") + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id " ++
-        "WHERE a.session_ref=?1 AND a.acceptance_position>" ++ later ++ ") + " ++
+        "WHERE a.session_ref=" ++ session ++ " AND a.acceptance_position>" ++ later ++ ") + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN content c ON c.content_id=m.content_id " ++
-        "WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql ++ ") + " ++
+        "WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ") + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM message_admission m JOIN message_skill k ON k.admission_id=m.admission_id " ++
-        "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=?1 AND " ++ runnable_eligibility_sql ++ ") + " ++
+        "JOIN content c ON c.content_id=k.content_id WHERE m.session_ref=" ++ session ++ " AND " ++ runnable_eligibility_sql ++ ") + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
-        "WHERE r.session_ref=?1 AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=?1),1) " ++
+        "WHERE r.session_ref=" ++ session ++ " AND r.revision>coalesce((SELECT max(e.source_revision) FROM conversation_entry e WHERE e.session_ref=" ++ session ++ "),1) " ++
         "AND r.instructions_updated=1) + " ++
         "(SELECT coalesce(sum(c.byte_length),0) FROM session_revision r JOIN content c ON c.content_id=r.instructions_content_id " ++
-        "WHERE r.session_ref=?1 AND r.revision=1 AND " ++ usage_position ++ "=0)";
+        "WHERE r.session_ref=" ++ session ++ " AND r.revision=1 AND " ++ usage_position ++ "=0)";
 }
 
 /// The raw newest base, before model compatibility is decided by Recipe.select.
@@ -451,43 +456,24 @@ fn pendingInstructionsSql(comptime session: []const u8, comptime revision: []con
     return "r.session_ref=" ++ session ++ " AND r.revision>" ++ appliedFrontierSql(session) ++ " AND r.revision<=" ++ revision ++ " AND r.instructions_updated=1";
 }
 
-/// The settings, previous Turn and instruction count frozen inside admission's
-/// transaction. The selected recipe was read under the same Entry lock; its
-/// uncovered bytes ride this read's batch, not a dependent round of their own.
-const admission_facts = rsql.Read(.{
-    .sql = "SELECT " ++ rsql.session_head_columns ++ ",s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
+/// The settings, previous Turn and instruction count of the Session `session`
+/// names, read with its selection under the same Entry lock: the columns
+/// after the Session head, then the joins on `session s`.
+fn factsColumnsSql(comptime session: []const u8) []const u8 {
+    return "s.revision,s.provider,s.model,s.compaction_trigger,s.output_reservation," ++ configuration_domain.reasoningEffortOverrideSql("s") ++ " AS reasoning_effort," ++
         configuration_domain.previousReasoningEffortSql("s") ++ " AS previous_reasoning_effort," ++
+        "s.tool_set_id,s.loaded_tool_set_id," ++ tool_offer.stale_sql ++ " AS offer_stale," ++
         "latest.turn_id AS latest_turn,latest.outcome_code IS NULL AS latest_active,latest.first_admission_id AS latest_first," ++
         "current.operation_id AS latest_operation,current.purpose AS latest_compaction,current.resolution_code AS latest_resolution,latest_revision.model AS latest_model," ++
-        "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql("?1", "s.revision") ++ ") AS instructions " ++
-        "FROM session s LEFT JOIN turn latest ON latest.turn_id=(SELECT t.turn_id FROM turn t @index(turn_session_latest) " ++
-        "WHERE t.session_ref=?1 ORDER BY t.turn_id DESC LIMIT 1) " ++
+        "(SELECT count(*) FROM session_revision r WHERE " ++ pendingInstructionsSql(session, "s.revision") ++ ") AS instructions";
+}
+
+fn factsJoinsSql(comptime session: []const u8) []const u8 {
+    return " LEFT JOIN turn latest ON latest.turn_id=(SELECT t.turn_id FROM turn t @index(turn_session_latest) " ++
+        "WHERE t.session_ref=" ++ session ++ " ORDER BY t.turn_id DESC LIMIT 1) " ++
         "LEFT JOIN model_operation current ON current.operation_id=latest.operation_id " ++
-        "LEFT JOIN session_revision latest_revision ON latest_revision.session_ref=current.session_ref AND latest_revision.revision=current.settings_revision " ++
-        "WHERE s.session_ref=?1",
-    .Args = struct { session: []const u8 },
-    .Row = struct {
-        session: rsql.SessionHead,
-        revision: rsql.Positive,
-        provider: provider_name.Provider,
-        model: Bounded(model_capability.max_model_bytes),
-        compaction_trigger: ?rsql.Positive,
-        output_reservation: ?u64,
-        reasoning_effort: ?model_capability.ReasoningEffort,
-        previous_reasoning_effort: ?model_capability.ReasoningEffort,
-        latest_turn: ?rsql.Positive,
-        latest_active: bool,
-        latest_first: ?rsql.Positive,
-        latest_operation: ?rsql.Positive,
-        latest_compaction: ?bool,
-        latest_resolution: ?Bounded(outcome_code.max_bytes),
-        latest_model: ?Bounded(model_capability.max_model_bytes),
-        instructions: u64,
-    },
-    .cardinality = .one,
-});
-/// `admission_facts` as SQLite runs it.
-pub const admission_facts_sql = admission_facts.sql;
+        "LEFT JOIN session_revision latest_revision ON latest_revision.session_ref=current.session_ref AND latest_revision.revision=current.settings_revision";
+}
 
 /// Read identities and counters, not an estimate against a SQL-selected recipe.
 /// Zig selects both the next request's recipe and the one the usage measured;
@@ -535,28 +521,89 @@ const admission_context = rsql.Read(.{
     .cardinality = .optional,
 });
 
-/// Read only recipe identities in the same batch as candidate selection.
-/// The candidate query comes from the selection owner, not a copied predicate.
+/// What admission reads of the Session it selected: the head, the facts and
+/// the recipe identities.
+const SelectedRow = struct {
+    session: rsql.SessionHead,
+    revision: rsql.Positive,
+    provider: provider_name.Provider,
+    model: Bounded(model_capability.max_model_bytes),
+    compaction_trigger: ?rsql.Positive,
+    output_reservation: ?u64,
+    reasoning_effort: ?model_capability.ReasoningEffort,
+    previous_reasoning_effort: ?model_capability.ReasoningEffort,
+    tool_set_id: rsql.Positive,
+    loaded_tool_set_id: ?rsql.Positive,
+    offer_stale: bool,
+    latest_turn: ?rsql.Positive,
+    latest_active: bool,
+    latest_first: ?rsql.Positive,
+    latest_operation: ?rsql.Positive,
+    latest_compaction: ?bool,
+    latest_resolution: ?Bounded(outcome_code.max_bytes),
+    latest_model: ?Bounded(model_capability.max_model_bytes),
+    instructions: u64,
+    changed: bool,
+    base_position: ?rsql.Positive,
+    base_floor: ?rsql.Positive,
+    base_model: ?Bounded(model_capability.max_model_bytes),
+    uncached: ?u64,
+    cache_read: ?u64,
+    cache_write: ?u64,
+    output: ?u64,
+    usage_position: ?rsql.Positive,
+    result_admission: ?rsql.Positive,
+    usage_floor: ?rsql.Positive,
+    usage_base_position: ?rsql.Positive,
+    usage_base_floor: ?rsql.Positive,
+    usage_base_model: ?Bounded(model_capability.max_model_bytes),
+};
+
+/// The selected Session's admission facts and recipe identities, in the same
+/// batch as candidate selection: one statement, so admission's write round
+/// reads neither. The candidate query comes from the selection owner, not a
+/// copied predicate.
 fn SelectedContext(comptime candidate_sql: []const u8) type {
     return rsql.Read(.{
         .sql = "WITH admission_selection AS (" ++ candidate_sql ++ ")," ++
             contextCtesSql("SELECT s.session_ref,s.next_position AS boundary,s.provider,s.model FROM session s JOIN admission_selection chosen ON chosen.session_ref=s.session_ref") ++
-            " SELECT context.model," ++ context_columns_sql ++ " FROM context_session context CROSS JOIN measured",
+            " SELECT " ++ rsql.session_head_columns ++ "," ++ factsColumnsSql("context.session_ref") ++ "," ++ context_columns_sql ++
+            " FROM context_session context CROSS JOIN measured JOIN session s ON s.session_ref=context.session_ref" ++ factsJoinsSql("context.session_ref"),
         .Args = struct {},
-        .Row = ContextRow,
+        .Row = SelectedRow,
         .cardinality = .optional,
     });
 }
 const selected_context = SelectedContext(runnableCandidateSql(runnable_eligibility_sql));
+/// The message admission's facts and context read as SQLite runs it.
+pub const selected_context_sql = selected_context.sql;
 const open_turn_context = SelectedContext(runnableCandidateSql(queued_input_sql ++ " AND " ++ open_turn_takes_input_sql));
 const tool_continuation_context = SelectedContext(tool_continuation_selection.made_from.sql);
 
 const context_bytes = rsql.Read(.{
-    .sql = "SELECT " ++ uncoveredBytesSql("?2", "?3", "?4") ++ " AS uncovered_bytes",
+    .sql = "SELECT " ++ uncoveredBytesSql("?1", "?2", "?3", "?4") ++ " AS uncovered_bytes",
     .Args = struct { session: []const u8, covered: u64, frontier: u64, results: u64 },
     .Row = struct { uncovered_bytes: u64 },
     .cardinality = .one,
 });
+
+/// What an admission knows of its context's uncovered bytes, which it
+/// does not read: nothing yet, so its first write weighs them
+/// (`within_pressure`), or that this write just found them over the limit.
+pub const Pressure = enum { weighed, over };
+
+/// Admission's guard that the selected recipe's uncovered bytes are under
+/// `limit` (`turn_policy.compactingBytes`): it matches the Session's row
+/// only then and changes nothing in it.
+const within_pressure = rsql.Write(.{
+    .sql = "UPDATE session SET next_position=next_position WHERE session_ref=@session(?1) AND " ++
+        uncoveredBytesSql("session.session_ref", "?2", "?3", "?4") ++ "<?5",
+    .Args = struct { session: rsql.SessionHead, covered: u64, frontier: u64, results: u64, limit: u64 },
+    .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CompactionDue } },
+});
+
+/// `within_pressure` as SQLite runs it.
+pub const within_pressure_sql = within_pressure.sql;
 
 const insert_turn = rsql.Write(.{
     .sql = "INSERT INTO turn(turn_id,session_ref,first_admission_id,input_cutoff,operation_id,outcome_code,outcome_content_id) " ++
@@ -626,8 +673,11 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at) " ++
-        "VALUES(?1,?2,@session(?3),?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now)",
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
+        "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?14," ++
+        configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ "," ++
+        "selected_session.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
+        "FROM session_revision selected_revision JOIN session selected_session ON selected_session.session_ref=selected_revision.session_ref WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
     .Args = struct {
         operation_id: u64,
         turn_id: u64,
@@ -642,6 +692,7 @@ const insert_operation = rsql.Write(.{
         history_floor: ?u64,
         history_level: ?u8,
         history_dropped: ?u64,
+        tool_set_id: u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -656,11 +707,11 @@ fn queueSelection(reader: anytype, kind: ModelAdmissionKind, found: *runnable_se
     }
 }
 
-fn queueSelectedContext(reader: anytype, kind: ModelAdmissionKind, context: *selected_context.Result) void {
+fn queueSelectedContext(reader: anytype, kind: ModelAdmissionKind, row: *SelectedRow, found: *store_access.Found) void {
     switch (kind) {
-        .message => reader.read(selected_context, .{}, context),
-        .open_turn_message => reader.read(open_turn_context, .{}, context),
-        .tool_continuation => reader.read(tool_continuation_context, .{}, context),
+        .message => reader.readInto(selected_context, .{}, row, found),
+        .open_turn_message => reader.readInto(open_turn_context, .{}, row, found),
+        .tool_continuation => reader.readInto(tool_continuation_context, .{}, row, found),
     }
 }
 
@@ -691,20 +742,22 @@ const IdleChecks = struct {
 };
 
 /// Admits the next model Attempt of `kind`. The read Access `reader`
-/// selects, outside any transaction; with nothing selected it runs main's
-/// idle checks, the disagreeing continuations with whether any Operation
-/// is blocked, and only then the blocked calls' outcomes, and answers
-/// null. Recipe identities share selection's read batch, so Zig can choose
-/// coverage before the write Access reads the admission facts. The selected
-/// recipe's uncovered bytes share that first write batch. Then it writes the
-/// Turn, binds and projects input, inserts the Operation and commits: three
-/// rounds, with no extra round for pressure. The Entry mutex excludes every
-/// other writer; a moved head or requested model is `SelectionChanged`.
-pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, faults: Faults) !?AttemptAdmission {
+/// selects, outside any transaction but inside the Store hold; with nothing
+/// selected it runs main's idle checks, the disagreeing continuations with
+/// whether any Operation is blocked, and only then the blocked calls'
+/// outcomes, and answers null. The selected Session's admission facts and
+/// recipe identities share selection's read batch, so Zig chooses coverage
+/// before the write Access opens. Only the selected recipe's uncovered
+/// bytes, where the purpose rests on them, are read inside the transaction.
+/// Then it writes the Turn, binds and projects input, inserts the Operation
+/// and commits. The Entry mutex excludes every other writer; a moved head is
+/// `SelectionChanged`.
+pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
     var found: runnable_selection.Result = undefined;
-    var context_row: selected_context.Result = undefined;
+    var facts_row: SelectedRow = undefined;
+    var facts_found: store_access.Found = undefined;
     queueSelection(reader, kind, &found);
-    queueSelectedContext(reader, kind, &context_row);
+    queueSelectedContext(reader, kind, &facts_row, &facts_found);
     try store_access.runNamed(reader, .{
         .{ selected_context, error.SessionReadFailed },
         .{ open_turn_context, error.SessionReadFailed },
@@ -720,34 +773,43 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
     const session_ref: []const u8 = &selection.session.ref;
     const first_admission = selection.first_admission.get();
-    const context = if (context_row) |*row| row else return error.CorruptStore;
-    const context_model = (context.model orelse return error.CorruptStore).slice();
+    if (!facts_found.get()) return error.CorruptStore;
+    const facts = &facts_row;
+    if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
+    const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
     var compaction: turn_policy.CompactionFacts = .{
-        .trigger = null,
+        .trigger = policy.compaction_trigger,
         .context_changed = false,
         .usage_tokens = null,
         .uncovered_bytes = 0,
-        .output_reservation = 0,
+        .output_reservation = policy.output_reservation,
     };
-    const coverage = try takeContext(&compaction, context, context_model, session_ref);
-    var facts: admission_facts.Result = undefined;
-    var bytes: context_bytes.Result = undefined;
-    writer.read(admission_facts, .{ .session = session_ref }, &facts);
-    if (coverage) |args| writer.read(context_bytes, args, &bytes);
-    try store_access.runNamed(writer, .{.{ context_bytes, error.CorruptStore }}, error.SessionReadFailed);
-    if (facts.session.next_position != selection.session.next_position or !facts.model.eql(context_model)) return error.SelectionChanged;
-
-    const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
-    compaction.trigger = policy.compaction_trigger;
-    compaction.output_reservation = policy.output_reservation;
-    if (coverage != null) compaction.uncovered_bytes = bytes.uncovered_bytes;
     if (facts.latest_turn != null) {
         if (facts.latest_operation == null) return error.CorruptStore;
         const latest_first = facts.latest_first orelse return error.CorruptStore;
         const resolution: []const u8 = if (facts.latest_resolution) |*code| code.slice() else "";
         compaction.previous = previousTurn(facts.latest_compaction orelse return error.CorruptStore, resolution, facts.latest_active, latest_first.get(), first_admission, output_format.OutputItemKind.compaction.replayableTo((facts.latest_model orelse return error.CorruptStore).slice(), facts.model.slice(), .selected_base));
     }
-    const purpose = turn_policy.nextPurpose(compaction);
+    // The uncovered bytes are never read here. Where only their count
+    // decides the purpose, the admission writes as an assistant response
+    // and its first write checks the count against the policy's limit
+    // (`within_pressure`); that guard's failure is `CompactionDue`, and the
+    // caller admits again knowing the count is `.over` it.
+    var purpose = turn_policy.nextPurpose(compaction);
+    var weighed: ?within_pressure.Args = null;
+    if (try takeContext(&compaction, facts, facts.model.slice(), session_ref)) |coverage| {
+        purpose = turn_policy.nextPurpose(compaction);
+        if (purpose != .compaction) if (turn_policy.compactingBytes(compaction)) |limit| switch (pressure) {
+            .over => purpose = .compaction,
+            .weighed => weighed = .{
+                .session = facts.session,
+                .covered = coverage.covered,
+                .frontier = coverage.frontier,
+                .results = coverage.results,
+                .limit = @min(limit, std.math.maxInt(i64)),
+            },
+        };
+    }
     // A compaction after one that overflowed makes room: settlement let
     // the Turn go on only because a deeper floor exists (D217).
     var dropped: u64 = 0;
@@ -766,6 +828,8 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
     const selected: u64 = if (purpose == .compaction) 0 else selection.selected;
     const instructions: u64 = if (purpose == .compaction) 0 else facts.instructions;
 
+    const offer = try tool_offer.freeze(writer, facts.tool_set_id.get(), if (facts.loaded_tool_set_id) |id| id.get() else null, facts.offer_stale);
+    if (weighed) |args| writer.write(within_pressure, args);
     const turn_id = if (selection.turn_id) |existing| existing.get() else try writer.identity(.turn_id);
     const operation_id = try writer.identity(.operation_id);
     const cutoff = selection.cutoff.get();
@@ -804,21 +868,37 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .compaction = purpose == .compaction,
         .compaction_trigger = policy.compaction_trigger,
         .output_reservation = policy.output_reservation,
-        .reasoning_effort = configuration_domain.effectiveReasoningEffort(&facts),
+        .reasoning_effort = configuration_domain.effectiveReasoningEffort(facts),
         .history_floor = floor,
         .history_level = if (room) |choice| choice.level else null,
         .history_dropped = if (room != null) dropped else null,
+        .tool_set_id = offer,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try writer.commit();
-    return .{ .permit = .{ .binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 } } };
+    const binding: AttemptBinding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
+    // The request's settings round reads only what this commit saves, so
+    // it follows COMMIT in the same message where that message has room.
+    var request: historical_domain.SettingsRead = undefined;
+    // Only a network engine's commit carries reads after it.
+    const opened = if (start) |into| writer.store.engine.batches() and into.open(writer.store, binding) else false;
+    if (opened) {
+        request = .init(start.?.view, start.?.settings);
+        store_core.followCommit(writer.store, request.follow());
+    }
+    defer if (opened) store_core.followCommit(writer.store, null);
+    writer.commit() catch |err| {
+        if (opened) start.?.view.close();
+        return err;
+    };
+    const started = opened and start.?.view.settled != null;
+    if (opened and !started) start.?.view.close();
+    return .{ .permit = .{ .binding = binding }, .request_started = started };
 }
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
 /// A hint: each admission still selects for itself, so a stale one costs
-/// an empty scan or a pass's delay, never a wrong write. The retry scans
-/// are not here; they also skip what execution slots hold.
+/// an empty scan or a pass's delay, never a wrong write.
 pub const DispatchWork = struct {
     /// An owed stop, an owed ending, a feed hop or a core tool call.
     core: bool,
@@ -828,9 +908,13 @@ pub const DispatchWork = struct {
     /// are held (`paused`) only an open Turn's.
     message: bool,
     tool_continuation: bool,
+    /// An open Turn's Attempt is unresolved with a retry state: running,
+    /// waiting for its retry or out of retries. The retry scans find
+    /// nothing without one; they also skip what execution slots hold.
+    retry: bool,
 
     /// Before the first read, and what a loop with no Store assumes.
-    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true };
+    pub const unknown: DispatchWork = .{ .core = true, .mcp = true, .bash = true, .message = true, .tool_continuation = true, .retry = true };
 };
 
 /// The reads `DispatchWork` takes, as one round's statements: the
@@ -842,6 +926,7 @@ pub const DispatchSurvey = struct {
     message: runnable_selection.Result = undefined,
     continuation: runnable_selection.Result = undefined,
     idle: IdleChecks = .{},
+    retry: retrying_attempt.Result = undefined,
 
     /// The statement whose failed step names the read's failure.
     pub const named = .{.{ blocked_operation, error.CallReadFailed }};
@@ -851,6 +936,7 @@ pub const DispatchSurvey = struct {
         queueSelection(reader, if (paused) .open_turn_message else .message, &survey.message);
         queueSelection(reader, .tool_continuation, &survey.continuation);
         survey.idle.queue(reader);
+        reader.read(retrying_attempt, .{}, &survey.retry);
     }
 
     /// Whether the idle checks, which run when either selection found
@@ -874,6 +960,7 @@ pub const DispatchSurvey = struct {
             .bash = survey.actions.bash(),
             .message = survey.message != null,
             .tool_continuation = survey.continuation != null,
+            .retry = survey.retry != null,
         };
     }
 };
@@ -887,6 +974,16 @@ pub fn dispatchWork(reader: anytype, paused: bool) !DispatchWork {
     if (try survey.unsettled()) try validateBlockedToolCalls(reader);
     return survey.found();
 }
+
+/// Whether any Attempt the retry scans read exists: each sets
+/// `retry_due_at_ms` while unresolved, and every resolution clears it.
+const retrying_attempt = rsql.Read(.{
+    .sql = "SELECT 1 AS retrying FROM turn active JOIN model_operation current ON current.operation_id=active.operation_id " ++
+        "WHERE active.outcome_code IS NULL AND current.resolution_code IS NULL AND current.retry_due_at_ms IS NOT NULL LIMIT 1",
+    .Args = struct {},
+    .Row = struct { retrying: u64 },
+    .cardinality = .optional,
+});
 
 /// Due retries in id order after `after`, with their Session: one page.
 const due_retries = rsql.Read(.{

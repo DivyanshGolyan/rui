@@ -6,7 +6,7 @@ const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
-const tool_catalog = @import("../../call_classification.zig");
+const tool_defs = @import("../../call_classification.zig");
 const tool_record = @import("../../tool_record.zig");
 const tool_presentation = @import("../../tool_presentation.zig");
 const mcp_arguments = @import("../../mcp/arguments.zig");
@@ -21,6 +21,7 @@ const rsql = @import("../rsql.zig");
 const store_schema = @import("../schema.zig");
 const action_domain = @import("action.zig");
 const command_domain = @import("command.zig");
+const operation_effort = @import("operation_effort.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const historical_domain = @import("historical.zig");
@@ -343,25 +344,18 @@ const schedule_retry = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-/// Only a changed effort that actually has an earlier Operation for this
-/// model can have emitted a configuration update. Creation/top-level effort
-/// failures and already-refused sources remain ordinary provider failures.
+/// Admission, not revision history, owns whether this request emitted a
+/// refusable choice. A replay restoration or an unchanged effort is ordinary.
 const refused_effort_source = rsql.Read(.{
-    .sql = "SELECT source.revision FROM model_operation o " ++
-        "JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
-        "JOIN session_revision source ON source.session_ref=r.session_ref AND source.revision=" ++ configuration_domain.reasoningEffortRevisionSql("r") ++ " " ++
-        "WHERE o.operation_id=?1 AND source.revision>1 " ++
-        "AND EXISTS(SELECT 1 FROM session_change changed WHERE changed.session_ref=source.session_ref AND changed.revision=source.revision AND changed.field='reasoning_effort') " ++
-        "AND EXISTS(SELECT 1 FROM model_operation earlier JOIN session_revision earlier_revision ON earlier_revision.session_ref=earlier.session_ref AND earlier_revision.revision=earlier.settings_revision " ++
-        "WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position AND earlier.settings_revision<source.revision AND earlier_revision.model=r.model)",
+    .sql = "SELECT o.effort_source_revision AS revision FROM model_operation o WHERE o.operation_id=?1 AND " ++ operation_effort.refusalEligibleSql("o"),
     .Args = struct { operation: u64 },
     .Row = struct { revision: rsql.Positive },
     .cardinality = .optional,
 });
 
 const insert_effort_refusal = rsql.Write(.{
-    .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text) VALUES(@session(?1),?2,0,?3,'reasoning_effort_refused',@now,?4)",
-    .Args = struct { session: rsql.SessionHead, position: u64, revision: u64, provider_text: []const u8 },
+    .sql = "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES(@session(?1),?2,0,?3,'reasoning_effort_refused',@now,?4,?5)",
+    .Args = struct { session: rsql.SessionHead, position: u64, revision: u64, provider_text: []const u8, operation: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
@@ -371,9 +365,9 @@ const invalidate_effort_prefix = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
-fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, report: []const u8) !void {
+fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, operation: u64, report: []const u8) !void {
     const position = try (try a.positions(session)).take(1);
-    a.write(insert_effort_refusal, .{ .session = session, .position = position, .revision = revision, .provider_text = report });
+    a.write(insert_effort_refusal, .{ .session = session, .position = position, .revision = revision, .provider_text = report, .operation = operation });
     a.write(invalidate_effort_prefix, .{ .session = session });
 }
 
@@ -390,7 +384,7 @@ fn settleEffortRefusal(a: anytype, io: std.Io, binding: AttemptBinding, failure:
     const row = try currentAttempt(&facts, binding);
     const revision = (source orelse return .unmatched).revision.get();
     if (binding.attempt_ordinal >= retry_policy.maximum_attempts) return .{ .exhausted = revision };
-    try queueEffortRefusal(a, row.session, revision, failure.report());
+    try queueEffortRefusal(a, row.session, revision, binding.operation_id, failure.report());
     a.write(schedule_retry, .{
         .operation_id = binding.operation_id,
         .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
@@ -564,7 +558,7 @@ pub fn settleModelAttemptFailure(
             },
         },
     }
-    if (exhausted_refusal) |revision| try queueEffortRefusal(a, session, revision, failure.report());
+    if (exhausted_refusal) |revision| try queueEffortRefusal(a, session, revision, binding.operation_id, failure.report());
     if (faults.before_commit) return error.InjectedCommitFailure;
     try a.commit();
 }
@@ -636,19 +630,19 @@ const builtin_names_sql = blk: {
     break :blk names;
 };
 
-/// The Operation's frozen offered names and set id (null for a missing
-/// revision), owner validity, the Session's permission mode and revision,
+/// The Operation's frozen offered names and revision presence, owner validity,
+/// the Session's permission mode and revision,
 /// and the last Conversation ordinal. Earlier names are checked per batch.
 const success_facts = rsql.Read(.{
-    .sql = "SELECT r.tool_set_id,coalesce(" ++ tool_set.namesSql(tool_set.offeredSetSql("r")) ++ ",'') AS tool_names," ++
+    .sql = "SELECT r.revision AS frozen_revision,coalesce(" ++ tool_set.namesSql("o.tool_set_id") ++ ",'') AS tool_names," ++
         "EXISTS(SELECT 1 FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner<>'mcp') AS invalid_owner," ++
+        "WHERE member.tool_set_id=o.tool_set_id AND tool.name NOT IN (" ++ builtin_names_sql ++ ") AND tool.owner<>'mcp') AS invalid_owner," ++
         "s.permission_mode,s.revision," ++
         "coalesce((SELECT max(e.entry_ordinal) FROM conversation_entry e WHERE e.session_ref=o.session_ref),0) AS entry_base " ++
         "FROM model_operation o LEFT JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision=o.settings_revision " ++
         "JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1",
     .Args = struct { operation_id: u64 },
-    .Row = struct { tool_set_id: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
+    .Row = struct { frozen_revision: ?rsql.Positive = null, tool_names: *Bounded(tool_set.max_names_bytes), invalid_owner: bool = false, permission_mode: bool = false, revision: rsql.Positive = undefined, entry_base: u64 = 0 },
     .cardinality = .optional,
 });
 
@@ -874,9 +868,9 @@ const insert_action = rsql.Write(.{
 
 /// Resolves the settling Attempt with its output.
 const resolve_success = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,usage_content_id=?7,output_item_count=?8," ++
-        "usage_uncached_tokens=?9,usage_cache_read_tokens=?10,usage_cache_write_tokens=?11,usage_output_tokens=?12," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?14) AND resolution_code IS NULL AND attempt_ordinal=?13",
+    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
+        "usage_uncached_tokens=?8,usage_cache_read_tokens=?9,usage_cache_write_tokens=?10,usage_output_tokens=?11," ++ operation_resolved_now_sql ++ " " ++
+        "WHERE operation_id=?1 AND session_ref=@session(?13) AND resolution_code IS NULL AND attempt_ordinal=?12",
     .Args = struct {
         operation_id: u64,
         resolution: []const u8,
@@ -884,7 +878,6 @@ const resolve_success = rsql.Write(.{
         response_id: ?[]const u8,
         model_evidence: rsql.Bytes,
         request_id: ?[]const u8,
-        usage_content_id: ?u64,
         item_count: u64,
         uncached: ?u64,
         cache_read: ?u64,
@@ -980,9 +973,10 @@ const DuplicateVisitor = struct {
 };
 
 const historical_names = rsql.Read(.{
-    .sql = "SELECT DISTINCT tool.name FROM model_operation o JOIN session_revision r ON r.session_ref=o.session_ref AND r.revision<o.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE o.operation_id=?1 AND tool.name IN (" ++ parameters(2, batch_items) ++ ")",
+    .sql = "SELECT DISTINCT tool.name FROM model_operation o JOIN tool_set_member member ON " ++
+        "(member.tool_set_id IN (SELECT earlier.tool_set_id FROM model_operation earlier WHERE earlier.session_ref=o.session_ref AND earlier.admission_position<o.admission_position) " ++
+        "OR member.tool_set_id IN (SELECT " ++ tool_set.offeredSetSql("r") ++ " FROM session_revision r WHERE r.session_ref=o.session_ref AND r.revision<o.settings_revision)) " ++
+        "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE o.operation_id=?1 AND tool.name IN (" ++ parameters(2, batch_items) ++ ")",
     .Args = NameArgs(),
     .Row = struct { name: Bounded(tool_record.max_name_bytes) },
     .cardinality = .each,
@@ -1196,8 +1190,9 @@ pub const Batch = struct {
 };
 
 /// The identity a metadata record imports, if any, as main imports it:
-/// a decoded part text, a bag, a message text, the usage record, and a
-/// call's name, call_id and arguments.
+/// a decoded part text, a bag, a message text, and a call's name,
+/// call_id and arguments. The usage record imports nothing: only its
+/// counts are kept.
 fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
     const length: u64, const private = switch (record.tag) {
         .part => switch (record.part_kind) {
@@ -1206,16 +1201,14 @@ fn recordImport(record: *const OutputMetadataRecord) ?content_domain.Import {
         },
         .extras => .{ record.decoded_length, true },
         .text => .{ record.decoded_length, false },
-        .usage => .{ record.length, true },
         .name, .call_id, .arguments => .{ record.decoded_length, false },
-        .item, .action, .pattern, .member => return null,
+        .item, .action, .pattern, .member, .usage => return null,
     };
     return .{ .digest = record.content_digest, .length = length, .private = private };
 }
 
 /// Collects the next items from `start`: whole items, at most
-/// `batch_items`, while their identities fit, the usage record's and an
-/// empty answer's included. A first item whose identities do not all fit
+/// `batch_items`, while their identities fit, an empty answer's included. A first item whose identities do not all fit
 /// is taken alone; the rest are looked up when written
 /// (`Settlement.content`). Never fails: a metadata read failure stops the
 /// batch there, for the write walk to return. Keep scan scratch off the
@@ -1234,8 +1227,8 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
             batch.last = true;
             return;
         };
+        // The usage record imports nothing but still closes the last item.
         if (record.tag == .item or record.tag == .usage) {
-            if (record.tag == .usage and !unfit and !batch.add(recordImport(&record).?)) unfit = true;
             if (record.tag == .item and !unfit and output.answer_length == 0 and output.answer_item_ordinal == record.ordinal and
                 !batch.add(content_domain.empty_content)) unfit = true;
             if (unfit and batch.digest_count != 0) {
@@ -1263,7 +1256,7 @@ noinline fn collectItems(batch: *Batch, output: *const ValidatedOutput, io: std.
 }
 
 /// Collects the next calls from `start`, as `collectItems` does items:
-/// each call's name, call_id and arguments, and, when the catalog rejects
+/// each call's name, call_id and arguments, and, when the tool set rejects
 /// it, its rejection text. Unknown names collect both possible results before
 /// the history read, so deciding withdrawn versus unknown adds no round.
 /// Noinline keeps call inspection scratch off the subsequent SQL call chain.
@@ -1300,10 +1293,10 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
                     const provisional = facts.tool == null and !facts.removed;
                     if (provisional) {
                         batch.history_needed = true;
-                        const fits = batch.add(.ofBytes(tool_catalog.removed_tool_result, false));
+                        const fits = batch.add(.ofBytes(tool_defs.removed_tool_result, false));
                         std.debug.assert(fits);
                     }
-                    if (tool_catalog.classifyCall(&facts)) |code| {
+                    if (tool_defs.classifyCall(&facts)) |code| {
                         var buffer: [192]u8 = undefined;
                         if (rejectionText(io, output, code, &facts, name_record, &buffer)) |text| {
                             const fits = batch.add(.ofBytes(text, false));
@@ -1326,9 +1319,9 @@ noinline fn collectCalls(batch: *Batch, output: *const ValidatedOutput, io: std.
 }
 
 /// A rejected call's result text, from its name in the source.
-fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal.Rejection, facts: *const tool_catalog.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
+fn rejectionText(io: std.Io, output: *const ValidatedOutput, code: tool_proposal.Rejection, facts: *const tool_defs.CallFacts, name: OutputMetadataRecord, buffer: *[192]u8) ![]const u8 {
     var rejected_name: output_format.NameReader = .{ .io = io, .file = output.source, .position = name.start, .end = try name.end() };
-    return tool_catalog.rejectionResult(code, facts, &rejected_name, name.decoded_length, name.content_digest, buffer);
+    return tool_defs.rejectionResult(code, facts, &rejected_name, name.decoded_length, name.content_digest, buffer);
 }
 
 /// Main's checks on the candidate output, before any import: compaction
@@ -1385,7 +1378,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
     // The Operation was found, so only its revision row can be missing.
     if (!success_found.get()) return error.CorruptStore;
     const settling = success;
-    if (settling.tool_set_id == null) return error.StaleAttemptBinding;
+    if (settling.frozen_revision == null) return error.StaleAttemptBinding;
     if (settling.invalid_owner) return error.CorruptStore;
     const purpose: ModelOperationKind = if (row.compaction) .compaction else .assistant_response;
     // Main checked the candidate before any output read.
@@ -1419,7 +1412,6 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .response_id = optionalText(output.response_id.slice()),
         .model_evidence = .{ .bytes = output.model_evidence.slice() },
         .request_id = optionalText(output.request_id.slice()),
-        .usage_content_id = settlement.usage_id,
         .item_count = output.item_count,
         // The provider parser admits only counts that fit an SQLite integer.
         .uncached = if (usage) |counts| counts.uncached else null,
@@ -1462,7 +1454,7 @@ fn Settlement(comptime A: type) type {
         imported_calls: u64 = 0,
         entries: u64 = 0,
         answer_id: ?u64 = null,
-        usage_id: ?u64 = null,
+        usage_seen: bool = false,
         usage: ?output_format.Usage = null,
         /// The function_call items, walked beside the calls' records.
         call_items: OutputMetadataReader,
@@ -1540,8 +1532,9 @@ fn Settlement(comptime A: type) type {
             while (reader.offset < batch.end) {
                 const record = try reader.next() orelse break;
                 if (record.tag == .usage) {
-                    if (s.usage_id != null) return error.CorruptOutputMetadata;
-                    s.usage_id = try s.importUsage(batch, record);
+                    // Only the four counts are kept; the provider's report is not.
+                    if (s.usage_seen) return error.CorruptOutputMetadata;
+                    s.usage_seen = true;
                     s.usage = record.usage;
                     continue;
                 }
@@ -1597,17 +1590,6 @@ fn Settlement(comptime A: type) type {
                 });
             }
             if (batch.stopped) |err| return err;
-        }
-
-        /// Copies the usage record's bytes into a private row.
-        fn importUsage(s: *Self, batch: *Batch, record: OutputMetadataRecord) !u64 {
-            const end = try std.math.add(u64, record.start, record.length);
-            if (end > s.output.source_length) return error.CorruptOutputMetadata;
-            const row = try s.content(batch, recordImport(&record).?);
-            const sink = try s.sinkFor(row, record.length);
-            defer if (sink) |value| value.close();
-            try streamSourceRange(s.io, s.output.source, record.start, record.length, &record.content_digest, sink, s.faults);
-            return row.id;
         }
 
         /// Saves one accepted item in Rui's own form from its metadata
@@ -1787,7 +1769,7 @@ fn Settlement(comptime A: type) type {
             const arguments_content_id = try s.importDecoded(batch, record);
             if (batch.duplicate(index)) return error.InvalidProviderEnvelope;
             const call_facts = try inspectOutputCall(s.io, s.output.source, name, record, &s.tools);
-            const rejection_code = tool_catalog.classifyCall(&call_facts);
+            const rejection_code = tool_defs.classifyCall(&call_facts);
             const rejection_content_id: ?u64 = if (rejection_code) |code| id: {
                 var buffer: [192]u8 = undefined;
                 const text = try rejectionText(s.io, s.output, code, &call_facts, name, &buffer);
@@ -1805,7 +1787,7 @@ fn Settlement(comptime A: type) type {
 
         /// All content sinks have closed before saving the certificate and
         /// line. Keep their bounded row-binding scratch off those sink paths.
-        noinline fn recordCall(s: *Self, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_catalog.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
+        noinline fn recordCall(s: *Self, fields: *const [3]OutputMetadataRecord, content_ids: [3]u64, call_facts: *const tool_defs.CallFacts, rejection_code: ?tool_proposal.Rejection, rejection_content_id: ?u64) !void {
             const record = fields[2];
             const name_content_id, const call_id_content_id, const arguments_content_id = content_ids;
             // The call's certificate: (little-endian length, SHA-256) for its
@@ -1860,9 +1842,9 @@ const ImportedNeutral = struct { bag: u64, part_count: u64, text: ?u64, text_len
 /// A hosted call's description from its action and pattern records.
 /// noinline: its excerpt windows live in this frame only.
 noinline fn describeWebSearch(io: std.Io, source: std.Io.File, call: OutputMetadataRecord, pattern: ?OutputMetadataRecord) !tool_record.Description {
-    var target: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
-    var found: [tool_catalog.WebSearchCall.excerpt_bytes]u8 = undefined;
-    return tool_catalog.describe(.{ .web_search = .{
+    var target: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
+    var found: [tool_defs.WebSearchCall.excerpt_bytes]u8 = undefined;
+    return tool_defs.describe(.{ .web_search = .{
         .action = @fromBackingInt(@backingInt(call.action)),
         .target = try excerpt(io, source, call, &target),
         .pattern = if (pattern) |field| try excerpt(io, source, field, &found) else "",
@@ -1976,7 +1958,7 @@ fn writeDecoded(io: std.Io, output: *const ValidatedOutput, sink: store_access.C
 
 /// Noinline: description rendering does not retain its bounded scratch on
 /// the import frame while that frame opens SQLite content sinks.
-noinline fn callDescription(facts: *const tool_catalog.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
+noinline fn callDescription(facts: *const tool_defs.CallFacts, io: std.Io, file: std.Io.File, arguments: OutputMetadataRecord) !?tool_record.Description {
     if (facts.tool) |*tool| if (tool.runner() == .mcp) {
         var fallback: tool_record.Description = .{ .len = 0 };
         try fallback.set(tool.name);
@@ -2004,15 +1986,15 @@ noinline fn callDescription(facts: *const tool_catalog.CallFacts, io: std.Io, fi
     return facts.description();
 }
 
-/// One function call's catalog facts: its name and, for bash, its
+/// One function call's tool-set facts: its name and, for bash, its
 /// arguments. noinline: the arguments' content window lives in this frame
 /// only, not in the settlement frame that walks the output's metadata.
-noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_catalog.CallFacts {
+noinline fn inspectOutputCall(io: std.Io, source: std.Io.File, name: OutputMetadataRecord, arguments: OutputMetadataRecord, offered: *const tool_record.Offered) !tool_defs.CallFacts {
     var call_name: output_format.NameReader = .{ .io = io, .file = source, .position = name.start, .end = try name.end() };
     var encoded: output_format.JsonStringSource = .{
         .encoded = .{ .io = io, .file = source, .position = arguments.start, .end = try arguments.end() },
     };
-    return tool_catalog.inspectCall(&call_name, name.decoded_length, &encoded, offered);
+    return tool_defs.inspectCall(&call_name, name.decoded_length, &encoded, offered);
 }
 
 /// noinline: its read buffer serves the rare schema check, not every

@@ -117,6 +117,29 @@ pub const ToolsField = struct {
         return out;
     }
 
+    /// Adds one name in canonical order, refusing duplicates and bound overflow.
+    pub fn insert(self: *ToolsField, name: []const u8) error{ InvalidToolName, InvalidJsonShape }!void {
+        if (!validToolName(name)) return error.InvalidToolName;
+        var names = self.iterator();
+        var at: usize = 0;
+        while (names.next()) |held| {
+            switch (std.mem.order(u8, held, name)) {
+                .eq => return error.InvalidJsonShape,
+                .gt => break,
+                .lt => at += held.len + 1,
+            }
+        }
+        if (at >= self.names.len) return self.append(name);
+        if (self.count == max_tools or self.names.len - (self.count -| 1) + name.len > max_tool_list_name_bytes)
+            return error.InvalidJsonShape;
+        const added = name.len + 1;
+        std.mem.copyBackwards(u8, self.names.bytes[at + added ..][0 .. self.names.len - at], self.names.bytes[at..self.names.len]);
+        @memcpy(self.names.bytes[at..][0..name.len], name);
+        self.names.bytes[at + name.len] = ' ';
+        self.names.len += added;
+        self.count += 1;
+    }
+
     /// Appends `name`, which must sort after every name already held. A
     /// name outside the grammar is `InvalidToolName`; one out of order,
     /// repeated, or past a limit is `InvalidJsonShape`.
@@ -159,12 +182,14 @@ fn ConfigurationOf(comptime Custody: type) type {
         reasoning_effort: OptionalBounded(16) = .{},
         /// Display text only: never model input, an address or a selector.
         label: OptionalBounded(max_label_bytes) = .{},
+        /// Creation relation, never a revisioned setting.
+        parent: OptionalBounded(6) = .{},
 
         comptime {
             const fields = @typeInfo(Configuration).@"struct";
-            if (fields.field_names.len != session_settings.entries.len)
+            if (fields.field_names.len != session_settings.spec_entries.len)
                 @compileError("Session settings table must cover Configuration exactly");
-            for (session_settings.entries, fields.field_names, fields.field_types) |entry, name, Field| {
+            for (session_settings.spec_entries, fields.field_names, fields.field_types) |entry, name, Field| {
                 if (!std.mem.eql(u8, entry.field, name))
                     @compileError("Session settings table must follow Configuration field order: " ++ name);
                 const Expected = switch (entry.kind) {
@@ -253,6 +278,10 @@ fn configureDigest(session: []const u8, configuration: anytype, require_model: b
             }
         }
     }
+    if (configuration.parent.state != .omitted) {
+        hashField(&hash, "rui/core/configure/parent/v1");
+        hashOptional(&hash, &configuration.parent);
+    }
     return hash.finalResult();
 }
 
@@ -278,14 +307,21 @@ fn MessageCommandOf(comptime Custody: type) type {
         sender_handle: ?Bounded(max_sender_handle_bytes) = null,
         text: ContentField = .{},
         // Non-null means create a fresh Session and admit this first Message in
-        // one transaction. The requested Session must then be empty. Initial
-        // configuration cannot supply instruction or schema content values.
+        // one transaction. The requested Session must then be empty; its spec
+        // carries the same instruction and schema custody as configure.
         configuration: ?Configuration = null,
         // A creating Message only: create nothing unless the Host has a model.
         require_model: bool = false,
 
         pub fn removeTemporaryContent(self: *MessageCommand, io: Custody.Io) !void {
-            try self.text.removeTemporaryContent(io);
+            var failure: ?anyerror = null;
+            self.text.removeTemporaryContent(io) catch |err| {
+                failure = err;
+            };
+            if (self.configuration) |*configuration| configuration.removeTemporaryContent(io) catch |err| {
+                if (failure == null) failure = err;
+            };
+            if (failure) |err| return err;
         }
 
         pub fn semanticDigest(self: *const MessageCommand) [32]u8 {

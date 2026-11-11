@@ -11,10 +11,9 @@ const tool_name = @import("../../tool_name.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const session_id = @import("../../session_id.zig");
-const tool_catalog = @import("../../tool_record.zig");
+const tool_defs = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
-const tool_set = @import("tool_set.zig");
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
@@ -104,7 +103,7 @@ pub const CoreNames = struct {
 };
 
 /// Whether the Action's call belongs to MCP in its Operation's frozen offer,
-/// never the current catalog. The call is point-seeked by parent and ordinal;
+/// never the current tool set. The call is point-seeked by parent and ordinal;
 /// accepted tool names fit the inline content payload and compare exactly.
 pub fn mcpCallSql(comptime action_alias: []const u8, comptime operation_alias: []const u8) []const u8 {
     return "EXISTS(" ++ mcpCallSelectSql(action_alias, operation_alias, "1") ++ ")";
@@ -118,8 +117,7 @@ pub fn mcpServerSql(comptime action_alias: []const u8, comptime operation_alias:
 fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias: []const u8, comptime selected: []const u8) []const u8 {
     return "SELECT " ++ selected ++ " FROM model_tool_call tool_call " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
-        "JOIN session_revision revision ON revision.session_ref=" ++ operation_alias ++ ".session_ref AND revision.revision=" ++ operation_alias ++ ".settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
+        "JOIN tool_set_member member ON member.tool_set_id=" ++ operation_alias ++ ".tool_set_id " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++
         "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
@@ -169,7 +167,7 @@ const next_core_action = rsql.Read(.{
 
 /// A core tool call to run: which Action it is, which tool it calls, its
 /// Session, and its arguments' content.
-pub const CoreTool = tool_catalog.CoreTool;
+pub const CoreTool = tool_defs.CoreTool;
 
 pub const CoreActionInput = struct {
     binding: ActionAttemptBinding,
@@ -350,7 +348,7 @@ pub fn nextCoreWork(a: anytype, include_mcp: bool) !?CoreWork {
 }
 
 const attempt_action = rsql.Write(.{
-    .sql = "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=@now,bash_timeout_ms=?2,sender_handle=?3 " ++
+    .sql = "UPDATE action_operation SET " ++ action_attempted_sql ++ ",attempt_at=@now,attempt_timeout_ms=?2,sender_handle=?3 " ++
         "WHERE action_id=?1 AND session_ref=@session(?4) AND authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0",
     .Args = struct { action_id: u64, timeout_ms: u64, sender_handle: []const u8, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.ActionSelectionChanged } },
@@ -397,7 +395,7 @@ pub const ActionExecutionInput = struct {
             parent: ?Bounded(session_id.max_reference_bytes),
             root: Bounded(session_id.max_reference_bytes),
             name: Bounded(tool_name.max_bytes),
-            server: Bounded(tool_catalog.max_server_bytes),
+            server: Bounded(tool_defs.max_server_bytes),
             input_schema: ContentReference,
         },
     },
@@ -486,10 +484,9 @@ pub fn admitNextActionAttempt(
 /// The unresolved Attempt `binding` names, with its revision and its call,
 /// or none: the binding is stale. Its text columns decode in place into
 /// the caller's input, through the Row's pointers.
-// bash_timeout_ms is the legacy Store column for every runner's timeout (D225).
 const bash_input = rsql.Read(.{
     .sql = "SELECT item.session_position AS position,revision.workspace,action.session_ref AS session,action.sender_handle," ++
-        "action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
+        "action.attempt_timeout_ms AS timeout_ms FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN session_revision revision ON revision.session_ref=action.session_ref AND revision.revision=action.permission_revision " ++
         "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
@@ -642,7 +639,7 @@ const settle_facts = rsql.Read(.{
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND action." ++ action_attempted_sql ++ " AND action.resolution_code IS NULL",
     .Args = struct { action_id: u64, parent_operation_id: u64 },
-    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, runner: tool_catalog.Runner, stopped: bool },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, runner: tool_defs.Runner, stopped: bool },
     .cardinality = .optional,
 });
 
@@ -673,9 +670,10 @@ pub fn settleActionAttempt(
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
 
-    // A stop that selected the Turn cancels whatever the Action did.
+    // Bash stop confirms local cancellation. MCP keeps the adapter's evidence:
+    // closing a sent request cannot establish that the remote work stopped.
     const settled: struct { code: ActionResolutionCode, text: []const u8 } =
-        if (found.stopped) .{ .code = .cancelled, .text = found.runner.stoppedText(code, result) } else .{ .code = code, .text = result };
+        if (found.stopped and found.runner != .mcp) .{ .code = .cancelled, .text = found.runner.stoppedText(code, result) } else .{ .code = code, .text = result };
     var content: content_domain.Import = .ofBytes(settled.text, false);
     var completion: turn_domain.stopped_turn.Result = null;
     content_domain.lookup(a, &content);
@@ -715,7 +713,7 @@ const uncertain_facts = rsql.Read(.{
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE action.action_id=?1 AND action.resolution_code IS NULL AND action." ++ action_attempted_sql,
     .Args = struct { action_id: u64 },
-    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, runner: tool_catalog.Runner },
+    .Row = struct { session: rsql.SessionHead, turn_id: rsql.Positive, runner: tool_defs.Runner },
     .cardinality = .optional,
 });
 
@@ -727,7 +725,7 @@ const resolve_uncertain = rsql.Write(.{
 });
 
 /// Runner-specific recovery identities are hashed once at build time.
-fn recoveryContent(runner: tool_catalog.Runner) content_domain.Import {
+fn recoveryContent(runner: tool_defs.Runner) content_domain.Import {
     return switch (runner) {
         inline .bash, .mcp => |kind| comptime blk: {
             @setEvalBranchQuota(1_000_000);
@@ -791,7 +789,7 @@ pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveO
 
 // Reads share a wave; writes fence every unresolved earlier MCP call. An
 // attempted write remains a barrier even if its Action is later in order.
-// Both hints come from the Operations' frozen offers, never today's catalog.
+// Both hints come from the Operations' frozen offers, never today's tool set.
 const mcp_serial_sql = "NOT EXISTS(SELECT 1 FROM action_operation earlier JOIN model_operation earlier_operation ON earlier_operation.operation_id=earlier.parent_operation_id " ++
     "WHERE earlier.session_ref=action.session_ref AND earlier.resolution_code IS NULL " ++
     "AND (earlier.action_id<action.action_id OR earlier.attempt_ordinal>0) AND EXISTS(" ++ mcpCallSelectSql("earlier", "earlier_operation", "1") ++
@@ -816,8 +814,7 @@ const next_mcp_action = rsql.Read(.{
     .sql = "SELECT action.action_id,tool.server " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
-        "CROSS JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
-        "CROSS JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
+        "CROSS JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
         "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
         "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
@@ -825,16 +822,16 @@ const next_mcp_action = rsql.Read(.{
         "JOIN session s ON s.session_ref=action.session_ref " ++
         "WHERE " ++ mcp_ready_sql ++ " ORDER BY action.action_id LIMIT 1",
     .Args = struct {},
-    .Row = struct { action_id: rsql.Positive, server: Bounded(tool_catalog.max_server_bytes) },
+    .Row = struct { action_id: rsql.Positive, server: Bounded(tool_defs.max_server_bytes) },
     .cardinality = .optional,
 });
 pub const next_mcp_action_sql = next_mcp_action.sql;
 pub const ReadyAction = struct {
     action_id: u64,
-    runner: tool_catalog.Runner,
-    server: Bounded(tool_catalog.max_server_bytes) = .{},
+    runner: tool_defs.Runner,
+    server: Bounded(tool_defs.max_server_bytes) = .{},
 };
-pub fn nextAction(a: anytype, comptime runner: tool_catalog.Runner) !?ReadyAction {
+pub fn nextAction(a: anytype, comptime runner: tool_defs.Runner) !?ReadyAction {
     if (runner == .bash) {
         var next: next_action_attempt.Result = undefined;
         queueNextActionAttempt(a, &next);
@@ -910,26 +907,24 @@ pub fn admitActionAttempt(a: anytype, io: std.Io, selected: ReadyAction, timeout
     try a.commit();
     return .{ .action_id = selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() };
 }
-// bash_timeout_ms is the legacy Store column for every runner's timeout (D225).
 const mcp_input = rsql.Read(.{
-    .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.bash_timeout_ms AS timeout_ms FROM action_operation action " ++
+    .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.attempt_timeout_ms AS timeout_ms FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
-        "JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
+        "JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp' " ++
         "JOIN content schema_content ON schema_content.content_id=tool.input_schema_content_id " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
         " AND action.resolution_code IS NULL AND " ++ mcpCallSql("action", "operation"),
     .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
-    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(tool_name.max_bytes), server: *Bounded(tool_catalog.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
+    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(tool_name.max_bytes), server: *Bounded(tool_defs.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
     .cardinality = .optional,
 });
 test "MCP execution input uses each engine's tool-name content layout" {
     const mysql = comptime mcp_input.mysql.prepared();
-    // A tool name fits one content chunk. Both its projection and catalog
+    // A tool name fits one content chunk. Both its projection and tool-set
     // comparison must use that chunk on MySQL, not SQLite's payload column.
     const name_bytes = "coalesce((SELECT bytes FROM content_chunk WHERE content_chunk.content_id=name.content_id AND content_chunk.chunk_index=0),X'')";
     try std.testing.expect(std.mem.indexOf(u8, mcp_input.sql, "name.payload AS name") != null);

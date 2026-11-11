@@ -3,6 +3,7 @@
 import ast
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 import importlib.util
 import json
 import mmap
@@ -177,6 +178,7 @@ ZIG_EXPRESSION = re.compile(r"(?:\.|\berror)\s*$")
 ZIG_TEST_ONLY = re.compile(r"(?:^|/)(?:tests|testing)/|tests?\.zig$")
 
 
+@lru_cache(maxsize=512)
 def zig_blocks(text):
     """The code with comments and strings blanked, its `test` blocks and its top-level declarations."""
     code = ZIG_SKIPPED.sub(lambda match: " " * len(match[0]), text)
@@ -200,7 +202,7 @@ def zig_blocks(text):
             head = index + 1
             if not open_blocks:
                 top_head = index + 1
-    return code, tests, declarations
+    return code, tuple(tests), tuple(declarations)
 
 
 def zig_sleep_ordering(path, text):
@@ -219,6 +221,12 @@ def zig_sleep_ordering(path, text):
                                  "<top level>"))] += 1
     offenses.pop(ZIG_POLL_HELPER, None)
     return offenses
+
+
+@lru_cache(maxsize=512)
+def sleep_python_tree(text):
+    """Share source parsing across head/base offense and key scans (read-only)."""
+    return ast.parse(text)
 
 
 def python_sleep_ordering(path, text):
@@ -242,7 +250,7 @@ def python_sleep_ordering(path, text):
                 offenses[(path, name or "<module>")] += 1
             visit(child, child_name)
 
-    visit(ast.parse(text), None)
+    visit(sleep_python_tree(text), None)
     offenses.pop(PYTHON_POLL_HELPER, None)
     return offenses
 
@@ -269,7 +277,7 @@ def sleep_keys(sources):
             if ZIG_TEST_ONLY.search(path):
                 keys.update((path, name) for _, _, name in declarations)
         elif re.fullmatch(r"tests/integration/[^/]+\.py|tests/ci/(?:test_[^/]*|[^/]*_test)\.py", path):
-            for node in ast.parse(text).body:
+            for node in sleep_python_tree(text).body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     keys.add((path, node.name))
                 if isinstance(node, ast.ClassDef):
@@ -293,11 +301,13 @@ def review_base_sources(root=ROOT):
     paths = [path for path in git("ls-tree", "-r", "--name-only", base, "--", "src", "tests", text=True).splitlines()
              if path.endswith((".zig", ".py"))]
     contents = git("cat-file", "--batch", input="".join(f"{base}:{path}\n" for path in paths).encode())
+    offset = 0
     for path in paths:
-        header, contents = contents.split(b"\n", 1)
-        size = int(header.split()[2])
-        yield path, contents[:size].decode()
-        contents = contents[size + 1:]
+        end = contents.index(b"\n", offset)
+        size = int(contents[offset:end].split()[2])
+        offset = end + 1
+        yield path, contents[offset:offset + size].decode()
+        offset += size + 1
 
 
 def review_base_ceiling(root=ROOT, sources=None):
@@ -390,7 +400,7 @@ SLEEP_ORDERED = {
     ("tests/integration/human_cli_integration.py", "main"):
         (2, "input paced past the bare-ESC ambiguity timeout and the repaint window"),
     ("tests/integration/human_cli_integration.py", "renderer_cases"):
-        (5, "settle sleeps before screen and request assertions"),
+        (3, "settle sleeps before screen and request assertions"),
     ("tests/integration/model_fixture.py", "FailureHandler.do_POST"):
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
     ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
@@ -409,6 +419,17 @@ class SleepOrderingTest(unittest.TestCase):
         offenses = sleep_ordering(tree)
         ceiling = moved_ceiling(offenses, review_base_ceiling(sources=base), sleep_keys(tree), sleep_keys(base.items()))
         self.assertEqual(sleep_allowlist_problems(offenses, SLEEP_ORDERED, ceiling), [])
+
+    def test_read_only_parsers_reuse_content_and_detect_edits(self):
+        zig = 'test "cached parsing" { std.time.sleep(1); }'
+        self.assertIs(zig_blocks(zig), zig_blocks(zig))
+        self.assertEqual(zig_sleep_ordering("src/tests.zig", zig), {("src/tests.zig", "cached parsing"): 1})
+        self.assertEqual(zig_sleep_ordering("src/tests.zig", zig.replace("sleep", "wake")), {})
+        python = 'def cached_parsing():\n    time.sleep(1)\n'
+        self.assertIs(sleep_python_tree(python), sleep_python_tree(python))
+        self.assertEqual(python_sleep_ordering("tests/integration/cases.py", python),
+                         {("tests/integration/cases.py", "cached_parsing"): 1})
+        self.assertEqual(python_sleep_ordering("tests/integration/cases.py", python.replace("sleep", "wake")), {})
 
     def test_a_moved_test_keeps_only_its_own_allowance(self):
         base = Counter({("a.zig", "t"): 2, ("a.zig", "u"): 1})

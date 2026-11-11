@@ -583,9 +583,7 @@ test "schema 55 migrates recovery index and wire 8 together to the current schem
         if (step.from < 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
     try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('wire_version','8'),('format','55')", false);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 55) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(55).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -637,9 +635,7 @@ test "skills schema 56 wire 9 MySQL migration preserves ordinary rows and reache
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 56) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(56).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -707,9 +703,7 @@ test "skills schema 58 wire 10 MySQL migration preserves archive refusal and ord
     defer before.deinit();
     try writeResult(ordinary_rows, &before.writer);
     try std.testing.expect(before.written().len > 100);
-    inline for (schema.migrations) |step| {
-        if (step.from >= 58) try load(migrated_database, schema.mysqlMigration(step.from), false);
-    }
+    try load(migrated_database, schema.mysqlMigrationFrom(58).?, false);
     var result: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer result.deinit();
     try writeResult("SELECT meta_value FROM store_meta WHERE meta_key='wire_version'", &result.writer);
@@ -781,4 +775,68 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     try std.testing.expect(schema.isStoreId(&first));
     try std.testing.expect(schema.isStoreId(&second));
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
+}
+
+test "schema 65 MySQL migration freezes each Operation offer and preserves Session intent" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_offer_migration";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    try load(name, store_testing.baseline_mysql_ddl, false);
+    try load(name, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (comptime step.from < 64) try load(name, schema.mysqlMigration(step.from), false);
+    }
+    try load(name, store_testing.operation_offer_migration_seed, false);
+    try load(name, schema.mysqlMigration(64), false);
+    var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer rows.deinit();
+    try writeResult("SELECT operation_id,tool_set_id FROM " ++ name ++ ".model_operation ORDER BY operation_id", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:1 1:4\n 1:2 1:2\n 2:99 1:2", rows.written());
+    rows.clearRetainingCapacity();
+    try writeResult("SELECT revision,tool_set_id,loaded_tool_set_id FROM " ++ name ++ ".session WHERE session_ref='d8mv7p'", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:2 1:4 1:2", rows.written());
+    done.migrations += 1;
+    writeRecord();
+}
+
+test "schema 66 MySQL migration freezes actual effort emission and prior admitted fallback" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    inline for (std.enums.values(store_testing.EffortMigrationChoice)) |choice| inline for ([_]bool{ false, true }) |legacy_codec| {
+        const name = "rui_effort_migration";
+        try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+        defer restore("DROP DATABASE IF EXISTS " ++ name);
+        try load(name, store_testing.baseline_mysql_ddl, false);
+        try load(name, store_testing.baseline_rows, true);
+        inline for (schema.migrations) |step| {
+            if (comptime step.from < schema.schema_version - 1) try load(name, schema.mysqlMigration(step.from), false);
+        }
+        try load(name, store_testing.operation_effort_migration_seed, false);
+        try load(name, choice.sql(), false);
+        if (legacy_codec) try load(name, "UPDATE session SET codec='openai-responses/1' WHERE session_ref='d8mv7p'", false);
+        try load(name, schema.mysqlMigration(schema.schema_version - 1), false);
+        var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer rows.deinit();
+        try writeResult("SELECT operation_id,effort_source_revision,previous_reasoning_effort,effort_update FROM " ++ name ++ ".model_operation WHERE session_ref='d8mv7p' ORDER BY operation_id", &rows.writer);
+        const source: u64 = if (choice == .retained) 2 else 3;
+        const emitted = !legacy_codec and choice != .back_to_top;
+        const expected = std.fmt.comptimePrint("\n 1:1 1:1 null 1:0\n 2:99 1:2 3:low 1:{d}\n 3:100 1:2 4:high 1:0\n 3:101 1:{d} 4:high 1:{d}", .{ @intFromBool(!legacy_codec), source, @intFromBool(emitted) });
+        try std.testing.expectEqualStrings(expected, rows.written());
+        if (choice == .legacy_new_choice) {
+            try load(name, "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at,provider_text,refused_operation_id) VALUES('d8mv7p',30,0,2,'reasoning_effort_refused',1793781802,'refused',99)", false);
+            rows.clearRetainingCapacity();
+            try writeResult(comptime "SELECT " ++ @import("domain/configuration.zig").reasoningEffortOverrideSql("s") ++ " FROM " ++ name ++ ".session s WHERE s.session_ref='d8mv7p'", &rows.writer);
+            try std.testing.expectEqualStrings("\n 5:xhigh", rows.written());
+        }
+        done.migrations += 1;
+        writeRecord();
+    };
 }

@@ -88,6 +88,7 @@ pub const Code = enum {
     invalid_output_reservation,
     unsupported_reasoning_effort,
     unknown_tool,
+    mcp_server_unavailable,
     provider_tool_missing,
     loaded_tools_not_in_tools,
     loaded_tools_unreachable,
@@ -95,6 +96,12 @@ pub const Code = enum {
     incomplete_initial_configuration,
     unknown_preset,
     preset_on_update,
+    parent_on_update,
+    parent_provider_forbidden,
+    parent_workspace_forbidden,
+    tools_not_in_parent,
+    permission_mode_wider_than_parent,
+
     invalid_workspace,
     workspace_is_immutable,
     provider_is_immutable,
@@ -114,6 +121,7 @@ pub const Code = enum {
     invalid_arguments,
     idempotency_key_conflict,
     host_busy,
+    host_starting,
     result_not_ready,
     host_stopped,
     host_unreachable,
@@ -123,6 +131,7 @@ pub const Code = enum {
     reply_unconfirmed,
     wait_timed_out,
     request_absent,
+    request_wire_incompatible,
 };
 
 /// Transitional inventory. An entry is an unclassified internal failure,
@@ -154,7 +163,6 @@ pub const pending = .{
     "HostInvocationFailed",
     "HostLaunchFailed",
     "HostModelUnavailable",
-    "HostReadinessUnconfirmed",
     "HostStartupFailed",
     "HostStopUnconfirmed",
     "IncompatibleHost",
@@ -239,6 +247,7 @@ pub const pending = .{
 fn mapped(err: anyerror) ?Code {
     return switch (err) {
         error.OutOfMemory => .memory_exhausted,
+        error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
         error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
@@ -281,6 +290,7 @@ fn mapped(err: anyerror) ?Code {
         error.InvalidHome => .home_unavailable,
         error.InvalidSession => .invalid_session_reference,
         error.InvalidModel => .model_id_malformed,
+        error.InvalidOutputSchema => .invalid_output_schema,
         error.InteractiveTerminalRequired => .terminal_required,
         error.EmptyMessageInput => .message_empty,
         error.InvalidArguments, error.InvalidPrefix => .invocation_invalid,
@@ -294,6 +304,7 @@ fn mapped(err: anyerror) ?Code {
         error.StoreAlreadyOwned => .store_locked,
         error.StoreIdentityMismatch => .store_identity_mismatch,
         error.HostBusy => .host_busy,
+        error.HostReadinessUnconfirmed => .host_starting,
         error.ResultNotReady => .result_not_ready,
         error.EnvironmentTooLarge => .environment_too_large,
         else => null,
@@ -472,6 +483,7 @@ pub fn facts(code: Code) Facts {
         .invalid_output_reservation => .{ .act = .fix, .input = .output_reservation, .accepted = .{ .grammar = "default or a decimal from 0 to " ++ std.fmt.comptimePrint("{d}", .{std.math.maxInt(i64)}) }, .says = "The output reservation is not a nonnegative token count.", .next = "Use --output-reservation default or a nonnegative decimal in the accepted range." },
         .unsupported_reasoning_effort => .{ .act = .fix, .input = .reasoning_effort, .accepted = .{ .closed = names(cli_value.ReasoningChoice) }, .says = "The effort word is invalid, unsupported by the listed model, or clears an assigned effort.", .next = "Use --reasoning-effort default or a supported effort word; unlisted models pass effort words to the provider." },
         .unknown_tool => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "built-in tools listed by rui session configure --help, or tools offered by this Host" }, .says = "A requested tool is not offered by this Host.", .next = "Check --tools against the Host's offered tools, or use --tools none." },
+        .mcp_server_unavailable => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "tools offered by this Host" }, .says = "A requested tool is unknown and a configured MCP server has no tools; it may provide the name.", .next = "Restore the unavailable MCP servers and restart the Host, or remove the unknown tool from --tools." },
         .provider_tool_missing => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "tools offered by this Host and supported by the selected provider" }, .says = "The selected provider cannot run a requested tool.", .next = "Remove the unsupported tool from --tools, or create a Session with a provider that supports it." },
         .loaded_tools_not_in_tools => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "a subset of the Session's --tools, or none" }, .says = "A loaded tool is not one of the Session's tools.", .next = "Remove it from --loaded-tools, or add it to --tools first." },
         .loaded_tools_unreachable => .{ .act = .fix, .input = .loaded_tools, .accepted = .{ .grammar = "every tool in --tools, or a subset when find_tools is loaded" }, .says = "Some tools would never be reachable: --loaded-tools leaves tools out without loading find_tools.", .next = "Add find_tools to --loaded-tools, or load every tool in --tools." },
@@ -479,6 +491,11 @@ pub fn facts(code: Code) Facts {
         .incomplete_initial_configuration => .{ .act = .fix, .input = .initial_configuration, .accepted = .{ .grammar = "model, reasoning effort, compaction trigger, tools and permission mode, a workspace when tools include bash, and a provider when the Host serves several" }, .says = "A new Session's spec is missing a required setting.", .next = "State every required setting; rui session start fills them for you." },
         .unknown_preset => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset name supplied when this Host was launched" }, .says = "The Host does not have that preset.", .next = "Use a preset supplied at connect, or supply a complete creation spec." },
         .preset_on_update => .{ .act = .fix, .input = .preset, .accepted = .{ .grammar = "a preset only when creating a Session" }, .says = "An existing Session cannot apply a preset.", .next = "Omit preset from the update, or create a new Session with it." },
+        .parent_on_update => .{ .act = .fix, .input = .session, .accepted = .{ .grammar = "parent only on creation" }, .says = "spec.parent: an existing Session cannot change its parent. Nothing was changed.", .next = "Omit parent from the update." },
+        .parent_provider_forbidden => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the parent's provider, inherited without naming provider" }, .says = "spec.provider: an agent always uses your provider.", .next = "Omit provider from the child spec." },
+        .parent_workspace_forbidden => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the parent's Workspace, inherited without naming workspace" }, .says = "spec.workspace: an agent always works in your Workspace.", .next = "Omit workspace from the child spec." },
+        .tools_not_in_parent => .{ .act = .fix, .input = .tools, .accepted = .{ .grammar = "a subset of the parent's configured tools" }, .says = "spec.tools: a requested tool is not one of your tools. Nothing was created.", .next = "Remove tools the parent does not have." },
+        .permission_mode_wider_than_parent => .{ .act = .fix, .input = .permission_mode, .accepted = .{ .grammar = "ask when the parent asks" }, .says = "spec.permissionMode: you ask before running commands, so your agents ask too. Nothing was created.", .next = "Use permissionMode ask." },
         .invalid_workspace => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "an absolute path to an existing directory" }, .says = "The workspace is not a usable absolute directory.", .next = "Set --workspace to an existing absolute directory accessible to the Host." },
         .workspace_is_immutable => .{ .act = .fix, .input = .workspace, .accepted = .{ .grammar = "the workspace already saved for this Session" }, .says = "An existing Session cannot change its workspace.", .next = "Omit --workspace, or create a new Session for the other directory." },
         .provider_is_immutable => .{ .act = .fix, .input = .provider, .accepted = .{ .grammar = "the provider already saved for this Session" }, .says = "An existing Session cannot change its provider.", .next = "Omit --provider, or create a new Session with the other provider." },
@@ -498,6 +515,7 @@ pub fn facts(code: Code) Facts {
         .invalid_arguments => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "arguments satisfying the selected tool schema" }, .says = "The tool arguments are invalid.", .next = "Correct the arguments to match the selected tool schema." },
         .idempotency_key_conflict => .{ .act = .fix, .input = .key, .accepted = .{ .grammar = "one immutable captured request per key" }, .says = "This key already belongs to a different request.", .next = "Recover the original capture to inspect it; use a new key only for intentionally different work." },
         .host_busy => .{ .act = .wait, .input = null, .accepted = .none, .says = "The Host is busy.", .next = "Retry the same request unchanged later." },
+        .host_starting => .{ .act = .wait, .input = null, .accepted = .none, .says = "This Store's Host has not confirmed it is ready; it may still be starting.", .next = "Retry once rui host status reports the Host ready; do not kill or reclaim a Host that is still starting." },
         .result_not_ready => .{ .act = .wait, .input = null, .accepted = .none, .says = "The saved result is not ready yet.", .next = "Run the same rui request read-result command again later." },
         .host_stopped => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host is stopped.", .next = "Start this Store's Host with rui host start, then retry unchanged." },
         .host_unreachable => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host cannot be reached.", .next = "Start or repair this Store's Host, then retry the same saved request unchanged." },
@@ -505,6 +523,7 @@ pub fn facts(code: Code) Facts {
         .store_identity_mismatch => .{ .act = .operate, .input = null, .accepted = .none, .says = "This SQLite Store belongs to a different canonical folder.", .next = "Stop Hosts and preserve the complete Store; restore its saved original canonical folder, or back up this Store and choose a fresh --store." },
         .store_locked => .{ .act = .operate, .input = null, .accepted = .none, .says = "Another Host owns this Store.", .next = "Use that Host, or pause it with rui host pause before starting again." },
         .wait_timed_out => .{ .act = .wait, .input = null, .accepted = .none, .says = "The wait ended while the request was still pending.", .next = "Run rui request wait with the same HANDLE again; never resubmit with a new key." },
+        .request_wire_incompatible => .{ .act = .recover, .input = .identity, .accepted = .none, .says = "The saved request uses a different Rui wire version; it was not sent.", .next = "Keep the original record and key. Recover it with the compatible Rui build; do not resubmit it with a new key." },
         .request_absent => .{ .act = .recover, .input = null, .accepted = .none, .says = "The Store has no such request; admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
         .reply_unconfirmed => .{ .act = .recover, .input = null, .accepted = .none, .says = "Admission is not confirmed.", .next = "Run rui request recover with the original HANDLE or record; never resubmit with a new key." },
         .memory_exhausted => .{ .act = .operate, .input = null, .accepted = .none, .says = "Memory was exhausted while reading the arguments.", .next = "Free memory and try the same invocation again." },
@@ -801,4 +820,13 @@ test "Session settings caller spellings retain every existing diagnostic" {
         .{ Input.label, "--label" },
     }) |case| try std.testing.expectEqualStrings(case[1], case[0].spelling().?);
     try std.testing.expect(Input.instructions.spelling() == null);
+}
+
+test "saved request wire mismatch has an explicit recovery diagnostic" {
+    try std.testing.expectEqual(Code.request_wire_incompatible, of(error.SavedRequestWireVersionMismatch));
+    var buffer: [1024]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try writeLine(&out, .request_wire_incompatible, .{ .resource = "request", .operation = "recover" });
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "different Rui wire version; it was not sent") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "do not resubmit it with a new key") != null);
 }

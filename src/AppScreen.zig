@@ -7,24 +7,56 @@ const Stack = @import("widgets/Stack.zig");
 const Layer = @import("widgets/Layer.zig");
 
 pub const Overview = Screen(@import("GroupedList.zig"));
-pub const Session = Screen(@import("Transcript.zig"));
+/// A Session switches between the feed and independent panel widgets.
+pub const Content = struct {
+    shown: vxfw.Widget,
 
-fn Screen(comptime Content: type) type {
+    pub fn widget(self: *Content) vxfw.Widget {
+        return self.shown;
+    }
+};
+pub const Session = Screen(Content);
+
+fn Screen(comptime Body: type) type {
     return struct {
         const Self = @This();
 
-        content: *Content,
+        content: *Body,
         input: *InputArea,
         style: @import("vaxis").Style = .{},
         header: ?vxfw.Widget = null,
         tail: ?vxfw.Widget = null,
+        host: ?vxfw.Widget = null,
+        /// One feed gutter in either shell layout; input keeps its own margin.
+        content_gutter: bool = false,
         marker: ?vxfw.Widget = null,
         overlay: ?vxfw.Widget = null,
         userdata: *anyopaque,
         on_event: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event) anyerror!void,
 
+        pub const Part = enum { whole, list, compose };
+        const empty: vxfw.Text = .{ .text = "" };
+
         pub fn widget(self: *Self) vxfw.Widget {
             return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+        }
+
+        pub fn listWidget(self: *Self) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = drawList };
+        }
+
+        pub fn composeWidget(self: *Self) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = event, .drawFn = drawCompose };
+        }
+
+        fn drawList(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            return self.drawPart(ctx, .list);
+        }
+
+        fn drawCompose(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            return self.drawPart(ctx, .compose);
         }
 
         fn event(raw: *anyopaque, ctx: *vxfw.EventContext, value: vxfw.Event) !void {
@@ -39,45 +71,64 @@ fn Screen(comptime Content: type) type {
 
         fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
             const self: *Self = @ptrCast(@alignCast(raw));
+            return self.drawPart(ctx, .whole);
+        }
+
+        pub fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: Part) std.mem.Allocator.Error!vxfw.Surface {
+            const own = switch (part) {
+                .whole => self.widget(),
+                .list => self.listWidget(),
+                .compose => self.composeWidget(),
+            };
             const size = ctx.max.size();
-            if (size.width == 0 or size.height == 0) return .empty(self.widget());
+            if (size.width == 0 or size.height == 0) return .empty(own);
             // Nest columns to retain the existing height priority: input,
             // header, tail, marker, then the remaining content.
             const lower = try ctx.arena.create(Stack);
-            const lower_children = try ctx.arena.alloc(Stack.Child, 3);
+            const lower_children = try ctx.arena.alloc(Stack.Child, 4);
             var count: usize = 1;
-            lower_children[0] = .{ .widget = self.content.widget(), .sizing = .fill };
-            if (self.marker) |marker| {
+            lower_children[0] = .{ .widget = if (part == .compose) empty.widget() else self.content.widget(), .sizing = .fill };
+            if (part == .whole) if (self.marker) |marker| {
                 const row = try ctx.arena.create(Marker);
-                row.* = .{ .child = marker };
+                row.* = .{ .child = marker, .style = self.style };
                 lower_children[count] = .{ .widget = row.widget() };
                 count += 1;
-            }
-            if (self.tail) |tail| {
+            };
+            if (part == .whole) if (self.tail) |tail| {
                 lower_children[count] = .{ .widget = tail };
                 count += 1;
-            }
+            };
+            if (part != .list) if (self.host) |host| {
+                lower_children[count] = .{ .widget = host };
+                count += 1;
+            };
             lower.* = .{ .children = lower_children[0..count] };
+            const feed: vxfw.Widget = if (self.content_gutter) gutter: {
+                const padding = try ctx.arena.create(vxfw.Padding);
+                padding.* = .{ .child = lower.widget(), .padding = .{ .left = 1 } };
+                break :gutter padding.widget();
+            } else lower.widget();
             const upper = try ctx.arena.create(Stack);
             const upper_children = try ctx.arena.alloc(Stack.Child, 2);
             count = 0;
-            if (self.header) |header| {
+            if (part != .compose) if (self.header) |header| {
                 upper_children[count] = .{ .widget = header };
                 count += 1;
-            }
-            upper_children[count] = .{ .widget = lower.widget(), .sizing = .fill };
+            };
+            upper_children[count] = .{ .widget = feed, .sizing = .fill };
             upper.* = .{ .children = upper_children[0 .. count + 1] };
             const column = try ctx.arena.create(Stack);
-            column.* = .{ .children = try ctx.arena.dupe(Stack.Child, &.{
-                .{ .widget = upper.widget(), .sizing = .fill },
-                .{ .widget = self.input.widget() },
-            }) };
+            const column_children = try ctx.arena.alloc(Stack.Child, if (part == .list) 1 else 2);
+            column_children[0] = .{ .widget = upper.widget(), .sizing = .fill };
+            if (part != .list) column_children[1] = .{ .widget = self.input.widget() };
+            column.* = .{ .children = column_children };
             const base = try column.widget().draw(ctx);
-            const panels = try ctx.arena.alloc(Layer.Panel, if (self.overlay != null) 1 else 0);
-            if (self.overlay) |overlay| panels[0] = .{
-                .child = overlay,
+            const overlay = if (part == .list) null else self.overlay;
+            const panels = try ctx.arena.alloc(Layer.Panel, if (overlay != null) 1 else 0);
+            if (overlay) |shown| panels[0] = .{
+                .child = shown,
                 .bottom = @intCast(base.children[1].origin.row),
-                .top = if (self.header != null and base.children[1].origin.row > 0) base.children[0].surface.children[0].surface.size.height else 0,
+                .top = if (part == .whole and self.header != null and base.children[1].origin.row > 0) base.children[0].surface.children[0].surface.size.height else 0,
                 .style = self.style,
                 .userdata = self,
                 .on_close = closeOverlay,
@@ -85,9 +136,9 @@ fn Screen(comptime Content: type) type {
             const layer = try ctx.arena.create(Layer);
             layer.* = .{ .base = column.widget(), .panels = panels };
             var surface = try layer.drawAbove(ctx, base);
-            // Existing screen policy still owns events; only composition moves
-            // here. The shell will route captured panel events in its next unit.
-            surface.widget = self.widget();
+            // Existing screen policy still owns events; these parts change
+            // composition without changing how panels or input handle keys.
+            surface.widget = own;
             surface.buffer = try vxfw.Surface.createBuffer(ctx.arena, size);
             @memset(surface.buffer, .{ .style = self.style });
             return surface;
@@ -97,6 +148,7 @@ fn Screen(comptime Content: type) type {
 
 const Marker = struct {
     child: vxfw.Widget,
+    style: @import("vaxis").Style,
 
     fn widget(self: *Marker) vxfw.Widget {
         return .{ .userdata = self, .drawFn = draw };
@@ -107,6 +159,7 @@ const Marker = struct {
         const width = ctx.max.width.?;
         if (width == 0 or ctx.max.height.? == 0) return .empty(self.widget());
         var row = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = 1 });
+        @memset(row.buffer, .{ .style = self.style });
         const drawn = try self.child.draw(ctx.withConstraints(.{}, .{ .width = width, .height = 1 }));
         const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
         children[0] = .{ .origin = .{ .row = 0, .col = width - drawn.size.width }, .surface = drawn, .z_index = 1 };
@@ -123,7 +176,7 @@ test "App screens compose content input facts status and an overlay without owni
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    var transcript: @import("Transcript.zig") = .{ .document = document };
+    var transcript: @import("DocumentView.zig") = .{ .document = document };
     var events: usize = 0;
     const Handler = struct {
         fn event(raw: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {
@@ -132,7 +185,8 @@ test "App screens compose content input facts status and an overlay without owni
         }
     };
     var overview: Overview = .{ .content = &list, .input = &input, .userdata = &events, .on_event = Handler.event };
-    var session: Session = .{ .content = &transcript, .input = &input, .userdata = &events, .on_event = Handler.event };
+    var facade: Content = .{ .shown = transcript.widget() };
+    var session: Session = .{ .content = &facade, .input = &input, .userdata = &events, .on_event = Handler.event };
     const overlay: vxfw.Text = .{ .text = "Commands" };
     overview.overlay = overlay.widget();
     session.overlay = overlay.widget();
@@ -191,9 +245,9 @@ test "App screens compose content input facts status and an overlay without owni
     }
 }
 
-test "App screens render the same cells as the original composition" {
+test "App screens render the original composition with painted marker rows" {
     const vaxis = @import("vaxis");
-    const Content = struct {
+    const TestContent = struct {
         fn widget(self: *@This()) vxfw.Widget {
             return .{ .userdata = self, .drawFn = draw };
         }
@@ -208,8 +262,8 @@ test "App screens render the same cells as the original composition" {
     var bytes = "draft".*;
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 2 };
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
-    var content: Content = .{};
-    var screen: Screen(Content) = .{ .content = &content, .input = &input, .userdata = &content, .on_event = Content.event, .style = .{ .bg = .{ .index = 4 } } };
+    var content: TestContent = .{};
+    var screen: Screen(TestContent) = .{ .content = &content, .input = &input, .userdata = &content, .on_event = TestContent.event, .style = .{ .bg = .{ .index = 4 } } };
     const header: vxfw.Text = .{ .text = "Header", .style = .{ .bold = true } };
     const tail: vxfw.Text = .{ .text = "Tail\nSecond" };
     const marker: vxfw.Text = .{ .text = "Up" };
@@ -231,15 +285,27 @@ test "App screens render the same cells as the original composition" {
         @memset(terminal.buf, .{});
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &terminal };
         surface.render(window, input.composer.widget());
+        if (screen.marker != null and screen.overlay == null and width > 0 and height > 0) {
+            const upper = surface.children[0].surface.children[0].surface;
+            const lower = upper.children[upper.children.len - 1];
+            const row = lower.surface.children[1];
+            if (row.surface.size.height > 0) {
+                const y: u16 = @intCast(lower.origin.row + row.origin.row);
+                const chip = row.surface.children[0];
+                for (0..@intCast(chip.origin.col)) |x| {
+                    try std.testing.expectEqual(screen.style.bg, terminal.readCell(@intCast(x), y).?.style.bg);
+                }
+            }
+        }
         for (terminal.buf) |cell| {
             hash.update(cell.char.grapheme);
             std.hash.autoHash(&hash, cell.char.width);
             std.hash.autoHash(&hash, cell.style);
         }
     };
-    // Captured from c347313's composition, across all optional rows and tiny,
-    // narrow and wide terminals. Hash visible graphemes, widths and styles.
-    try std.testing.expectEqual(@as(u64, 13927979314281808809), hash.final());
+    // Based on c347313's composition, with marker rows filled to the ground,
+    // across all optional rows and tiny, narrow and wide terminals.
+    try std.testing.expectEqual(@as(u64, 15741834227597727779), hash.final());
 }
 
 test "App screens update layout state through exhausted resizes for every optional row combination" {
@@ -276,9 +342,10 @@ test "App screens update layout state through exhausted resizes for every option
     for (0..8) |flags| for (1..11) |small_height| {
         var all: []const GroupedList.Row = rows[0..3];
         var list: GroupedList = .{ .rows = .of(&all) };
-        var transcript: @import("Transcript.zig") = .{ .document = document };
+        var transcript: @import("DocumentView.zig") = .{ .document = document };
         var overview: Overview = .{ .content = &list, .input = &input, .userdata = &list, .on_event = Row.event };
-        var session: Session = .{ .content = &transcript, .input = &input, .userdata = &transcript, .on_event = Row.event };
+        var facade: Content = .{ .shown = transcript.widget() };
+        var session: Session = .{ .content = &facade, .input = &input, .userdata = &transcript, .on_event = Row.event };
         inline for (.{ &overview, &session }) |screen| {
             var header: Row = .{ .text = .{ .text = "Header" } };
             var tail: Row = .{ .text = .{ .text = "Tail\nSecond" } };

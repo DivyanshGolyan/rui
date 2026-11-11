@@ -34,6 +34,8 @@ pub const Work = struct {
     bash: bool = true,
     message: bool = true,
     tool_continuation: bool = true,
+    /// An Attempt the retry scans read exists.
+    retry: bool = true,
 };
 
 /// `Work` reads only Store rows, which a commit moves, and whether new
@@ -129,11 +131,25 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
         .paused = context.turnsPaused(),
     };
     const retry_key: RetryKey = .{ .generation = admission_key.generation, .slot_changes = admission_key.slot_changes };
+    const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
+    const core_due = state.idle_core_generation != admission_key.generation;
+    // One round says which of the scans below would find work, so a commit
+    // costs that round rather than an empty scan of each kind.
+    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused };
+    const work_stands = if (state.work) |kept| std.meta.eql(kept.key, work_key) else false;
+    if (!work_stands and (core_due or !scanned)) {
+        state.work = null;
+        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused) };
+    }
+    const work: Work = if (state.work) |kept| kept.found else .{};
+    // No commit since that round read no Attempt for the retry scans, so
+    // neither would find one, whatever the slots hold or the clock says.
+    const retries_absent = !work.retry and std.meta.eql(state.work.?.key, work_key);
     const retries_idle = keyIs(state.idle_exhausted, retry_key) and keyIs(state.idle_retry, retry_key);
     // The poll interval bounds how often moving facts rescan; standing
     // facts rescan only when a scheduled retry falls due by the wall clock,
     // or that clock cannot be read.
-    const maintain_retries = context.providerConfigured() and
+    const maintain_retries = context.providerConfigured() and !retries_absent and
         (capacity_released or (retry_poll_due and (!retries_idle or retryFellDue(state.next_retry_unix_ms, context))));
     if (maintain_retries) {
         state.retry_admission_due = true;
@@ -146,18 +162,7 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
             state.idle_exhausted = retry_key;
         }
     }
-    const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
     var found_nothing = true;
-    const core_due = state.idle_core_generation != admission_key.generation;
-    // One round says which of the scans below would find work, so a commit
-    // costs that round rather than an empty scan of each kind.
-    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused };
-    const work_stands = if (state.work) |kept| std.meta.eql(kept.key, work_key) else false;
-    if (!work_stands and (core_due or !scanned)) {
-        state.work = null;
-        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused) };
-    }
-    const work: Work = if (state.work) |kept| kept.found else .{};
     // Core calls, owed stops and MCP admission take no execution slot.
     // Their shared empty scan reruns only once a commit moves the generation.
     if (core_due) {
@@ -190,7 +195,7 @@ noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timesta
             .retry, .message, .tool_continuation => blk: {
                 if (!context.providerConfigured() or !context.modelPreparationOpen()) continue;
                 break :blk switch (kind) {
-                    .retry => if (state.retry_admission_due) context.admitRetry() else continue,
+                    .retry => if (state.retry_admission_due and !retries_absent) context.admitRetry() else continue,
                     .message => context.admitNewModel(admission_key.paused),
                     .tool_continuation => context.admitToolContinuation(),
                     .bash => unreachable,
@@ -940,6 +945,25 @@ test "an admission that must retry later keeps scanning without a commit" {
     _ = run(&state, &context);
     _ = run(&state, &context);
     try std.testing.expectEqual(@as(usize, 3), context.count(.admit_continuation));
+}
+
+test "retry scans wait while the work survey read no Attempt for them" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0, .work = .{ .retry = false } };
+    var state: State = .{};
+    // Neither a commit, a released slot nor the poll interval runs them.
+    _ = run(&state, &context);
+    context.generation += 1;
+    context.slot_changes += 1;
+    context.now_ns += 10 * retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_retry));
+    // A commit after which the survey reads one does.
+    context.work.retry = true;
+    context.generation += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
 }
 
 test "retry scans that found nothing rerun only after a commit, a slot change or a scheduled retry falling due" {
