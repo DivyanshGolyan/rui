@@ -1409,7 +1409,7 @@ test "failed tool exit status is named rather than read as a count" {
         var buffer: [128]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit);
+        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit, null);
         var expected: [128]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n× Tool call · exit {s}\n", .{exit}), out.buffered());
     }
