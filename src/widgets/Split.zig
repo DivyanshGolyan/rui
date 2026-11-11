@@ -9,7 +9,9 @@ right: vxfw.Widget,
 left_width: u16,
 min_width: u16,
 narrow: enum { left, right },
-divider: struct { grapheme: []const u8 = "│", style: vaxis.Style = .{} } = .{},
+divider: Divider = .{},
+
+pub const Divider = struct { grapheme: []const u8 = "│", style: vaxis.Style = .{} };
 
 pub fn widget(self: *const Self) vxfw.Widget {
     return .{ .userdata = @constCast(self), .drawFn = draw };

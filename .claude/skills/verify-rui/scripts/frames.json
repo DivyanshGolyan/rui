@@ -1,0 +1,1205 @@
+{
+  "sizes": [
+    "140x40",
+    "46x30"
+  ],
+  "states": [
+    {
+      "name": "start-empty",
+      "note": "01-overview-empty",
+      "open": "overview",
+      "steps": [],
+      "expect": "Type a task"
+    },
+    {
+      "name": "settings",
+      "note": "App settings via End/Enter; does not require S5's drawn Settings row",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Rui"
+        },
+        {
+          "wait": "Notifications"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Notifications",
+        "Sign-in",
+        "Version"
+      ]
+    },
+    {
+      "name": "start",
+      "note": "02-overview",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Needs you"
+        },
+        {
+          "wait": "Profile the Host under load"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Fix retry deadline",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "The retry loop waits a full backoff even when the request is already late. Fix it with a rich answer in markdown.",
+            "Give me a tool demonstration: list the project, then run the two checks."
+          ]
+        },
+        {
+          "label": "Schema migration",
+          "workspace": "code/drift",
+          "mode": "ask",
+          "effort": "high",
+          "messages": [
+            "Review the schema migration. First, run a consent check."
+          ],
+          "settle": "pending"
+        },
+        {
+          "label": "Flaky upload test",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "The upload test fails one run in ten. Find out why. (invalid output)"
+          ]
+        },
+        {
+          "label": "Profile the Host under load",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Profile the Host under load with a long bash call."
+          ],
+          "settle": "stop"
+        },
+        {
+          "label": "Release notes for 0.60",
+          "workspace": "code/blog",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Draft the release notes for 0.60 from the merged PRs."
+          ]
+        },
+        {
+          "label": "Split the Store module",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Split the Store module into smaller files."
+          ]
+        },
+        {
+          "label": "Explain the Host",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Explain the Host in a long answer."
+          ]
+        }
+      ],
+      "expect": [
+        "Needs you",
+        "■"
+      ]
+    },
+    {
+      "name": "start-busy",
+      "note": "03-overview-busy: ⠹ counts active Sessions",
+      "open": "overview",
+      "steps": [
+        {
+          "send": {
+            "to": "Benchmark idle memory",
+            "text": "Benchmark idle memory with a slow explanation.",
+            "wait": false
+          }
+        },
+        {
+          "send": {
+            "to": "Docs build",
+            "text": "Build the docs and run the tests with parallel bash.",
+            "wait": false
+          }
+        },
+        {
+          "wait": "Run the slow tests"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Benchmark idle memory",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        },
+        {
+          "label": "Docs build",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
+      "expect": [
+        "Docs build",
+        "Run the slow tests"
+      ]
+    },
+    {
+      "name": "chat",
+      "note": "10-conversation: tool rows stay folded, with named failed exits",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "send": {
+            "to": "Docs build",
+            "text": "Summarise the build results.",
+            "wait": true
+          }
+        },
+        {
+          "send": {
+            "to": "Benchmark idle memory",
+            "text": "Summarise the benchmark.",
+            "wait": true
+          }
+        },
+        {
+          "wait": "The project has a README"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "The project has a README",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "tool-open",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "    stderr tail:"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour"
+    },
+    {
+      "name": "tool-open-two",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up"
+          ]
+        },
+        {
+          "wait": "✓ List project files"
+        },
+        {
+          "gone": "× Fail with exit 127"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn",
+            "PgDn",
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "    Bash succeeded. Exit code: 0.",
+        "    stdout tail:",
+        "    README.md",
+        "    src",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears"
+    },
+    {
+      "name": "tool-open-long",
+      "open": "Long tool output",
+      "cast": [
+        {
+          "label": "Long tool output",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Show long tool output."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Printed thirty-two numbered lines."
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "more lines"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ Print thirty-two lines",
+        "    Bash succeeded. Exit code: 0.",
+        "    stdout tail:",
+        "    output line 18",
+        "    … 14 more lines"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines"
+    },
+    {
+      "name": "tool-open-nocolor",
+      "open": "Fix retry deadline",
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "steps": [
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "keys": [
+            "C-o"
+          ]
+        },
+        {
+          "wait": "    stderr tail:"
+        },
+        {
+          "gone": "Opening tool output…"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        },
+        {
+          "wait": "    unknown option --help"
+        },
+        {
+          "gone": "▸"
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "    Bash failed. Exit code: 1.",
+        "    stderr tail:",
+        "    usage: example",
+        "    unknown option --help"
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour"
+    },
+    {
+      "name": "chat-draft-kept",
+      "note": "chat draft and caret kept after Esc and reopening",
+      "open": "Fix retry deadline",
+      "steps": [
+        { "text": "Keep this chat draft" },
+        { "keys": ["Left", "Left", "Esc"] },
+        { "wait": "Type a task" },
+        { "keys": ["Enter"] },
+        { "wait": "Keep this chat draft" }
+      ],
+      "expect": "Keep this chat draft"
+    },
+    {
+      "name": "chat-scrolled",
+      "note": "11-conversation-scrolled",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "What I changed"
+        }
+      ],
+      "expect": [
+        "What I changed",
+        "retry.zig"
+      ]
+    },
+    {
+      "name": "chat-top",
+      "note": "12-conversation-top",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp",
+            "PgUp",
+            "PgUp",
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "Start of conversation"
+        }
+      ],
+      "expect": [
+        "Start of conversation",
+        "What I changed"
+      ]
+    },
+    {
+      "name": "markdown",
+      "note": "12b-markdown-code-table-link",
+      "open": "Markdown retry",
+      "cast": [
+        {
+          "label": "Markdown retry",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "A compact rich answer."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "markdown-wrapped",
+      "note": "12c-markdown-wrapped: pin the four-space code continuation while narrow, then resize to the sidebar layout",
+      "open": "Markdown retry",
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        },
+        {
+          "wait": "return null; //\n    expired"
+        }
+      ],
+      "expect": [
+        "return null; //",
+        "expired",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "chat-working",
+      "note": "13b-working: owns its slow Turn; leaves the retry transcript unchanged",
+      "open": "Explain the retry change",
+      "steps": [
+        {
+          "text": "Explain the change again, a slow walk through is fine."
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Waiting"
+        },
+        {
+          "wait": "ctrl+x stop"
+        }
+      ],
+      "expect": [
+        "Waiting",
+        "ctrl+x stop"
+      ],
+      "cast": [
+        {
+          "label": "Explain the retry change",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "chat-queued",
+      "note": "13d-queued-message: owns its slow Turn instead of borrowing chat-working work",
+      "open": "Queue a follow-up",
+      "steps": [
+        {
+          "send": {
+            "to": "Queue a follow-up",
+            "text": "Explain the change in a slow walk through.",
+            "wait": false
+          }
+        },
+        {
+          "wait": "Waiting"
+        },
+        {
+          "wait": "ctrl+x stop"
+        },
+        {
+          "text": "and one more thing"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "◌ and one more thing"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Queue a follow-up",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "tools-running",
+      "note": "14-tools-running: ⠹ marks active tool calls; owns its parallel jobs, leaving the retry transcript unchanged",
+      "open": "Run parallel checks",
+      "steps": [
+        {
+          "send": {
+            "to": "Run parallel checks",
+            "text": "Now build the docs and run the slow tests as parallel bash jobs.",
+            "wait": false
+          }
+        },
+        {
+          "wait": "Build the docs"
+        },
+        {
+          "wait": "Run the slow tests"
+        },
+        {
+          "wait": "ctrl+x stop"
+        }
+      ],
+      "expect": [
+        "⠹ Build the docs",
+        "Run the slow tests",
+        "ctrl+x stop"
+      ],
+      "cast": [
+        {
+          "label": "Run parallel checks",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stop",
+      "note": "14c-stop-asked: after stop, no stale Stopping line; owns its slow Bash call",
+      "open": "Stop the slow job",
+      "cast": [
+        {
+          "label": "Stop the slow job",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "send": {
+            "to": "Stop the slow job",
+            "text": "long bash",
+            "wait": false
+          }
+        },
+        {
+          "wait": "⠹ Sleep eight seconds"
+        },
+        {
+          "keys": [
+            "C-x"
+          ]
+        },
+        {
+          "wait": "■ Stopped",
+          "timeout": 60
+        }
+      ],
+      "expect": "■ Stopped",
+      "absent": [
+        "Stopping"
+      ]
+    },
+    {
+      "name": "stopped",
+      "note": "14d-stopped: one ■ Stopped line, without continuation advice; independently seeded with settle: stop",
+      "open": "Profile the Host under load",
+      "steps": [
+        {
+          "wait": "■ Stopped"
+        }
+      ]
+    },
+    {
+      "name": "chat-failed",
+      "note": "16-conversation-failed: × Model reply unreadable, without a saved code or provider report",
+      "open": "Flaky upload test",
+      "steps": [
+        {
+          "wait": "× Model reply unreadable"
+        }
+      ]
+    },
+    {
+      "name": "approval",
+      "note": "17-approval",
+      "open": "Schema migration",
+      "steps": [
+        {
+          "wait": "Allow once"
+        },
+        {
+          "wait": "Deny"
+        }
+      ]
+    },
+    {
+      "name": "approval-typing",
+      "note": "17c-approval-typing",
+      "open": "Schema migration",
+      "steps": [
+        {
+          "wait": "Allow once"
+        },
+        {
+          "text": "I am checking the migration before approving it."
+        },
+        {
+          "wait": "I am checking the migration before approving it."
+        }
+      ]
+    },
+    {
+      "name": "approval-after-esc",
+      "note": "17d-approval-after-esc",
+      "open": "Schema migration",
+      "steps": [
+        {
+          "wait": "Allow once"
+        },
+        {
+          "text": "I am checking the migration before approving it."
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "Allow once"
+        }
+      ]
+    },
+    {
+      "name": "help",
+      "note": "20-help: Ctrl-O opens a row; no separate tool-details command",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/help"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Marks"
+        },
+        {
+          "gone": "/details"
+        }
+      ],
+      "expect": [
+        "Marks",
+        "Keys",
+        "ctrl+o                 open",
+        "Commands",
+        "/copy [code|file]"
+      ]
+    },
+    {
+      "name": "slash",
+      "note": "21-slash: conversation commands without a tool-details page",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/help"
+        },
+        {
+          "gone": "/details"
+        }
+      ],
+      "expect": [
+        "/copy [code|file]",
+        "/effort LEVEL",
+        "/help",
+        "/history"
+      ]
+    },
+    {
+      "name": "slash-filter",
+      "note": "22-slash-filter",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/stat"
+        },
+        {
+          "wait": "/status"
+        }
+      ]
+    },
+    {
+      "name": "unknown-command",
+      "note": "25-unknown-command",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/nope"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Unknown command /nope"
+        }
+      ]
+    },
+    {
+      "name": "misused-command",
+      "note": "23-misused",
+      "open": "Release notes for 0.60",
+      "steps": [
+        {
+          "text": "/configure --reasoning-effort \"\""
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /configure"
+        },
+        {
+          "text": "/status extra"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Usage: /status"
+        }
+      ]
+    },
+    {
+      "name": "status",
+      "note": "20-status",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/status"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "This Session"
+        }
+      ]
+    },
+    {
+      "name": "status-page2",
+      "note": "20b-status-page2",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/status"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "This Session"
+        },
+        {
+          "keys": [
+            "PgDn"
+          ]
+        }
+      ],
+      "expect": "New Sessions"
+    },
+    {
+      "name": "model-picker",
+      "note": "41-model-picker",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/model"
+        },
+        {
+          "wait": "tab sign-in"
+        }
+      ]
+    },
+    {
+      "name": "model-filter",
+      "note": "41d-model-filter",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/model ter"
+        },
+        {
+          "wait": "gpt-6.1-terra"
+        },
+        {
+          "keys": [
+            "Down",
+            "Right",
+            "Right"
+          ]
+        }
+      ],
+      "expect": [
+        "gpt-6.1-terra",
+        "‹ high ›"
+      ]
+    },
+    {
+      "name": "start-draft",
+      "note": "48-overview-draft",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "Add a --json flag to rui session list"
+        },
+        {
+          "wait": "enter start"
+        }
+      ]
+    },
+    {
+      "name": "long-labels",
+      "note": "50c-long-label",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Migrate the billing"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Migrate the billing reconciliation worker from the legacy queue to the new reconciliation pipeline",
+          "workspace": "code/customer-platform/production/billing-reconciliation-worker",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Plan the billing reconciliation migration."
+          ]
+        }
+      ],
+      "expect": "Migrate"
+    },
+    {
+      "name": "many-sessions",
+      "note": "51-many-sessions",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Batch job"
+        }
+      ],
+      "cast": [
+        {
+          "label": "Batch job {n}",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Complete this batch job."
+          ],
+          "count": 25
+        }
+      ]
+    },
+    {
+      "name": "many-sessions-end",
+      "note": "51b-many-sessions-end",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "wait": "Flaky upload"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": "Batch job"
+    },
+    {
+      "name": "day-start",
+      "note": "70-light-overview",
+      "open": "overview",
+      "steps": [],
+      "theme": "day",
+      "expect": "Type a task"
+    },
+    {
+      "name": "day-chat",
+      "note": "71-light-conversation",
+      "open": "Markdown retry",
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "theme": "day",
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "mist-chat-scrolled",
+      "note": "light terminal with its own background, scrolled back",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "keys": [
+            "PgUp"
+          ]
+        },
+        {
+          "wait": "What I changed"
+        }
+      ],
+      "theme": "mist"
+    },
+    {
+      "name": "no-color",
+      "note": "72-no-color",
+      "open": "Markdown retry",
+      "steps": [
+        {
+          "wait": "retry policy notes"
+        }
+      ],
+      "env": {
+        "NO_COLOR": "1"
+      },
+      "expect": [
+        "What I changed",
+        "retry.zig",
+        "pub fn next",
+        "Late request  waits 30 s  fails at once",
+        "retry policy notes"
+      ]
+    },
+    {
+      "name": "host-stopped",
+      "note": "60-host-down-overview",
+      "open": "overview",
+      "steps": [
+        {
+          "host": "pause"
+        },
+        {
+          "wait": "Host stopped"
+        }
+      ]
+    },
+    {
+      "name": "host-stopped-chat",
+      "note": "60b-host-down-conversation",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "host": "start"
+        },
+        {
+          "sleep": 1
+        },
+        {
+          "host": "pause"
+        },
+        {
+          "wait": "Host stopped"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": "Host stopped"
+    },
+    {
+      "name": "host-back",
+      "note": "61-host-back",
+      "open": "overview",
+      "steps": [
+        {
+          "host": "start"
+        },
+        {
+          "gone": "Host stopped"
+        }
+      ],
+      "expect": "Batch job"
+    },
+    {
+      "name": "exit",
+      "note": "81-exit",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/exit"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Detached. Host work continues."
+        },
+        {
+          "wait": "Pane is dead (status 0"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": "Pane is dead (status 0"
+    }
+  ]
+}

@@ -11,7 +11,7 @@ const session_id = @import("../../session_id.zig");
 const Bounded = @import("../../bounded.zig").Bounded;
 const model_capability = @import("../../model_capability.zig");
 const provider_name = @import("../../provider_name.zig");
-const tool_catalog = @import("../../tool_record.zig");
+const tool_defs = @import("../../tool_record.zig");
 const output_format = @import("../../output_format.zig");
 const prefix_seal = @import("../../prefix_seal.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
@@ -93,8 +93,8 @@ pub const HistoricalSettings = struct {
 /// One tool record the frozen settings offer, as saved: its texts are
 /// rendered from the Store, never from the Host's built-ins.
 pub const HistoricalTool = struct {
-    name: Bounded(tool_catalog.max_name_bytes) = .{},
-    owner: tool_catalog.Owner = undefined,
+    name: Bounded(tool_defs.max_name_bytes) = .{},
+    owner: tool_defs.Owner = undefined,
     description: HistoricalContent = undefined,
     input_schema: HistoricalContent = undefined,
 };
@@ -204,6 +204,9 @@ pub const HistoricalView = struct {
     /// What the entry batch holds beyond its entries, on the heap for the
     /// view's life; its first read allocates it.
     page: ?*Page = null,
+    /// The settings an admission's commit already read for this view
+    /// (`Start`); `settings` then answers them without a round.
+    settled: ?*const HistoricalSettings = null,
     /// Open readers that borrow the page's bytes, which are then only
     /// added to.
     inline_readers: usize = 0,
@@ -384,6 +387,10 @@ pub const HistoricalView = struct {
     /// view once did, and reads the first page of the output check.
     pub fn settings(self: *HistoricalView, out: *HistoricalSettings) !void {
         std.debug.assert(self.active);
+        if (self.settled == out) {
+            self.settled = null;
+            return;
+        }
         try self.allocatePage();
         return readHistoricalSettings(self.store, self, out);
     }
@@ -648,8 +655,8 @@ const tool_texts = "JOIN content description ON description.content_id=tool.desc
 
 const ToolRow = struct {
     ordinal: u64,
-    name: Bounded(tool_catalog.max_name_bytes),
-    owner: tool_catalog.Owner,
+    name: Bounded(tool_defs.max_name_bytes),
+    owner: tool_defs.Owner,
     description_content_id: rsql.Positive,
     description_length: u64,
     description_digest: [32]u8,
@@ -713,7 +720,7 @@ const historical_provider_tool = rsql.Read(.{
     .sql = "SELECT member.ordinal,tool.name FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE member.tool_set_id=?1 AND member.ordinal>=?2 AND tool.owner='provider' ORDER BY member.ordinal LIMIT 1",
     .Args = struct { set: u64, ordinal: u64 },
-    .Row = struct { ordinal: u64, name: *Bounded(tool_catalog.max_name_bytes) },
+    .Row = struct { ordinal: u64, name: *Bounded(tool_defs.max_name_bytes) },
     .cardinality = .optional,
 });
 
@@ -757,9 +764,9 @@ fn readHistoricalSettingsHeld(self: *Store, view: *HistoricalView, out: *Histori
 /// The settings an Operation's request froze, with its Session's binding.
 /// The texts decode straight into the caller's settings.
 const historical_settings = rsql.Read(.{
-    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id," ++ tool_set.offeredSetSql("r") ++ " AS tool_set_id,tool_set.member_count," ++
+    .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,o.tool_set_id AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+        "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         configuration_domain.operationReasoningEffortSql("o", "r") ++ " AS reasoning_effort,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
@@ -767,7 +774,7 @@ const historical_settings = rsql.Read(.{
         pageBytesSql("instructions", "instructions_bytes") ++ "," ++
         "output_schema.byte_length AS output_schema_length,output_schema.digest AS output_schema_digest,output_schema.private AS output_schema_private " ++
         "FROM model_operation o JOIN session s ON s.session_ref=o.session_ref JOIN session_revision r ON r.session_ref=o.session_ref " ++
-        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=" ++ tool_set.offeredSetSql("r") ++ " JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 " ++
+        "AND r.revision=o.settings_revision JOIN tool_set ON tool_set.tool_set_id=o.tool_set_id JOIN session_revision baseline ON baseline.session_ref=o.session_ref AND baseline.revision=1 " ++
         "JOIN content instructions ON instructions.content_id=baseline.instructions_content_id " ++
         "LEFT JOIN content output_schema ON output_schema.content_id=r.output_schema_content_id WHERE o.operation_id=?1",
     .Args = struct { operation: u64 },
@@ -807,73 +814,135 @@ const historical_settings = rsql.Read(.{
 /// `CorruptStore` for the rest, main's answer for each; so is a content
 /// row the settings name and the Store lacks.
 fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !void {
-    const page = view.page.?;
-    const row = page.decoded(historical_settings.Row);
-    row.model = &out.model;
-    row.session_ref = &out.session;
-    row.workspace = &out.workspace;
-    var standing: model_settlement_domain.attempt_standing.Result = undefined;
-    model_settlement_domain.queueAttemptKind(a, view.binding, &standing);
-    var found: store_access.Found = undefined;
-    a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, row, &found);
-    const first = view.output_frontier == null;
-    var boundary: reads_domain.First(output_boundary.Row) = .{};
-    var sources: OutputSources = .{ .view = view };
-    if (first) {
-        a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &boundary);
-        a.readEach(first_output_sources, .{ .operation = view.binding.operation_id }, output_source_page, &sources);
-    }
+    var read: SettingsRead = .init(view, out);
+    read.queue(a);
     try store_access.runNamed(a, .{.{ model_settlement_domain.attempt_standing, error.OperationReadFailed }}, error.CorruptStore);
-    _ = try model_settlement_domain.attemptKindOf(standing, view.binding);
-    if (!found.get() or !row.catalogs_consistent) return error.CorruptStore;
-    if (first) {
-        try sources.finish();
-        try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
-    }
-    page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
-    if (row.member_count > tool_catalog.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
-    view.tool_set_id = row.tool_set_id.get();
-    view.tool_count = row.member_count;
-    view.provider_tool_count = row.provider_count;
-    view.next_tool = 0;
-    out.tool_count = row.member_count;
-    const instructions: content_metadata.Row = .{ .byte_length = row.instructions_length, .digest = row.instructions_digest, .private = row.instructions_private };
-    out.baseline_instructions = try viewContent(view, row.instructions_content_id.get(), &instructions, false);
-    out.output_schema = if (row.output_schema_content_id) |id| schema: {
-        const output_schema: content_metadata.Row = .{
-            .byte_length = row.output_schema_length orelse return error.CorruptStore,
-            .digest = row.output_schema_digest orelse return error.CorruptStore,
-            .private = row.output_schema_private orelse return error.CorruptStore,
-        };
-        break :schema try viewContent(view, id.get(), &output_schema, false);
-    } else null;
-    out.store = a.store.selector;
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    hash.update("rui/session-affinity/v1");
-    var length: [8]u8 = undefined;
-    std.mem.writeInt(u64, &length, a.store.selector.len, .big);
-    hash.update(&length);
-    hash.update(a.store.selector.slice());
-    std.mem.writeInt(u64, &length, out.session.len, .big);
-    hash.update(&length);
-    hash.update(out.session.slice());
-    out.operation = switch (row.purpose) {
-        0 => .assistant_response,
-        1 => .compaction,
-        else => return error.CorruptStore,
-    };
-    if (row.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
-    out.compaction_trigger = row.compaction_trigger;
-    out.output_reservation = row.output_reservation orelse return error.CorruptStore;
-    out.reasoning_effort = row.reasoning_effort;
-    out.starting_effort = row.starting_effort;
-    out.provider = row.provider;
-    // Requests are built by the codec the Session pinned, which takes no
-    // options; a Session pinned to one this Host does not serve cannot be.
-    out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
-    if (!row.plain_codec) return error.CorruptStore;
-    out.session_affinity = hash.finalResult()[0..16].*;
+    return read.settle(a.store);
 }
+
+/// Where an admission starts the request of the Attempt it admits: the
+/// preparation's view and settings, which stay where they are.
+pub const Start = struct {
+    view: *HistoricalView,
+    settings: *HistoricalSettings,
+
+    /// Opens the view for `binding` with its page; false when there is no
+    /// memory for one, and the view is then not open.
+    pub fn open(start: Start, store: *Store, binding: AttemptBinding) bool {
+        start.view.* = .{ .store = store, .binding = binding };
+        start.view.allocatePage() catch return false;
+        return true;
+    }
+};
+
+/// The settings round as a value: `queue` binds its reads on the Access
+/// whose round or message runs them, and `settle` takes their answers
+/// once they ran. `settingsOf` runs it in a round of its own; an admission
+/// queues it behind its COMMIT (`Start`), where it costs no round trip.
+pub const SettingsRead = struct {
+    view: *HistoricalView,
+    out: *HistoricalSettings,
+    standing: model_settlement_domain.attempt_standing.Result = undefined,
+    found: store_access.Found = undefined,
+    first: bool,
+    boundary: reads_domain.First(output_boundary.Row) = .{},
+    sources: OutputSources,
+
+    pub fn init(view: *HistoricalView, out: *HistoricalSettings) SettingsRead {
+        return .{ .view = view, .out = out, .first = view.output_frontier == null, .sources = .{ .view = view } };
+    }
+
+    pub fn queue(read: *SettingsRead, a: anytype) void {
+        const view = read.view;
+        const row = view.page.?.decoded(historical_settings.Row);
+        row.model = &read.out.model;
+        row.session_ref = &read.out.session;
+        row.workspace = &read.out.workspace;
+        model_settlement_domain.queueAttemptKind(a, view.binding, &read.standing);
+        a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, row, &read.found);
+        if (read.first) {
+            a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &read.boundary);
+            a.readEach(first_output_sources, .{ .operation = view.binding.operation_id }, output_source_page, &read.sources);
+        }
+    }
+
+    /// This round as the reads an admission's commit carries.
+    pub fn follow(read: *SettingsRead) store_core.Follow {
+        return .{ .context = read, .queue = followQueue, .settle = followSettle };
+    }
+
+    fn followQueue(context: *anyopaque, a: *store_access.Access(.survey, error{})) void {
+        const read: *SettingsRead = @ptrCast(@alignCast(context));
+        read.queue(a);
+    }
+
+    /// A round whose answers do not settle leaves the view unsettled: its
+    /// owner's own `settings` round then answers as it always did.
+    fn followSettle(context: *anyopaque) void {
+        const read: *SettingsRead = @ptrCast(@alignCast(context));
+        read.settle(read.view.store) catch return;
+        read.view.settled = read.out;
+    }
+
+    pub fn settle(read: *SettingsRead, store: *Store) !void {
+        const view = read.view;
+        const out = read.out;
+        const page = view.page.?;
+        const row = page.decoded(historical_settings.Row);
+        const first = read.first;
+        const boundary = &read.boundary;
+        const sources = &read.sources;
+        _ = try model_settlement_domain.attemptKindOf(read.standing, view.binding);
+        if (!read.found.get() or !row.catalogs_consistent) return error.CorruptStore;
+        if (first) {
+            try sources.finish();
+            try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
+        }
+        page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
+        if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
+        view.tool_set_id = row.tool_set_id.get();
+        view.tool_count = row.member_count;
+        view.provider_tool_count = row.provider_count;
+        view.next_tool = 0;
+        out.tool_count = row.member_count;
+        const instructions: content_metadata.Row = .{ .byte_length = row.instructions_length, .digest = row.instructions_digest, .private = row.instructions_private };
+        out.baseline_instructions = try viewContent(view, row.instructions_content_id.get(), &instructions, false);
+        out.output_schema = if (row.output_schema_content_id) |id| schema: {
+            const output_schema: content_metadata.Row = .{
+                .byte_length = row.output_schema_length orelse return error.CorruptStore,
+                .digest = row.output_schema_digest orelse return error.CorruptStore,
+                .private = row.output_schema_private orelse return error.CorruptStore,
+            };
+            break :schema try viewContent(view, id.get(), &output_schema, false);
+        } else null;
+        out.store = store.selector;
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update("rui/session-affinity/v1");
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, store.selector.len, .big);
+        hash.update(&length);
+        hash.update(store.selector.slice());
+        std.mem.writeInt(u64, &length, out.session.len, .big);
+        hash.update(&length);
+        hash.update(out.session.slice());
+        out.operation = switch (row.purpose) {
+            0 => .assistant_response,
+            1 => .compaction,
+            else => return error.CorruptStore,
+        };
+        if (row.compaction_trigger == @as(?u64, 0)) return error.CorruptStore;
+        out.compaction_trigger = row.compaction_trigger;
+        out.output_reservation = row.output_reservation orelse return error.CorruptStore;
+        out.reasoning_effort = row.reasoning_effort;
+        out.starting_effort = row.starting_effort;
+        out.provider = row.provider;
+        // Requests are built by the codec the Session pinned, which takes no
+        // options; a Session pinned to one this Host does not serve cannot be.
+        out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
+        if (!row.plain_codec) return error.CorruptStore;
+        out.session_affinity = hash.finalResult()[0..16].*;
+    }
+};
 
 fn readHistoricalEntry(self: *Store, view: *HistoricalView, after_position: u64) !HistoricalView.EntryProgress {
     return self.queue().run(readHistoricalEntryHeld, .{ self, view, after_position });
@@ -1235,8 +1304,8 @@ const historical_entries = rsql.Read(.{
         // Every earlier Operation of the Session above the floor, whatever
         // its outcome: its request carried its own boundary, so later ones do too.
         // With each, its tool set and whether it declares any tool.
-        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ configuration_domain.operationReasoningEffortSql("earlier", "revision") ++ "," ++ tool_set.offeredSetSql("revision") ++ "," ++
-        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where(tool_set.offeredSetSql("revision"), "earlier.admission_position", "?6") ++ "),NULL " ++
+        "SELECT earlier.admission_position,4,NULL,NULL,NULL,NULL,revision.model,NULL,NULL,NULL,NULL,NULL," ++ configuration_domain.operationReasoningEffortSql("earlier", "revision") ++ ",earlier.tool_set_id," ++
+        "EXISTS(SELECT 1 FROM " ++ declared_members_from ++ " WHERE " ++ declared_members_where("earlier.tool_set_id", "earlier.admission_position", "?6") ++ "),NULL " ++
         "FROM model_operation current JOIN model_operation earlier ON earlier.session_ref=current.session_ref " ++
         "JOIN session_revision revision ON revision.session_ref=earlier.session_ref AND revision.revision=earlier.settings_revision " ++
         "WHERE current.operation_id=?1 AND earlier.admission_position>?2 AND earlier.admission_position<current.admission_position " ++
@@ -1283,8 +1352,7 @@ const declared_members_from = "tool_set_member member JOIN tool_record tool ON t
 fn declared_members_where(comptime set: []const u8, comptime position: []const u8, comptime anchor: []const u8) []const u8 {
     return "member.tool_set_id=" ++ set ++ " AND tool.owner!='provider' AND member.tool_record_id NOT IN (" ++
         "SELECT previous_member.tool_record_id FROM tool_set_member previous_member WHERE previous_member.tool_set_id=coalesce((" ++
-        "SELECT " ++ tool_set.offeredSetSql("previous_revision") ++ " FROM model_operation previous JOIN session_revision previous_revision " ++
-        "ON previous_revision.session_ref=previous.session_ref AND previous_revision.revision=previous.settings_revision " ++
+        "SELECT previous.tool_set_id FROM model_operation previous " ++
         "WHERE previous.session_ref=current.session_ref AND previous.admission_position<" ++ position ++
         " AND previous.admission_position>=" ++ anchor ++ " ORDER BY previous.admission_position DESC LIMIT 1),0))";
 }
@@ -1689,8 +1757,8 @@ const Page = struct {
     /// A tool row without its texts' bytes.
     const Tool = struct {
         ordinal: u64,
-        name: Bounded(tool_catalog.max_name_bytes),
-        owner: tool_catalog.Owner,
+        name: Bounded(tool_defs.max_name_bytes),
+        owner: tool_defs.Owner,
         description_content_id: rsql.Positive,
         description_length: u64,
         description_digest: [32]u8,

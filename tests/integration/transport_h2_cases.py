@@ -189,15 +189,9 @@ def round_trip(root, endpoint, capacity, ca_file, rounds=2, *, observe=None):
                     configured = requests.call(
                         "configure", key=f"config-{capacity}-{index}",
                         session="", configuration={
-                            "workspace": {"state": "value", "value": str(dispatch.ROOT)},
-                            "provider": {"state": "value", "value": "codex"},
-                            "model": {"state": "value", "value": "gpt-6-sol"},
-                            "instructions": {"state": "omitted"},
-                            "tools": {"state": "value", "value": ["bash"]},
-                            "permission_mode": {"state": "value", "value": "ask"},
-                            "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
-                            "reasoning_effort": {"state": "value", "value": "medium"},
-                            "output_schema": {"state": "omitted"},
+                            "workspace": str(dispatch.ROOT), "provider": "codex", "model": "gpt-6-sol",
+                            "tools": ["bash"], "permissionMode": "ask",
+                            "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
                         },
                     )
                     assert configured["answer"]["status"] == "accepted", configured
@@ -345,15 +339,9 @@ def held_population(root):
                     configured = requests.call(
                         "configure", key=f"held-config-{index}",
                         session="", configuration={
-                            "workspace": {"state": "value", "value": str(dispatch.ROOT)},
-                            "provider": {"state": "value", "value": "codex"},
-                            "model": {"state": "value", "value": "gpt-6-sol"},
-                            "instructions": {"state": "omitted"},
-                            "tools": {"state": "value", "value": ["bash"]},
-                            "permission_mode": {"state": "value", "value": "ask"},
-                            "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
-                            "reasoning_effort": {"state": "value", "value": "medium"},
-                            "output_schema": {"state": "omitted"},
+                            "workspace": str(dispatch.ROOT), "provider": "codex", "model": "gpt-6-sol",
+                            "tools": ["bash"], "permissionMode": "ask",
+                            "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
                         },
                     )
                     assert configured["answer"]["status"] == "accepted", configured

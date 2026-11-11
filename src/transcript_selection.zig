@@ -175,10 +175,10 @@ test "a row's columns map to the clusters they show, indents and wide cells incl
     const document = try std.testing.allocator.create(Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    // At 10 columns "• 雪 fall fast" wraps: "• 雪 fall" then a hanging "  fast".
+    // At 10 columns "⠹ 雪 fall fast" wraps: "⠹ 雪 fall" then a hanging "  fast".
     // Spaces are drawn from no text byte: each is the point after the text
     // before it.
-    try document.append("• 雪 fall fast\n\nend");
+    try document.append("⠹ 雪 fall fast\n\nend");
     try document.prepare();
     var cells: [10 * 4]vaxis.Cell = undefined;
     layOut(document, .{}, 10, 4, &cells);
@@ -261,4 +261,34 @@ test "only a click on a peer's name opens its Session" {
     // The point after the name, and the text before it, open nothing.
     try std.testing.expectEqual(@as(?[]const u8, null), opens(document, Spot.point(at)));
     try std.testing.expectEqual(@as(?[]const u8, null), opens(document, .{ .start = at - 1, .end = at }));
+}
+
+test "copying code across wrapped and blank band rows contains only code text" {
+    const gpa = std.testing.allocator;
+    const document = try gpa.create(Document);
+    defer gpa.destroy(document);
+    document.* = .{};
+    const text = "abcdefghijkl\n\nz\n";
+    const stream = "\x1b[40mabcdefghijkl\n\x1b[0m\x1b[40m\n\x1b[0m\x1b[40mz\n\x1b[0m";
+    for (stream) |byte| try document.append(&.{byte});
+    try document.prepare();
+    try std.testing.expectEqualStrings(text, document.text());
+    for (1..17) |width_value| {
+        const width: u16 = @intCast(width_value);
+        const rows: usize = (12 + width_value - 1) / width_value + 2;
+        const cells = try gpa.alloc(vaxis.Cell, width_value * rows);
+        defer gpa.free(cells);
+        layOut(document, .{}, width, @intCast(rows), cells);
+        const first: Row = .{ .document = document, .cells = cells[0..width], .line = 0 };
+        const last: Row = .{ .document = document, .cells = cells[(rows - 1) * width ..], .line = text.len - 2 };
+        const result = try copy(gpa, document, Range.of(first.spot(0), last.spot(0)));
+        defer gpa.free(result.text.bytes);
+        try std.testing.expectEqualStrings("abcdefghijkl\n\nz", result.text.bytes);
+        try std.testing.expectEqual(@as(usize, 3), result.text.lines);
+        // Filling the band's unused cells creates no source-backed glyphs
+        // and can never smuggle a marker into the selected text.
+        const whole = try copy(gpa, document, .{ .from = 0, .to = document.text().len });
+        defer gpa.free(whole.text.bytes);
+        try std.testing.expectEqualStrings(text, whole.text.bytes);
+    }
 }

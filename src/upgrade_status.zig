@@ -228,3 +228,70 @@ test "ASCII spells the ellipsis and dot" {
     try std.testing.expectEqualStrings("Checking for updates...", line(.checking, &buffer, .ascii).text);
     try std.testing.expectEqualStrings("Upgrading to 0.60.0 - restarts the Host (2 Sessions working) - esc cancels", line(.{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } } } }, &buffer, .ascii).text);
 }
+
+/// Compact state for a Version field. The shell status line can offer recovery
+/// commands; a settings field contains state only, never a second command UI.
+pub fn fieldTail(run: Run, buffer: *[max_line_bytes]u8) []const u8 {
+    var writer = std.Io.Writer.fixed(buffer);
+    const text: []const u8 = switch (run) {
+        .checking => " · checking for updates…",
+        .cancelling => " · cancelling…",
+        .installing => |install| switch (install.step) {
+            .preparing => {
+                writer.print(" · upgrading to {f}", .{install.found.version}) catch unreachable;
+                return writer.buffered();
+            },
+            .publishing => " · publishing…",
+            .restarting => " · restarting the Host…",
+        },
+        .ended => |ended| switch (ended.how) {
+            .up_to_date => " · up to date",
+            .superseded => " · newer Rui installed",
+            .refused => |why| switch (why) {
+                .first_install => " · no managed install",
+                .source_build => " · source build",
+                .unknown_build => " · unknown build",
+                .package_managed => " · package managed",
+            },
+            .cancelled => " · cancelled",
+            .failed => " · upgrade failed",
+            .upgraded => |done| {
+                writer.print(" · upgraded to {f}", .{done.version}) catch unreachable;
+                return writer.buffered();
+            },
+            .incompatible => |version| {
+                writer.print(" · {f} installed · restart needed", .{version}) catch unreachable;
+                return writer.buffered();
+            },
+        },
+    };
+    return text;
+}
+
+test "Upgrade settings field reports state without shell instructions" {
+    var buffer: [max_line_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(" · checking for updates…", fieldTail(.checking, &buffer));
+    try std.testing.expectEqualStrings(" · cancelling…", fieldTail(.cancelling, &buffer));
+    const found: Found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none };
+    try std.testing.expectEqualStrings(" · upgrading to 0.61.0", fieldTail(.{ .installing = .{ .found = found } }, &buffer));
+    try std.testing.expectEqualStrings(" · publishing…", fieldTail(.{ .installing = .{ .found = found, .step = .publishing } }, &buffer));
+    try std.testing.expectEqualStrings(" · restarting the Host…", fieldTail(.{ .installing = .{ .found = found, .step = .restarting } }, &buffer));
+    const endings = [_]Ended{
+        .{ .up_to_date = .{ .schema = 60, .patch = 0 } },
+        .superseded,
+        .{ .refused = .first_install },
+        .{ .refused = .source_build },
+        .{ .refused = .unknown_build },
+        .{ .refused = .package_managed },
+        .cancelled,
+        .failed,
+        .{ .upgraded = .{ .version = found.version, .restarted = true } },
+        .{ .incompatible = found.version },
+    };
+    for (endings) |ending| {
+        const text = fieldTail(.{ .ended = .{ .how = ending, .outcome = .unchanged } }, &buffer);
+        try std.testing.expect(std.mem.startsWith(u8, text, " · "));
+        try std.testing.expect(std.mem.indexOf(u8, text, "shell") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "esc") == null);
+    }
+}

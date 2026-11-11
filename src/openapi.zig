@@ -12,6 +12,7 @@
 //! hold a marker type (see `Optional`, `ListOf`, `State`, `Content`) for the parts the
 //! Host and client write in code rather than as one shape.
 const std = @import("std");
+const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -85,7 +86,7 @@ pub const routes = [_]Route{
         .kind = .host_info,
         .summary = "The Host's identity, capacity and provider routes. Also the readiness probe.",
         .variants = &.{variant(protocol.host_info_request, .{})},
-        .reply = jsonReply(.{ protocol.host_info_reply, protocol.host_info_mysql_reply }),
+        .reply = jsonReply(.{protocol.host_info_reply.head ++ .{Optional(protocol.host_info_reply.doublewrite)} ++ protocol.host_info_reply.tail}),
     },
     .{
         .path = "/v1/control/host-stop",
@@ -299,9 +300,9 @@ fn Optional(comptime shape: anytype) type {
         pub const optional_shape = shape;
         pub const member_name = blk: {
             const first = shape[0];
-            if (!std.mem.startsWith(u8, first, ",\"")) @compileError("optional member must start with a comma and quoted name");
-            const end = std.mem.indexOfScalarPos(u8, first, 2, '"').?;
-            break :blk first[2..end];
+            const start = if (std.mem.startsWith(u8, first, ",\"")) 2 else if (std.mem.startsWith(u8, first, "\"")) 1 else @compileError("optional member must start with a quoted name");
+            const end = std.mem.indexOfScalarPos(u8, first, start, '"').?;
+            break :blk first[start..end];
         };
     };
 }
@@ -354,35 +355,27 @@ const Content = struct {
     }
 };
 
-/// A configuration field: left `omitted`, cleared with `null` when
-/// `allow_null`, or set to `value`, a hole or marker, when it is not null.
-fn State(comptime value: anytype, comptime allow_null: bool) type {
+/// Plain spec values can be null only where the setting table permits it.
+fn Plain(comptime value: anytype, comptime allow_null: bool) type {
     return struct {
-        const omitted = .{"{\"state\":\"omitted\"}"};
-        const cleared = .{"{\"state\":\"null\"}"};
-        const set = .{ "{\"state\":\"value\",\"value\":", value, "}" };
-
         pub fn openapi_inline(d: *Document) !Value {
-            var values: [3]Value = undefined;
-            var count: usize = 0;
-            values[count] = try d.shapeSchema(omitted);
-            count += 1;
-            if (allow_null) {
-                values[count] = try d.shapeSchema(cleared);
-                count += 1;
-            }
-            if (@TypeOf(value) != @TypeOf(null)) {
-                values[count] = try d.shapeSchema(set);
-                count += 1;
-            }
-            return d.anyOf(values[0..count]);
+            const schema = if (@TypeOf(value) == type) try d.typeRef(value) else try d.holeSchema(value, false);
+            return if (allow_null) d.nullable(schema) else schema;
         }
         pub fn openapi_example(out: *std.Io.Writer) !void {
-            if (@TypeOf(value) == @TypeOf(null)) return writeExample(out, omitted, .{});
-            return writeExample(out, set, .{});
+            if (@TypeOf(value) == type) try value.openapi_example(out) else try writeHoleExample(out, value, false);
         }
     };
 }
+
+const TokenCount = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "integer" }, .minimum = Value{ .integer = 0 } });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("1");
+    }
+};
 
 const Tool = protocol.BuiltInTool;
 
@@ -395,7 +388,7 @@ const ToolNameList = struct {
             .maxItems = Value{ .integer = protocol.max_tools },
             .uniqueItems = Value{ .bool = true },
             .@"x-rui-max-bytes" = Value{ .integer = protocol.max_tool_list_name_bytes },
-            .description = Value{ .string = "Sorted by bytes, none repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers." },
+            .description = Value{ .string = "None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers." },
         });
     }
     pub fn openapi_example(out: *std.Io.Writer) !void {
@@ -411,40 +404,44 @@ fn toolName(d: *Document) !Value {
     });
 }
 
-/// Fields after `output_schema` are optional to the parser, in any order;
-/// the client always sends all four, in this order. Creation requires model,
-/// effort, compaction trigger, tools and permission mode, and a Workspace
-/// with bash (D113, D133); the schema states no `required` because an
-/// addressed configure may omit every field.
-fn configurationShape(comptime name: []const u8, comptime instructions: anytype, comptime output_schema: anytype) type {
+/// A sparse plain agent spec. Creation completeness is checked by the parser;
+/// updates may omit any member. Both native mutation doors share this shape.
+fn configurationShape(comptime name: []const u8) type {
     return struct {
         pub const openapi_name = name;
-        pub const openapi_shape = .{"{"} ++ configurationMembers(0, instructions, output_schema).shape;
+        pub const openapi_shape = .{"{"} ++ configurationMembers(0).shape;
     };
 }
 
-fn configurationMembers(comptime index: usize, comptime instructions: anytype, comptime output_schema: anytype) type {
-    if (index == session_settings.entries.len) return struct {
+fn configurationMembers(comptime index: usize) type {
+    if (index == session_settings.spec_entries.len) return struct {
         const shape = .{"}"};
     };
-    const entry = session_settings.entries[index];
+    const entry = session_settings.spec_entries[index];
     const value = switch (entry.kind) {
-        .text, .choice => |capacity| State(Hole{ .string = capacity }, entry.nullable),
-        .decimal_policy => State(Hole{ .string = 20 }, entry.nullable),
-        .tools => State(ToolNameList, entry.nullable),
-        .content => if (std.mem.eql(u8, entry.field, "instructions")) instructions else output_schema,
+        .text, .choice => |capacity| Plain(Hole{ .string = capacity }, entry.nullable),
+        .decimal_policy => Plain(TokenCount, entry.nullable),
+        .tools => Plain(ToolNameList, entry.nullable),
+        .content => Plain(if (entry.json_object) SchemaObject else Content, entry.nullable),
     };
-    const member = .{ (if (index == 0) "" else ",") ++ "\"" ++ entry.field ++ "\":", value };
+    const member = .{ (if (index == 0) "" else ",") ++ "\"" ++ entry.spec ++ "\":", value };
     return struct {
-        // loaded_tools was the only optional member in the original shape.
-        const shape = (if (std.mem.eql(u8, entry.field, "loaded_tools")) .{Optional(member)} else member) ++ configurationMembers(index + 1, instructions, output_schema).shape;
+        const shape = .{Optional(member)} ++ configurationMembers(index + 1).shape;
     };
 }
 
-/// A `configure` request's settings.
-const Configuration = configurationShape("Configuration", State(Content, false), State(Content, true));
-/// A creating Message's settings, which carry no content.
-const MessageConfiguration = configurationShape("MessageConfiguration", State(null, false), State(null, true));
+/// Schemas have arbitrary JSON members; no object is a content reference.
+const SchemaObject = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.object(.{ .type = Value{ .string = "object" }, .additionalProperties = Value{ .bool = true } });
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("{}");
+    }
+};
+
+const Configuration = configurationShape("Configuration");
+const MessageConfiguration = Configuration;
 
 /// One `conversation-page` item: what every kind carries, then what only
 /// its kind carries.
@@ -688,10 +685,6 @@ pub const Document = struct {
         const spec_properties = spec.object.getPtr("properties").?;
         try spec_properties.object.put(d.arena, "provider", try d.enumeration(protocol.Provider, false));
         try spec_properties.object.put(d.arena, "workspace", try d.wireSchema([]const u8));
-        // JSON Schema defaults object properties to unconstrained values.
-        // Spell that out so generated clients do not turn them into `never`.
-        const output_schema = spec.object.getPtr("properties").?.object.getPtr("outputSchema").?;
-        try output_schema.object.put(d.arena, "additionalProperties", .{ .bool = true });
         try d.schemas.put(d.arena, "AgentSpec", spec);
         var frame = try d.wireSchema(launch_frame.Wire);
         const properties = frame.object.getPtr("properties").?;
@@ -1429,10 +1422,25 @@ test "replies the Host renders conform to their schemas" {
     const a = arena.allocator();
     var out: std.Io.Writer.Allocating = .init(a);
 
+    // Render the real request refusal, including its advisory server names.
+    const reply = @import("command_reply.zig");
+    const host_reply = @import("host_reply.zig");
+    var configured: reply.ConfigureReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable } };
+    var host_tool_set = @import("tools.zig").built_in_tool_set;
+    host_tool_set.configured_servers = &.{"notes"};
+    configured.rejected.message = host_tool_set.missingTool("lookup");
+    try host_reply.renderConfigureReply(.{ .writer = &out.writer }, "", configured);
+    try Case.check(schemas, "ConfigureReply", out.written(), a);
+    out.clearRetainingCapacity();
+    const message: reply.MessageReply = .{ .rejected = .{ .replayed = false, .code = .mcp_server_unavailable, .message = configured.rejected.message, .content = .{ .length = 4, .digest = protocol.contentDigest("task") } } };
+    try host_reply.renderMessageReply(.{ .writer = &out.writer }, "", message);
+    try Case.check(schemas, "MessageReply", out.written(), a);
+    out.clearRetainingCapacity();
+
     // The model list is written in code, not as a shape.
     const ids = "gpt-6.1-sol\nmy\"model\n";
     try out.writer.writeAll(protocol.model_list_reply.head);
-    try model_list.writeProviders(&out.writer, &.{
+    try model_list.writeProviders(&out.writer, model_catalog.shipped, &.{
         .{ .provider = .codex, .list = .catalog },
         .{ .provider = .openai, .list = .{ .live = .{ .bytes = ids } } },
     });
@@ -1457,6 +1465,53 @@ test "replies the Host renders conform to their schemas" {
     // These are the Store's real streaming reports, not schema examples:
     // an added hand-written field must fail additionalProperties here.
     try store.checkSessionReportsForTesting(Case{ .schemas = schemas, .allocator = a });
+}
+
+test "Host information has one schema with an omittable bounded diagnostic" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    _ = try document.build();
+    const schema = document.schemas.get("HostInfoReply").?;
+    try std.testing.expect(!schema.object.contains("anyOf"));
+    try std.testing.expectEqualStrings("object", schema.object.get("type").?.string);
+    const properties = schema.object.get("properties").?.object;
+    const diagnostic = properties.get("innodb_doublewrite").?.object;
+    try std.testing.expectEqualStrings("string", diagnostic.get("type").?.string);
+    try std.testing.expectEqual(@as(i64, 32), diagnostic.get("maxLength").?.integer);
+    try std.testing.expectEqual(@as(i64, protocol.max_store_bytes), properties.get("store").?.object.get("maxLength").?.integer);
+    for (schema.object.get("required").?.array.items) |required|
+        try std.testing.expect(!std.mem.eql(u8, "innodb_doublewrite", required.string));
+
+    // One schema accepts both Host-emitted forms, and the diagnostic's
+    // presence does not narrow the selector to a MySQL id.
+    const host_reply = @import("host_reply.zig");
+    const stores = [_][]const u8{ "/sqlite", "0123456789abcdef0123456789abcdef", &@as([protocol.max_store_bytes]u8, @splat('s')) };
+    for (stores) |selector| {
+        for ([_]?[]const u8{ null, "OFF", &@as([32]u8, @splat(1)) }) |doublewrite| {
+            var response: protocol.ResponseBuffer = .{};
+            try response.render(host_reply.renderHostInfo, .{host_reply.HostInfo{
+                .store = selector,
+                .instance = @splat(1),
+                .active_capacity = 2,
+                .intake_capacity = 100,
+                .descriptor_soft_limit = 1024,
+                .started_at = 1792918800,
+                .custody_occupied = 0,
+                .paused = false,
+                .routes = protocol.routesAll(.unserved),
+                .doublewrite = doublewrite,
+            }});
+            var json = try std.json.parseFromSliceLeaky(Value, arena.allocator(), response.slice(), .{});
+            try std.testing.expect(conforms(document.schemas, schema, json));
+            try std.testing.expectEqual(doublewrite != null, json.object.contains("innodb_doublewrite"));
+            // Omission is not nullability, and the string has an actual bound.
+            try json.object.put(arena.allocator(), "innodb_doublewrite", .null);
+            try std.testing.expect(!conforms(document.schemas, schema, json));
+            try json.object.put(arena.allocator(), "innodb_doublewrite", .{ .string = &@as([33]u8, @splat('x')) });
+            try std.testing.expect(!conforms(document.schemas, schema, json));
+        }
+    }
 }
 
 test "Message observation schema requires Host state and bounds recovery" {

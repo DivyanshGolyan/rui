@@ -657,7 +657,7 @@ def stdin_start_contract():
         saved = record.read_bytes()
         capture = json.loads(saved)
         assert capture["session"] == "" and capture["kind"] == "message", capture
-        assert capture["text"]["value"].encode() == text and capture["configuration"]["workspace"]["value"] == str(state), capture
+        assert capture["text"]["value"].encode() == text and capture["configuration"]["workspace"] == str(state), capture
         with ThreadPoolExecutor(max_workers=4) as pool:
             replays = list(pool.map(lambda _: fixture.command("request", "recover", "--store", store,
                 "--record", record, "--kind", "message"), range(4)))
@@ -679,7 +679,7 @@ def stdin_start_contract():
         configured = fixture.command("session", "configure", "--store", store, "--session", session,
             "--record", state / "instructions.json", "--key", "instructions", "--instructions", "-", input=instructions)
         assert configured["answer"]["status"] == "accepted", configured
-        assert json.loads((state / "instructions.json").read_bytes())["configuration"]["instructions"]["value"] == instructions
+        assert json.loads((state / "instructions.json").read_bytes())["configuration"]["instructions"] == instructions
         stopped = fixture.command("session", "stop", "--store", store, "--session", session)
         assert stopped["answer"]["status"] == "accepted", stopped
         assert fixture.observe(store, "first")["result"] == {"status": "cancelled", "code": "session_stopped"}

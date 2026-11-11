@@ -37,10 +37,10 @@ def untimed(row):
     return match.group(1) if match else row
 
 
-# What work under way says: the running call's row, "• Run tests · 42s", or
-# the conversation's last line, "• Waiting · 12s",
-# "! Rate limited · retry 2 in 18s", "Stopping…".
-LIVE_LINE = re.compile(r"^(?:[•!?] .+ · (?:\d|retry )|Stopping…)", re.M)
+# What work under way says: the running call's row, "⠹ Run tests · 42s", or
+# the conversation's last line, "⠹ Waiting · 12s",
+# "⠹ Rate limited · retry 2 in 18s", "Stopping…".
+LIVE_LINE = re.compile(r"^(?:[⠹◌?] .+ · (?:\d|retry )|Stopping…)", re.M)
 # What the line under a draft beside an Action says once Enter there denies
 # the Action and sends the draft as the reason.
 REASON = "enter denies the call and sends this"
@@ -57,7 +57,7 @@ def send_reason(master, ready, description):
     beside the Action; return the frames up to the Action's denial."""
     shown = action_ready(ready, master, shows=reason_shown)
     os.write(master, b"\r")
-    return shown + read_terminal(master, f"• {description} — Denied")
+    return shown + read_terminal(master, f"■ {description} · denied")
 
 
 def time_limit(milliseconds):
@@ -72,7 +72,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, command_frame, composer_ready, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -317,7 +317,7 @@ def compiled_model_cases():
     windows = {model: CATALOG[model].context_window for model in models}
     assert DEFAULTS.recommended_model in models
     listing = "Supported model IDs: " + ", ".join(models) + "\n"
-    unlisted_note = "it uses default limits"
+    unlisted_note = "client defaults use estimated limits"
     root = canonical_fixture_root(pathlib.Path(tempfile.mkdtemp(prefix="rui-compiled-models.")))
     home, store = root / "home", root / "host-store"
     home.mkdir(mode=0o700)
@@ -502,10 +502,10 @@ def status_frame(master, session, command="/status", timeout=15):
     """The /status page for exactly `session` (escaped as /status shows it)."""
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
     def page(frame):
-        rows = frame.split("\n")
-        # App draws the page from the first row, with no browsing heading.
+        rows = [chat_content_row(row) for row in frame.split("\n")]
+        # App draws the page from the first feed row, with no browsing heading.
         return (rows[0].startswith(" Status · ")
-            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and "\n Work\n" in frame)
+            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and " Work" in rows)
     return command_frame(master, command, page, timeout)
 
 
@@ -522,8 +522,8 @@ def configured_frame(master, command):
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
     frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith(" Status · "):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith(" Status · "), end="")
+    if frame.startswith("  Status · "):
+        command_frame(master, "\x1b", lambda frame: not frame.startswith("  Status · "), end="")
     return frame
 
 
@@ -555,7 +555,7 @@ def overview_store(notice):
 
 def permanent_tool_count(screen, heading):
     """Count a call heading's rows in one frame (not repeated frames)."""
-    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", screen))
+    return len(re.findall(r"(?m)^" + re.escape(heading) + r"$", "\n".join(chat_content_row(row) for row in screen.split("\n"))))
 
 
 def pipe_wait_oracles():
@@ -675,6 +675,7 @@ def shown_bash_command(master):
     """
     capture = terminal_capture(master)
     width = capture.screen.columns
+    # PermissionCard is an overlay with its own two-column inset, not feed content.
     rows = [line.rstrip() for line in capture.screen.display]
     start = next(index for index, line in enumerate(rows) if line.startswith("  $ "))
     command = rows[start][4:]
@@ -726,8 +727,8 @@ def raw_export(master, screen):
     Word wrap consumes the space at a soft break; a row filled to the edge
     broke inside a word instead (a long hex identity), so it joins directly.
     """
-    columns = terminal_capture(master).screen.columns
-    lines = screen.split("\n")
+    columns = terminal_capture(master).screen.columns - 1  # Feed width, without its gutter.
+    lines = [chat_content_row(line) for line in screen.split("\n")]
     start = next(index for index, line in enumerate(lines) if line.lstrip(" ").startswith("Raw export: "))
     command = lines[start].lstrip(" ").removeprefix("Raw export: ")
     previous = lines[start]
@@ -1146,7 +1147,7 @@ def silent_read_edit_cases():
 def wait_for_listed_call(tty):
     # A matching Bash projection supplies the unresolved row's clock. The
     # command stays held until after traversal; a bare heading can precede claim.
-    running = re.compile(r"• Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
+    running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
     tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
 
 
@@ -1158,16 +1159,16 @@ def listed_call_readiness_cases():
         def __init__(self, elapsed):
             self.capture = ScreenCapture(80, 24)
             self.frames = (
-                "• Held call\n• Queued · 0s",
+                "⠹ Held call\n◌ Queued · 0s",
                 "✓ Held call · 42s",
-                "• Other call · 42s",
-                "prefix • Held call · 42s",
-                "• Held call · 42s extra",
-                "• Held call · " + elapsed,
+                "⠹ Other call · 42s",
+                "prefix ⠹ Held call · 42s",
+                "⠹ Held call · 42s extra",
+                "⠹ Held call · " + elapsed,
             )
             self.offered = None
             # Accumulated output already contains a timed row: it is not current.
-            self.frame("• Held call · 99s")
+            self.frame("⠹ Held call · 99s")
             self.frame(self.frames[0])
 
         def frame(self, text):
@@ -1535,7 +1536,7 @@ def renderer_cases():
             shown = tty.send("show invisible output\r", "output survived")
             assert all(value in shown for value in escaped), shown
             joined(tty)
-            shown = tty.send("/details\r", "joined é")
+            shown = tty.send("\x0f", "    Bash ")
             # Both the saved Tool Result and answer use the same display sink.
             assert all(value in shown for value in escaped), shown
             tty.caller.send_signal(signal.SIGINT)
@@ -1547,10 +1548,10 @@ def renderer_cases():
             tty.finish()
         print("renderer: invisible answer and tool output escaped; saved conversation reopens", flush=True)
 
-        # A permission request takes the input's place, decided 2026-11-09:
-        # the draft is hidden and kept, Allow once is highlighted and Enter
-        # acts at once, even before a long command's end is shown. Typed
-        # keys and a marked paste decide nothing and never reach the draft.
+        # The request stays above the input row. Its choice initially hides
+        # the kept draft, highlights Allow once and accepts Enter even before
+        # a long command's end is shown. Typing or paste reveals and edits the
+        # draft without deciding; Esc returns to the choice.
         consent_session = configure("ask")
         proxy = canonical.ReplyProxy(host, "/v1/control/permission-decision", lambda response: response)
         command = "\n".join(f"# exact command line {index}" for index in range(100)) + "\nprintf approved > renderer-effect"
@@ -1566,9 +1567,9 @@ def renderer_cases():
                 opened = tty.wait(CHOICE)
                 tty.ready(ready_read)
                 assert highlighted(tty.capture) == "Allow once", opened
-                # The card leads with what it is for, then the exact command,
-                # cut to what fits; the draft is not on screen.
-                assert "? Renderer consent" in opened and "$ # exact command line 0" in opened, opened
+                # One title, then the exact command cut to what fits. Only
+                # the choice is on the input row; the kept draft is hidden.
+                assert opened.count("? Renderer consent") == 1 and "$ # exact command line 0" in opened, opened
                 assert "printf approved > renderer-effect" not in opened and "› a" not in opened, opened
                 assert "Workspace" not in opened and "Time limit" not in opened and "Run Bash" not in opened, opened
                 records = set((home / ".config/rui/requests").glob("*.json"))
@@ -1576,15 +1577,30 @@ def renderer_cases():
                 action = current["actionable_permissions"][0]["action"]
                 exact = json.loads(run(home, "action", "inspect", "--store", store, "--session", consent_session, "--action", action))
                 assert exact["arguments"] == arguments
-                # Letters, Ctrl-R, Shift-Enter as Ghostty sends it (ESC CR)
-                # and a paste holding an Enter decide nothing. Keys are
-                # handled in order, so the frame that moves the highlight
-                # follows them all.
-                os.write(tty.master, b"y\x12\x1b\r\x1b[200~\r\x1b[201~")
+                # Ctrl-R and Shift-Enter as Ghostty sends it (ESC CR) do
+                # not decide at the choice. A printable key then reveals
+                # the kept draft and is inserted at its caret.
+                drafting = tty.send("\x12\x1b\ry", predicate=lambda: tty.capture.draft("ay", 4))
+                assert "? Renderer consent" in drafting and highlighted(tty.capture) is None, drafting
+                tty.send("\r", "Not sent: this Action needs a decision")
+                tty.send("\x1b", predicate=lambda: highlighted(tty.capture) == "Allow once")
+
+                def pasted_draft():
+                    screen = tty.capture.screen
+                    return (not tty.capture.synchronized and screen.cursor.y > 0
+                            and screen.display[screen.cursor.y - 1].rstrip() == " › aypasted"
+                            and screen.display[screen.cursor.y].rstrip() == "   text"
+                            and screen.cursor.x == 7)
+
+                # A paste switches back to the draft too. Its embedded
+                # Enter is text, never a decision, and the request stays up.
+                drafting = tty.send("\x1b[200~pasted\r\ntext\x1b[201~", predicate=pasted_draft)
+                assert "? Renderer consent" in drafting and highlighted(tty.capture) is None, drafting
+                tty.send("\x1b", predicate=lambda: highlighted(tty.capture) == "Allow once")
                 tty.send("\x1b[C", predicate=lambda: highlighted(tty.capture) == "Deny")
                 tty.send("\x1b[D", predicate=lambda: highlighted(tty.capture) == "Allow once")
                 assert set((home / ".config/rui/requests").glob("*.json")) == records and not proxy.exchanges
-                assert not (workspace / "renderer-effect").exists(), "typing at the card authorized an Action"
+                assert not (workspace / "renderer-effect").exists(), "editing the draft authorized an Action"
                 # Enter allows at once, though the command's end is not shown.
                 tty.send("\r", marker)
                 assert (workspace / "renderer-effect").read_bytes() == b"approved"
@@ -1594,13 +1610,13 @@ def renderer_cases():
                 body, response = proxy.exchanges[0]
                 assert json.loads(body)["action"] == action and json.loads(body)["decision"] == "allow_once"
                 assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
-                # The hidden draft returns as it was, with its caret.
-                tty.wait(predicate=lambda: tty.capture.draft("a", 3))
+                # The edited draft returns unchanged, including its caret.
+                tty.wait(predicate=pasted_draft)
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
         finally:
             dispose_all(release.set, lambda: os.close(ready_read), lambda: os.close(ready_write))
-        print("renderer: the card takes the input's place, ignores typing and paste, allows at once and returns the draft", flush=True)
+        print("renderer: the choice hides the draft; typing and paste edit it without deciding; Esc returns the choice and Allow restores the draft", flush=True)
 
         proxy.close()
         proxy = None
@@ -1636,7 +1652,7 @@ def renderer_cases():
 
         # Another client decides: the card leaves on its own, with the
         # outcome and answer shown, never an Action that still looks pending.
-        # A key typed at the card never reaches the draft.
+        # A key typed at the choice remains in the draft after that decision.
         for decision in ("allow", "deny"):
             session = configure("ask")
             effect = workspace / f"renderer-elsewhere-{decision}"
@@ -1646,22 +1662,22 @@ def renderer_cases():
             with terminal(session) as tty:
                 tty.send("propose an Action decided elsewhere\r", CHOICE)
                 action = fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"][0]["action"]
-                # Ignored, it draws no frame; the draft checked below is empty.
-                os.write(tty.master, b"/")
+                tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
                 generation = tty.capture.generation
                 run(home, "action", decision, "--store", store, "--session", session, "--action", action)
-                shown = tty.wait(predicate=lambda: marker in tty.capture.completed and tty.capture.draft("", 2), after=generation)
+                shown = tty.wait(predicate=lambda: marker in tty.capture.completed and tty.capture.draft("x", 3), after=generation)
                 for pending in ("Allow once", "? Decided elsewhere"):
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
                 requests = len(endpoint.requests)
+                tty.send("\x7f", predicate=lambda: tty.capture.draft("", 2))
                 tty.send("/status\r", " Status · ")
                 assert len(endpoint.requests) == requests, endpoint.requests
                 tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
-        print("renderer: an Action decided by another client leaves the card and shows its outcome; a key typed at the card stays out of the draft", flush=True)
+        print("renderer: an Action decided by another client leaves the card and shows its outcome; a key typed at the choice stays in the draft", flush=True)
 
         # The card decides only the request it drew: when the first of two is
         # decided elsewhere, the second gets its own card and readiness.
@@ -1721,19 +1737,19 @@ def renderer_cases():
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/details\r")
+            os.write(tty.master, b"/history\r")
             time.sleep(0.3)
             released[1].set()
-            tty.wait("Recent conversation — tool details", timeout=20)
+            tty.wait("Start of conversation", timeout=20)
             time.sleep(1.5)
-            assert "Recent conversation — tool details" in tty.capture.completed, tty.capture.completed
+            assert "Start of conversation" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a later /details replaces a /status not yet shown", flush=True)
+        print("renderer: a later /history replaces a /status not yet shown", flush=True)
 
         # A fresh Session's live page begins with an Admission row, which is
         # no conversation cursor: its start is the start of the conversation.
@@ -2566,20 +2582,20 @@ def main(selected="all"):
         try:
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
-            assert "\n› first input" in greeting and "\nfirst answer" in greeting, greeting
+            assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
             assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/inspect-action", "/details", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
+            for command in ("/status", "/inspect-action", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
             assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
             # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).
             assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
-            assert "result: completed\nfirst answer" in result, result
+            assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
@@ -2746,7 +2762,7 @@ def main(selected="all"):
             assert "result: failed" in failed, failed
             assert "code: provider_http_422" in failed and "successor done" not in failed, failed
             result = terminal_step(master, f"/result {queued_key}", "result: completed", composer=True)
-            assert "result: completed\nsuccessor done" in result, result
+            assert "result: completed\nsuccessor done" in conversation_text(result), result
             terminal_step(master, "/exit", "Detached.")
             assert entered.wait(timeout=5) == 0
 
@@ -2986,7 +3002,7 @@ def main(selected="all"):
             "--", unsafe_session], env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
-            assert "Session:" not in greeting and "\nsafe result" in greeting, greeting
+            assert "Session:" not in greeting and "\nsafe result" in conversation_text(greeting), greeting
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {unsafe_session}" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
@@ -3055,8 +3071,8 @@ def main(selected="all"):
                     observed = terminal_step(master, typed, f"edited {index}")
                 assert f"edited {index}" in observed, observed
                 if index == 2:
-                    assert "\n› line1\n  line2" in "\n".join(map(untimed, observed.split("\n"))), observed
-                    assert "\nedited 2" in observed, observed
+                    assert "\n› line1\n  line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
+                    assert "\nedited 2" in conversation_text(observed), observed
                 if "› " not in observed.split(f"edited {index}", 1)[1]:
                     await_screen(master, "", composer=True)
                 body = json.loads(endpoint.requests[-1])
@@ -3083,7 +3099,7 @@ def main(selected="all"):
                 os.write(master, b"\x7f")
                 time.sleep(0.025)  # Longer than the editor's repaint window.
             observed = terminal_step(master, "Z", "paced edited")
-            assert "\n› Z" in observed, observed
+            assert "\n› Z" in conversation_text(observed), observed
             body = json.loads(endpoint.requests[-1])
             actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user")
@@ -3183,7 +3199,7 @@ def main(selected="all"):
             def hold_observation(response):
                 observation_held.set()
                 assert observation_continue.wait(15), "accepted observation gate was not released"
-                return b""  # Lost read framing must be fatal, not partial success.
+                return b""  # Lost read framing is the Host's loss, not partial success.
 
             def after_admission(response):
                 assert json.loads(response.split(b"\r\n\r\n", 1)[1])["answer"]["status"] == "accepted"
@@ -3204,15 +3220,15 @@ def main(selected="all"):
                 "--key", saved_key)["observation"]["status"] == "accepted"
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             observation_continue.set()
+            # The screen stays up and says so in one line; nothing is sent again.
+            stopped = read_terminal(master, "Host stopped · r start")
+            assert "TruncatedResponse" not in stopped and "Not confirmed" not in stopped and "rui host start" not in stopped, stopped
+            assert entered.poll() is None, "the Host's stop ended the TUI"
+            assert proxy.mutations == [("/v1/message", original)], "a lost observation retransmitted the Message"
+            os.write(master, b"\x03")
             lost, errors = terminal_exit(entered, master)
-            assert entered.returncode != 0, errors
-            stopped = b"rui: The Host stopped. Run rui host start --store $'" + bytes(store) + b"', then resume this Session.\n"
-            assert stopped in errors, errors
-            assert b"TruncatedResponse" not in errors and b"syntax and recovery" not in errors, errors
-            assert b"Message accepted; do not resubmit it" in errors, errors
-            assert f"rui request read-result {saved_key}".encode() in errors, errors
-            assert b"Detached." not in lost and b"Not confirmed" not in lost, lost
-            assert proxy.mutations == [("/v1/message", original)], "fatal observation retransmitted Message"
+            assert entered.returncode == 0, errors
+            assert b"The Host stopped" not in errors and b"TruncatedResponse" not in errors, errors
             actual = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual) == os_semantics.user_termios(original_terminal)
             assert set(json.loads(run(home, "request", "list"))) == after and record.read_bytes() == original

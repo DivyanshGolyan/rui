@@ -9,8 +9,20 @@ const wire_request = @import("wire_request.zig");
 const storage = @import("store.zig");
 
 pub fn initial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, store: *storage.Store, key: []const u8, configuration: *const wire_request.Configuration, home: ?[]const u8) !?*const storage.InitialSkills {
-    if (try store.commandExists(key)) return null;
-    return captureInitial(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home);
+    var inherited: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+    if (try creationReplay(store, key, configuration, &inherited)) return null;
+    return captureInitial(allocator, scratch_allocator, io, creationWorkspace(configuration, &inherited), home);
+}
+
+fn creationReplay(store: *storage.Store, key: []const u8, configuration: *const wire_request.Configuration, inherited: *protocol.Bounded(protocol.max_workspace_bytes)) !bool {
+    return if (configuration.parent.state == .value)
+        store.creationHint(key, configuration.parent.value.slice(), inherited)
+    else
+        store.commandExists(key);
+}
+
+fn creationWorkspace(configuration: *const wire_request.Configuration, inherited: *const protocol.Bounded(protocol.max_workspace_bytes)) []const u8 {
+    return if (configuration.parent.state == .value) inherited.slice() else if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/";
 }
 
 pub fn captureInitial(allocator: std.mem.Allocator, scratch_allocator: std.mem.Allocator, io: std.Io, workspace: []const u8, home: ?[]const u8) !*const storage.InitialSkills {
@@ -98,10 +110,14 @@ pub fn prepareMessage(allocator: std.mem.Allocator, scratch_allocator: std.mem.A
     }
     // This includes accepted, rejected and conflicting keys: no metadata or
     // file discovery precedes the Store's authoritative replay classification.
-    if (try store.commandExists(command.key.slice())) return prepared;
     if (command.configuration) |*configuration| {
-        prepared.* = try prepareCreation(allocator, scratch_allocator, io, if (configuration.workspace.state == .value) configuration.workspace.value.slice() else "/", home, .{ .field = &command.text });
-    } else prepared.captured = try bindTo(allocator, io, store, command.session.slice(), .{ .field = &command.text });
+        var inherited: protocol.Bounded(protocol.max_workspace_bytes) = .{};
+        if (try creationReplay(store, command.key.slice(), configuration, &inherited)) return prepared;
+        prepared.* = try prepareCreation(allocator, scratch_allocator, io, creationWorkspace(configuration, &inherited), home, .{ .field = &command.text });
+    } else {
+        if (try store.commandExists(command.key.slice())) return prepared;
+        prepared.captured = try bindTo(allocator, io, store, command.session.slice(), .{ .field = &command.text });
+    }
     return prepared;
 }
 

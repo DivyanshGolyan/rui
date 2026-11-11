@@ -40,12 +40,15 @@ const cores = .{
     .{ "conversation_read.zig", @import("conversation_read.zig") },
     .{ "deadline.zig", @import("deadline.zig") },
     .{ "descriptor_capacity.zig", @import("descriptor_capacity.zig") },
+    .{ "display_text.zig", @import("display_text.zig") },
     .{ "draft_layout.zig", @import("draft_layout.zig") },
     .{ "environment.zig", @import("environment.zig") },
     .{ "failure_class.zig", @import("failure_class.zig") },
+    .{ "feed_reads.zig", @import("feed_reads.zig") },
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
+    .{ "HostStartupWait.zig", @import("HostStartupWait.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
     .{ "idempotency_key.zig", @import("idempotency_key.zig") },
@@ -53,6 +56,7 @@ const cores = .{
     .{ "json_limits.zig", @import("json_limits.zig") },
     .{ "json_scalar.zig", @import("json_scalar.zig") },
     .{ "keymap.zig", @import("keymap.zig") },
+    .{ "marks.zig", @import("marks.zig") },
     .{ "mcp/action_text.zig", @import("mcp/action_text.zig") },
     .{ "mcp/arguments.zig", @import("mcp/arguments.zig") },
     .{ "mcp/document.zig", @import("mcp/document.zig") },
@@ -60,6 +64,7 @@ const cores = .{
     .{ "mcp/headers.zig", @import("mcp/headers.zig") },
     .{ "mcp/post.zig", @import("mcp/post.zig") },
     .{ "mcp/reply.zig", @import("mcp/reply.zig") },
+    .{ "mcp/result_text.zig", @import("mcp/result_text.zig") },
     .{ "mcp/shape.zig", @import("mcp/shape.zig") },
     .{ "message_admission.zig", @import("message_admission.zig") },
     .{ "message_agent_arguments.zig", @import("message_agent_arguments.zig") },
@@ -91,6 +96,7 @@ const cores = .{
     .{ "serve_grammar.zig", @import("serve_grammar.zig") },
     .{ "session_archive.zig", @import("session_archive.zig") },
     .{ "session_chrome.zig", @import("session_chrome.zig") },
+    .{ "schema_json.zig", @import("schema_json.zig") },
     .{ "session_consent.zig", @import("session_consent.zig") },
     .{ "session_departure.zig", @import("session_departure.zig") },
     .{ "session_field.zig", @import("session_field.zig") },
@@ -113,11 +119,13 @@ const cores = .{
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
     .{ "store_id.zig", @import("store_id.zig") },
+    .{ "store_target.zig", @import("store_target.zig") },
     .{ "store_path.zig", @import("store_path.zig") },
     .{ "submission_state.zig", @import("submission_state.zig") },
     .{ "TerminalText.zig", @import("TerminalText.zig") },
     .{ "theme.zig", @import("theme.zig") },
     .{ "tool_name.zig", @import("tool_name.zig") },
+    .{ "tool_fold.zig", @import("tool_fold.zig") },
     .{ "tool_presentation.zig", @import("tool_presentation.zig") },
     .{ "tool_proposal.zig", @import("tool_proposal.zig") },
     .{ "tool_record.zig", @import("tool_record.zig") },
@@ -126,6 +134,7 @@ const cores = .{
     .{ "turn_policy.zig", @import("turn_policy.zig") },
     .{ "utf8_validation.zig", @import("utf8_validation.zig") },
     .{ "ViewportPosition.zig", @import("ViewportPosition.zig") },
+    .{ "widgets/Feed.zig", @import("widgets/Feed.zig") },
     .{ "wire_field.zig", @import("wire_field.zig") },
     .{ "wire_version.zig", @import("wire_version.zig") },
     .{ "word_search.zig", @import("word_search.zig") },
@@ -149,6 +158,7 @@ test {
     _ = @import("ConversationViewport.zig");
     _ = @import("transcript_selection.zig");
     _ = @import("session_follow.zig");
+    _ = @import("session_drafts.zig");
     _ = @import("SessionInput.zig");
     _ = @import("TerminalEditor.zig");
     _ = @import("tools.zig");

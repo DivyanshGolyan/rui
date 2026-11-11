@@ -153,13 +153,22 @@ def main():
                     sql(f"ALTER TABLE {database}.store_meta ALTER CHECK store_meta_chk_1 ENFORCED")
         host = launch(good)
         store_id = ready(host)
+        # Only private host-info discovery may omit the identity. Once known,
+        # the exact opaque id works; database names and other ids never do.
+        discovered = frame_host.host_info(sock, "")
+        exact = frame_host.host_info(sock, store_id)
+        assert exact["store"] == store_id and exact["instance"] == discovered["instance"], exact
+        for wrong_id in (database, "0" * 32):
+            wrong_info = frame_host.post(sock, "host-info", {"version": frame_host.WIRE, "kind": "host_info", "store": wrong_id}, expected_status=409)
+            assert wrong_info["code"] == "wrong_store_identity", wrong_info
+        assert "kind" not in exact and "engine" not in exact, exact
         assert store_id == sql(f"SELECT meta_value FROM {database}.store_meta WHERE meta_key='store_id'")
         other = root / "other"
         other.mkdir(mode=0o700)
         locked = launch(dict(good, runtimeDir=str(other)))
         assert frame_host.refusal(locked)["code"] == "store_locked"
         create = {"version": frame_host.WIRE, "kind": "configure", "store": store_id, "key": "mysql-launch-create",
-                  "session": "", "preset": "review", "configuration": {"label": {"state": "null"}}}
+                  "session": "", "preset": "review", "configuration": {"label": None}}
         configured = frame_host.post(sock, "configure", create)
         assert configured["answer"]["status"] == "accepted", configured
         session = configured["answer"]["session"]
@@ -180,6 +189,17 @@ def main():
         status = json.loads(status.stdout)
         assert status["store"] == store_id and status["innodb_doublewrite"] == sql("SELECT @@global.innodb_doublewrite")
         assert status["diagnostics"] == str(runtime / "diagnostics")
+        # A bad hint is refused, never retried as a relative SQLite directory.
+        for hint in ("relative-runtime", ""):
+            invalid = subprocess.run([rui, "host", "status", "--store", store_id],
+                                     cwd=root, env=dict(env, RUI_RUNTIME_DIR=hint), text=True, capture_output=True, timeout=10)
+            assert invalid.returncode != 0 and json.loads(invalid.stdout)["status"] == "access_failure", invalid
+        missing_runtime = root / "missing-runtime"
+        unavailable_env = dict(env, RUI_RUNTIME_DIR=str(missing_runtime))
+        unavailable = subprocess.run([rui, "host", "start", "--store", store_id],
+                                     cwd=root, env=unavailable_env, text=True, capture_output=True, timeout=10)
+        assert unavailable.returncode != 0 and "[mysql_host_unavailable]" in unavailable.stderr, unavailable
+        assert not missing_runtime.exists() and not (root / store_id).exists(), "MySQL routing created a SQLite Store or runtime"
         private(host)
         close(host)
         released()

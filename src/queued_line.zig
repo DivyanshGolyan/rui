@@ -6,6 +6,7 @@
 //! it. This core fits the row.
 const std = @import("std");
 const Bounded = @import("bounded.zig").Bounded;
+const marks = @import("marks.zig");
 const session_line = @import("session_line.zig");
 
 pub const Method = session_line.Method;
@@ -17,8 +18,8 @@ pub const Line = Bounded(session_line.max_line_bytes);
 pub const Shown = struct { admission: u64, line: Line };
 
 /// The newest Message live output showed while it waited
-/// (`View.showsAtAdmission`), by admission ID and Admission position; zero
-/// before any.
+/// (the append-only bridge in `session_reads.scan`), by admission ID and
+/// Admission position; zero before any. Unit 5 removes this carried state.
 pub const Drawn = struct { admission: u64 = 0, position: u64 = 0 };
 
 /// How many of the `count` Messages waiting from `oldest_position` the row
@@ -56,7 +57,7 @@ pub const text_capacity = mark.len + session_line.max_line_bytes + session_line.
 pub const label_capacity = std.fmt.count("{d} queued", .{std.math.maxInt(u64)});
 
 /// The waiting mark the Session's activity tail and the overview share.
-pub const waiting_mark = "◌";
+pub const waiting_mark = marks.marks.get(.queued).unicode;
 pub const waiting_capacity = waiting_mark.len + std.fmt.count(" {d} ·", .{std.math.maxInt(u64)}) + 1 + session_line.max_line_bytes + session_line.ellipsis.len;
 
 /// The activity tail's waiting row: `◌ also update docs …`, and with more
