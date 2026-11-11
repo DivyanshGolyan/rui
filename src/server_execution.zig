@@ -808,7 +808,7 @@ const NativeTurn = struct {
             self.fenced = true;
             return error.Fence;
         };
-        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation };
+        return .{ .core = found.core, .mcp = found.mcp, .bash = found.bash, .message = found.message, .tool_continuation = found.tool_continuation, .retry = found.retry };
     }
 
     pub fn scheduledRetry(self: *const NativeTurn) execution_turn.ScheduledRetry {
