@@ -3486,7 +3486,7 @@ test "Enter on a rejected draft clears it even while a skill list shows" {
     try std.testing.expectEqualStrings("hi", held.self.input.composition().bytes);
 }
 
-test "End on an empty draft does nothing and never leaves the conversation" {
+test "End on an empty draft stays at latest and never leaves the conversation" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -5369,5 +5369,46 @@ test "SessionFrontend history physical feed geometry" {
     for (74..92) |line| {
         var expected: [32]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "History line{d:0>3}", .{line}), std.mem.trimEnd(u8, older_rows.next().?, " "));
+    }
+}
+
+test "SessionFrontend End encodings return to end only when the editor delegates them" {
+    const cases = [_]struct { bytes: []const u8, ctrl: bool = false }{
+        .{ .bytes = "\x1b[F" },                  .{ .bytes = "\x1bOF" },                  .{ .bytes = "\x1b[4~" },
+        .{ .bytes = "\x1b[1;5F", .ctrl = true }, .{ .bytes = "\x1b[4;5~", .ctrl = true },
+    };
+    for (cases) |encoded| {
+        for ([_][]const u8{ "", "single line", "first line\nsecond line" }) |draft| {
+            const fixture = try FeedFixture.create();
+            defer fixture.destroy();
+            const held = fixture.held;
+            try fixture.longPage(.opening, 100);
+            _ = try held.draw();
+            try held.self.scroll(false, 9);
+            try std.testing.expect(!held.screen.anchor.following());
+            if (draft.len != 0) {
+                try held.keys("\x1b[200~");
+                try held.keys(draft);
+                try held.keys("\x1b[201~\x1b[H");
+            }
+            const before = held.self.input.composition();
+            const anchor = held.screen.anchor.anchor;
+            try held.keys(encoded.bytes);
+            try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
+            if (!encoded.ctrl and draft.len != 0) {
+                // Ordinary End still edits the current draft line, without
+                // stealing the conversation's reading position.
+                try std.testing.expectEqual(draft.len, held.self.input.composition().cursor);
+                try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
+            } else {
+                try std.testing.expect(held.screen.anchor.following());
+                try std.testing.expectEqual(before.cursor, held.self.input.composition().cursor);
+                // Unlike Esc at end, repeated End never leaves the Session.
+                try held.keys(encoded.bytes);
+            }
+            try std.testing.expect(held.self.leaving == null);
+            try std.testing.expect(held.self.input.queuedCommand() == null);
+            try std.testing.expect(held.self.submission.view() == null);
+        }
     }
 }

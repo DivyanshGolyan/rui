@@ -273,13 +273,15 @@ def scroll_marker_case():
             shared = before.keys() & after.keys()
             assert shared, (end, scrolled)
             assert all(after[line] - before[line] == BOTTOM // 2 for line in shared), (end, scrolled)
-            # End leaves the view where it is; only Esc or the marker return.
-            # Older pages may still join above; End is judged on the settled view.
+            # End edits this nonempty draft without moving the feed. Empty-
+            # draft End and Ctrl-End delegate to the conversation's end action.
+            # Older pages may still join above; judge the settled view.
             scrolled = settle_screen(master, quiet=0.5)
             os.write(master, b"\x1b[F")
             same = settle_screen(master, quiet=0.5)
             assert marker(same) == "↓" and rows(same)[:2] == rows(scrolled)[:2], (keys, same)
-            live = chrome.frame(master, b"\x1b", lambda screen: latest(screen, "second row 07"))
+            back = b"\x1b[1;5F" if keys == b"\x1b[1;2A" else b"\x1b"
+            live = chrome.frame(master, back, lambda screen: latest(screen, "second row 07"))
             assert composing(live, "keep"), live
             assert rows(live)[:BOTTOM + 1] == rows(end)[:BOTTOM + 1], (end, live)
         assert len(chrome.endpoint.requests) == requests, "scrolling sent input"
@@ -296,7 +298,7 @@ def scroll_marker_case():
         assert composing(counted, ""), counted
         chrome.frame(master, b"\x1b", lambda screen: latest(screen, "ARRIVED-ANSWER"), timeout=30)
         chrome.leave(master, caller)
-    print("session chrome: Shift-↑ and PgUp draw ↓, End keeps the view, ↓ N new counts arrivals, Esc returns; empty PgUp is unchanged and the chip never changes feed height", flush=True)
+    print("session chrome: Shift-↑ and PgUp draw ↓, draft End keeps the view, ↓ N new counts arrivals, Ctrl-End and Esc return; empty PgUp is unchanged and the chip never changes feed height", flush=True)
 
 
 def pages_case():
