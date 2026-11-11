@@ -38,14 +38,13 @@ from host_process import WIRE_VERSION
 from product_defaults import compaction_trigger
 binary, store, ready, key, record, encoded, *drop = sys.argv[1:]
 values = json.loads(encoded)
-fields = ('workspace', 'provider', 'model', 'instructions', 'tools', 'permission_mode', 'output_schema')
-configuration = {name: {'state': 'value', 'value': values[name]} if name in values else {'state': 'omitted'} for name in fields}
-# Every creation states the rest of its agent spec (D113); these records test
-# domain rejections, which the parser only reaches with a complete spec.
-if configuration['tools']['state'] == 'omitted': configuration['tools'] = {'state': 'value', 'value': []}
-if configuration['permission_mode']['state'] == 'omitted': configuration['permission_mode'] = {'state': 'value', 'value': 'bypass'}
-configuration['compaction_trigger'] = {'state': 'value', 'value': str(compaction_trigger('codex', None))}
-configuration['reasoning_effort'] = {'state': 'null'}
+fields = {'workspace': 'workspace', 'provider': 'provider', 'model': 'model', 'instructions': 'instructions', 'tools': 'tools', 'permission_mode': 'permissionMode', 'output_schema': 'outputSchema'}
+configuration = {spec: values[name] for name, spec in fields.items() if name in values}
+# Complete creation before exercising domain rejections.
+configuration.setdefault('tools', [])
+configuration.setdefault('permissionMode', 'bypass')
+configuration['compactAt'] = compaction_trigger('codex', None)
+configuration['effort'] = None
 body = json.dumps({'version': WIRE_VERSION, 'kind': 'configure', 'store': store,
                    'key': key, 'session': '', 'configuration': configuration}, separators=(',', ':')).encode()
 with pathlib.Path(record).open('xb') as captured:
@@ -225,7 +224,7 @@ finally:
 assert temporary.exists()
 recovered = subprocess.run(args, input=b'new capture', capture_output=True, timeout=10)
 assert recovered.returncode == 0, recovered.stderr
-assert json.loads(record.read_text())['configuration']['instructions']['value'] == 'new capture'
+assert json.loads(record.read_text())['configuration']['instructions'] == 'new capture'
 assert not temporary.exists()
 saved = record.read_bytes()
 duplicate = subprocess.run(args, input=b'replacement', capture_output=True, timeout=5)
@@ -320,15 +319,8 @@ body = json.dumps({
     "key": "draining-request",
     "session": "",
     "configuration": {
-        "workspace": {"state": "value", "value": workspace},
-        "provider": {"state": "value", "value": "codex"},
-        "model": {"state": "value", "value": "gpt-6-sol"},
-        "instructions": {"state": "omitted"},
-        "tools": {"state": "value", "value": ["bash"]},
-        "permission_mode": {"state": "value", "value": "bypass"},
-        "output_schema": {"state": "omitted"},
-        "compaction_trigger": {"state": "value", "value": str(compaction_trigger("codex", "gpt-6-sol"))},
-        "reasoning_effort": {"state": "value", "value": "medium"},
+        "workspace": workspace, "provider": "codex", "model": "gpt-6-sol", "tools": ["bash"],
+        "permissionMode": "bypass", "compactAt": compaction_trigger("codex", "gpt-6-sol"), "effort": "medium",
     },
 }, separators=(",", ":")).encode()
 client = os_semantics.unix_stream()
@@ -497,7 +489,7 @@ printf '{"type":"object"}' >"$state/rejected-schema.json"
 unknown_configuration=$(python3 - "$root" "$state/rejected-instructions.txt" "$state/rejected-schema.json" <<'PY'
 import json, pathlib, sys
 print(json.dumps({'workspace': sys.argv[1], 'provider': 'anthropic', 'model': 'gpt-6-sol',
-    'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': pathlib.Path(sys.argv[3]).read_text(), 'tools': []}))
+    'instructions': pathlib.Path(sys.argv[2]).read_text(), 'output_schema': json.loads(pathlib.Path(sys.argv[3]).read_text()), 'tools': []}))
 PY
 )
 unknown_provider=$(not_accepted wire_configure unknown-provider "$records/unknown-provider.json" "$unknown_configuration")
@@ -640,12 +632,17 @@ contains "$partial_message" '"status":"absent"'
 partial_session=$($rui session inspect --store "$store" --session "$main_session")
 contains "$partial_session" '"pending_messages":"0"'
 
-# Invalid schemas are definite saved rejections. A known-Session message keeps
+# A malformed schema cannot be a plain object spec: refuse it before capture.
+# A known-Session message keeps
 # its original captured bytes and queue admission through lost reply, source
 # mutation, client exit and Host restart.
 printf '{invalid' >"$state/invalid-schema.json"
-invalid_schema=$(not_accepted "$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session "$main_session" --output-schema "$state/invalid-schema.json")
-contains "$invalid_schema" '"code":"invalid_output_schema"'
+status=0
+"$rui" session configure --store "$store" --record "$records/schema.json" --key schema-key --session "$main_session" --output-schema "$state/invalid-schema.json" >"$state/schema.out" 2>"$state/schema.err" || status=$?
+require_test 'malformed schema is a caller refusal' "$status" -eq 2
+contains "$(cat "$state/schema.err")" '[invalid_output_schema]'
+require_test 'malformed schema publishes no capture' ! -e "$records/schema.json"
+require_test 'malformed schema admits no command' "$("$rui" request inspect --store "$store" --key schema-key | python3 -c 'import json,sys; print(json.load(sys.stdin)["observation"]["status"])')" = absent
 printf 'original message with "quotes", slash \\, newline\nand emoji 🙂\n' >"$state/message-source.txt"
 if "$rui" session send --store "$store" --to "$main_session" --record "$records/known-message.json" --key msg-known --test-drop-reply after-commit <"$state/message-source.txt" >"$state/drop.out" 2>"$state/drop.err"; then
     echo "lost message acceptance unexpectedly produced a complete reply" >&2
@@ -827,8 +824,8 @@ import os_semantics
 from host_process import WIRE_VERSION
 ready, store, pid = sys.argv[1:]
 fields = dict(part.split("=", 1) for part in open(ready).read().split()[1:])
-request = {"version":WIRE_VERSION, "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{"workspace":{"state":"omitted"}, "provider":{"state":"omitted"}, "model":{"state":"omitted"}}}
-prefix = json.dumps(request)[:-2] + ',"instructions":{"state":"value","value":"'
+request = {"version":WIRE_VERSION, "kind":"configure", "store":store, "key":"crashed-first", "session":"", "configuration":{}}
+prefix = json.dumps(request)[:-2] + '"instructions":"'
 with os_semantics.unix_stream() as connection:
     connection.connect(fields["socket"])
     body = prefix.encode() + b'x' * 32768

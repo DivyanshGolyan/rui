@@ -264,9 +264,7 @@ def hostile_discovery(root):
         discovery_released(diagnostics, began_ns)
         baseline = wait_for_descriptors(host.pid) if os_semantics.PROC_FS else None
         for kind, extra in (("message", {"key": "hostile", "session": "hostile/session", "sender": None, "sender_handle": None, "text": {"state": "value", "value": "x" * 128}}),
-                            ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {
-                                "workspace": {"state": "omitted"}, "provider": {"state": "omitted"},
-                                "model": {"state": "omitted"}, "instructions": {"state": "value", "value": "x" * 128}}})):
+                            ("configure", {"key": "hostile", "session": "hostile/session", "configuration": {"instructions": "x" * 128}})):
             for route in ("host-info", "control/host-stop"):
                 began_ns = time.monotonic_ns()
                 response = raw_info(socket_path(store), store, route=route, kind=kind, extra=extra)

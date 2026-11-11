@@ -1169,6 +1169,7 @@ test "Session settings changed detects each mutable value without comparing boun
     try current.label.?.set("label");
     const before = Settings.of(&current);
     inline for (.{
+        session_field.SessionField.model,
         session_field.SessionField.instructions,
         session_field.SessionField.tools,
         session_field.SessionField.loaded_tools,
@@ -1181,6 +1182,7 @@ test "Session settings changed detects each mutable value without comparing boun
     }) |field| {
         var next = current;
         switch (field) {
+            .model => try next.model.set("gpt-5.5"),
             .instructions => next.instructions_id = 1,
             .tools => next.tool_set_id = 2,
             .loaded_tools => next.loaded_tool_set_id = 1,

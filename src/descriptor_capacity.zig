@@ -2,11 +2,13 @@ const std = @import("std");
 const default_intake = @import("product_defaults.zig").intake_capacity;
 
 pub const minimum_intake: usize = 10;
+/// Socket, all retained content files, and the last value's overlapping writer.
+pub const ordinary_exchange_descriptors: usize = @import("protocol.zig").max_request_contents + 2;
 
 pub fn fitIntake(default_requirement: usize, soft_limit: ?usize) !usize {
     const limit = soft_limit orelse return default_intake;
     if (limit >= default_requirement) return default_intake;
-    const reduction = std.math.divCeil(usize, default_requirement - limit, 4) catch unreachable;
+    const reduction = std.math.divCeil(usize, default_requirement - limit, ordinary_exchange_descriptors) catch unreachable;
     if (reduction > default_intake - minimum_intake) return error.DescriptorCapacityInsufficient;
     return default_intake - reduction;
 }
@@ -82,15 +84,14 @@ pub fn calculate(
     };
     fixed_host = try add(fixed_host, model_list);
 
-    // While sealing the second configure content value, an ordinary
-    // connection can retain its socket, the first sealed file, and both the
-    // second value's writer and read-only custody handles. Absolute POSIX
+    // While sealing the last creating-Message content value, an ordinary
+    // connection can retain its socket, all earlier sealed files, and both
+    // the last value's writer and read-only custody handles. Absolute POSIX
     // opens use AT_FDCWD directly and acquire no directory descriptor.
     // Controls retain only their sockets. These are simultaneous populations
     // of the supported workload, not runtime connection quotas. Demand beyond
     // them can fail allocation/open with original request recovery intact.
-    const ordinary_client = try add(1, 3);
-    const ordinary_clients = try multiply(ordinary_exchanges, ordinary_client);
+    const ordinary_clients = try multiply(ordinary_exchanges, ordinary_exchange_descriptors);
     const clients = try add(ordinary_clients, control_exchanges);
 
     // A model slot owns one request file, two response aliases, and at most
@@ -195,35 +196,35 @@ test "requirement uses simultaneous owner populations rather than summing exclus
     const linux = try calculate(3, 2, 10, 2, .requests, false, .linux);
     try std.testing.expectEqual(@as(usize, 3), linux.inherited);
     try std.testing.expectEqual(@as(usize, 8), linux.fixed_host);
-    try std.testing.expectEqual(@as(usize, 42), linux.clients);
+    try std.testing.expectEqual(@as(usize, 52), linux.clients);
     try std.testing.expectEqual(@as(usize, 15), linux.execution);
     try std.testing.expectEqual(@as(usize, 0), linux.authentication);
     try std.testing.expectEqual(@as(usize, 2), linux.self_wake);
-    try std.testing.expectEqual(@as(usize, 70), linux.total);
+    try std.testing.expectEqual(@as(usize, 80), linux.total);
 
     const managed = try calculate(3, 2, 10, 2, .requests, true, .linux);
     try std.testing.expectEqual(@as(usize, 6), managed.authentication);
-    try std.testing.expectEqual(@as(usize, 76), managed.total);
+    try std.testing.expectEqual(@as(usize, 86), managed.total);
 
     const listing = try calculate(3, 2, 10, 2, .requests_and_model_list, false, .linux);
     try std.testing.expectEqual(@as(usize, 9), listing.fixed_host);
-    try std.testing.expectEqual(@as(usize, 71), listing.total);
+    try std.testing.expectEqual(@as(usize, 81), listing.total);
 
     const without_transport = try calculate(3, 2, 10, 2, .none, false, .linux);
     try std.testing.expectEqual(@as(usize, 7), without_transport.fixed_host);
-    try std.testing.expectEqual(@as(usize, 69), without_transport.total);
+    try std.testing.expectEqual(@as(usize, 79), without_transport.total);
 
     const macos = try calculate(3, 2, 10, 2, .requests, true, .macos);
     try std.testing.expectEqual(@as(usize, 9), macos.fixed_host);
     try std.testing.expectEqual(@as(usize, 7), macos.authentication);
-    try std.testing.expectEqual(@as(usize, 78), macos.total);
+    try std.testing.expectEqual(@as(usize, 88), macos.total);
 }
 
 test "zero execution capacity has no unreachable preparation or spawn population" {
     const requirement = try calculate(3, 0, 10, 2, .none, true, .linux);
     try std.testing.expectEqual(@as(usize, 0), requirement.execution);
     try std.testing.expectEqual(@as(usize, 0), requirement.authentication);
-    try std.testing.expectEqual(@as(usize, 54), requirement.total);
+    try std.testing.expectEqual(@as(usize, 64), requirement.total);
     // No slot, no Reactor: the model list is never fetched.
     const listing = try calculate(3, 0, 10, 2, .requests_and_model_list, true, .linux);
     try std.testing.expectEqual((try calculate(3, 0, 10, 2, .requests, true, .linux)).fixed_host, listing.fixed_host);
@@ -255,11 +256,11 @@ test "finite descriptor limits reject below and accept exact or above" {
 }
 
 test "intake fits the available limit without sacrificing its minimum" {
-    try std.testing.expectEqual(@as(usize, 100), try fitIntake(475, null));
-    try std.testing.expectEqual(@as(usize, 100), try fitIntake(475, 475));
-    try std.testing.expectEqual(@as(usize, 45), try fitIntake(475, 256));
-    try std.testing.expectEqual(@as(usize, 10), try fitIntake(475, 115));
-    try std.testing.expectError(error.DescriptorCapacityInsufficient, fitIntake(475, 114));
+    try std.testing.expectEqual(@as(usize, 100), try fitIntake(575, null));
+    try std.testing.expectEqual(@as(usize, 100), try fitIntake(575, 575));
+    try std.testing.expectEqual(@as(usize, 36), try fitIntake(575, 256));
+    try std.testing.expectEqual(@as(usize, 10), try fitIntake(575, 125));
+    try std.testing.expectError(error.DescriptorCapacityInsufficient, fitIntake(575, 124));
 }
 
 test "catalog discovery reserves its sockets beyond model capacity including zero" {
@@ -273,4 +274,10 @@ test "catalog discovery reserves its sockets beyond model capacity including zer
             try std.testing.expectEqual(requests.execution, listings.execution);
         }
     }
+}
+
+test "default managed Host budgets all creating-Message contents at a typical Linux limit" {
+    const requirement = try calculate(3, 100, 100, 3, .catalog, true, .linux);
+    try std.testing.expectEqual(@as(usize, 1028), requirement.total);
+    try std.testing.expectEqual(@as(usize, 99), try fitIntake(requirement.total, 1024));
 }

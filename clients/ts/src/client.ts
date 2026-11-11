@@ -15,7 +15,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { SessionNotifications } from "./notifications.ts";
 import { resolveBinary } from "./binary.ts";
 import { RuiStartError, RuiUnavailableError } from "./errors.ts";
-import { models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
+import { agentSpec, models, Session, Sessions, setPaused, type AgentSpec, type ModelSummary } from "./sessions.ts";
 import { ConnectionError, post, WIRE_VERSION, type ReplyLimits } from "./transport.ts";
 import type { components } from "./wire.ts";
 
@@ -338,18 +338,9 @@ export function launchFor(options: ConnectOptions, runtimeDir: string): Launch {
 	return { binary: resolveBinary(options.binary), frame, socketPath: join(runtimeDir, SOCKET_NAME), store, env };
 }
 
-/** Decode the JSON-text convenience; leave preset validation to the Host. */
+/** Presets and Session mutation requests use the same wire writer. */
 function presetFor(spec: AgentSpec): Schemas["AgentSpec"] {
-	let serialized: unknown = spec;
-	if (typeof spec?.outputSchema === "string") {
-		try {
-			serialized = { ...spec, outputSchema: JSON.parse(spec.outputSchema) };
-		} catch {
-			// A raw string is not a valid wire schema; the Host will refuse it.
-		}
-	}
-	// The wire type is mutable, but JSON serialization does not mutate the preset.
-	return serialized as Schemas["AgentSpec"];
+	return agentSpec(spec) as Schemas["AgentSpec"];
 }
 
 /** Starts one child and resolves once it answers host-info, or throws AttemptFailed. */

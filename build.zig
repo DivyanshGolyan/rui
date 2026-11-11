@@ -428,6 +428,7 @@ pub fn build(b: *std.Build) void {
     fast_integrations.addFileArg(ci.path(activity_client));
     fast_integrations.addFileArg(ci.path(preference_policy_actor));
     fast_integrations.addFileArg(ci.path(terminal_notice));
+    fast_integrations.addFileArg(ci.path(mysql_launch_admin));
     for (units.tests[1..]) |compile| fast_integrations.addFileArg(ci.path(compile));
     fast_integrations.step.dependOn(&format.step);
     // Release compilation coverage stays in qualification, not PR fixture startup.
@@ -467,6 +468,7 @@ pub fn build(b: *std.Build) void {
     process_integrations.addFileArg(ci.path(preference_policy_actor));
     process_integrations.addArg(@tagName(check_part));
     process_integrations.addFileArg(ci.path(terminal_notice));
+    process_integrations.addFileArg(ci.path(mysql_launch_admin));
     process_integrations.step.dependOn(&format.step);
     // The execution partition overlaps native tests with its serial process
     // fixtures, just as check already does. Keep the unsplit gate serial and

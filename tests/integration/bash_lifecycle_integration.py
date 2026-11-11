@@ -133,15 +133,11 @@ def hold_incomplete_connection(host, store, session):
         "store": canonical,
         "key": "shutdown-drain",
         "session": session,
-        "configuration": {
-            "workspace": {"state": "omitted"},
-            "provider": {"state": "omitted"},
-            "model": {"state": "omitted"},
-        },
+        "configuration": {},
     }
     body = (
         json.dumps(request)[:-2]
-        + ',"instructions":{"state":"value","value":"'
+        + '"instructions":"'
     ).encode() + b"x" * 32768
     connection = os_semantics.unix_stream()
     connection.settimeout(5)
