@@ -4896,6 +4896,57 @@ test "App overview schedules spinning rows only while Root shows the list" {
     }
 }
 
+test "App overview accepts picker keys immediately after the first wide frame" {
+    const Keys = struct {
+        // Follow the drawn focus ancestry: the Composer deliberately ignores
+        // keys; the screen enclosing it must receive them through bubbling.
+        fn bubble(surface: vxfw.Surface, target: vxfw.Widget, ctx: *vxfw.EventContext, input: vxfw.Event) !bool {
+            if (surface.widget.eql(target)) {
+                try target.handleEvent(ctx, input);
+                return true;
+            }
+            for (surface.children) |child| if (try bubble(child.surface, target, ctx, input)) {
+                if (!ctx.consume_event) {
+                    ctx.phase = .bubbling;
+                    try surface.widget.handleEvent(ctx, input);
+                }
+                return true;
+            };
+            return false;
+        }
+    };
+    for ([_]u16{ 100, 120, 140 }) |width| {
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try overview.widget().handleEvent(&ctx, .focus_in);
+        const focused = ctx.cmds.items[0].request_focus;
+        try std.testing.expect(focused.eql(overview.app_input.composer.widget()));
+        const first = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        var keys: app_events.Events = .init("/model luna");
+        while (keys.next()) |input| {
+            ctx.redraw = false;
+            ctx.consume_event = false;
+            ctx.phase = .capturing;
+            try overview.root.widget().captureEvent(&ctx, input);
+            ctx.phase = .at_target;
+            try std.testing.expect(try Keys.bubble(first, focused, &ctx, input));
+            try std.testing.expectEqual(true, ctx.redraw);
+            try std.testing.expect(ctx.consume_event);
+        }
+        try std.testing.expectEqualStrings("/model luna", overview.composerDraft().bytes);
+        try std.testing.expect(overview.state.picker != null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
+        var shown = try rig.shown(width, 24);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "gpt-6-luna") != null);
+    }
+}
+
 test "App overview panes prepare rows and compose only at their actual widths" {
     const Find = struct {
         fn count(surface: vxfw.Surface, target: vxfw.Widget) usize {

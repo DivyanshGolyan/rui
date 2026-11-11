@@ -29,6 +29,34 @@ DEVICE_ANSWER = b"\x1b[?62;22c"
 
 
 class TerminalProcessTest(unittest.TestCase):
+    def test_composer_oracles_follow_the_caret_pane(self):
+        from human_cli_fixture import composer_empty, composer_ready, overview_composer
+
+        for prefix in (" ", "list text│ ", "中       │ "):
+            for text, caret in (("café", 6), ("x │ y", 7)):
+                with self.subTest(prefix=prefix, text=text):
+                    capture = ScreenCapture(columns=80, rows=4)
+                    self.assertFalse(capture.draft("", 2))
+                    # An earlier identical User row is not the focused draft.
+                    capture.feed(("\x1b[?2026h\x1b[2J\x1b[H › " + text + "\r\n" +
+                                  prefix + "› " + text + "\x1b[?2026l").encode())
+                    cursor = capture.screen.cursor
+                    self.assertTrue(capture.draft(text, caret))
+                    self.assertFalse(capture.draft(text, caret - 1))
+                    self.assertFalse(capture.draft("wrong", caret))
+                    self.assertTrue(composer_ready(capture.completed, cursor.x, cursor.y))
+                    self.assertTrue(overview_composer(capture.completed, cursor.x, cursor.y))
+                    self.assertFalse(composer_empty(capture.completed, cursor.y))
+                    capture.feed(("\x1b[?2026h\r\x1b[2K" + prefix + "› \x1b[?2026l").encode())
+                    self.assertTrue(capture.draft("", 2))
+                    self.assertTrue(composer_empty(capture.completed, capture.screen.cursor.y))
+                    capture.feed(b"\x1b[D")
+                    self.assertFalse(capture.draft("", 2))
+
+        from human_cli_fixture import conversation_text
+        self.assertEqual(conversation_text("list│› line1    01:23\nlist│  line2\n    │edited 2"),
+                         "› line1    01:23\n  line2\nedited 2")
+
     def setUp(self):
         self.descriptors = []
         real_openpty = pty.openpty
