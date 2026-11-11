@@ -3585,7 +3585,7 @@ Clients never auto-start or access SQLite; disconnects/timeouts do not cancel wo
 A MySQL Host starts only from `rui host serve --launch-frame`.
 Its stdin
 frame's `store` is `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE`; TCP verifies
-TLS with system trust.
+TLS with system trust unless its sole query option is `ssl-ca=<path>`, a nonempty absolute PEM CA-bundle path (percent escapes allowed, at most `PATH_MAX - 1` decoded bytes) trusted exclusively; unknown or repeated keys, fragments, relative or empty paths, `ssl-ca` on a Unix socket and any verification-disabling option are refused (D224).
 A Unix socket is an absolute path in place of HOST,
 usually percent-encoded (`%2Fvar%2Frun%2Fmysqld.sock`).
 User, password and
@@ -3598,6 +3598,7 @@ Parsing wipes all JSON allocations, including failed
 parses; the connection handshake wipes its authentication buffer as soon as
 login finishes or fails.
 The Store keeps its own copy of the login in Host memory for the Host's life, wiped when the Store closes, so it can reconnect.
+The connection loads TLS trust at open and retains it across reconnects without borrowing or reloading the CA path; an unloadable `ssl-ca` file refuses startup with `mysql_unreachable` and a static message that never names the path.
 
 On MySQL the `store_owner` row owns the Store: open raises its `epoch`, and every write transaction first advances `commit_seq` only where both match what this Host last saw, so a Host that lost the Store fails its next write.
 `GET_LOCK` only refuses early a second Host on the same database.
@@ -3631,7 +3632,7 @@ start refusal (D222):
 - `durability_innodb_flush_log_at_trx_commit`: `innodb_flush_log_at_trx_commit` is not 1.
 - `durability_sync_binlog`: binlogging is enabled and `sync_binlog` is not 1.
 - `binlog_statement`: `binlog_format` is STATEMENT.
-- `mysql_unreachable`: connection failed, including DNS, TCP or socket connection, TLS handshake or certificate verification, or a timeout before login.
+- `mysql_unreachable`: connection failed, including DNS, TCP or socket connection, TLS trust loading (including the `ssl-ca` file), handshake or certificate verification, or a timeout before login.
 - `mysql_login`: the server refused the credentials, authentication method or database access (including server errors 1045 and 1044).
 
 Exactly one admission cause is reported: version/MariaDB first (MariaDB wins
