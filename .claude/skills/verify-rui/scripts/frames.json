@@ -9,11 +9,15 @@
       "note": "01-overview-empty",
       "open": "overview",
       "steps": [],
-      "expect": "Type a task"
+      "expect": [
+        "Type a task",
+        "Settings",
+        "enter start"
+      ]
     },
     {
       "name": "settings",
-      "note": "App settings via End/Enter; does not require S5's drawn Settings row",
+      "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
       "open": "overview",
       "steps": [
         {
@@ -42,7 +46,7 @@
       "open": "overview",
       "steps": [
         {
-          "wait": "Needs you"
+          "wait": "Schema migration"
         },
         {
           "wait": "Profile the Host under load"
@@ -117,13 +121,14 @@
         }
       ],
       "expect": [
-        "Needs you",
+        "Schema migration",
+        "Settings",
         "■"
       ]
     },
     {
       "name": "start-busy",
-      "note": "03-overview-busy: ⠹ counts active Sessions",
+      "note": "03-overview-busy: two-line working Sessions",
       "open": "overview",
       "steps": [
         {
@@ -141,7 +146,7 @@
           }
         },
         {
-          "wait": "Run the slow tests"
+          "wait": "Docs build"
         }
       ],
       "cast": [
@@ -166,7 +171,8 @@
       ],
       "expect": [
         "Docs build",
-        "Run the slow tests"
+        "Benchmark idle memory",
+        "Settings"
       ]
     },
     {
@@ -1011,6 +1017,10 @@
         {
           "wait": "enter start"
         }
+      ],
+      "expect": [
+        "Settings",
+        "enter start"
       ]
     },
     {
@@ -1033,7 +1043,10 @@
           ]
         }
       ],
-      "expect": "Migrate"
+      "expect": [
+        "Migrate the billing",
+        "Settings"
+      ]
     },
     {
       "name": "many-sessions",
@@ -1055,6 +1068,12 @@
           ],
           "count": 25
         }
+      ],
+      "expect": [
+        "Batch job",
+        "↓",
+        "more",
+        "Settings"
       ]
     },
     {
@@ -1107,14 +1126,17 @@
           ]
         },
         {
-          "wait": "Flaky upload"
+          "wait": "Settings"
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Batch job"
+      "expect": [
+        "Settings",
+        "enter open"
+      ]
     },
     {
       "name": "day-start",
@@ -1122,7 +1144,10 @@
       "open": "overview",
       "steps": [],
       "theme": "day",
-      "expect": "Type a task"
+      "expect": [
+        "Type a task",
+        "Settings"
+      ]
     },
     {
       "name": "day-chat",
@@ -1163,7 +1188,7 @@
     },
     {
       "name": "no-color",
-      "note": "72-no-color",
+      "note": "72-no-color: quiet two-line sidebar alongside the chat",
       "open": "Markdown retry",
       "steps": [
         {

@@ -1756,9 +1756,9 @@ def renderer_cases():
             os.write(tty.master, b"/help\r")
             time.sleep(0.3)
             released[1].set()
-            tty.wait("in your shell.", timeout=20)
+            tty.wait("shift+↑↓               scroll", timeout=20)
             time.sleep(1.5)
-            assert "in your shell." in tty.capture.completed, tty.capture.completed
+            assert "shift+↑↓               scroll" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
@@ -1775,7 +1775,10 @@ def renderer_cases():
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
             for _ in range(3):
-                shown = tty.send("\x1b[5~", predicate=lambda screen: "› fresh start" in screen and marker in screen)
+                # A scroll that changes nothing draws no frame to wait for.
+                os.write(tty.master, b"\x1b[5~")
+                shown = settle_screen(tty.master, quiet=0.3)
+                assert "› fresh start" in shown and marker in shown, shown
                 assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
                 assert shown.index("› fresh start") < shown.index(marker), shown
                 assert "Start of conversation" not in shown, shown
