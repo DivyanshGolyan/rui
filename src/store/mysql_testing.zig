@@ -1425,3 +1425,126 @@ test "store.mysql live buffered payloads keep streamed query budgets under queue
         try std.testing.expectEqual(before + 3, connection_state.queries);
     }
 }
+
+const single_owner = rsql.Read(.{
+    .sql = "SELECT commit_seq FROM store_owner WHERE owner_key=1",
+    .Args = struct {},
+    .Row = struct { commit_seq: u64 },
+    .cardinality = .one,
+});
+
+test "store.mysql live single Access commits one fenced domain write" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const seq = try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{});
+    const entry = try store_core.enter(&storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.single, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    const before = storage.engine.mysql.state.connection.queries;
+    access.write(live_insert, .{ .id = 9000400, .digest = protocol.contentDigest("single-success") });
+    // Single is semantic intent, not permission to bypass the fence.
+    try std.testing.expect(storage.engine.inTransaction());
+    try entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.commit()));
+    try std.testing.expectEqual(before + 2, storage.engine.mysql.state.connection.queries);
+    try std.testing.expect(!storage.engine.inTransaction());
+    try std.testing.expectEqual(seq + 1, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000400", .{}));
+    try access.abandon(.{ .rollback_failure = true });
+    try std.testing.expect(!storage.isFenced());
+}
+
+test "store.mysql live single Access no-op and abandon close every opening state" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const seq = try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{});
+    for ([_]enum { lazy, pending, read, queued, stepped }{ .lazy, .pending, .read, .queued, .stepped }) |state| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.single, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        var row: single_owner.Result = undefined;
+        if (state != .lazy) access.read(single_owner, .{}, &row);
+        if (state == .read or state == .queued or state == .stepped) {
+            try access.run();
+            try std.testing.expect(storage.engine.inTransaction());
+            try std.testing.expectEqual(seq + 1, row.commit_seq);
+        }
+        if (state == .queued or state == .stepped) {
+            access.write(live_insert, .{ .id = 9000401, .digest = protocol.contentDigest("single-abandoned") });
+            if (state == .stepped) try access.run();
+        }
+        try access.abandon(.{});
+        // Ended means no second rollback, even when it would fail.
+        try access.abandon(.{ .rollback_failure = true });
+        try std.testing.expect(!storage.engine.inTransaction());
+        try std.testing.expect(storage.engine.mysql.state.connection.isReady());
+        try std.testing.expectEqual(seq, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000401", .{}));
+        try std.testing.expect(!storage.isFenced());
+    }
+}
+
+test "store.mysql live single Access guard failure rolls back and rollback failure fences at Entry" {
+    for ([_]bool{ false, true }) |rollback_fails| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try openLive(&storage, &tmp);
+        defer storage.close() catch unreachable;
+        const seq = try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{});
+        {
+            const entry = try store_core.enter(&storage, .none);
+            defer entry.release();
+            var access: store_access.Access(.single, error{LiveGuard}) = .open(&entry);
+            defer access.deinit();
+            const faults: store_core.Faults = .{ .rollback_failure = rollback_fails };
+            access.write(live_guard, .{});
+            const result = entry.finishTransaction(error{LiveGuard}, faults, access.end(faults, access.commit()));
+            try std.testing.expect(access.failedOn(live_guard));
+            if (rollback_fails) {
+                try std.testing.expectError(error.CanonicalRollbackFailed, result);
+                try std.testing.expect(storage.isFenced());
+                // The unresolved transaction stays owned until close.
+                try std.testing.expect(storage.engine.inTransaction());
+            } else {
+                try std.testing.expectError(error.LiveGuard, result);
+                try std.testing.expect(!storage.isFenced());
+                try std.testing.expect(!storage.engine.inTransaction());
+                try std.testing.expectEqual(seq, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
+            }
+        }
+    }
+}
+
+test "store.mysql live single Access ownership loss refuses its write and fences at Entry" {
+    inline for (.{ "epoch", "commit_seq" }) |column| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try openLive(&storage, &tmp);
+        defer storage.close() catch |err| {
+            std.testing.expectEqual(error.StoreCloseFailed, err) catch unreachable;
+        };
+        try exec(&storage, "UPDATE store_owner SET " ++ column ++ "=" ++ column ++ "+1 WHERE owner_key=1", .{});
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var access: store_access.Access(.single, error{LiveGuard}) = .open(&entry);
+        defer access.deinit();
+        access.write(live_insert, .{ .id = 9000402, .digest = protocol.contentDigest("single-lost-owner") });
+        const committed = access.commit();
+        try std.testing.expectError(error.OwnershipLost, committed);
+        // Its rollback cannot confirm ownership either, and takes the
+        // error's place at the same boundary used by ordinary writes.
+        const result = entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, committed));
+        try std.testing.expectError(error.CanonicalRollbackFailed, result);
+        try std.testing.expect(storage.isFenced());
+        try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000402", .{}));
+    }
+}

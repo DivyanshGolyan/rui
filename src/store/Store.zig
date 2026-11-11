@@ -1179,16 +1179,9 @@ pub const Store = struct {
     fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
         const entry = try enter(self, .none);
         defer entry.release();
-        // SQLite's one-statement autocommit is already atomic. Network
-        // writes must include the ownership fence in the same transaction.
-        if (self.engine == .mysql) {
-            var access: Access(.write, error{}) = .open(&entry);
-            defer access.deinit();
-            return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
-        }
         var access: Access(.single, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.revokeActionSender(&access, binding));
+        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {

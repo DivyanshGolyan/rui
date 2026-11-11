@@ -30,11 +30,9 @@ pub const Mode = enum {
     /// Opens the transaction before its first statement and ends it with
     /// `commit`, or with `abandon` when it finds no work or fails.
     write,
-    /// One write statement, which commits itself: no BEGIN or COMMIT.
-    /// Its reads run outside any transaction, under the Entry's lock,
-    /// which excludes every other writer, so what they read still holds
-    /// when the write runs. It takes no identities and claims no
-    /// positions, and `commit` runs exactly one queued write.
+    /// One domain write: SQLite autocommit under the Entry lock, or an
+    /// ownership-fenced transaction on a batching engine. It takes no
+    /// identities or positions; `commit` runs exactly one queued write.
     single,
 };
 
@@ -540,14 +538,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// Runs the queued writes and one compare-and-set per Session that
         /// claimed positions, then COMMIT. A failed guard stops before
-        /// COMMIT. A `.single` Access runs its one write, which commits
-        /// itself.
+        /// COMMIT. A SQLite `.single` uses its one write's autocommit;
+        /// a batching engine keeps its ownership fence in the transaction.
         pub fn commit(a: *Self) Error!void {
             comptime std.debug.assert(mode == .write or mode == .single);
             if (@import("builtin").is_test) a.store.testing_content_work.rounds += 1;
-            if (mode == .single) {
-                // A second statement would not commit with the first.
-                if (a.failure == null and a.queued != 1) @panic("a single Access commits exactly one write");
+            if (mode == .single and a.failure == null and a.queued != 1)
+                @panic("a single Access commits exactly one write");
+            if (!a.transactional()) {
                 a.pass();
                 if (a.failure) |err| return err;
                 a.phase = .ended;
@@ -574,7 +572,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             const discarded = a.resetQueued();
             a.claimed = 0;
             a.phase = .ended;
-            if (mode == .write and opened) try store_core.rollbackAfterError(a.store, faults);
+            if (a.transactional() and opened) try store_core.rollbackAfterError(a.store, faults);
             try discarded;
         }
 
@@ -599,7 +597,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 // latched so the Store cannot reuse the unresolved connection.
                 a.failure = err;
             };
-            if (mode == .write and a.phase == .opened) @panic("a write Access neither committed nor abandoned its transaction");
+            if (a.transactional() and a.phase == .opened) @panic("a write Access neither committed nor abandoned its transaction");
         }
 
         /// The queued writes, then one compare-and-set per claiming
@@ -618,6 +616,12 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (a.failure) |err| return err;
         }
 
+        /// A single domain write still needs the network ownership fence
+        /// and every transaction exit, including abandon and failed rollback.
+        fn transactional(a: *const Self) bool {
+            return mode == .write or (mode == .single and a.store.engine.batches());
+        }
+
         /// Opens the transaction of a write Access before its first
         /// statement. A network engine's ownership check (PR 8) joins
         /// `store_core.begin`.
@@ -627,7 +631,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             std.debug.assert(a.phase != .ended);
             if (a.phase == .opened or a.failure != null) return;
             a.phase = .opened;
-            if (mode == .write) store_core.begin(a.store) catch |err| {
+            if (a.transactional()) store_core.begin(a.store) catch |err| {
                 a.failure = err;
             };
         }

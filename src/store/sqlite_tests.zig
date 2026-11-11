@@ -3624,6 +3624,52 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try std.testing.expect(!storage.isFenced());
 }
 
+test "SQLite single Access keeps autocommit on success guard failure and abandon" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try testingStore(&storage, &tmp, std.testing.io);
+    defer storage.close() catch unreachable;
+    const read = rsql.Read(.{
+        .sql = "SELECT min(content_id) AS id FROM content",
+        .Args = struct {},
+        .Row = struct { id: u64 },
+        .cardinality = .one,
+    });
+    const write = rsql.Write(.{
+        .sql = "UPDATE content SET private=private WHERE content_id=?1",
+        .Args = struct { id: u64 },
+        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
+    });
+    for ([_]enum { success, guard, abandon, no_op }{ .success, .guard, .abandon, .no_op }) |outcome| {
+        const entry = try store_core.enter(&storage, .none);
+        defer entry.release();
+        var a: store_access.Access(.single, error{TestingGuard}) = .open(&entry);
+        defer a.deinit();
+        var statements: TestingStatements = .{};
+        statements.begin(storage.sqliteDatabase());
+        defer statements.end(storage.sqliteDatabase());
+        var row: read.Result = undefined;
+        a.read(read, .{}, &row);
+        try a.run();
+        try std.testing.expect(!storage.engine.inTransaction());
+        if (outcome != .no_op) a.write(write, .{ .id = if (outcome == .guard) 0 else row.id });
+        if (outcome == .no_op or outcome == .abandon) {
+            // Even a rollback fault is irrelevant: no transaction opened,
+            // and a queued, unstepped autocommit write is simply discarded.
+            try a.abandon(.{ .rollback_failure = true });
+        } else if (outcome == .guard) {
+            const result = a.end(.{ .rollback_failure = true }, a.commit());
+            try std.testing.expectError(error.TestingGuard, entry.finishTransaction(error{TestingGuard}, .{}, result));
+        } else {
+            try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, a.commit()));
+        }
+        try std.testing.expectEqual(@as(u64, if (outcome == .success or outcome == .guard) 2 else 1), statements.count);
+        try std.testing.expect(!storage.engine.inTransaction());
+        try std.testing.expect(!storage.isFenced());
+    }
+}
+
 test "revoking a sender runs main's statements, with no transaction, and a missing Attempt changes nothing" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
