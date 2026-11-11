@@ -1223,19 +1223,9 @@ pub const Store = struct {
         try entry.finish(Ordinary.action_dispatch, action_domain.validateActionDispatch(&access, binding));
     }
 
+    /// Settle the result and optional complete rendered answer atomically.
+    /// Only the MCP adapter supplies a full answer when its excerpt omits bytes.
     pub fn settleActionAttempt(
-        self: *Store,
-        binding: ActionAttemptBinding,
-        code: ActionResolutionCode,
-        result: []const u8,
-        faults: Faults,
-    ) !ActionSettlement {
-        return self.queue().write(settleActionAttemptHeld, .{ self, binding, code, result, @as(?[]const u8, null), faults });
-    }
-
-    /// Settle an MCP excerpt and, only when it omitted bytes, its complete
-    /// rendered answer. Both public contents belong to the same transaction.
-    pub fn settleMcpActionAttempt(
         self: *Store,
         binding: ActionAttemptBinding,
         code: ActionResolutionCode,
@@ -1260,7 +1250,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttemptWithFullContent(&access, binding, code, result, full_result, faults)));
+        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, full_result, faults)));
     }
 
     /// Delivers the owed child ending (D39) `nextCoreWork` names, or only

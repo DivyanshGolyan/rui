@@ -132,7 +132,7 @@ test "Session archive pending blocks person and peer work and completes after Ac
             const peer_blocked = storage.submitMessageWithModel(&peer, null, .{});
             try std.testing.expect(peer_blocked == .rejected);
             try std.testing.expectEqual(protocol.MessageRejection.session_archiving, peer_blocked.rejected.code);
-            try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", .{}));
+            try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", null, .{}));
             try expectState(&storage, receiver.session.slice(), .archived);
             const replay = storage.archiveSession(&archive, .{});
             try std.testing.expect(replay == .accepted and replay.accepted.replayed);
@@ -254,7 +254,7 @@ test "Session archive gates core peer sends and restores only fresh delivered wo
             const blocked = (try storage.nextCoreWork() orelse return error.ExpectedBlockedCoreWork).action;
             try std.testing.expectEqual(@as(@import("domain/command.zig").AgentDelivery, .failed), try storage.deliverAgentMessage(blocked.binding, receiver.session.slice(), "blocked", .{}));
             try expectState(&storage, receiver.session.slice(), .archiving);
-            try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", .{}));
+            try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(receiver.binding, .cancelled, "Bash stopped.", null, .{}));
             try expectState(&storage, receiver.session.slice(), .archived);
             const fresh = (try storage.nextCoreWork() orelse return error.ExpectedFreshCoreWork).action;
             try std.testing.expectEqual(@as(@import("domain/command.zig").AgentDelivery, .delivered), try storage.deliverAgentMessage(fresh.binding, receiver.session.slice(), "fresh", .{}));
@@ -421,7 +421,7 @@ test "Session archive ending causality survives restored parents and ordinary ch
                     try stop.key.set("repeated-child-stop");
                     try std.testing.expectEqual(protocol.SessionStopCompletion.pending, storage.stopSession(&stop, .{}).accepted.completion);
                     try std.testing.expect(!try storage.deliverChildEnding(child_model.?.turn_id, .{}));
-                    try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(child_action.?, .cancelled, "Bash stopped.", .{}));
+                    try std.testing.expectEqual(action.ActionSettlement.session_stop, try storage.settleActionAttempt(child_action.?, .cancelled, "Bash stopped.", null, .{}));
                 } else if (ordering == .close_before_owed_stop) {
                     try finishAnswer(&storage, &tmp, child_model.?);
                     try std.testing.expect(!try storage.deliverChildEnding(child_model.?.turn_id, .{}));

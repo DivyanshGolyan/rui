@@ -516,7 +516,7 @@ test "read_transcript opens public calls and no-content rows and identifies nonz
     }
     var stop = try completeSessionStop("transcript-source-stop", source.slice());
     try std.testing.expect(database.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(ActionSettlement.session_stop, try database.settleActionAttempt(sender_action, .cancelled, "Sender stopped.", .{}));
+    try std.testing.expectEqual(ActionSettlement.session_stop, try database.settleActionAttempt(sender_action, .cancelled, "Sender stopped.", null, .{}));
     const page = try arena.create(protocol.ActivityFacts);
     try database.activityPage(&.{ .session = source, .direction = .backward, .kinds = .initMany(&.{ .call, .stop, .send_failed }) }, page);
     var call_address: u64 = 0;

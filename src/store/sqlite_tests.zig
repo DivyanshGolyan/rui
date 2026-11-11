@@ -392,7 +392,7 @@ test "archive reports retain pending stops and changed rows outside the full fil
     const pending = try TestingListing.read(&storage, &tmp, .{ .since = before.since });
     try std.testing.expectEqual(protocol.ListDelta.changed, pending.delta);
     try pending.expectReferences(&.{session.slice()[0..protocol.session_id_bytes].*});
-    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{}));
     try ArchiveReportTesting.expectState(&storage, &tmp, session.slice(), .archived);
     const active_delta: protocol.ListSessions = .{ .since = pending.since };
     const closed = try TestingListing.read(&storage, &tmp, active_delta);
@@ -974,7 +974,7 @@ test "Action settlement atomically yields to an earlier Session stop" {
     );
     try std.testing.expectEqual(
         ActionSettlement.session_stop,
-        try storage.settleActionAttempt(action_binding, .succeeded, "Bash succeeded.", .{}),
+        try storage.settleActionAttempt(action_binding, .succeeded, "Bash succeeded.", null, .{}),
     );
     try std.testing.expectEqual(
         protocol.SessionStopCompletion.completed,
@@ -1674,7 +1674,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
     }
     const settled = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     const open = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(settled, .succeeded, "Bash succeeded.", .{}));
+    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(settled, .succeeded, "Bash succeeded.", null, .{}));
 
     const Snapshot = struct {
         database: []u8,
@@ -1701,7 +1701,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
     // Already settled, and a binding whose Turn is not the Action's.
     const wrong_turn: ActionAttemptBinding = .{ .turn_id = open.turn_id + 1, .parent_operation_id = open.parent_operation_id, .action_id = open.action_id };
     for ([_]ActionAttemptBinding{ settled, wrong_turn }) |stale| {
-        try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(stale, .failed, "A stale result is never stored.", .{}));
+        try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(stale, .failed, "A stale result is never stored.", null, .{}));
     }
     try std.testing.expect(!storage.isFenced());
     const after = try Snapshot.take(&storage, tmp.dir);
@@ -1762,7 +1762,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
         var access: Interposed.Inner = .open(&entry);
         defer access.deinit();
         var interposed: Interposed = .{ .inner = &access, .action_id = open.action_id };
-        try std.testing.expectError(error.StaleActionAttemptBinding, entry.finishTransaction(error{StaleActionAttemptBinding}, .{}, access.end(.{}, action_domain.settleActionAttempt(&interposed, open, .failed, "A result the guard refuses.", .{}))));
+        try std.testing.expectError(error.StaleActionAttemptBinding, entry.finishTransaction(error{StaleActionAttemptBinding}, .{}, access.end(.{}, action_domain.settleActionAttempt(&interposed, open, .failed, "A result the guard refuses.", null, .{}))));
     }
     try std.testing.expect(!storage.isFenced());
     const refused = try Snapshot.take(&storage, tmp.dir);
@@ -1776,7 +1776,7 @@ test "a stale Action settlement leaves the Store byte-identical" {
     // The open Action still settles at the position and content id the stale ones left.
     const position = try store_testing.sqlite_only.queryU64(&storage, "SELECT next_position FROM session", .{});
     const content_id = storage.identities().next.get(.content_id);
-    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", .{}));
+    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(open, .failed, "A later result is stored.", null, .{}));
     try std.testing.expectEqual(position, try store_testing.sqlite_only.queryU64(&storage, "SELECT acceptance_position FROM action_operation WHERE resolution_code='failed'", .{}));
     try std.testing.expectEqual(content_id, try store_testing.sqlite_only.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE resolution_code='failed'", .{}));
 }
@@ -1803,7 +1803,7 @@ test "every transition dates its fact from the Host clock" {
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("dated-stop", session.slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+    try std.testing.expectEqual(ActionSettlement.session_stop, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{}));
     const after: u64 = @intCast(@divFloor(try store_core.readUnixMilliseconds(std.testing.io), 1000));
 
     const Column = struct { table: []const u8, column: []const u8 };
@@ -4637,7 +4637,7 @@ test "public completed Action sibling corruption fences first Conversation read"
                 try allow.session.set(session.slice());
                 try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
                 const action_binding = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-                _ = try storage.settleActionAttempt(action_binding, .succeeded, key, .{});
+                _ = try storage.settleActionAttempt(action_binding, .succeeded, key, null, .{});
             }
             // Obtain only the immutable identity, not a traversal on another
             // public route that could accidentally supply validation authority.
@@ -6405,7 +6405,7 @@ test "Session work dates a tool group by its last acceptance, even when the cloc
     try submitTestMessage(&storage, &tmp, "stepped-bypass-input", "stepped-bypass-input", bypass.slice(), "propose");
     try settleTwoActionsForTesting(&storage, &tmp, (try storage.admitNextModelAttempt(.{})).?.permit.binding, "stepped-bypass-calls");
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+    _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{});
     var sql: [256]u8 = undefined;
     try sqlite.exec(storage.sqliteDatabase(), try std.fmt.bufPrintSentinel(&sql, "UPDATE model_operation SET resolved_at=300 WHERE session_ref='{0s}';" ++
         "UPDATE action_operation SET decided_at=300 WHERE session_ref='{0s}';" ++
@@ -7193,7 +7193,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                 }
                 if (kind == .action) {
                     const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;
-                    _ = try storage.settleActionAttempt(action, .succeeded, "result", .{});
+                    _ = try storage.settleActionAttempt(action, .succeeded, "result", null, .{});
                     // Measure the actual tool successor: the producer's result
                     // is after its usage/output and must remain in pressure.
                     if (index != population) {
@@ -9985,12 +9985,12 @@ test "MCP attempts serialize Sessions and recover without replay" {
     const unsent = (try storage.admitActionAttempt(.{ .action_id = first + 1, .runner = .mcp }, 600_000, .{})).?.permit.binding;
     var stop = try completeSessionStop("mcp-unsent-stop", sessions[0].slice());
     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
-    _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", .{});
+    _ = try storage.settleActionAttempt(unsent, .spawn_failed, "not available", null, .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ unsent.action_id, "%not sent%" }));
     const sent = (try storage.admitActionAttempt(.{ .action_id = other, .runner = .mcp }, 5_000, .{})).?.permit.binding;
     var sent_stop = try completeSessionStop("mcp-sent-stop", sessions[1].slice());
     try std.testing.expect(storage.stopSession(&sent_stop, .{}) == .accepted);
-    _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", .{});
+    _ = try storage.settleActionAttempt(sent, .succeeded, "terminal result raced stop", null, .{});
     try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation action JOIN content c ON c.content_id=action.resolution_content_id WHERE action.action_id=?1 AND action.resolution_code='cancelled' AND CAST(c.payload AS TEXT) LIKE ?2", .{ sent.action_id, "%Outcome unknown%" }));
 }
 

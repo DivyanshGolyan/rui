@@ -665,18 +665,6 @@ pub fn settleActionAttempt(
     binding: ActionAttemptBinding,
     code: ActionResolutionCode,
     result: []const u8,
-    faults: Faults,
-) !ActionSettlement {
-    return settleActionAttemptWithFullContent(a, binding, code, result, null, faults);
-}
-
-/// The MCP full answer shares the excerpt's lookup round and settlement.
-/// A selected stop imports neither the excerpt nor its discarded full text.
-pub fn settleActionAttemptWithFullContent(
-    a: anytype,
-    binding: ActionAttemptBinding,
-    code: ActionResolutionCode,
-    result: []const u8,
     full_result: ?[]const u8,
     faults: Faults,
 ) !ActionSettlement {
@@ -685,7 +673,7 @@ pub fn settleActionAttemptWithFullContent(
     try a.run();
     const found = facts orelse return error.StaleActionAttemptBinding;
     if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
-    std.debug.assert(full_result == null or found.mcp);
+    std.debug.assert(full_result == null or found.runner == .mcp);
 
     // A stop that selected the Turn cancels whatever the Action did.
     const settled: struct { code: ActionResolutionCode, text: []const u8 } =

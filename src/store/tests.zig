@@ -2306,7 +2306,7 @@ test "Current, activity pages and Message progress report one work in each state
             try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
             try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT stopped_at FROM session_stop", .{}), try expectOneWork(&storage, &tmp, bash.slice(), "stopping"));
             try expectProgress(&storage, "one-work-bash-message", .in_flight);
-            _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+            _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{});
             _ = try expectOneWork(&storage, &tmp, bash.slice(), "stopped");
             try std.testing.expect(!storage.isFenced());
         }
@@ -2425,13 +2425,13 @@ test "earlier Action settlement remains authoritative after Session stop" {
 
             try std.testing.expectEqual(
                 ActionSettlement.effect,
-                try storage.settleActionAttempt(action_binding, .succeeded, "Original Bash result.", .{}),
+                try storage.settleActionAttempt(action_binding, .succeeded, "Original Bash result.", null, .{}),
             );
             const original_content_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation", .{});
             const original_content_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
             try std.testing.expectError(
                 error.StaleActionAttemptBinding,
-                storage.settleActionAttempt(action_binding, .failed, "Late replacement.", .{}),
+                storage.settleActionAttempt(action_binding, .failed, "Late replacement.", null, .{}),
             );
             try std.testing.expectEqual(
                 original_content_count,
@@ -2449,7 +2449,7 @@ test "earlier Action settlement remains authoritative after Session stop" {
             try expectContent(&storage, result_metadata, "Original Bash result.");
             try std.testing.expectError(
                 error.StaleActionAttemptBinding,
-                storage.settleActionAttempt(action_binding, .cancelled, "Late stop result.", .{}),
+                storage.settleActionAttempt(action_binding, .cancelled, "Late stop result.", null, .{}),
             );
             try std.testing.expectEqual(
                 original_content_count,
@@ -2507,7 +2507,7 @@ test "Full reports every closed Action resolution without fencing" {
             try std.testing.expectEqual(@as(u64, 1234), input.timeout_ms);
             try std.testing.expectEqual(
                 ActionSettlement.effect,
-                try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", .{}),
+                try storage.settleActionAttempt(action_binding, .infrastructure_shutdown, "Host shutdown.", null, .{}),
             );
 
             const report_bytes = try testingSessionReportWithProfile(&storage, &tmp, session.slice(), 1024 * 1024, .full);
@@ -2861,7 +2861,7 @@ test "each transition that lets a Turn continue without input makes it selectabl
                                 const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
                                 try std.testing.expect((try storage.admitModelAttempt(.tool_continuation, .{})) == null);
                                 if (path == .settled) {
-                                    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+                                    try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{}));
                                 } else {
                                     try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
                                 }
@@ -3089,7 +3089,7 @@ test "production turn preserves skipped continuation preference through actual S
             _ = turn.run(&state, &context);
             try std.testing.expectEqual(@as(?anyerror, null), context.failure);
             try std.testing.expectEqual(sender.operation_id, context.action.?.parent_operation_id);
-            _ = try storage.settleActionAttempt(context.action.?, .succeeded, "sent", .{});
+            _ = try storage.settleActionAttempt(context.action.?, .succeeded, "sent", null, .{});
             context.preparation_open = true;
             _ = turn.run(&state, &context);
             try std.testing.expectEqual(@as(?anyerror, null), context.failure);
@@ -3138,7 +3138,7 @@ test "production turn preserves skipped continuation preference through actual S
                 try std.testing.expectEqual(@as(?anyerror, null), sustained_context.failure);
                 if (sustained_context.action) |action| {
                     progress[0] += 1;
-                    _ = try sustained.settleActionAttempt(action, .succeeded, "sent", .{});
+                    _ = try sustained.settleActionAttempt(action, .succeeded, "sent", null, .{});
                 } else if (sustained_context.model) |model| {
                     if (model.operation_id == bindings[1].operation_id) {
                         progress[1] += 1;
@@ -6924,7 +6924,7 @@ test "the dispatch work read answers as each admission owner does, in every stat
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
             const action = (try WorkParity.bash(&storage)).?;
             try WorkParity.idle(&storage);
-            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{}));
+            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{}));
             // Its last result lets the Turn go on; the queued input makes that a message admission.
             try std.testing.expect((try WorkParity.bash(&storage)) == null);
             try std.testing.expect((try WorkParity.model(&storage, .tool_continuation)) == null);
@@ -7597,7 +7597,7 @@ test "the Current report's resolved and rejected calls carry their group's publi
             try allow.session.set(session.slice());
             try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
             const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-            _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+            _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{});
             const group = try store_testing.queryU64(&storage, "SELECT max(acceptance_position) FROM action_operation", .{});
             try std.testing.expect(group > try store_testing.queryU64(&storage, "SELECT acceptance_position FROM model_tool_call WHERE rejection_code IS NOT NULL", .{}));
 
@@ -9377,7 +9377,7 @@ pub fn costCycleForTesting(storage: *Store, tmp: *std.testing.TmpDir, session: [
     try std.testing.expect(storage.decidePermission(&allow, .{}) == .accepted);
     try denyForTesting(storage, session, try std.fmt.bufPrint(&key, "cycle-{d}-deny", .{index}), first_action + 1);
     const action = (try storage.admitNextActionAttempt(300_000, .{})).?.permit.binding;
-    _ = try storage.settleActionAttempt(action, .succeeded, "total 8\ndrwxr-xr-x 2 user user 4096 a\n-rw-r--r-- 1 user user 120 b\n", .{});
+    _ = try storage.settleActionAttempt(action, .succeeded, "total 8\ndrwxr-xr-x 2 user user 4096 a\n-rw-r--r-- 1 user user 120 b\n", null, .{});
     const continued = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
     const items = [_][]const u8{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Two files; the removal was denied.\"}]}"};
     try settleItemsForTesting(storage, tmp, continued, &items, "Two files; the removal was denied.");
@@ -10737,7 +10737,7 @@ test "each Store entry point takes its round budget on its common path" {
             meter.start();
             try storage.readActionExecutionInput(.mcp, binding, &input);
             meter.stop(.readMcpExecutionInput);
-            _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
+            _ = try storage.settleActionAttempt(binding, .succeeded, "done", null, .{});
             try std.testing.expect((try storage.nextAction(.mcp)) == null);
             try std.testing.expect((try storage.admitNextModelAttempt(.{})) != null);
         }
@@ -10919,7 +10919,7 @@ test "each Store entry point takes its round budget on its common path" {
             try storage.revokeActionSender(action);
             meter.stop(.revokeActionSender);
             meter.start();
-            _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", .{});
+            _ = try storage.settleActionAttempt(action, .succeeded, "Bash succeeded.", null, .{});
             meter.stop(.settleActionAttempt);
             var deny: protocol.PermissionDecisionCommand = .{ .action_id = denied, .decision = .deny };
             try deny.key.set("budget-deny");
@@ -11837,7 +11837,7 @@ test "model admission work excludes usage-covered accepted tool and instruction 
                     }
                     if (kind == .action) {
                         const action = (try storage.admitNextActionAttempt(1000, .{}) orelse return error.MissingPressureAction).permit.binding;
-                        _ = try storage.settleActionAttempt(action, .succeeded, "result", .{});
+                        _ = try storage.settleActionAttempt(action, .succeeded, "result", null, .{});
                         // Measure the actual tool successor: the producer's result
                         // is after its usage/output and must remain in pressure.
                         if (index != population) {
@@ -14082,7 +14082,7 @@ test "saved MCP call lines survive all work reads pending, running and completed
                 const action = (try storage.nextAction(.mcp)).?;
                 const binding = (try storage.admitActionAttempt(action, 600_000, .{})).?.permit.binding;
                 try reads(&storage, &tmp, session.slice(), "bash", text);
-                _ = try storage.settleActionAttempt(binding, .succeeded, "done", .{});
+                _ = try storage.settleActionAttempt(binding, .succeeded, "done", null, .{});
                 try reads(&storage, &tmp, session.slice(), "pending", text);
             }
         }
@@ -14147,14 +14147,14 @@ test "MCP full answer settlement is atomic and stop and stale results import nei
                     .encoded_arguments = "{}",
                     .decoded_arguments = "{}",
                 }});
-                const action = (try storage.nextMcpAction()).?;
-                const binding = (try storage.admitMcpActionAttempt(action.action_id, 600_000, .{})).?;
+                const action = (try storage.nextAction(.mcp)).?;
+                const binding = (try storage.admitActionAttempt(action, 600_000, .{})).?.permit.binding;
                 const excerpt = "Saved MCP excerpt";
                 const full = "Complete MCP answer, including bytes omitted from the saved excerpt.";
                 const full_text: ?[]const u8 = if (scenario == .fitting) null else full;
                 const before = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
                 if (scenario == .import_failure or scenario == .commit_failure) {
-                    try std.testing.expectError(if (scenario == .import_failure) error.InjectedContentImportFailure else error.InjectedCommitFailure, storage.settleMcpActionAttempt(binding, .succeeded, excerpt, full_text, .{
+                    try std.testing.expectError(if (scenario == .import_failure) error.InjectedContentImportFailure else error.InjectedCommitFailure, storage.settleActionAttempt(binding, .succeeded, excerpt, full_text, .{
                         .content_import = scenario == .import_failure,
                         .before_commit = scenario == .commit_failure,
                     }));
@@ -14170,9 +14170,9 @@ test "MCP full answer settlement is atomic and stop and stale results import nei
                     var stop = try completeSessionStop("mcp-full-stop", session.slice());
                     try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
                 }
-                try std.testing.expectEqual(if (scenario == .stopped) ActionSettlement.session_stop else ActionSettlement.effect, try storage.settleMcpActionAttempt(binding, .succeeded, excerpt, full_text, .{}));
+                try std.testing.expectEqual(if (scenario == .stopped) ActionSettlement.session_stop else ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, excerpt, full_text, .{}));
                 const resolution_id = try store_testing.queryU64(&storage, "SELECT resolution_content_id FROM action_operation WHERE action_id=?1", .{binding.action_id});
-                try expectContent(&storage, try testingContentReference(&storage, resolution_id), if (scenario == .stopped) action_domain.mcp_stop_unknown_text else excerpt);
+                try expectContent(&storage, try testingContentReference(&storage, resolution_id), if (scenario == .stopped) @import("../mcp/action_text.zig").stop_unknown else excerpt);
                 if (scenario == .stopped or scenario == .fitting) {
                     try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE full_content_id IS NOT NULL", .{}));
                     const digest = protocol.contentDigest(full);
@@ -14184,7 +14184,7 @@ test "MCP full answer settlement is atomic and stop and stale results import nei
                     try std.testing.expectEqual(before + 2, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
                 }
                 const settled_count = try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{});
-                try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleMcpActionAttempt(binding, .failed, "Late excerpt must not be imported", "Late full answer must not be imported", .{}));
+                try std.testing.expectError(error.StaleActionAttemptBinding, storage.settleActionAttempt(binding, .failed, "Late excerpt must not be imported", "Late full answer must not be imported", .{}));
                 try std.testing.expectEqual(settled_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM content", .{}));
                 try std.testing.expect(!storage.isFenced());
             }
@@ -14458,7 +14458,7 @@ test "runner action seam covers selection admission input settlement stop and re
                             try std.testing.expectEqualSlices(u8, &protocol.contentDigest("{\"type\":\"object\"}"), &input.runner.mcp.input_schema.digest);
                         }
                         if (scenario == 0) {
-                            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, expected_text, .{}));
+                            try std.testing.expectEqual(ActionSettlement.effect, try storage.settleActionAttempt(binding, .succeeded, expected_text, null, .{}));
                         } else {
                             try std.testing.expect(try storage.recoverOneUncertainAction(ActiveOperationFilter.empty()));
                         }

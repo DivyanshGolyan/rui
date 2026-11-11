@@ -1770,7 +1770,7 @@ fn completeBash(host: *Host, slot: *ExecutionSlot, outcome: *bash.Outcome) void 
     pause(host, .{ .action_result = binding });
     testTransition(host, .action_result_ready, binding);
     if (host.custody.claimTerminalDelivery(token)) {
-        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), host.hooks.storeFaults(.action_result)) catch |err| {
+        const settlement = host.store.settleActionAttempt(binding, outcome.code, outcome.text(), null, host.hooks.storeFaults(.action_result)) catch |err| {
             active.execution.releaseOutputReservation(host.retention);
             _ = failBash(host, slot, "Bash result settlement", err);
             return;
@@ -1848,7 +1848,7 @@ fn settleActionFailure(
     result: []const u8,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    _ = host.store.settleActionAttempt(binding, code, result, host.hooks.storeFaults(.action_result)) catch |err| {
+    _ = host.store.settleActionAttempt(binding, code, result, null, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "Bash failure settlement", err);
         return;
     };

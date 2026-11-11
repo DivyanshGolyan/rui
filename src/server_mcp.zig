@@ -185,13 +185,13 @@ noinline fn settleFull(host: *Host, binding: store.ActionAttemptBinding, code: s
         fenceDispatch(host, "MCP excerpt rendering", err);
         return;
     };
-    _ = host.store.settleMcpActionAttempt(binding, code, excerpt.written(), full, host.hooks.storeFaults(.action_result)) catch |err| {
+    _ = host.store.settleActionAttempt(binding, code, excerpt.written(), full, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "MCP settlement", err);
     };
 }
 
 fn settle(host: *Host, binding: store.ActionAttemptBinding, code: store.ActionResolutionCode, text: []const u8) void {
-    _ = host.store.settleActionAttempt(binding, code, text, host.hooks.storeFaults(.action_result)) catch |err| {
+    _ = host.store.settleActionAttempt(binding, code, text, null, host.hooks.storeFaults(.action_result)) catch |err| {
         fenceDispatch(host, "MCP settlement", err);
     };
 }
