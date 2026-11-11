@@ -1834,10 +1834,12 @@ fn upgradeHeld(self: *const Self) bool {
     return self.upgradePhase() != .active;
 }
 
-/// No Client work of this conversation's is in flight, so an Upgrade's run
-/// may start.
+/// No Client work of this conversation's is in flight or accepted and
+/// waiting its turn, so an Upgrade's run may start. A queued command runs
+/// first: `quiesceUpgrade` starts it, and its read is joined before this
+/// holds.
 pub fn atRest(self: *const Self) bool {
-    return self.reader.thread == null and self.submission.task.thread == null and self.skill_task.thread == null;
+    return self.input.queuedCommand() == null and self.reader.thread == null and self.submission.task.thread == null and self.skill_task.thread == null;
 }
 
 /// Settles this conversation's Client work for an Upgrade's run. The
@@ -4273,6 +4275,39 @@ test "a run quiesces the conversation's Client work, and its end holds Host requ
     self.upgrade_stale = false;
     try std.testing.expect(!self.upgradeHeld());
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), session_upgrade.rereading) == null);
+}
+
+test "a conversation is at rest for an Upgrade only with no work queued, running or finished and not yet joined" {
+    const Worker = struct {
+        fn read(_: *anyopaque, task: *Task) !void {
+            while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
+            return error.Cancelled;
+        }
+        fn idle(_: *anyopaque, _: *Task) !void {}
+        fn completed(reader: *Task) bool {
+            return reader.completed();
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try std.testing.expect(self.atRest());
+    // Accepted and waiting its turn.
+    self.input.queueCommand("/requests");
+    try std.testing.expect(!self.atRest());
+    _ = self.input.takeCommand();
+    try std.testing.expect(self.atRest());
+    // Running, then finished and not yet joined.
+    try self.reader.start(std.testing.io, self, Worker.read);
+    try std.testing.expect(!self.atRest());
+    self.reader.cancel();
+    _ = self.joinReader();
+    try std.testing.expect(self.atRest());
+    try self.reader.start(std.testing.io, self, Worker.idle);
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &self.reader, Worker.completed);
+    try std.testing.expect(!self.atRest());
+    _ = self.joinReader();
+    try std.testing.expect(self.atRest());
 }
 
 test "upgrade quiescing reobservation and protocol holds refuse a fresh Message without clearing its draft" {

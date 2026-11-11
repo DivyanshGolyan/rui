@@ -4485,6 +4485,57 @@ test "memory counts this TUI alone while no Host runs, at open and after a Host 
     try std.testing.expect(after.rui > 0 and after.tools == null);
 }
 
+test "a conversation's /upgrade waits for the conversation's queued command, though the overview ticks first" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var ops = fake_operations;
+    ops.open = openSession;
+    const Scratch = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    Scratch.dir = tmp.dir;
+    Scratch.count = 0;
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6-luna" }, ops, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = Scratch.scratch;
+    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    defer {
+        for (overview.retired.items) |retired| overview.disposeSession(retired.left);
+        overview.retired.deinit(std.testing.allocator);
+    }
+    const frontend = overview.app_session.?.frontend.?;
+    try std.testing.expect(overview.root.session != null);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    // A command the conversation accepted, then /upgrade before its tick.
+    frontend.input.queueCommand("/requests");
+    try conversed(overview, .idle, .upgrade);
+    try std.testing.expect(overview.state.upgrading());
+    for (0..3) |_| try overview.appUpgrade(&ctx);
+    try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
+    // Esc ends the run that never started, as on the overview.
+    try conversed(overview, .idle, .cancel_upgrade);
+    _ = frontend.input.takeCommand();
+    var turns: usize = 0;
+    while (overview.state.upgrading()) : (turns += 1) {
+        try std.testing.expect(turns < 100);
+        try overview.appUpgrade(&ctx);
+    }
+    try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", overview.state.notice.?.text());
+    try std.testing.expect(overview.upgrade_report == null);
+    frontend.leaving = .returned;
+    try appSessionLeft(overview, &ctx, .returned);
+}
+
 test "upgrade quiescence cancels read jobs rather than granting them mutation custody" {
     const Read = struct {
         var cancelled: bool = false;
