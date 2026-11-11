@@ -5344,3 +5344,28 @@ test "SessionFrontend capped answer Ctrl-O opens the whole authenticated source"
     try std.testing.expectEqual(.message, held.screen.view);
     try std.testing.expect(std.mem.indexOf(u8, held.screen.staging.text(), source) != null);
 }
+
+test "SessionFrontend history physical feed geometry" {
+    const fixture = try FeedFixture.create();
+    defer fixture.destroy();
+    const held = fixture.held;
+    var buffer: [4096]u8 = undefined;
+    var words = std.Io.Writer.fixed(&buffer);
+    for (0..100) |line| try words.print("History line{d:0>3}\n", .{line});
+    try words.writeAll("TD4 history end\n");
+    try fixture.page(.opening, &.{.{ .key = 1, .text = words.buffered() }}, true, true);
+    const initial = try held.shown();
+    try std.testing.expectEqual(@as(u16, 18), held.screen.height);
+    var initial_rows = std.mem.splitScalar(u8, initial, '\n');
+    for (83..100) |line| {
+        var expected: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "History line{d:0>3}", .{line}), std.mem.trimEnd(u8, initial_rows.next().?, " "));
+    }
+    try std.testing.expectEqualStrings("TD4 history end", std.mem.trimEnd(u8, initial_rows.next().?, " "));
+    try held.keys("\x1b[5~");
+    var older_rows = std.mem.splitScalar(u8, try held.shown(), '\n');
+    for (74..92) |line| {
+        var expected: [32]u8 = undefined;
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "History line{d:0>3}", .{line}), std.mem.trimEnd(u8, older_rows.next().?, " "));
+    }
+}
