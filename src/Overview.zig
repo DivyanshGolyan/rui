@@ -5486,7 +5486,9 @@ test "App root navigation shows and focuses the main pane before every Session s
             return error.TestUnexpectedResult;
         }
     };
-    const Guard = enum { allowed, draft, pending, action, command };
+    // App-owned drafts can leave safely; SessionFrontend tests own their
+    // handoff policy. Exercise unresolved-work guards, not draft emptiness.
+    const Guard = enum { allowed, pending, action, command };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     Nav.dir = tmp.dir;
@@ -5531,7 +5533,6 @@ test "App root navigation shows and focuses the main pane before every Session s
                             // could consume it before the selection observes it.
                             switch (guard) {
                                 .allowed => {},
-                                .draft => _ = held.input.append("kept draft"),
                                 .pending => {
                                     held.submission.intent = .{ .message = held.input.submitText("pending message") };
                                     held.submission.state = .submitting;
@@ -5568,7 +5569,6 @@ test "App root navigation shows and focuses the main pane before every Session s
                         try std.testing.expectEqual(@as(usize, @intFromBool(retained and !kept)), overview.retired.items.len);
                         const notice: ?[]const u8 = if (kept and !same) switch (guard) {
                             .allowed => unreachable,
-                            .draft => "Esc returns to the overview once the draft is empty.",
                             .pending => "Esc returns to the overview once the original is confirmed.",
                             .action => "Links open once the Action is decided.",
                             .command => "Links open once the command ends.",
@@ -5597,7 +5597,6 @@ test "App root navigation shows and focuses the main pane before every Session s
                             try std.testing.expect(focused.eql(held.app_input.composer.widget()));
                             switch (guard) {
                                 .allowed => {},
-                                .draft => try std.testing.expectEqualStrings("kept draft", held.input.composition().bytes),
                                 .pending => {
                                     try std.testing.expectEqual(.submitting, held.submission.state);
                                     try std.testing.expectEqualStrings("pending message", try held.input.message(held.submission.intent.?.message));
