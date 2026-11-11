@@ -129,7 +129,9 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         var token_buffer: [protocol_reply.SessionToken.max_bytes]u8 = undefined;
-        try body.appendShape(protocol.observe_command_request, .{ paths.store.slice(), key, if (since) |token| token.format(&token_buffer) else null });
+        try body.appendShape(protocol.observe_command_request.head, .{ paths.store.slice(), key });
+        if (since) |token| try body.appendShape(protocol.observe_command_request.since, .{@as(?[]const u8, token.format(&token_buffer))});
+        try body.appendShape(protocol.observe_command_request.tail, .{});
         const reply = try sendSource(self, &paths, "/v1/observe-command", .{}, body.len, null, body.slice(), null, null, reply_buffer, until).get();
         return protocol_reply.ObservationReply.parse(reply, key, since);
     }
@@ -161,8 +163,8 @@ pub const Requests = struct {
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
         switch (profile) {
-            .current => try body.appendShape(protocol.inspect_session_request.current, .{ paths.store.slice(), session }),
-            .full => try body.appendShape(protocol.inspect_session_request.full, .{ paths.store.slice(), session }),
+            .current => try body.appendShape(protocol.inspect_session_request.head ++ protocol.inspect_session_request.tail, .{ paths.store.slice(), session }),
+            .full => try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail), .{ paths.store.slice(), session }),
         }
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
@@ -175,7 +177,7 @@ pub const Requests = struct {
         if (selection.operation == 0 or selection.operation > std.math.maxInt(i64) or selection.attempt == 0 or selection.attempt > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.inspect_session_request.failed_response, .{ paths.store.slice(), session, selection.part, selection.operation, selection.attempt });
+        try body.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail), .{ paths.store.slice(), session, selection.part, selection.operation, selection.attempt });
         const fd = try openRead(self, &paths, "/v1/inspect-session", body.slice());
         defer closeSocket(self.io, fd);
         const head = try readResponseHeadUntil(self, fd, .{}, null);
@@ -249,7 +251,7 @@ pub const Requests = struct {
         if (position == 0 or position > std.math.maxInt(i64) or ordinal > std.math.maxInt(i64)) return error.InvalidTarget;
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.conversation_content_request, .{ paths.store.slice(), session, position, ordinal });
+        try body.appendShape(protocol.conversation_content_request.all, .{ paths.store.slice(), session, position, ordinal });
         const fd = try openRead(self, &paths, "/v1/conversation-content", body.slice());
         defer closeSocket(self.io, fd);
         return readPublicContentResponse(self, fd, expected, sink);
@@ -261,7 +263,7 @@ pub const Requests = struct {
         try cursor.validate();
         const paths = try platform.resolveClientPaths(self.io, store_path);
         var body: protocol.RequestBuffer = .{};
-        try body.appendShape(protocol.activity_page_request, .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
+        try body.appendShape((protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ paths.store.slice(), session, cursor.end, cursor.position, cursor.ordinal, cursor.direction, cursor.kinds, cursor.limit });
         const fd = try openRead(self, &paths, "/v1/activity-page", body.slice());
         defer closeSocket(self.io, fd);
         const Sink = struct {
@@ -944,7 +946,7 @@ pub fn captureSessionArchive(io: std.Io, input: SessionArchiveInput, target: Cap
     var output_buffer: [protocol.content_window_bytes]u8 = undefined;
     var capture = try Capture.open(io, location.record, &output_buffer);
     errdefer capture.abort();
-    try capture.writeRequest(protocol.session_archive_request, .{ paths.store.slice(), location.key, input.session, input.archived });
+    try capture.writeRequest(protocol.session_archive_request.all, .{ paths.store.slice(), location.key, input.session, input.archived });
     return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .session_archive);
 }
 
@@ -1140,13 +1142,18 @@ pub fn listSessionsFiltered(
 }
 
 fn appendListSessions(body: anytype, store: []const u8, workspace: ?[]const u8, archive: protocol.SessionArchiveFilter, cursor: protocol_reply.SessionListCursor) !void {
-    const head = .{ store, workspace, archive, cursor.after, cursor.ceiling };
+    try body.appendShape(protocol.list_sessions_request.head, .{ store, workspace });
+    try body.appendShape(protocol.list_sessions_request.archive, .{archive});
+    try body.appendShape(protocol.list_sessions_request.cursor, .{ cursor.after, cursor.ceiling });
     var token: [protocol.SinceToken.max_bytes]u8 = undefined;
-    const since = cursor.since orelse return body.appendShape(protocol.list_sessions_request, head);
-    if (cursor.changed) |*changed|
-        try body.appendShape(protocol.list_sessions_changed_request, head ++ .{ since.format(&token), changed.through, @as([]const u8, &changed.after_reference) })
-    else
-        try body.appendShape(protocol.list_sessions_since_request, head ++ .{since.format(&token)});
+    if (cursor.since) |since| {
+        try body.appendShape(protocol.list_sessions_request.since, .{since.format(&token)});
+        if (cursor.changed) |*changed| {
+            try body.appendShape(protocol.list_sessions_request.through, .{changed.through});
+            try body.appendShape(protocol.list_sessions_request.after_reference, .{@as([]const u8, &changed.after_reference)});
+        }
+    }
+    try body.appendShape(protocol.list_sessions_request.tail, .{});
 }
 
 pub fn readActionArguments(
@@ -1525,14 +1532,9 @@ fn writeConfigureCapture(io: std.Io, paths: *const platform.Paths, input: Config
     errdefer capture.abort();
     try capture.writeRequest(protocol.configure_request.head, .{ paths.store.slice(), location.key, session });
     try capture.writeConfiguration(input);
-    if (input.reload_skills and input.require_model)
-        try capture.writeRequest(protocol.configure_request.reload_require_model_tail, .{})
-    else if (input.reload_skills)
-        try capture.writeRequest(protocol.configure_request.reload_skills_tail, .{})
-    else if (input.require_model)
-        try capture.writeRequest(protocol.configure_request.require_model_tail, .{})
-    else
-        try capture.writeRequest(protocol.configure_request.tail, .{});
+    if (input.reload_skills) try capture.writeRequest(protocol.configure_request.reload_skills, .{});
+    if (input.require_model) try capture.writeRequest(protocol.configure_request.require_model, .{});
+    try capture.writeRequest(protocol.configure_request.tail, .{});
     return finishCapture(io, &capture, &location, paths.store.slice(), session, .configure);
 }
 
@@ -1567,9 +1569,11 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     var capture = try Capture.open(io, location.record, &output_buffer);
     capture.input_failure = input_failure;
     errdefer capture.abort();
+    try capture.writeRequest(protocol.message_request.head, .{ paths.store.slice(), location.key, input.session });
     if (input.sender) |sender| {
-        try capture.writeRequest(protocol.message_request.sender_head, .{ paths.store.slice(), location.key, input.session, sender.store.?, sender.session, input.sender_handle });
-    } else try capture.writeRequest(protocol.message_request.head, .{ paths.store.slice(), location.key, input.session, input.sender_handle });
+        try capture.writeRequest(protocol.message_request.sender, .{ sender.store.?, sender.session });
+    } else try capture.writeRequest(protocol.message_request.no_sender, .{});
+    try capture.writeRequest(protocol.message_request.sender_handle, .{input.sender_handle});
     if (input.configuration) |configuration| {
         // Creation intent is visible in the bounded metadata prefix, before
         // either variable payload. Inspection never scans Message content.
@@ -1583,10 +1587,10 @@ fn writeMessageCapture(io: std.Io, paths: *const platform.Paths, input: MessageI
     } else if (std.mem.eql(u8, input.text_path, "-")) {
         try capture.writeJsonFileBounded(input.text_path, protocol.max_sqlite_content_bytes, true);
     } else try capture.writeJsonFile(input.text_path);
+    try capture.writeRequest(protocol.message_request.text_tail, .{});
     if (input.configuration != null and input.configuration.?.require_model)
-        try capture.writeRequest(protocol.message_request.require_model_tail, .{})
-    else
-        try capture.writeRequest(protocol.message_request.tail, .{});
+        try capture.writeRequest(protocol.message_request.require_model, .{});
+    try capture.writeRequest(protocol.message_request.tail, .{});
     return finishCapture(io, &capture, &location, paths.store.slice(), input.session, .message);
 }
 
@@ -2897,6 +2901,46 @@ test "client recovery rejects noncanonical Session references without retransmis
     }
 }
 
+test "capture creating Messages writes configuration and optional model admission" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    try tmp.dir.setPermissions(io, .fromMode(0o700));
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    for ([_]bool{ false, true }) |require_model| {
+        var captured = try captureMessage(io, .{
+            .store = root,
+            .session = "",
+            .text_path = "",
+            .text = "hello",
+            .configuration = .{
+                .store = root,
+                .session = .create,
+                .model = .{ .present = true, .value = "custom" },
+                .tools = "none",
+                .permission_mode = .{ .present = true, .value = "ask" },
+                .compaction_trigger = .{ .present = true, .value = "1000" },
+                .reasoning_effort = .{ .present = true, .value = "low" },
+                .require_model = require_model,
+            },
+        }, .{ .generated = root }).get();
+        defer captured.close(io);
+        _ = try readCapturedBinding(io, &captured.file);
+        var bytes: [4096]u8 = undefined;
+        const length = try captured.file.readPositionalAll(io, &bytes, 0);
+        const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+        defer parsed.deinit();
+        const object = parsed.value.object;
+        try std.testing.expectEqualStrings("", object.get("session").?.string);
+        try std.testing.expect(object.get("sender").? == .null);
+        try std.testing.expectEqualStrings("custom", object.get("configuration").?.object.get("model").?.object.get("value").?.string);
+        try std.testing.expectEqualStrings("hello", object.get("text").?.object.get("value").?.string);
+        try std.testing.expectEqual(require_model, object.contains("require_model"));
+        if (require_model) try std.testing.expect(object.get("require_model").?.bool);
+    }
+}
+
 test "capture configure requests a Store allocated Session and retains model admission" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -3757,12 +3801,12 @@ test "bounded read requests retain escaped key capacities and canonical Session 
     const session = "k7m2qx";
     const session_encoding_slack = 6 * protocol.max_session_bytes - session.len;
     const cases = .{
-        .{ protocol.observe_command_request, .{ &escaped_store, &escaped_key, @as(?[]const u8, &escaped_since) }, protocol.max_observe_command_request_bytes },
+        .{ protocol.observe_command_request.all, .{ &escaped_store, &escaped_key, @as(?[]const u8, &escaped_since) }, protocol.max_observe_command_request_bytes },
         .{ protocol.read_result_request, .{ &escaped_store, &escaped_key }, protocol.max_read_result_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_call_id_request_bytes - session_encoding_slack },
         .{ protocol.read_action_arguments_request, .{ &escaped_store, session, std.math.maxInt(u64) }, protocol.max_read_action_arguments_request_bytes - session_encoding_slack },
-        .{ protocol.inspect_session_request.failed_response, .{ &escaped_store, session, protocol.FailedResponsePart.metadata, std.math.maxInt(u64), std.math.maxInt(u64) }, protocol.shapeBytes(protocol.inspect_session_request.failed_response) - session_encoding_slack },
-        .{ protocol.inspect_session_request.current_since, .{ &escaped_store, session, @as(?[]const u8, &escaped_since) }, protocol.max_inspect_session_request_bytes - session_encoding_slack },
+        .{ (protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail), .{ &escaped_store, session, protocol.FailedResponsePart.metadata, std.math.maxInt(u64), std.math.maxInt(u64) }, protocol.shapeBytes((protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail)) - session_encoding_slack },
+        .{ (protocol.inspect_session_request.head ++ protocol.inspect_session_request.since ++ protocol.inspect_session_request.tail), .{ &escaped_store, session, @as(?[]const u8, &escaped_since) }, protocol.max_inspect_session_request_bytes - session_encoding_slack },
     };
     inline for (cases) |case| {
         var body: protocol.RequestBuffer = .{};
@@ -3770,11 +3814,28 @@ test "bounded read requests retain escaped key capacities and canonical Session 
         try std.testing.expectEqual(@as(usize, case[2]), body.len);
     }
     var inspection: protocol.RequestBuffer = .{};
-    try inspection.appendShape(protocol.inspect_session_request.full, .{ &escaped_store, session });
+    try inspection.appendShape((protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail), .{ &escaped_store, session });
     try std.testing.expect(inspection.len <= protocol.max_inspect_session_request_bytes);
     var full: protocol.RequestBuffer = .{};
     full.len = full.bytes.len;
     try std.testing.expectError(error.BufferTooLarge, full.append("x"));
+}
+
+test "configure metadata bound covers every optional member together" {
+    const store = @as([protocol.max_store_bytes]u8, @splat(1));
+    const key = @as([protocol.max_key_bytes]u8, @splat(1));
+    const session = @as([protocol.max_session_bytes]u8, @splat(1));
+    const preset = @as([protocol.max_preset_name_bytes]u8, @splat(1));
+    // The configuration body is streamed independently of bounded metadata.
+    var body: protocol.FixedJsonBuffer(protocol.configure_request.max_metadata_bytes + "{}".len) = .{};
+    try body.appendShape(protocol.configure_request.head, .{ &store, &key, &session });
+    try body.append("{}");
+    try body.appendShape(protocol.configure_request.reload_skills, .{});
+    try body.appendShape(protocol.configure_request.require_model, .{});
+    try body.appendShape(protocol.configure_request.preset, .{&preset});
+    try body.appendShape(protocol.configure_request.tail, .{});
+    try std.testing.expectEqual(protocol.configure_request.max_metadata_bytes + "{}".len, body.len);
+    try std.testing.expect(try std.json.validate(std.testing.allocator, body.slice()));
 }
 
 test "every request renders its exact worst-case bound from the shape it writes" {
@@ -3786,27 +3847,29 @@ test "every request renders its exact worst-case bound from the shape it writes"
     const observation_token = @as([protocol_reply.SessionToken.max_bytes]u8, @splat(1));
     const reference = @as([protocol.session_id_bytes]u8, @splat(1));
     const skill_prefix = @as([64]u8, @splat(1));
+    const search_query = @as([256]u8, @splat(1));
     const id: u64 = std.math.maxInt(u64);
     const optional_id: ?u64 = std.math.maxInt(u64);
     const Direction = @FieldType(protocol.ActivityPage, "direction");
     const cases = .{
         .{ protocol.session_stop_request, .{ &store, &key, &session }, protocol.max_session_stop_request_bytes },
-        .{ protocol.session_archive_request, .{ &store, &key, &session, false }, protocol.max_session_archive_request_bytes },
+        .{ protocol.session_archive_request.all, .{ &store, &key, &session, false }, protocol.max_session_archive_request_bytes },
         .{ protocol.model_interruption_request, .{ &store, &key, &session, id, id }, protocol.max_model_interruption_request_bytes },
         .{ protocol.permission_decision_request, .{ &store, &key, &session, id, protocol.PermissionDecision.allow_once }, protocol.max_permission_decision_request_bytes },
-        .{ protocol.observe_command_request, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
+        .{ protocol.observe_command_request.all, .{ &store, &key, @as(?[]const u8, &observation_token) }, protocol.max_observe_command_request_bytes },
         .{ protocol.host_info_request, .{&store}, protocol.max_host_info_request_bytes },
         .{ protocol.host_stop_request, .{&store}, protocol.max_host_stop_request_bytes },
         .{ protocol.read_result_request, .{ &store, &key }, protocol.max_read_result_request_bytes },
-        .{ protocol.inspect_session_request.failed_response, .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, comptime protocol.shapeBytes(protocol.inspect_session_request.failed_response) },
-        .{ protocol.inspect_session_request.current_since, .{ &store, &session, @as(?[]const u8, &observation_token) }, comptime protocol.shapeBytes(protocol.inspect_session_request.current_since) },
-        .{ protocol.list_sessions_changed_request, .{ &store, @as(?[]const u8, &workspace), protocol.SessionArchiveFilter.archived, id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
+        .{ (protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail), .{ &store, &session, protocol.FailedResponsePart.metadata, id, id }, comptime protocol.shapeBytes((protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail)) },
+        .{ (protocol.inspect_session_request.head ++ protocol.inspect_session_request.since ++ protocol.inspect_session_request.tail), .{ &store, &session, @as(?[]const u8, &observation_token) }, comptime protocol.shapeBytes((protocol.inspect_session_request.head ++ protocol.inspect_session_request.since ++ protocol.inspect_session_request.tail)) },
+        .{ protocol.list_sessions_request.all, .{ &store, @as(?[]const u8, &workspace), protocol.SessionArchiveFilter.archived, id, id, &token, id, &reference }, protocol.max_list_sessions_request_bytes },
         .{ protocol.read_action_arguments_request, .{ &store, &session, id }, protocol.max_read_action_arguments_request_bytes },
         .{ protocol.read_action_call_id_request, .{ &store, &session, id }, protocol.max_read_action_call_id_request_bytes },
-        .{ protocol.conversation_content_request, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
+        .{ protocol.conversation_content_request.all, .{ &store, &session, id, id }, protocol.max_conversation_content_request_bytes },
         .{ protocol.conversation_page_request, .{ &store, &session, id, id, id }, protocol.max_conversation_page_request_bytes },
-        .{ protocol.activity_page_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request) },
-        .{ protocol.activity_page_since_request, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
+        .{ (protocol.activity_page_request.head ++ protocol.activity_page_request.tail), .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id }, comptime protocol.shapeBytes(protocol.activity_page_request.head ++ protocol.activity_page_request.tail) },
+        .{ protocol.activity_page_request.all, .{ &store, &session, optional_id, id, optional_id, Direction.backward, protocol.ActivityPage.Kinds.full, id, @as(?[]const u8, &observation_token) }, protocol.max_activity_page_request_bytes },
+        .{ protocol.activity_search_request.all, .{ &store, &session, &search_query, protocol.ActivityPage.Kinds.full, optional_id, optional_id, id }, protocol.max_activity_search_request_bytes },
         .{ protocol.activity_content_request, .{ &store, &session, id, id }, protocol.max_activity_content_request_bytes },
         .{ protocol.skill_suggestions_session_request, .{ &store, &session, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_session_request) },
         .{ protocol.skill_suggestions_workspace_request, .{ &store, &workspace, &skill_prefix }, comptime protocol.shapeBytes(protocol.skill_suggestions_workspace_request) },
@@ -4749,14 +4812,20 @@ test "skills typed captures preserve reload intent" {
     var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
     var bytes: [4096]u8 = undefined;
-    var reload = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" }, .reload_skills = true, .require_model = true }, .{ .generated = root }).get();
-    defer reload.close(io);
-    _ = try readCapturedBinding(io, &reload.file);
-    const length = try reload.file.readPositionalAll(io, &bytes, 0);
-    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
-    defer parsed.deinit();
-    try std.testing.expect(parsed.value.object.get("reload_skills").?.bool);
-    try std.testing.expect(parsed.value.object.get("require_model").?.bool);
+    for ([_]bool{ false, true }) |reload_skills| {
+        for ([_]bool{ false, true }) |require_model| {
+            var captured = try captureConfigure(io, .{ .store = root, .session = .{ .named = "k7m2qx" }, .reload_skills = reload_skills, .require_model = require_model }, .{ .generated = root }).get();
+            defer captured.close(io);
+            _ = try readCapturedBinding(io, &captured.file);
+            const length = try captured.file.readPositionalAll(io, &bytes, 0);
+            var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes[0..length], .{});
+            defer parsed.deinit();
+            try std.testing.expectEqual(reload_skills, parsed.value.object.contains("reload_skills"));
+            try std.testing.expectEqual(require_model, parsed.value.object.contains("require_model"));
+            if (reload_skills) try std.testing.expect(parsed.value.object.get("reload_skills").?.bool);
+            if (require_model) try std.testing.expect(parsed.value.object.get("require_model").?.bool);
+        }
+    }
 }
 
 test "inline skills native suggestion read rejects invalid scope before Store discovery" {

@@ -1837,15 +1837,23 @@ const session_hole = Hole{ .string = max_session_bytes };
 /// Holes: Store, key, Session.
 pub const session_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_stop\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, "}" };
 /// Holes: Store, key, Session, archived.
-pub const session_archive_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_archive\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"archived\":", Hole.boolean, "}" };
+pub const session_archive_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"session_archive\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole };
+    pub const archived = .{ ",\"archived\":", Hole.boolean };
+    pub const tail = .{"}"};
+    pub const all = head ++ archived ++ tail;
+};
 /// Holes: Store, key, Session, turn, operation.
 pub const model_interruption_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"model_interruption\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"target\":{\"session\":", session_hole, ",\"turn\":\"", Hole.decimal, "\",\"operation\":\"", Hole.decimal, "\"}}" };
 /// Holes: Store, key, Session, Action, decision.
 pub const permission_decision_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"permission_decision\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\",\"decision\":\"", Hole{ .tag = PermissionDecision }, "\"}" };
 /// Holes: Store, key.
-pub const observe_command_without_since_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
-/// Holes: Store, key, nullable Session token.
-pub const observe_command_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
+pub const observe_command_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"observe_command\",\"store\":", store_hole, ",\"key\":", key_hole };
+    pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
+    pub const tail = .{"}"};
+    pub const all = head ++ since ++ tail;
+};
 /// Holes: Store.
 pub const host_info_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"host_info\",\"store\":", store_hole, "}" };
 /// Holes: Store.
@@ -1865,37 +1873,55 @@ pub const host_stop_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind
 /// Holes: Store, key.
 pub const read_result_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_result\",\"store\":", store_hole, ",\"key\":", key_hole, "}" };
 pub const inspect_session_request = struct {
-    /// Holes: Store, Session.
-    const current_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole };
-    pub const current = current_head ++ .{"}"};
-    /// Holes: Store, Session.
-    pub const full = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"profile\":\"full\"}" };
-    /// Holes: Store, Session, part, operation, attempt.
-    pub const failed_response = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"failed_response\":\"", Hole{ .tag = FailedResponsePart }, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"}" };
-    pub const current_since = current_head ++ .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
-    pub const max_bytes = maxShapeBytes(.{ current, current_since, full, failed_response });
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"inspect_session\",\"store\":", store_hole, ",\"session\":", session_hole };
+    pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
+    // These are exclusive targets: a full report, or one failed response.
+    pub const profile = .{",\"profile\":\"full\""};
+    pub const failed_response = .{ ",\"failed_response\":\"", Hole{ .tag = FailedResponsePart }, "\",\"operation\":\"", Hole.decimal, "\",\"attempt\":\"", Hole.decimal, "\"" };
+    pub const tail = .{"}"};
+    pub const max_bytes = maxShapeBytes(.{ head ++ since ++ tail, head ++ profile ++ tail, head ++ failed_response ++ tail });
 };
-/// Holes: Store, Workspace, archive, after, ceiling.
-const list_sessions_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes }, ",\"archive\":\"", Hole{ .tag = SessionArchiveFilter }, "\",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"" };
-pub const list_sessions_request = list_sessions_head ++ .{"}"};
-/// Hole: the token, after the head's.
-pub const list_sessions_since_request = list_sessions_head ++ .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\"}" };
-/// Holes: the token, through, after reference, after the head's.
-pub const list_sessions_changed_request = list_sessions_head ++ .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\",\"through\":\"", Hole.decimal, "\",\"after_reference\":", Hole{ .string = session_id_bytes }, "}" };
+pub const list_sessions_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"list_sessions\",\"store\":", store_hole, ",\"workspace\":", Hole{ .optional_string = max_workspace_bytes } };
+    pub const archive = .{ ",\"archive\":\"", Hole{ .tag = SessionArchiveFilter }, "\"" };
+    pub const cursor = .{ ",\"after\":\"", Hole.decimal, "\",\"ceiling\":\"", Hole.decimal, "\"" };
+    pub const since = .{ ",\"since\":\"", Hole{ .text = SinceToken.max_bytes }, "\"" };
+    pub const through = .{ ",\"through\":\"", Hole.decimal, "\"" };
+    pub const after_reference = .{ ",\"after_reference\":", Hole{ .string = session_id_bytes } };
+    pub const tail = .{"}"};
+    pub const all = head ++ archive ++ cursor ++ since ++ through ++ after_reference ++ tail;
+};
 /// Holes: Store, Session, Action.
 pub const read_action_arguments_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_arguments\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, Action.
 pub const read_action_call_id_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"read_action_call_id\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"action\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, position, ordinal. The client always streams from
 /// the start.
-pub const conversation_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\",\"stream\":true}" };
+pub const conversation_content_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\",\"start\":\"0\"" };
+    pub const stream = .{",\"stream\":true"};
+    pub const tail = .{"}"};
+    pub const all = head ++ stream ++ tail;
+};
 /// Holes: Store, Session, end, before position, before ordinal.
 pub const conversation_page_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"conversation_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":\"", Hole.decimal, "\",\"before_position\":\"", Hole.decimal, "\",\"before_ordinal\":\"", Hole.decimal, "\"}" };
 /// Holes: Store, Session, end, position, ordinal, direction, kinds, limit.
-pub const activity_search_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 }, ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"before_position\":", Hole.optional_id, ",\"before_ordinal\":", Hole.optional_id, ",\"limit\":\"", Hole.decimal, "\"}" };
-pub const max_activity_search_request_bytes = shapeBytes(activity_search_request);
-const activity_page_request_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal };
-pub const activity_page_request = activity_page_request_head ++ .{"\"}"};
+pub const activity_search_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_search\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"query\":", Hole{ .string = 256 } };
+    pub const kinds = .{ ",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind } };
+    pub const before_position = .{ ",\"before_position\":", Hole.optional_id };
+    pub const before_ordinal = .{ ",\"before_ordinal\":", Hole.optional_id };
+    pub const limit = .{ ",\"limit\":\"", Hole.decimal, "\"" };
+    pub const tail = .{"}"};
+    pub const all = head ++ kinds ++ before_position ++ before_ordinal ++ limit ++ tail;
+};
+pub const max_activity_search_request_bytes = shapeBytes(activity_search_request.all);
+pub const activity_page_request = struct {
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_page\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"end\":", Hole.optional_id, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":", Hole.optional_id, ",\"direction\":\"", Hole{ .tag = @FieldType(ActivityPage, "direction") }, "\",\"kinds\":", Hole{ .tag_set = ActivityItem.Kind }, ",\"limit\":\"", Hole.decimal, "\"" };
+    pub const since = .{ ",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes } };
+    pub const tail = .{"}"};
+    pub const all = head ++ since ++ tail;
+};
 /// Holes: Store, Session, position, ordinal.
 pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"activity_content\",\"store\":", store_hole, ",\"session\":", session_hole, ",\"position\":\"", Hole.decimal, "\",\"ordinal\":\"", Hole.decimal, "\"}" };
 /// Configure and Message carry content of unbounded size, so only their
@@ -1903,54 +1929,55 @@ pub const activity_content_request = .{ "{\"version\":\"" ++ wire_version ++ "\"
 pub const configure_request = struct {
     /// Holes: Store, key, Session. The configuration object follows.
     pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"configure\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"configuration\":" };
+    pub const reload_skills = .{",\"reload_skills\":true"};
+    pub const require_model = .{",\"require_model\":true"};
+    pub const preset = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes } };
     pub const tail = .{"}"};
-    pub const require_model_tail = .{",\"require_model\":true}"};
-    pub const reload_skills_tail = .{",\"reload_skills\":true}"};
-    pub const reload_require_model_tail = .{",\"reload_skills\":true,\"require_model\":true}"};
-    pub const preset_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, "}" };
-    pub const preset_require_model_tail = .{ ",\"preset\":", Hole{ .string = max_preset_name_bytes }, ",\"require_model\":true}" };
+    /// Excludes the streamed configuration object, which has no whole-body
+    /// shape. Every optional metadata member may be present together.
+    pub const max_metadata_bytes = shapeBytes(head ++ reload_skills ++ require_model ++ preset ++ tail);
 };
 pub const message_request = struct {
-    /// Holes: Store, key, Session, sender handle.
-    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":null,\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
-    /// Holes: Store, key, Session, sender Store, sender Session, sender handle.
-    pub const sender_head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":{\"store\":", store_hole, ",\"session\":", session_hole, "},\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
+    /// Holes: Store, key, Session. The nullable sender follows.
+    pub const head = .{ "{\"version\":\"" ++ wire_version ++ "\",\"kind\":\"message\",\"store\":", store_hole, ",\"key\":", key_hole, ",\"session\":", session_hole, ",\"sender\":" };
+    pub const sender = .{ "{\"store\":", store_hole, ",\"session\":", session_hole, "}" };
+    pub const no_sender = .{"null"};
+    pub const sender_handle = .{ ",\"sender_handle\":", Hole{ .optional_string = max_sender_handle_bytes } };
     /// The configuration object of a creating Message follows.
     pub const configuration = .{",\"configuration\":"};
     /// The text, as a JSON string, follows.
     pub const text = .{",\"text\":{\"state\":\"value\",\"value\":"};
-    pub const tail = .{"}}"};
-    /// A creating Message's capability condition follows its text.
-    pub const require_model_tail = .{"},\"require_model\":true}"};
+    pub const text_tail = .{"}"};
+    pub const require_model = .{",\"require_model\":true"};
+    pub const tail = .{"}"};
 };
 
 pub const max_session_stop_request_bytes = shapeBytes(session_stop_request);
-pub const max_session_archive_request_bytes = shapeBytes(session_archive_request);
+pub const max_session_archive_request_bytes = shapeBytes(session_archive_request.all);
 pub const max_model_interruption_request_bytes = shapeBytes(model_interruption_request);
 pub const max_permission_decision_request_bytes = shapeBytes(permission_decision_request);
-pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request, model_interruption_request, permission_decision_request });
-pub const max_observe_command_request_bytes = shapeBytes(observe_command_request);
+pub const max_control_request_bytes = maxShapeBytes(.{ session_stop_request, session_archive_request.all, model_interruption_request, permission_decision_request });
+pub const max_observe_command_request_bytes = shapeBytes(observe_command_request.all);
 pub const max_host_info_request_bytes = shapeBytes(host_info_request);
 pub const max_host_stop_request_bytes = shapeBytes(host_stop_request);
 pub const max_host_pause_request_bytes = shapeBytes(host_pause_request);
 pub const max_model_list_request_bytes = shapeBytes(model_list_request);
 pub const max_read_result_request_bytes = shapeBytes(read_result_request);
 pub const max_inspect_session_request_bytes = inspect_session_request.max_bytes;
-pub const max_list_sessions_request_bytes = maxShapeBytes(.{ list_sessions_request, list_sessions_since_request, list_sessions_changed_request });
+pub const max_list_sessions_request_bytes = shapeBytes(list_sessions_request.all);
 pub const max_read_action_arguments_request_bytes = shapeBytes(read_action_arguments_request);
 pub const max_read_action_call_id_request_bytes = shapeBytes(read_action_call_id_request);
-pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request);
+pub const max_conversation_content_request_bytes = shapeBytes(conversation_content_request.all);
 pub const max_conversation_page_request_bytes = shapeBytes(conversation_page_request);
-pub const activity_page_since_request = activity_page_request_head ++ .{ "\",\"since\":", Hole{ .optional_string = change_ring.SessionToken.max_bytes }, "}" };
-pub const max_activity_page_request_bytes = shapeBytes(activity_page_since_request);
+pub const max_activity_page_request_bytes = shapeBytes(activity_page_request.all);
 pub const max_activity_content_request_bytes = shapeBytes(activity_content_request);
 /// Every request the client writes into a `RequestBuffer`. Control requests
 /// are captured to a record file instead.
 pub const max_client_request_bytes = @max(max_inspect_session_request_bytes, maxShapeBytes(.{
-    observe_command_request,       host_info_request,                 host_stop_request,
-    host_pause_request,            read_result_request,               list_sessions_changed_request,
-    read_action_arguments_request, read_action_call_id_request,       conversation_content_request,
-    conversation_page_request,     activity_search_request,           activity_page_since_request,
+    observe_command_request.all,   host_info_request,                 host_stop_request,
+    host_pause_request,            read_result_request,               list_sessions_request.all,
+    read_action_arguments_request, read_action_call_id_request,       conversation_content_request.all,
+    conversation_page_request,     activity_search_request.all,       activity_page_request.all,
     activity_content_request,      skill_suggestions_session_request, skill_suggestions_workspace_request,
     model_list_request,
 }));
