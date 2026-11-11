@@ -18,8 +18,8 @@ pub const Line = Bounded(session_line.max_line_bytes);
 pub const Shown = struct { admission: u64, line: Line };
 
 /// The newest Message live output showed while it waited
-/// (`View.showsAtAdmission`), by admission ID and Admission position; zero
-/// before any.
+/// (the append-only bridge in `session_reads.scan`), by admission ID and
+/// Admission position; zero before any. Unit 5 removes this carried state.
 pub const Drawn = struct { admission: u64 = 0, position: u64 = 0 };
 
 /// How many of the `count` Messages waiting from `oldest_position` the row
