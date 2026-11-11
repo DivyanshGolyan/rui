@@ -660,6 +660,9 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
+            var ignored = false;
+            const prior_notice = self.notice;
+            const prior_shown_notice = self.shown_notice;
             self.shown_notice.dismiss();
             const question = self.app_consent.request == null and event == .key_press and !pasting and typesQuestion(event.key_press);
             const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
@@ -696,7 +699,11 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.notice = "Not sent: this Action needs a decision",
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| self.notice = refusedNotice(why),
+                            .refused => |why| if (why == .unbound) {
+                                ignored = true;
+                            } else {
+                                self.notice = refusedNotice(why);
+                            },
                             .none, .append, .redraw, .submit => {},
                         },
                         .message, .command => unreachable, // Sending is disabled while consent waits.
@@ -717,12 +724,22 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                         .busy => self.sayBusy(null, false),
                         .editor => |outcome| switch (outcome) {
                             .action => |action| try self.perform(action),
-                            .refused => |why| self.notice = refusedNotice(why),
+                            .refused => |why| if (why == .unbound) {
+                                ignored = true;
+                            } else {
+                                self.notice = refusedNotice(why);
+                            },
                             .submit => if (self.shownCommands() != null) try self.commandLine(),
                             .none, .append, .redraw => {},
                         },
                     }
                 }
+            }
+            if (ignored) {
+                self.notice = prior_notice;
+                self.shown_notice = prior_shown_notice;
+                ctx.consumeEvent();
+                return;
             }
             ctx.consumeEvent();
             ctx.redraw = true;
@@ -2682,7 +2699,7 @@ fn takeRow(self: *Self, shown: *slash_commands_shared.Shown) void {
 fn refusedNotice(why: keymap.Refusal) []const u8 {
     return switch (why) {
         .invalid, .edit_rejected => "! Input rejected; nothing sent. Enter plain text or paste again.",
-        .unbound => "! Key combination not recognized; ignored. Draft unchanged.",
+        .unbound => unreachable,
         .overflow => "! input too long; nothing sent. Draft cleared. Enter a shorter message.",
         .paste_overflow => "! Paste too long; draft unchanged.",
     };
@@ -3562,6 +3579,20 @@ fn barShows(held: *HeldFrontend) ![]const u8 {
 fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     const held: *HeldFrontend = @fieldParentPtr("self", frontend);
     try held.keys(bytes);
+}
+
+test "unbound chat input leaves notice and draft alone" {
+    var drafts: session_drafts.Drafts = .{};
+    defer drafts.deinit(std.testing.allocator);
+    const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+    defer held.destroy();
+    try held.keys("abc\x1bx");
+    try std.testing.expectEqualStrings("abc", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.shown_notice.current(held.self.nowMs()) == null);
+    held.self.shown_notice.show("existing", held.self.nowMs());
+    try held.keys("\x1bx");
+    try std.testing.expectEqualStrings("existing", held.self.shown_notice.current(held.self.nowMs()).?);
+    try std.testing.expectEqualStrings("abc", held.self.input.composition().bytes);
 }
 
 test "App Session draft storage still guards pending originals Actions and commands" {

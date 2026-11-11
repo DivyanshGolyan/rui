@@ -2174,6 +2174,7 @@ fn firstLine(state: *State, result: FirstLine) error{OutOfMemory}!void {
 /// Keys act on the picker only while the screen shows it. A key that acts
 /// on a Session closes a panel, so it acts where the Sessions show.
 fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}!void {
+    if (value.input == .composer and value.input.composer == .refused and value.input.composer.refused == .unbound) return;
     // Session mutations enter their semantic owner before the generic
     // notice clearing below.
     const action: ?Action = switch (value.input) {
@@ -2265,7 +2266,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 .overflow => state.say(.attention, "! Too long to send.", .{}),
                 .paste_overflow => state.say(.attention, "! Paste too long; draft unchanged.", .{}),
                 .edit_rejected => state.say(.attention, "! Can't add that character alone.", .{}),
-                .unbound => state.say(.attention, "! That key does nothing here.", .{}),
+                .unbound => unreachable,
             }
         },
     }
@@ -5227,7 +5228,6 @@ test "a line the editor rejects says why once; text it could not take clears" {
         .{ .{ .refused = .overflow }, "! Too long to send.", true },
         .{ .{ .refused = .paste_overflow }, "! Paste too long; draft unchanged.", false },
         .{ .{ .refused = .edit_rejected }, "! Can't add that character alone.", false },
-        .{ .{ .refused = .unbound }, "! That key does nothing here.", false },
     }) |case| {
         var state = try opened(&mixed);
         defer state.deinit();
@@ -5239,6 +5239,18 @@ test "a line the editor rejects says why once; text it could not take clears" {
         draft = try typeText(&state, "second");
         try expectNotice(&state, null);
     }
+}
+
+test "unbound overview input leaves notice and draft alone" {
+    var state = try opened(&mixed);
+    defer state.deinit();
+    const draft = try typeText(&state, "first");
+    const input = Event{ .composed = .{ .input = .{ .composer = .{ .refused = .unbound } }, .draft = draft } };
+    try expectEffects(&.{}, try step(&state, input));
+    try expectNotice(&state, null);
+    state.say(.attention, "existing", .{});
+    try expectEffects(&.{}, try step(&state, input));
+    try expectNotice(&state, "existing");
 }
 
 test "session resume opens its Session through the overview, which then keeps it selected" {
