@@ -1,6 +1,7 @@
 //! Installed command grammar. Help and pre-effect syntax validation use the
 //! same definitions; model/state-dependent values remain with the Store.
 const std = @import("std");
+const session_settings = @import("session_settings.zig");
 const model_capability = @import("model_capability.zig");
 const product_defaults = @import("product_defaults.zig");
 const caller_error = @import("caller_error.zig");
@@ -90,7 +91,7 @@ pub const Command = enum {
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
             .host_serve => serve_grammar.definition,
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
-            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
+            .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settingOption("reasoning_effort") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort" }} },
             .store_schema => .{ .resource = .store, .name = "schema", .description = "Print this build's MySQL DDL for the database team to apply; the Host never changes MySQL tables.", .options = &.{value("engine", "mysql")}, .requires = &.{&.{"engine"}} },
             .auth_login => .{ .resource = .auth, .name = "login", .description = "Explicit operator sign-in: rui auth login codex signs in with ChatGPT; rui auth login openai saves an OpenAI API key read from stdin. Ordinary peer calls never sign in or prompt.", .positional = "PROVIDER", .requires = &.{&.{""}} },
         };
@@ -134,7 +135,7 @@ const destination = serve_grammar.destination;
 const session = &[_]Option{value("session", "ID")};
 const key = &[_]Option{ value("key", "KEY"), hex("key-hex", "key", 128) };
 const capture = &[_]Option{ value("record", "FILE"), value("key", "KEY"), hex("key-hex", "key", 128), hiddenValue("test-drop-reply") };
-const binding = &[_]Option{ choice("provider", provider_name.Provider), value("model", "MODEL") };
+const binding = settingOptions(.binding, false);
 const notifications = choice("notifications", cli_value.Notification);
 const action = &[_]Option{value("action", "ID")};
 const need_session = &[_][]const []const u8{&.{"session"}};
@@ -147,19 +148,44 @@ const saved_identity = &[_]PositionalConflict{
     .{ .code = .handle_names_store_and_key, .option = "key-hex" },
 };
 /// Session settings shared by `session configure` and the live /configure.
-const settings = &[_]Option{
-    value("workspace", "PATH"),       value("instructions", "-"), value("tools", "bash,find_tools,message_agent,read_transcript,start_agent,web_search|none"), value("loaded-tools", "a,b|none"),             choice("permission-mode", cli_value.PermissionMode),
-    value("output-schema", "FILE|-"), flag("text-output"),        value("compaction-trigger", "TOKENS|default"),                                               value("output-reservation", "TOKENS|default"), choice("reasoning-effort", cli_value.ReasoningChoice),
-    value("label", "TEXT"),
-};
-const start_settings = &[_]Option{ settings[0], settings[2], settings[3], settings[4], settings[7], settings[8], settings[9], settings[10] };
+const settings = settingOptions(.settings, false);
+const start_settings = settingOptions(.settings, true);
+
+fn settingOptions(comptime group: @FieldType(session_settings.Cli, "group"), comptime on_start: bool) []const Option {
+    var options: []const Option = &.{};
+    for (session_settings.entries) |entry| {
+        const cli = entry.cli orelse continue;
+        if (cli.group != group or (on_start and !cli.on_start)) continue;
+        options = options ++ .{settingOption(entry.field)};
+        // A CLI-only clearing alias, beside the content option it clears.
+        if (std.mem.eql(u8, entry.field, "output_schema")) options = options ++ .{flag("text-output")};
+    }
+    return options;
+}
+
+/// Argument shapes and aliases belong to the CLI, not to a Session setting.
+fn settingOption(comptime field: []const u8) Option {
+    for (session_settings.entries) |entry| {
+        if (!std.mem.eql(u8, entry.field, field)) continue;
+        const cli = entry.cli orelse @compileError("setting has no CLI option: " ++ field);
+        return switch (entry.kind) {
+            .text => value(cli.name, if (std.mem.eql(u8, field, "workspace")) "PATH" else if (std.mem.eql(u8, field, "model")) "MODEL" else "TEXT"),
+            .content => value(cli.name, if (entry.nullable) "FILE|-" else "-"),
+            .tools => value(cli.name, if (std.mem.eql(u8, field, "tools")) "bash,find_tools,message_agent,read_transcript,start_agent,web_search|none" else "a,b|none"),
+            .decimal_policy => value(cli.name, "TOKENS|default"),
+            .choice => if (std.mem.eql(u8, field, "provider")) choice(cli.name, provider_name.Provider) else if (std.mem.eql(u8, field, "permission_mode")) choice(cli.name, cli_value.PermissionMode) else if (std.mem.eql(u8, field, "reasoning_effort")) choice(cli.name, cli_value.ReasoningChoice) else @compileError("choose CLI values for " ++ field),
+        };
+    }
+    @compileError("unknown Session setting: " ++ field);
+}
+
 const settings_conflicts = &[_]Conflict{.{ .code = .output_schema_excludes_text_output, .a = "output-schema", .b = "text-output" }};
 /// The bare `rui` entry, which has no resource help of its own.
-pub const fresh_session: Definition = .{ .resource = .session, .name = "", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1] } };
+pub const fresh_session: Definition = .{ .resource = .session, .name = "", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model") } };
 /// The live Session's /configure: settings only; the Session is its address.
 pub const live_configure: Definition = .{ .resource = .session, .name = "/configure", .description = "", .options = binding ++ settings ++ &[_]Option{flag("reload-skills")}, .conflicts = settings_conflicts };
 /// The live Session's /setup: the defaults grammar, where none means inspect.
-pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), binding[0], binding[1], flag("clear-model"), notifications, settings[9] }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
+pub const live_setup: Definition = .{ .resource = .defaults, .name = "/setup", .description = "", .options = &.{ value("store", "PATH"), settingOption("provider"), settingOption("model"), flag("clear-model"), notifications, settingOption("reasoning_effort") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }} };
 
 /// Every grammar contributes its options, including hex spellings and hidden flags.
 const option_names = blk: {
@@ -701,4 +727,16 @@ test "archive list visibility is independent of all Workspaces" {
     try expectValidation(.session_list, &.{ "--all", "--archived" }, false);
     try expectValidation(.session_list, &.{ "--all", "--include-archived" }, false);
     _ = try expectRefusal(.session_list, &.{ "--archived", "--include-archived" }, .archive_visibility_conflict, "archived");
+}
+
+// Pinned from the pre-table grammar: these expectations must not be derived.
+test "Session settings CLI membership and order preserve configure and start" {
+    inline for (.{
+        .{ settings, &[_][]const u8{ "workspace", "instructions", "tools", "loaded-tools", "permission-mode", "output-schema", "text-output", "compaction-trigger", "output-reservation", "reasoning-effort", "label" } },
+        .{ start_settings, &[_][]const u8{ "workspace", "tools", "loaded-tools", "permission-mode", "compaction-trigger", "output-reservation", "reasoning-effort", "label" } },
+        .{ binding, &[_][]const u8{ "provider", "model" } },
+    }) |case| {
+        try std.testing.expectEqual(case[1].len, case[0].len);
+        for (case[0], 0..) |option, index| try std.testing.expectEqualStrings(case[1][index], option.name);
+    }
 }

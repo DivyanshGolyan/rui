@@ -2,6 +2,7 @@
 //! configuration update, and reading a Session's saved settings.
 
 const std = @import("std");
+const session_settings = @import("../../session_settings.zig");
 const command_reply = @import("../../command_reply.zig");
 const command_input = @import("../../command_input.zig");
 const session_field = @import("../../session_field.zig");
@@ -477,22 +478,32 @@ const Settings = struct {
     /// Each field whose value differs, by its name in `SessionField`.
     fn changed(before: *const Settings, after: *const CurrentConfiguration) std.EnumSet(session_field.SessionField) {
         var fields: std.EnumSet(session_field.SessionField) = .empty;
-        fields.setPresent(.provider, before.provider != after.provider);
-        fields.setPresent(.model, !before.model.eql(after.model.slice()));
-        fields.setPresent(.instructions, before.instructions_id != after.instructions_id);
-        fields.setPresent(.tools, before.tool_set_id != after.tool_set_id);
-        // Equality follows tools implicitly: its existing tools event suffices.
-        fields.setPresent(.loaded_tools, before.loaded_tool_set_id != after.loaded_tool_set_id);
-        fields.setPresent(.permission_mode, before.permission_mode != after.permission_mode);
-        fields.setPresent(.output_schema, before.output_schema_id != after.output_schema_id);
-        fields.setPresent(.compaction_trigger, before.compaction_trigger != after.compaction_trigger);
-        fields.setPresent(.output_reservation, before.output_reservation != after.output_reservation);
-        fields.setPresent(.reasoning_effort, before.reasoning_effort != after.reasoning_effort);
-        const same_label = if (before.label) |label| (if (after.label) |next| label.eql(next.slice()) else false) else after.label == null;
-        fields.setPresent(.label, !same_label);
+        inline for (session_settings.entries) |entry| {
+            if (comptime entry.changeable) {
+                const name = comptime settingsField(entry);
+                const old = @field(before, name);
+                const next = @field(after, name);
+                const same = switch (entry.kind) {
+                    .text => if (entry.nullable)
+                        (if (old) |value| (if (next) |other| value.eql(other.slice()) else false) else next == null)
+                    else
+                        old.eql(next.slice()),
+                    .choice, .content, .tools, .decimal_policy => old == next,
+                };
+                fields.setPresent(@field(session_field.SessionField, entry.field), !same);
+            }
+        }
         return fields;
     }
 };
+
+/// SQL names tools by set id; imported content uses a shorter id in reads.
+fn settingsField(comptime entry: session_settings.Entry) []const u8 {
+    return switch (entry.kind) {
+        .content => entry.field ++ "_id",
+        else => entry.column,
+    };
+}
 
 pub const Application = union(enum) {
     accepted: Applied,
@@ -1099,4 +1110,86 @@ fn validateWorkspace(io: std.Io, supplied: []const u8, destination: *Bounded(wor
     const length = try directory.realPath(io, &destination.bytes);
     if (!std.unicode.utf8ValidateSlice(destination.bytes[0..length])) return error.InvalidUtf8;
     destination.len = length;
+}
+
+/// Match SQL identifiers, not substrings (tools must not hide loaded_tools).
+fn columnMentions(sql: []const u8, column: []const u8) usize {
+    var tokens = std.mem.tokenizeAny(u8, sql, " (),=\n\t");
+    var count: usize = 0;
+    while (tokens.next()) |token| {
+        if (std.mem.eql(u8, token, column)) count += 1;
+    }
+    return count;
+}
+
+test "Session settings cover every hand-written Store SQL and schema projection" {
+    const schema = @import("../schema.zig");
+    var buffer: [16 * 1024]u8 = undefined;
+    var missing: std.Io.Writer = .fixed(&buffer);
+    inline for (session_settings.entries) |entry| {
+        inline for (.{ "session", "session_revision" }) |table_name| {
+            var found = false;
+            for (schema.tables) |table| {
+                if (!std.mem.eql(u8, table.name, table_name)) continue;
+                for (table.columns) |column| {
+                    if (std.mem.eql(u8, column.name, entry.column)) found = true;
+                }
+            }
+            if (!found) try missing.print("{s}: schema.{s}.{s}\n", .{ entry.field, table_name, entry.column });
+        }
+        inline for (.{
+            .{ "saved_session", saved_session.sql, @as(usize, 1) },
+            .{ "insert_session", insert_session.sql, @as(usize, 1) },
+            .{ "insert_revision (INSERT and SELECT)", insert_revision.sql, @as(usize, 2) },
+        }) |site| {
+            if (columnMentions(site[1], entry.column) < site[2])
+                try missing.print("{s}: {s}.{s}\n", .{ entry.field, site[0], entry.column });
+        }
+        // Workspace never appears in UPDATE: admission keeps it immutable.
+        if (comptime !std.mem.eql(u8, entry.field, "workspace")) {
+            if (columnMentions(update_session.sql, entry.column) == 0)
+                try missing.print("{s}: update_session.{s}\n", .{ entry.field, entry.column });
+        }
+        if (comptime !@hasField(CurrentConfiguration, settingsField(entry)))
+            try missing.print("{s}: CurrentConfiguration.{s}\n", .{ entry.field, settingsField(entry) });
+    }
+    try std.testing.expectEqualStrings("", missing.buffered());
+}
+
+test "Session settings changed detects each mutable value without comparing bounded tails" {
+    var current: CurrentConfiguration = .{ .provider = .openai, .tool_set_id = 1 };
+    try current.model.set("gpt-5");
+    current.label = .{};
+    try current.label.?.set("label");
+    const before = Settings.of(&current);
+    inline for (.{
+        session_field.SessionField.instructions,
+        session_field.SessionField.tools,
+        session_field.SessionField.loaded_tools,
+        session_field.SessionField.permission_mode,
+        session_field.SessionField.output_schema,
+        session_field.SessionField.compaction_trigger,
+        session_field.SessionField.output_reservation,
+        session_field.SessionField.reasoning_effort,
+        session_field.SessionField.label,
+    }) |field| {
+        var next = current;
+        switch (field) {
+            .instructions => next.instructions_id = 1,
+            .tools => next.tool_set_id = 2,
+            .loaded_tools => next.loaded_tool_set_id = 1,
+            .permission_mode => next.permission_mode = 1,
+            .output_schema => next.output_schema_id = 2,
+            .compaction_trigger => next.compaction_trigger = 1000,
+            .output_reservation => next.output_reservation = 10,
+            .reasoning_effort => next.reasoning_effort = .high,
+            .label => try next.label.?.set("renamed"),
+            else => unreachable,
+        }
+        const changed = before.changed(&next);
+        try std.testing.expectEqual(@as(usize, 1), changed.count());
+        try std.testing.expect(changed.contains(field));
+    }
+    current.label.?.bytes[current.label.?.len] = 123;
+    try std.testing.expectEqual(@as(usize, 0), before.changed(&current).count());
 }

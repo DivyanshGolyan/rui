@@ -1,6 +1,7 @@
 //! CLI causes and their repair contract. No wire or Store policy.
 //! Saved-code facts are replay-affecting: do not reinterpret them using live state.
 const std = @import("std");
+const session_settings = @import("session_settings.zig");
 const TerminalText = @import("TerminalText.zig");
 const provider_name = @import("provider_name.zig");
 const cli_value = @import("cli_value.zig");
@@ -350,22 +351,21 @@ pub const Input = enum {
     key,
 
     fn spelling(self: Input) ?[]const u8 {
+        inline for (session_settings.entries) |entry| {
+            // Instructions failures have always used their contextual witness,
+            // not an option spelling. Keep those diagnostics byte-identical.
+            if (comptime !std.mem.eql(u8, entry.field, "instructions")) {
+                if (comptime entry.cli) |cli| {
+                    const name = entry.field;
+                    if (self == @field(Input, name)) return "--" ++ cli.name;
+                }
+            }
+        }
         return switch (self) {
             .session => "--session / --to",
             .sender_handle => "RUI_SENDER_HANDLE",
-            .permission_mode => "--permission-mode",
-            .provider => "--provider",
-            .model => "--model",
-            .output_schema => "--output-schema",
-            .compaction_trigger => "--compaction-trigger",
-            .output_reservation => "--output-reservation",
-            .reasoning_effort => "--reasoning-effort",
-            .tools => "--tools",
-            .loaded_tools => "--loaded-tools",
-            .label => "--label",
             .preset => "preset",
             .initial_configuration => "--workspace, --provider, --model",
-            .workspace => "--workspace",
             .target => "--turn / --operation / --action",
             .operation => "--operation",
             .action => "--action",
@@ -775,4 +775,21 @@ test "inline skills size refusal explains per-file and combined limits" {
     try std.testing.expect(std.mem.indexOf(u8, line, "each and in total") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "Select fewer skills or reduce their files") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "a resend needs a new key") != null);
+}
+
+test "Session settings caller spellings retain every existing diagnostic" {
+    inline for (.{
+        .{ Input.workspace, "--workspace" },
+        .{ Input.provider, "--provider" },
+        .{ Input.model, "--model" },
+        .{ Input.tools, "--tools" },
+        .{ Input.loaded_tools, "--loaded-tools" },
+        .{ Input.permission_mode, "--permission-mode" },
+        .{ Input.output_schema, "--output-schema" },
+        .{ Input.compaction_trigger, "--compaction-trigger" },
+        .{ Input.output_reservation, "--output-reservation" },
+        .{ Input.reasoning_effort, "--reasoning-effort" },
+        .{ Input.label, "--label" },
+    }) |case| try std.testing.expectEqualStrings(case[1], case[0].spelling().?);
+    try std.testing.expect(Input.instructions.spelling() == null);
 }
