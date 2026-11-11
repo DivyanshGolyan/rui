@@ -7,6 +7,12 @@ const wire_request = @import("../wire_request.zig");
 const tool_catalog = @import("../tools.zig");
 const tool_set_domain = @import("domain/tool_set.zig");
 
+/// Asserts exact saved-set membership by names, independent of tool ownership.
+pub fn expectToolSetNames(storage: *Store, set: u64, names: []const []const u8) !void {
+    try std.testing.expectEqual(@as(u64, @intCast(names.len)), try store_testing.queryU64(storage, "SELECT count(*) FROM tool_set_member WHERE tool_set_id=?1", .{set}));
+    for (names) |name| try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(storage, "SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id WHERE member.tool_set_id=?1 AND tool.name=?2", .{ set, name }));
+}
+
 // A stored Host catalog must contain every native tool. Keep that inventory
 // canonical while each fixture independently states its MCP schema and offer.
 pub fn testingCatalogRecords(comptime extras: []const tool_catalog.Record) [tool_catalog.built_in.records.len + extras.len]tool_catalog.Record {
@@ -4301,7 +4307,7 @@ test "unsupported provider rejects mixed configuration atomically and replays ex
             try std.testing.expectEqual(revision_count, try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision", .{}));
             const current = try storage.inspectSessionForTesting(created_session_0.slice());
             try std.testing.expectEqual(@as(u64, 1), current.revision);
-            try std.testing.expectEqual(tool_catalog.toolBit(.bash) | tool_catalog.toolBit(.web_search), current.tools_mask);
+            try expectToolSetNames(&storage, current.tool_set_id, &.{ "bash", "web_search" });
             try std.testing.expectEqualStrings("bypass", current.permission_mode.slice());
             const replay = try storage.configure(&update, .{});
             try std.testing.expect(replay == .rejected and replay.rejected.replayed);
@@ -4353,7 +4359,7 @@ test "creation requires every agent setting and accepts an unused Workspace" {
                 const reply = try storage.configure(&command, .{});
                 try std.testing.expect(reply == .accepted);
                 const observed = try storage.inspectSessionForTesting(reply.accepted.session.slice());
-                try std.testing.expectEqual(@as(u8, 0), observed.tools_mask);
+                try expectToolSetNames(&storage, observed.tool_set_id, &.{});
                 try std.testing.expectEqual(protocol.Provider.codex, observed.provider.?);
                 var enable: wire_request.ConfigureCommand = .{};
                 try enable.key.set(try std.fmt.bufPrint(&key, "enable-{d}", .{index}));
@@ -4363,7 +4369,7 @@ test "creation requires every agent setting and accepts an unused Workspace" {
                 const enabled = try storage.inspectSessionForTesting(reply.accepted.session.slice());
                 try std.testing.expectEqualStrings(observed.workspace.slice(), enabled.workspace.slice());
                 try std.testing.expectEqualStrings("/", enabled.workspace.slice());
-                try std.testing.expectEqual(@as(u8, tool_catalog.toolBit(.bash)), enabled.tools_mask);
+                try expectToolSetNames(&storage, enabled.tool_set_id, &.{"bash"});
             }
         }
     }.run);
@@ -4614,7 +4620,7 @@ test "configuration planning preserves sparse defaults and rejection precedence"
         existing.provider = .codex;
         try existing.model.set("model-a");
         existing.instructions_id = 11;
-        existing.tools_mask = 1;
+        existing.tool_set_id = 1;
         existing.permission_mode = 0;
         existing.output_schema_id = 12;
         existing.revision = case.current_revision;
@@ -4708,7 +4714,7 @@ test "configuration answers replay without reverting newer settings" {
             const observation = try storage.inspectSessionForTesting(first_reply.accepted.session.slice());
             try std.testing.expectEqualStrings("model-a", observation.model.slice());
             try std.testing.expectEqual(@as(u64, 2), observation.revision);
-            try std.testing.expectEqual(@as(u8, 0), observation.tools_mask);
+            try expectToolSetNames(&storage, observation.tool_set_id, &.{});
             try std.testing.expectEqualStrings("bypass", observation.permission_mode.slice());
             try std.testing.expectEqual(@as(u64, 0), observation.instructions.length);
             var empty_digest: [32]u8 = undefined;
@@ -11820,7 +11826,7 @@ test "a null effort on a listed model refuses a mixed update before any changes"
             try std.testing.expectEqual(protocol.ConfigurationRejection.unsupported_reasoning_effort, refused.rejected.code);
             const after = try storage.inspectSessionForTesting(session.slice());
             try std.testing.expectEqual(before.revision, after.revision);
-            try std.testing.expectEqual(before.tools_mask, after.tools_mask);
+            try std.testing.expectEqual(before.tool_set_id, after.tool_set_id);
             try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE session_ref=?1 AND label IS NULL", .{session.slice()}));
             try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), after.reasoning_effort);
             try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
@@ -12020,6 +12026,81 @@ test {
     _ = @import("engine/Mysql.zig");
     _ = @import("engine/mysql_content.zig");
     _ = @import("mysql_testing.zig");
+}
+
+test "start_agent narrows configured tool names including unloaded MCP members" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var records = comptime testingCatalogRecords(&.{
+                .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page", .input_schema = "{\"type\":\"object\"}" },
+                .{ .name = "other_page", .owner = .mcp, .server = "docs", .description = "Fetch another page", .input_schema = "{\"type\":\"object\"}" },
+            });
+            var digests: [records.len][32]u8 = undefined;
+            for (&records, &digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+            const catalog: tool_catalog.Catalog = .{ .records = &records, .digests = &digests };
+            try storage.saveCatalog(&catalog);
+            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+            var create = try completeConfiguration("names-agent-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+            create.configuration.tools = try .of(&.{ "fetch_page", "find_tools", "start_agent" });
+            create.configuration.loaded_tools = try .of(&.{ "find_tools", "start_agent" });
+            const parent = (try storage.configure(&create, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "names-agent-message", "names-agent-key", parent.slice(), "start children");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            const cases = [_]struct { names: []const []const u8, refusal: ?[]const u8 = null, remove_catalog: bool = false }{
+                // Configured, not loaded: narrowing is independent of the offer.
+                .{ .names = &.{"fetch_page"} },
+                .{ .names = &.{ "fetch_page", "start_agent" } },
+                .{ .names = &.{} },
+                .{ .names = &.{"other_page"}, .refusal = "spec.tools: other_page is not one of your tools. Nothing was started." },
+                .{ .names = &.{"bash"}, .refusal = "spec.tools: bash is not one of your tools. Nothing was started." },
+                .{ .names = &.{"fetch"}, .refusal = "spec.tools: fetch is not one of your tools. Nothing was started." },
+                // Parent membership still passes after catalog removal; configure
+                // retains authority to refuse a name absent from today's catalog.
+                .{ .names = &.{"fetch_page"}, .remove_catalog = true, .refusal = "Rui could not start the agent (unknown_tool). Nothing was started." },
+            };
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            const arena = memory.allocator();
+            var calls: [cases.len]TestingCall = undefined;
+            for (&calls, 0..) |*call, index| {
+                const id = try std.fmt.allocPrint(arena, "names-agent-{d}", .{index});
+                call.* = .{ .item_id = id, .name = "start_agent", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = "{}", .decoded_arguments = "{}" };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "names-agent-calls", &calls);
+            const Capture = struct {
+                child: protocol.Bounded(protocol.session_id_bytes) = .{},
+                fn call(context: *anyopaque, admission: Store.MessageAdmission) void {
+                    const self: *@This() = @ptrCast(@alignCast(context));
+                    self.child.set(admission.session) catch unreachable;
+                }
+            };
+            var started: u64 = 0;
+            for (cases) |entry| {
+                if (entry.remove_catalog) try storage.saveCatalog(&tool_catalog.built_in);
+                const action = (try storage.nextCoreWork()).?.action;
+                var spec = try testingAgentSpec(entry.names, "ask");
+                var capture: Capture = .{};
+                const result = try storage.startAgent(action.binding, parent.slice(), "read", true, &spec, .{ .context = &capture, .call = Capture.call }, .{});
+                if (entry.refusal) |reason| {
+                    try std.testing.expectEqual(command_domain.AgentStart.failed, result);
+                    try std.testing.expectEqual(@as(usize, 0), capture.child.len);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(reason) } }));
+                } else {
+                    try std.testing.expectEqual(command_domain.AgentStart.started, result);
+                    const child = try storage.inspectSessionForTesting(capture.child.slice());
+                    try expectToolSetNames(&storage, child.tool_set_id, entry.names);
+                    started += 1;
+                }
+                try std.testing.expectEqual(1 + started, try store_testing.queryU64(&storage, "SELECT count(*) FROM session", .{}));
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
 }
 
 test "core_tools presets retain caller narrowing after overrides resolve" {
@@ -13473,4 +13554,180 @@ test "inline skills configuration validation borrows one Store-owned plan throug
             }
         }.run);
     }
+}
+
+const membership_records = store_testing.catalogRecordsWith(&.{.{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" }});
+fn membershipCatalog(digests: *[membership_records.len][32]u8) tool_catalog.Catalog {
+    for (&membership_records, digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+    return .{ .records = &membership_records, .digests = digests };
+}
+
+const MembershipOutcome = enum { accepted, removed, unknown };
+const MembershipCase = struct {
+    name: []const u8,
+    outcome: MembershipOutcome = .accepted,
+    offered: bool = true,
+    loaded: bool = true,
+    // Change current Session settings only after freezing the Operation.
+    change_after_admission: bool = false,
+    withdraw: bool = false,
+};
+
+fn configureMembership(storage: *Store, tools: []const []const u8, loaded: ?[]const []const u8) !protocol.Bounded(protocol.max_session_bytes) {
+    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+    var command = try store_testing.completeConfiguration("membership-config", "", try store_testing.canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+    command.configuration.tools = try .of(tools);
+    if (loaded) |names| command.configuration.loaded_tools = try .of(names);
+    const reply = try storage.configure(&command, .{});
+    try std.testing.expect(reply == .accepted);
+    return reply.accepted.session;
+}
+
+fn membershipCall(name: []const u8) TestingCall {
+    const bash = std.mem.eql(u8, name, "bash");
+    return .{
+        .item_id = "membership-item",
+        .name = name,
+        .encoded_call_id = "membership-call",
+        .decoded_call_id = "membership-call",
+        .encoded_arguments = if (bash) "{\\\"description\\\":\\\"Run\\\",\\\"cmd\\\":\\\"true\\\"}" else "{}",
+        .decoded_arguments = if (bash) "{\"description\":\"Run\",\"cmd\":\"true\"}" else "{}",
+    };
+}
+
+fn expectMembershipRemovedOutput(storage: *Store, binding: store_core.AttemptBinding) !void {
+    const continuation = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+    try std.testing.expectEqual(binding.turn_id, continuation.turn_id);
+    var view: historical_domain.HistoricalView = undefined;
+    storage.openHistoricalView(continuation, &view);
+    defer view.close();
+    var position: u64 = 0;
+    while (try view.nextEntry(position)) |entry| {
+        position = entry.position;
+        if (entry.kind == .tool_results) break;
+    } else return error.MissingToolResults;
+    const result = (try view.nextToolResult()).?;
+    var output: historical_domain.HistoricalReader = undefined;
+    try view.openContent(result.output, &output);
+    defer output.close();
+    var buffer: [tool_catalog.removed_tool_result.len + 1]u8 = undefined;
+    const count = try output.read(0, &buffer);
+    try std.testing.expectEqualStrings(tool_catalog.removed_tool_result, buffer[0..count]);
+    try std.testing.expect((try view.nextToolResult()) == null);
+}
+
+test "tool membership settlement covers builtin provider MCP withdrawn unknown and loaded tools" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const catalog = membershipCatalog(&digests);
+            const cases = [_]MembershipCase{
+                .{ .name = "read_transcript" },
+                .{ .name = "bash" },
+                .{ .name = "web_search", .outcome = .unknown },
+                .{ .name = "web_search", .outcome = .unknown, .withdraw = true },
+                .{ .name = "fetch_page", .change_after_admission = true },
+                .{ .name = "fetch_page", .outcome = .removed },
+                .{ .name = "bash", .outcome = .removed },
+                .{ .name = "never_offered", .outcome = .unknown, .offered = false },
+                .{ .name = "fetch_page", .outcome = .unknown, .loaded = false, .change_after_admission = true },
+            };
+            for (cases) |test_case| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                defer storage.close() catch unreachable;
+                var offered = [_][]const u8{ test_case.name, "find_tools" };
+                if (std.mem.lessThan(u8, offered[1], offered[0])) std.mem.swap([]const u8, &offered[0], &offered[1]);
+                const discovery_only = &.{"find_tools"};
+                const session = try configureMembership(&storage, if (test_case.offered) &offered else discovery_only, if (test_case.loaded) null else discovery_only);
+                if (test_case.outcome == .removed or test_case.withdraw) {
+                    var update: wire_request.ConfigureCommand = .{ .session = session };
+                    try update.key.set("membership-withdraw");
+                    update.configuration.tools = try .of(discovery_only);
+                    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                }
+                try store_testing.submitTestMessage(&storage, &tmp, "membership-input", "membership-message", session.slice(), "classify");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (test_case.change_after_admission) {
+                    var update: wire_request.ConfigureCommand = .{ .session = session };
+                    try update.key.set("membership-current-only");
+                    if (test_case.loaded) {
+                        // Withdrawal now must not narrow the frozen offer.
+                        update.configuration.tools = try .of(discovery_only);
+                    } else {
+                        // Loading now must not widen the frozen offer.
+                        update.configuration.loaded_tools = try .of(&offered);
+                    }
+                    try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation o JOIN session s ON s.session_ref=o.session_ref WHERE o.operation_id=?1 AND o.settings_revision<s.revision", .{binding.operation_id}));
+                }
+                const calls = [_]TestingCall{membershipCall(test_case.name)};
+                const before = storage.testing_content_work.rounds;
+                try settleCallsForTesting(&storage, &tmp, binding, "membership-output", &calls);
+                const rounds = storage.testing_content_work.rounds - before;
+                if (!engine.rerun and test_case.outcome == .removed and std.mem.eql(u8, test_case.name, "bash"))
+                    try std.testing.expect(rounds <= 4);
+                const accepted = test_case.outcome == .accepted;
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE operation_id=?1 AND call_ordinal=0 AND name_content_id IN (SELECT content_id FROM content WHERE digest=?2)", .{ binding.operation_id, store_testing.Blob{ .bytes = &protocol.contentDigest(test_case.name) } }));
+                try std.testing.expectEqual(@as(u64, @intFromBool(accepted)), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code IS NULL AND rejection_content_id IS NULL AND action_kind IS NOT NULL", .{}));
+                try std.testing.expectEqual(@as(u64, @intFromBool(!accepted)), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call WHERE rejection_code='unknown_tool' AND rejection_content_id IS NOT NULL AND action_kind IS NULL", .{}));
+                try std.testing.expectEqual(@as(u64, @intFromBool(accepted)), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE parent_operation_id=?1 AND call_ordinal=0 AND authorized=1 AND resolution_code IS NULL", .{binding.operation_id}));
+                try std.testing.expectEqual(@as(u64, @intFromBool(accepted)), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+                if (test_case.outcome == .removed) try expectMembershipRemovedOutput(&storage, binding);
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+test "tool membership settlement fences an offered nonbuiltin with a corrupt owner" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const catalog = membershipCatalog(&digests);
+            for ([_][]const u8{ "rui", "provider" }) |owner| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .catalog = &catalog });
+                defer storage.close() catch unreachable;
+                const session = try configureMembership(&storage, &.{"fetch_page"}, null);
+                try store_testing.submitTestMessage(&storage, &tmp, "membership-input", "membership-message", session.slice(), "classify");
+                const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                // Keep the row's SQL shape valid while corrupting its owner.
+                try store_testing.exec(&storage, "UPDATE tool_record SET owner=?1,server='' WHERE name='fetch_page'", .{owner});
+                const calls = [_]TestingCall{membershipCall("fetch_page")};
+                try std.testing.expectError(error.CorruptStore, settleCallsForTesting(&storage, &tmp, binding, "membership-corrupt", &calls));
+                try std.testing.expect(storage.isFenced());
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_tool_call", .{}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation", .{}));
+            }
+        }
+    }.run);
+}
+
+test "tool membership rejects MCP catalog shadows of every builtin name" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(engine, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            for (tool_catalog.built_in.records, 0..) |builtin, index| {
+                var shadow_records: [tool_catalog.built_in.records.len]tool_catalog.Record = undefined;
+                @memcpy(&shadow_records, tool_catalog.built_in.records);
+                shadow_records[index].owner = .mcp;
+                shadow_records[index].server = "docs";
+                var shadow_digests: [shadow_records.len][32]u8 = undefined;
+                for (&shadow_records, &shadow_digests) |*record, *digest| digest.* = tool_catalog.recordDigest(record);
+                const shadow: tool_catalog.Catalog = .{ .records = &shadow_records, .digests = &shadow_digests };
+                try std.testing.expectError(error.InvalidToolCatalog, storage.saveCatalog(&shadow));
+                try std.testing.expect(!storage.isFenced());
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM tool_record WHERE name=?1 AND owner='mcp'", .{builtin.name}));
+            }
+        }
+    }.run);
 }

@@ -14,6 +14,7 @@ const session_id = @import("../../session_id.zig");
 const tool_catalog = @import("../../tool_record.zig");
 const store_core = @import("../Store.zig");
 const rsql = @import("../rsql.zig");
+const tool_set = @import("tool_set.zig");
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
@@ -76,7 +77,7 @@ fn mcpCallSelectSql(comptime action_alias: []const u8, comptime operation_alias:
     return "SELECT " ++ selected ++ " FROM model_tool_call tool_call " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "JOIN session_revision revision ON revision.session_ref=" ++ operation_alias ++ ".session_ref AND revision.revision=" ++ operation_alias ++ ".settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
         "WHERE tool_call.operation_id=" ++ action_alias ++ ".parent_operation_id AND tool_call.call_ordinal=" ++ action_alias ++ ".call_ordinal " ++
         "AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp'";
@@ -761,7 +762,7 @@ const next_mcp_action = rsql.Read(.{
         "FROM turn active @index(turn_one_active_per_session) " ++
         "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
         "CROSS JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
-        "CROSS JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "CROSS JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
         "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
         "CROSS JOIN content name ON name.content_id=tool_call.name_content_id AND @payload(name)=@bytes(tool.name) " ++
@@ -839,7 +840,7 @@ const mcp_input = rsql.Read(.{
         "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
         "JOIN session_revision revision ON revision.session_ref=operation.session_ref AND revision.revision=operation.settings_revision " ++
-        "JOIN tool_set_member member ON member.tool_set_id=coalesce(revision.loaded_tool_set_id,revision.tool_set_id) " ++
+        "JOIN tool_set_member member ON member.tool_set_id=" ++ tool_set.offeredSetSql("revision") ++ " " ++
         "JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND @bytes(tool.name)=@payload(name) AND tool.owner='mcp' " ++
         "JOIN content schema_content ON schema_content.content_id=tool.input_schema_content_id " ++
         "LEFT JOIN model_output_item item ON item.operation_id=tool_call.operation_id AND item.item_ordinal=tool_call.item_ordinal " ++
