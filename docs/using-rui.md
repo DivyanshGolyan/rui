@@ -169,6 +169,20 @@ This preserves the Session and its attached agents, but costs one cache miss.
 To change the saved default from the shell, run `rui defaults configure --model ID`.
 To remove it, run `rui defaults configure --clear-model`.
 
+## Defaults for future Sessions
+
+App settings changes saved defaults without changing existing Sessions.
+The Permissions row, between Effort and Notifications, offers **run without asking** and **ask first**.
+Press Enter to open the choices, then Enter to save one.
+
+From the shell, use `rui defaults configure`; in the terminal composer, use `/setup`.
+Both accept `--store PATH`, `--provider PROVIDER`, `--model ID`, `--clear-model`,
+`--reasoning-effort LEVEL|default`, `--permission-mode ask|bypass`, and `--notifications on|off`.
+`--clear-model` cannot be combined with `--model`.
+For example, `/setup --permission-mode ask` makes new Sessions ask before running Bash.
+An explicit `--permission-mode` on a new Session wins over the saved choice; without either, Rui runs without asking.
+`rui defaults inspect` reads the saved defaults without changing them.
+
 ## Notifications
 
 When the terminal running Rui is out of focus, the overview or an open conversation sends a desktop notification when a Session finishes, fails or needs approval. iTerm2, kitty, WezTerm and Ghostty show it as a desktop notification and foot through its notify command.
