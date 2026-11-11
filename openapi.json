@@ -210,7 +210,7 @@
     "/v1/message": {
       "post": {
         "operationId": "message",
-        "summary": "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        "summary": "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. Only an empty `session` carries (and requires) `configuration`; `require_model` is allowed only with it. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -764,7 +764,7 @@
     "/v1/list-sessions": {
       "post": {
         "operationId": "listSessions",
-        "summary": "One page of Sessions, newest first, or what changed since a token.",
+        "summary": "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/WireVersion"
@@ -2196,203 +2196,107 @@
         ]
       },
       "ActivityPageRequest": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "activity_page"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "end": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/Decimal"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "position": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "ordinal": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/Decimal"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "direction": {
-                "type": "string",
-                "enum": [
-                  "forward",
-                  "backward"
-                ]
-              },
-              "kinds": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "enum": [
-                    "admission",
-                    "user",
-                    "assistant",
-                    "call",
-                    "tool_result",
-                    "hosted_call",
-                    "turn_ended",
-                    "stop",
-                    "sent",
-                    "send_failed",
-                    "received",
-                    "approval_requested",
-                    "session_changed",
-                    "compacted"
-                  ]
-                },
-                "uniqueItems": true,
-                "description": "Each at most once, in the order the enum lists them."
-              },
-              "limit": {
-                "$ref": "#/components/schemas/Decimal"
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "session",
-              "end",
-              "position",
-              "ordinal",
-              "direction",
-              "kinds",
-              "limit"
-            ],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "11"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "activity_page"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "end": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/Decimal"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "position": {
+          "kind": {
+            "const": "activity_page"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "end": {
+            "anyOf": [
+              {
                 "$ref": "#/components/schemas/Decimal"
               },
-              "ordinal": {
-                "anyOf": [
-                  {
-                    "$ref": "#/components/schemas/Decimal"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "direction": {
-                "type": "string",
-                "enum": [
-                  "forward",
-                  "backward"
-                ]
-              },
-              "kinds": {
-                "type": "array",
-                "items": {
-                  "type": "string",
-                  "enum": [
-                    "admission",
-                    "user",
-                    "assistant",
-                    "call",
-                    "tool_result",
-                    "hosted_call",
-                    "turn_ended",
-                    "stop",
-                    "sent",
-                    "send_failed",
-                    "received",
-                    "approval_requested",
-                    "session_changed",
-                    "compacted"
-                  ]
-                },
-                "uniqueItems": true,
-                "description": "Each at most once, in the order the enum lists them."
-              },
-              "limit": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "since": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 60,
-                    "x-rui-max-bytes": 60
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              {
+                "type": "null"
               }
+            ]
+          },
+          "position": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ordinal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "forward",
+              "backward"
+            ]
+          },
+          "kinds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "admission",
+                "user",
+                "assistant",
+                "call",
+                "tool_result",
+                "hosted_call",
+                "turn_ended",
+                "stop",
+                "sent",
+                "send_failed",
+                "received",
+                "approval_requested",
+                "session_changed",
+                "compacted"
+              ]
             },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "session",
-              "end",
-              "position",
-              "ordinal",
-              "direction",
-              "kinds",
-              "limit",
-              "since"
-            ],
-            "additionalProperties": false
+            "uniqueItems": true,
+            "description": "Each at most once, in the order the enum lists them."
+          },
+          "limit": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 60,
+                "x-rui-max-bytes": 60
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
-        ]
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "session",
+          "end",
+          "position",
+          "ordinal",
+          "direction",
+          "kinds",
+          "limit"
+        ],
+        "additionalProperties": false
       },
       "ActivitySearchFactsCursor": {
         "type": "object",
@@ -2586,11 +2490,7 @@
           "kind",
           "store",
           "session",
-          "query",
-          "kinds",
-          "before_position",
-          "before_ordinal",
-          "limit"
+          "query"
         ],
         "additionalProperties": false
       },
@@ -3493,268 +3393,53 @@
         ]
       },
       "ConfigureRequest": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "configure"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/Configuration"
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "configuration"
-            ],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "11"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "configure"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/Configuration"
-              },
-              "reload_skills": {
-                "const": true
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "configuration",
-              "reload_skills"
-            ],
-            "additionalProperties": false
+          "kind": {
+            "const": "configure"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "configure"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/Configuration"
-              },
-              "reload_skills": {
-                "const": true
-              },
-              "require_model": {
-                "const": true
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "configuration",
-              "reload_skills",
-              "require_model"
-            ],
-            "additionalProperties": false
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "configure"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/Configuration"
-              },
-              "require_model": {
-                "const": true
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "configuration",
-              "require_model"
-            ],
-            "additionalProperties": false
+          "key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "configure"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/Configuration"
-              },
-              "preset": {
-                "type": "string",
-                "maxLength": 64,
-                "x-rui-max-bytes": 64
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "configuration",
-              "preset"
-            ],
-            "additionalProperties": false
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "configure"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/Configuration"
-              },
-              "preset": {
-                "type": "string",
-                "maxLength": 64,
-                "x-rui-max-bytes": 64
-              },
-              "require_model": {
-                "const": true
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "configuration",
-              "preset",
-              "require_model"
-            ],
-            "additionalProperties": false
+          "configuration": {
+            "$ref": "#/components/schemas/Configuration"
+          },
+          "reload_skills": {
+            "const": true
+          },
+          "require_model": {
+            "const": true
+          },
+          "preset": {
+            "type": "string",
+            "maxLength": 64,
+            "x-rui-max-bytes": 64
           }
-        ]
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "key",
+          "session",
+          "configuration"
+        ],
+        "additionalProperties": false
       },
       "ConversationContentRequest": {
         "type": "object",
@@ -3795,8 +3480,7 @@
           "session",
           "position",
           "ordinal",
-          "start",
-          "stream"
+          "start"
         ],
         "additionalProperties": false
       },
@@ -5176,34 +4860,6 @@
                 "type": "string",
                 "maxLength": 128,
                 "x-rui-max-bytes": 128
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "session"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "inspect_session"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
               },
               "since": {
                 "anyOf": [
@@ -5222,8 +4878,7 @@
               "version",
               "kind",
               "store",
-              "session",
-              "since"
+              "session"
             ],
             "additionalProperties": false
           },
@@ -5558,184 +5213,67 @@
         ]
       },
       "ListSessionsRequest": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "list_sessions"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "workspace": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 4096,
-                    "x-rui-max-bytes": 4096
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "archive": {
-                "type": "string",
-                "enum": [
-                  "active",
-                  "archived",
-                  "all"
-                ]
-              },
-              "after": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "ceiling": {
-                "$ref": "#/components/schemas/Decimal"
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "workspace",
-              "archive",
-              "after",
-              "ceiling"
-            ],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "11"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "list_sessions"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "workspace": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 4096,
-                    "x-rui-max-bytes": 4096
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "archive": {
-                "type": "string",
-                "enum": [
-                  "active",
-                  "archived",
-                  "all"
-                ]
-              },
-              "after": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "ceiling": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "since": {
-                "type": "string",
-                "x-rui-max-bytes": 53
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "workspace",
-              "archive",
-              "after",
-              "ceiling",
-              "since"
-            ],
-            "additionalProperties": false
+          "kind": {
+            "const": "list_sessions"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "list_sessions"
-              },
-              "store": {
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "workspace": {
+            "anyOf": [
+              {
                 "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
+                "maxLength": 4096,
+                "x-rui-max-bytes": 4096
               },
-              "workspace": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 4096,
-                    "x-rui-max-bytes": 4096
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "archive": {
-                "type": "string",
-                "enum": [
-                  "active",
-                  "archived",
-                  "all"
-                ]
-              },
-              "after": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "ceiling": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "since": {
-                "type": "string",
-                "x-rui-max-bytes": 53
-              },
-              "through": {
-                "$ref": "#/components/schemas/Decimal"
-              },
-              "after_reference": {
-                "type": "string",
-                "maxLength": 6,
-                "x-rui-max-bytes": 6
+              {
+                "type": "null"
               }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "workspace",
-              "archive",
-              "after",
-              "ceiling",
-              "since",
-              "through",
-              "after_reference"
-            ],
-            "additionalProperties": false
+            ]
+          },
+          "archive": {
+            "type": "string",
+            "enum": [
+              "active",
+              "archived",
+              "all"
+            ]
+          },
+          "after": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "ceiling": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "since": {
+            "type": "string",
+            "x-rui-max-bytes": 53
+          },
+          "through": {
+            "$ref": "#/components/schemas/Decimal"
+          },
+          "after_reference": {
+            "type": "string",
+            "maxLength": 6,
+            "x-rui-max-bytes": 6
           }
-        ]
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "workspace",
+          "after",
+          "ceiling"
+        ],
+        "additionalProperties": false
       },
       "MessageConfiguration": {
         "type": "object",
@@ -6516,101 +6054,32 @@
         ]
       },
       "MessageRequest": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "text"
-            ],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "11"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
+          "kind": {
+            "const": "message"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "session": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "sender": {
+            "anyOf": [
+              {
                 "type": "object",
                 "properties": {
                   "store": {
@@ -6630,199 +6099,58 @@
                 ],
                 "additionalProperties": false
               },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sender_handle": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32,
+                "x-rui-max-bytes": 32
               },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configuration": {
+            "$ref": "#/components/schemas/MessageConfiguration"
+          },
+          "text": {
+            "type": "object",
+            "properties": {
+              "state": {
+                "const": "value"
+              },
+              "value": {
+                "type": "string",
+                "description": "Text of any length, saved as content."
               }
             },
             "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "text"
+              "state",
+              "value"
             ],
             "additionalProperties": false
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/MessageConfiguration"
-              },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "configuration",
-              "text"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "message"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "session": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "sender": {
-                "type": "null"
-              },
-              "sender_handle": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 32,
-                    "x-rui-max-bytes": 32
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
-              },
-              "configuration": {
-                "$ref": "#/components/schemas/MessageConfiguration"
-              },
-              "text": {
-                "type": "object",
-                "properties": {
-                  "state": {
-                    "const": "value"
-                  },
-                  "value": {
-                    "type": "string",
-                    "description": "Text of any length, saved as content."
-                  }
-                },
-                "required": [
-                  "state",
-                  "value"
-                ],
-                "additionalProperties": false
-              },
-              "require_model": {
-                "const": true
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "session",
-              "sender",
-              "sender_handle",
-              "configuration",
-              "text",
-              "require_model"
-            ],
-            "additionalProperties": false
+          "require_model": {
+            "const": true
           }
-        ]
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "key",
+          "session",
+          "sender",
+          "sender_handle",
+          "text"
+        ],
+        "additionalProperties": false
       },
       "ModelInterruptionConflictReply": {
         "type": "object",
@@ -11589,77 +10917,44 @@
         ]
       },
       "ObserveCommandRequest": {
-        "anyOf": [
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "observe_command"
-              },
-              "store": {
-                "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
-              },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key"
-            ],
-            "additionalProperties": false
+        "type": "object",
+        "properties": {
+          "version": {
+            "const": "11"
           },
-          {
-            "type": "object",
-            "properties": {
-              "version": {
-                "const": "11"
-              },
-              "kind": {
-                "const": "observe_command"
-              },
-              "store": {
+          "kind": {
+            "const": "observe_command"
+          },
+          "store": {
+            "type": "string",
+            "maxLength": 492,
+            "x-rui-max-bytes": 492
+          },
+          "key": {
+            "type": "string",
+            "maxLength": 128,
+            "x-rui-max-bytes": 128
+          },
+          "since": {
+            "anyOf": [
+              {
                 "type": "string",
-                "maxLength": 492,
-                "x-rui-max-bytes": 492
+                "maxLength": 60,
+                "x-rui-max-bytes": 60
               },
-              "key": {
-                "type": "string",
-                "maxLength": 128,
-                "x-rui-max-bytes": 128
-              },
-              "since": {
-                "anyOf": [
-                  {
-                    "type": "string",
-                    "maxLength": 60,
-                    "x-rui-max-bytes": 60
-                  },
-                  {
-                    "type": "null"
-                  }
-                ]
+              {
+                "type": "null"
               }
-            },
-            "required": [
-              "version",
-              "kind",
-              "store",
-              "key",
-              "since"
-            ],
-            "additionalProperties": false
+            ]
           }
-        ]
+        },
+        "required": [
+          "version",
+          "kind",
+          "store",
+          "key"
+        ],
+        "additionalProperties": false
       },
       "PageWork": {
         "type": "object",
@@ -12298,8 +11593,7 @@
           "kind",
           "store",
           "key",
-          "session",
-          "archived"
+          "session"
         ],
         "additionalProperties": false
       },
@@ -12838,10 +12132,14 @@
                   "store_locked",
                   "store_schema_missing",
                   "store_schema_behind",
-                  "mysql_version_unsupported",
-                  "mysql_durability_unsafe",
-                  "mysql_read_only",
-                  "mysql_binlog_unsafe",
+                  "mysql_version",
+                  "mariadb",
+                  "read_only_replica",
+                  "durability_innodb_flush_log_at_trx_commit",
+                  "durability_sync_binlog",
+                  "binlog_statement",
+                  "mysql_unreachable",
+                  "mysql_login",
                   "store_fenced",
                   "runtime_dir_unusable",
                   "tool_name_collision"

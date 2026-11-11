@@ -2084,7 +2084,7 @@ const proposal_fields = [3][]const u8{ "name_content_id", "call_id_content_id", 
 /// (`proposal_joins`), which the tool outcome rule shares
 /// (`ToolOutcome`). LEFT JOIN keeps missing or contradictory owners
 /// visible as corruption.
-const proposal_columns = "item.operation_id,op.turn_id,tool_call.call_ordinal,action.action_id,tool_call.rejection_code," ++
+pub const proposal_columns = "item.operation_id,op.turn_id,tool_call.call_ordinal,action.action_id,tool_call.rejection_code," ++
     "tool_call.name_content_id,tool_call.call_id_content_id,tool_call.arguments_content_id," ++
     "CASE WHEN op.session_ref=item.session_ref AND t.session_ref=item.session_ref AND " ++
     store_schema.resolutionIs("op.resolution_code", .tool_proposals) ++ " AND op.attempt_ordinal=item.attempt_ordinal AND " ++
@@ -2099,7 +2099,7 @@ const proposal_columns = "item.operation_id,op.turn_id,tool_call.call_ordinal,ac
 /// The joins `proposal_columns` reads, off the item `item`: its
 /// Operation `op`, Turn `t`, call `tool_call`, the call's rejection,
 /// Action `action` and fields.
-const proposal_joins = "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
+pub const proposal_joins = "LEFT JOIN model_operation op ON op.operation_id=item.operation_id LEFT JOIN turn t ON t.turn_id=op.turn_id " ++
     "LEFT JOIN model_tool_call tool_call ON tool_call.operation_id=item.operation_id AND tool_call.item_ordinal=item.item_ordinal " ++
     "LEFT JOIN content rejection ON rejection.content_id=tool_call.rejection_content_id " ++
     "LEFT JOIN action_operation action ON action.parent_operation_id=tool_call.operation_id AND action.call_ordinal=tool_call.call_ordinal " ++
@@ -2257,20 +2257,27 @@ pub const ToolOutcomeRow = struct {
     length2: ?u64,
     digest2: ?[32]u8,
     private2: ?bool,
-
-    /// The call's Proposal as `proposal_row` reads it; a column it needs
-    /// that is NULL is `CorruptStore`, as main's decode answered, and as
-    /// its NULL source position did when the item was missing.
-    fn proposal(row: *const ToolOutcomeRow) error{CorruptStore}!proposal_row.Row {
-        var out: proposal_row.Row = undefined;
-        inline for (@typeInfo(proposal_row.Row).@"struct".field_names) |name| {
-            const Field = @FieldType(proposal_row.Row, name);
-            const value = @field(row, name);
-            @field(out, name) = if (@typeInfo(Field) == .optional or Field == @TypeOf(value)) value else value orelse return error.CorruptStore;
-        }
-        return out;
-    }
 };
+
+/// A row's Proposal as `proposal_row` reads it, from a read that joins a
+/// call to it (`proposal_columns` after LEFT JOINs); a column it needs
+/// that is NULL is `CorruptStore`, as main's decode answered, and as its
+/// NULL source position did when the item was missing.
+fn proposalOf(row: anytype) error{CorruptStore}!proposal_row.Row {
+    var out: proposal_row.Row = undefined;
+    inline for (@typeInfo(proposal_row.Row).@"struct".field_names) |name| {
+        const Field = @FieldType(proposal_row.Row, name);
+        const value = @field(row, name);
+        @field(out, name) = if (@typeInfo(Field) == .optional or Field == @TypeOf(value)) value else value orelse return error.CorruptStore;
+    }
+    return out;
+}
+
+/// Whether such a row's Proposal is consistent and its fields certified
+/// (`certifiedFields`).
+pub fn certifyCall(row: anytype) error{CorruptStore}!void {
+    _ = try certifiedFields(&try proposalOf(row));
+}
 
 /// The tool outcome rule, judging a `ToolOutcome` read's rows as they
 /// step, in plain Zig, keeping one Operation's counts at a time. For each
@@ -2320,7 +2327,7 @@ pub const ToolOutcomeCheck = struct {
         if (row.ordinal == null) return;
         if (check.calls == check.expected) return error.CorruptStore;
         check.calls += 1;
-        _ = try certifiedFields(&try row.proposal());
+        try certifyCall(row);
         const rejected = row.rejection_code != null and row.rejection_present and row.call_acceptance != null and row.action_id == null;
         const resolved = row.rejection_code == null and row.action_id != null and row.action_resolved and row.result_present and row.action_acceptance != null;
         const unresolved = row.rejection_code == null and row.action_id != null and !row.action_resolved and !row.action_content and row.action_acceptance == null;

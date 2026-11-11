@@ -68,7 +68,7 @@ def time_limit(milliseconds):
     return f"{milliseconds} ms"
 
 
-from terminal_process import answers_to, open_pty, spawn, terminal_process
+from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_process
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
@@ -294,7 +294,7 @@ def help_case():
                 stdin=slave, stdout=slave, stderr=subprocess.PIPE)
             output, errors = terminal_exit(caller, master)
         finally:
-            dispose_all(lambda: os.close(master), lambda: os.close(slave))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
         assert caller.returncode == 2, (output, errors)
         assert ("rui: `setup` is now `rui defaults inspect|configure`; see rui defaults --help. "
             "Nothing was captured or sent. To start a Session, use rui session start with Message text on stdin.\n").encode() in errors, errors
@@ -654,7 +654,7 @@ def command_wait_oracles():
         finally:
             dispose_all(lambda: os.write(stop_write, b"x"), lambda: peer.join(timeout=5) if peer.ident else None,
                         lambda: os.close(stop_read), lambda: os.close(stop_write),
-                        lambda: _captures.pop(master, None), lambda: os.close(master), lambda: os.close(slave))
+                        lambda: _captures.pop(master, None), lambda: close_pty(master), lambda: close_pty(slave))
             assert not peer.is_alive(), "scripted terminal did not stop"
     print("command wait oracles passed: Enter follows the typed frame; the shown page and the typed command are not the reply", flush=True)
 
@@ -1131,7 +1131,7 @@ def silent_read_edit_cases():
                 dispose_all(release.set,
                             lambda: stop_process(caller, timeout=5) if caller is not None else None,
                             lambda: proxy.close() if proxy is not None else None,
-                            lambda: os.close(master), lambda: os.close(slave))
+                            lambda: close_pty(master), lambda: close_pty(slave))
                 proxy = None
         completed = True
     finally:
@@ -1406,7 +1406,7 @@ def renderer_cases():
                 lambda: stop_process(caller, timeout=5) if caller is not None else None,
                 lambda: termios.tcflush(slave, termios.TCIFLUSH),
                 lambda: termios.tcsetattr(slave, termios.TCSANOW, original),
-                lambda: os.close(master), lambda: os.close(slave))
+                lambda: close_pty(master), lambda: close_pty(slave))
 
     def configure(permission="bypass"):
         return create_session(home, "--store", store,
@@ -1445,7 +1445,7 @@ def renderer_cases():
             assert len(frames) == 2 and "m" * 40 in frames[0] and "REPLY-04399" in frames[1], frames
             assert "REPLY-04399" in tty.capture.completed and tty.capture.listener is listener
         finally:
-            dispose_all(lambda: os.close(master), lambda: os.close(writer) if writer is not None else None)
+            dispose_all(lambda: close_pty(master), lambda: os.close(writer) if writer is not None else None)
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         defaults(home, "--store", store)
         geometry = configure()
@@ -1834,7 +1834,7 @@ def provider_line_cases():
                 assert not (config / "requests").exists(), "a provider choice captured a Message"
             finally:
                 dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                            lambda: os.close(master), lambda: os.close(slave),
+                            lambda: close_pty(master), lambda: close_pty(slave),
                             lambda: os.close(ready_read), lambda: os.close(ready_write))
         assert endpoint.requests == [], endpoint.requests
         completed = True
@@ -2183,7 +2183,7 @@ def main(selected="all"):
                 env={**os.environ, "HOME": str(preferences_home)}, stdin=slave,
                 stdout=slave, stderr=subprocess.PIPE, timeout=5)
         finally:
-            dispose_all(lambda: os.close(slave), lambda: os.close(master))
+            dispose_all(lambda: close_pty(slave), lambda: close_pty(master))
         assert entered.returncode == 6 and b"[store_unavailable]" in entered.stderr, entered.stderr
         assert not (state / "missing").exists() and not fallback.exists()
         assert run(preferences_home, "request", "list") == before_missing
@@ -2212,7 +2212,7 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
             raise
         finally:
             dispose_all(lambda: os.close(ready_write))
@@ -2224,7 +2224,7 @@ def main(selected="all"):
             assert set(json.loads(run(preferences_home, "request", "list"))) == before_missing
         finally:
             dispose_all(lambda: stop_process(deferred, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
+                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
         # The shell's canonical line input owns editing. Rui accepts only a
         # single provider letter or defer; it does not decode terminal chords.
         for keys, outcome, notice in (
@@ -2246,7 +2246,7 @@ def main(selected="all"):
                         "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                     pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
             except BaseException:
-                dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
+                dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
                 raise
             finally:
                 dispose_all(lambda: os.close(ready_write))
@@ -2266,7 +2266,7 @@ def main(selected="all"):
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_missing
             finally:
                 dispose_all(lambda: stop_process(chooser, timeout=5),
-                            lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
+                            lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
         explicit_config.mkdir(parents=True, mode=0o700)
@@ -2282,7 +2282,7 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
             raise
         finally:
             dispose_all(lambda: os.close(ready_write))
@@ -2300,7 +2300,7 @@ def main(selected="all"):
             assert explicit.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
+                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
         # A renewal-due opaque credential arrives while the prompt is open. It
         # remains usable for creation.
         (explicit_config / "codex.json").unlink()
@@ -2313,7 +2313,7 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
             raise
         finally:
             dispose_all(lambda: os.close(ready_write))
@@ -2331,7 +2331,7 @@ def main(selected="all"):
             assert malformed.read_text() == "version=9\n"
         finally:
             dispose_all(lambda: stop_process(expiring, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
+                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
         try:
@@ -2348,7 +2348,7 @@ def main(selected="all"):
                             "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                         pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
                 except BaseException:
-                    dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
+                    dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
                     raise
                 finally:
                     dispose_all(lambda: os.close(ready_write))
@@ -2363,7 +2363,7 @@ def main(selected="all"):
                     assert changing.wait(timeout=5) == 0
                 finally:
                     dispose_all(lambda: stop_process(changing, timeout=5),
-                                lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
+                                lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
@@ -2421,7 +2421,7 @@ def main(selected="all"):
             assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
         finally:
             dispose_all(lambda: stop_process(caller, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         blocked_home = state / "blocked-capture-home"
         blocked_config = blocked_home / ".config/rui"
         blocked_config.mkdir(parents=True, mode=0o700)
@@ -2453,7 +2453,7 @@ def main(selected="all"):
             assert run(preferences_home, "session", "list", "--store", store, "--all") == sessions_before
         finally:
             dispose_all(lambda: stop_process(blocked, timeout=5) if blocked is not None else None,
-                        lambda: os.close(master), lambda: os.close(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         credential.unlink()
         initial = fixture.command("session", "inspect", "--store", store, "--session", session)
         assert initial["selected_message"] is None and initial["recent_messages"] == [], initial
@@ -2559,7 +2559,7 @@ def main(selected="all"):
                     "RUI_TEST_ACTION_READY_FD": str(ready_write)},
                 pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: os.close(master), lambda: os.close(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
             raise
         finally:
             dispose_all(lambda: os.close(ready_write))
@@ -2638,7 +2638,7 @@ def main(selected="all"):
             assert entered.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(ready_read), lambda: os.close(master), lambda: os.close(slave))
+                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
         assert fixture.observe(store, queued)["result"]["status"] == "completed"
         def rejected_decision(key, replayed):
             return {"context": {"store": str(store), "session": session, "key": key, "kind": "permission_decision"},
@@ -3129,7 +3129,7 @@ def main(selected="all"):
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         master, slave = open_pty()
         entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
             "--", empty_session], env={**os.environ, "HOME": str(fresh_home)},
@@ -3144,7 +3144,7 @@ def main(selected="all"):
             assert termios.tcgetattr(master)[3] & termios.ICANON
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
-                        lambda: os.close(master), lambda: os.close(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         for columns in (7, 8):
             master, slave = open_pty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
@@ -3166,7 +3166,7 @@ def main(selected="all"):
             finally:
                 dispose_all(lambda: stop_process(entered, timeout=5),
                             entered.stderr.close,
-                            lambda: os.close(master), lambda: os.close(slave))
+                            lambda: close_pty(master), lambda: close_pty(slave))
         observation_release = threading.Event()
         endpoint.responses.append((fixture.sse_answer("observed-later", "observed-later-reason",
             "observed-later-message", "observed later")[0], observation_release))
@@ -3229,7 +3229,7 @@ def main(selected="all"):
             dispose_all(observation_continue.set, observation_release.set,
                         lambda: stop_process(entered, timeout=5),
                         lambda: proxy.close() if proxy is not None else None,
-                        lambda: os.close(master), lambda: os.close(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         completed = True
         print("human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:

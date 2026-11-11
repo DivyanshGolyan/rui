@@ -9,8 +9,8 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import draining, overview_frame, overview_title, read_terminal, terminal_exit
-from terminal_process import open_pty, spawn
+from human_cli_fixture import overview_frame, overview_title, read_terminal, terminal_exit
+from terminal_process import close_pty, open_pty, spawn
 
 
 def main():
@@ -51,8 +51,8 @@ def main():
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         caller = None
-        os.close(master)
-        os.close(slave)
+        close_pty(master)
+        close_pty(slave)
         master = slave = None
 
         master, slave = open_pty(columns=120, rows=24)
@@ -80,7 +80,7 @@ def main():
             rows = json.loads(cli("session", "list", "--store", store, "--all"))["sessions"]
             return rows[0]["reference"] if len(rows) == 1 else None
 
-        session = host_process.wait_for(draining(master, created_session), "Session after failed save")
+        session = host_process.wait_for(created_session, "Session after failed save")
         settings = json.loads(cli("session", "inspect", "--store", store, "--session", session))["session"]
         assert settings["model"] == "gpt-6-luna" and settings["reasoning_effort"] == "medium", settings
         saved = json.loads(cli("defaults", "inspect"))
@@ -93,8 +93,8 @@ def main():
     finally:
         host_process.dispose_all(
             lambda: host_process.stop_process(caller, timeout=5) if caller else None,
-            lambda: os.close(master) if master is not None else None,
-            lambda: os.close(slave) if slave is not None else None,
+            lambda: close_pty(master) if master is not None else None,
+            lambda: close_pty(slave) if slave is not None else None,
             lambda: fixture.stop_host(host) if host else None,
             endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
         )

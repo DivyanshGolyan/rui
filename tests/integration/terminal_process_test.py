@@ -13,12 +13,14 @@ import subprocess
 import sys
 import tempfile
 import termios
+import threading
 import time
 import unittest
 from unittest.mock import patch
 
 from host_process import stop_process, wait_for
-from terminal_process import answers_to, open_pty, spawn, terminal_process
+from terminal_process import (close_pty, CAPTURES, answers_to, capture_descriptors, open_pty,
+                              register_capture, spawn, terminal_process)
 from terminal_screen import ScreenCapture
 
 
@@ -44,7 +46,7 @@ class TerminalProcessTest(unittest.TestCase):
         # Keep a broken owner from leaking descriptors during a negative control.
         for fd in self.descriptors:
             try:
-                os.close(fd)
+                close_pty(fd)
             except OSError as error:
                 if error.errno != errno.EBADF:
                     raise
@@ -55,6 +57,150 @@ class TerminalProcessTest(unittest.TestCase):
             with self.assertRaises(OSError) as raised:
                 os.fstat(fd)
             self.assertEqual(raised.exception.errno, errno.EBADF)
+
+    def test_wait_drains_writer_and_opt_out_preserves_output(self):
+        master, slave = open_pty()
+        self.assertNotIn(master, capture_descriptors())
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        self.assertIn(master, capture_descriptors())
+        os.write(slave, b"pending")
+        # The opt-out must leave PTY output unread.
+        wait_for(lambda: True, "without drainage", drain=False)
+        self.assertEqual(received, b"")
+        self.assertTrue(select.select([master], [], [], 0)[0])
+        writer = subprocess.Popen([sys.executable, "-c", "import os; os.write(1, b'x' * 131072)"], stdout=slave)
+        self.addCleanup(stop_process, writer, timeout=5)
+        wait_for(lambda: writer.poll() is not None, "PTY writer", timeout=10)
+        self.assertEqual(writer.returncode, 0)
+        wait_for(lambda: len(received) == 131079, "all PTY output")
+
+    def test_wait_wakes_for_small_terminal_refills(self):
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        writer = subprocess.Popen([sys.executable, "-c", "import os; os.write(1, b'x' * 131072)"], stdout=slave)
+        self.addCleanup(stop_process, writer, timeout=5)
+        real_read, real_select = os.read, select.select
+        just_read = False
+
+        def small_read(fd, size):
+            nonlocal just_read
+            chunk = real_read(fd, min(size, 1024) if fd == master else size)
+            if fd == master and chunk:
+                just_read = True
+            return chunk
+
+        def refilling(readers, writers, errors, timeout=None):
+            nonlocal just_read
+            if readers == [master] and timeout == 0 and just_read:
+                # Model Darwin's writer not having refilled its small PTY
+                # buffer yet: every bounded drain batch ends after one read.
+                just_read = False
+                return [], [], []
+            return real_select(readers, writers, errors, timeout)
+
+        with patch("terminal_process.os.read", side_effect=small_read), \
+             patch("terminal_process.select.select", side_effect=refilling):
+            # Blind 25ms sleeps need at least 128 polls (3.2s). Readability
+            # must wake the waiter instead, without enlarging the drain batch.
+            wait_for(lambda: writer.poll() is not None and len(received) == 131072,
+                     "small-buffer PTY writer", timeout=2)
+            self.assertEqual(writer.returncode, 0)
+        self.assertEqual(received, b"x" * 131072)
+
+    def test_other_thread_wait_does_not_steal_terminal_output(self):
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        os.write(slave, b"for the reader")
+        self.assertTrue(select.select([master], [], [], 5)[0])
+        watched = []
+
+        def worker_wait():
+            watched.extend(capture_descriptors())
+            wait_for(lambda: True, "worker observation")
+
+        worker = threading.Thread(target=worker_wait)
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), "worker wait did not finish")
+        self.assertEqual(watched, [], "worker monitored another reader's PTY")
+        self.assertEqual(received, b"")
+        self.assertTrue(select.select([master], [], [], 0)[0], "worker stole the reader's bytes")
+        self.assertEqual(os.read(master, 14), b"for the reader")
+        os.write(slave, b"owner drains")
+        wait_for(lambda: received == b"owner drains", "owner drainage")
+
+    def test_continuously_readable_terminal_yields_to_observer(self):
+        import human_cli_fixture as human
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        # Simulate a chatty PTY without a timing-dependent writer. The last
+        # empty chunk bounds the old unbounded loop for the negative control.
+        for observe in (lambda: wait_for(lambda: len(received), "continuous output"),
+                        lambda: human.draining(master, lambda: len(received), received.extend)()):
+            received.clear()
+            with patch("terminal_process.select.select", return_value=([master], [], [])), \
+                 patch("terminal_process.os.read", side_effect=[b"x"] * 32 + [b""]):
+                self.assertEqual(observe(), 16)
+
+    def test_short_terminal_reads_make_progress_between_observations(self):
+        master, slave = open_pty()
+        received = bytearray()
+        register_capture(master, type("Capture", (), {"feed": received.extend})())
+        observations = []
+
+        def observe():
+            observations.append(len(received))
+            return len(received) >= 65536
+
+        # Darwin can return small chunks even with a much larger read buffer.
+        with patch("terminal_process.select.select", return_value=([master], [], [])), \
+             patch("terminal_process.os.read", return_value=b"x" * 128):
+            wait_for(observe, "short terminal reads", interval=0)
+        self.assertLessEqual(len(observations), 32)
+
+    def test_reused_pipe_is_not_drained(self):
+        master, slave = open_pty()
+        register_capture(master, type("Capture", (), {"feed": lambda _, data: self.fail(data)})())
+        close_pty(master)
+        read, write = os.pipe()
+        self.addCleanup(close_quietly, write)
+        if read != master:
+            os.dup2(read, master)
+            os.close(read)
+        os.write(write, b"keep")
+        wait_for(lambda: True, "unrelated pipe")
+        self.assertEqual(os.read(master, 4), b"keep")
+        self.assertNotIn(master, CAPTURES)
+        self.assertNotIn(master, capture_descriptors())
+
+    def test_reused_other_pty_is_not_drained(self):
+        master, slave = open_pty()
+        register_capture(master, type("Capture", (), {"feed": lambda _, data: self.fail(data)})())
+        close_pty(master, slave)
+        other_master, other_slave = pty.openpty()
+        self.assertEqual(other_master, master)
+        os.write(other_slave, b"keep")
+        wait_for(lambda: True, "unrelated PTY")
+        self.assertEqual(os.read(other_master, 4), b"keep")
+        self.assertNotIn(master, CAPTURES)
+        self.assertNotIn(master, capture_descriptors())
+
+    def test_read_terminal_accepts_already_drained_frame(self):
+        import human_cli_fixture as human
+        master, slave = open_pty()
+        human.terminal_capture(master)
+        os.write(slave, b"\x1b[?2026h\x1b[H\x1b[2Jalready visible\x1b[?2026l")
+        wait_for(lambda: "already visible" in human.current_screen(master), "drained marker")
+        self.assertIn("already visible", human.read_terminal(master, "already visible", timeout=.1))
+        with self.assertRaises(AssertionError):
+            human.read_terminal(master, "already visible", timeout=.05, fresh=True)
+        os.write(slave, "\x1b[?2026h\x1b[H\x1b[2Janswer\r\n › \x1b[?2026l".encode())
+        wait_for(lambda: "answer" in human.current_screen(master), "drained composer")
+        self.assertIn("answer", human.read_terminal(master, "answer", timeout=.1, composer=True))
 
     def test_failed_launch_closes_terminal(self):
         with self.assertRaises(FileNotFoundError):
@@ -240,7 +386,7 @@ class TerminalProcessTest(unittest.TestCase):
         process = self.job("import os, time; os.write(1, b'R'); time.sleep(30)", slave,
                            default_signals=(signal.SIGHUP,))
         self.assertEqual(os.read(master, 1), b"R")
-        os.close(master)
+        close_pty(master)
         self.assertEqual(process.wait(timeout=5), -signal.SIGHUP)
         self.assertEqual(process.leader.process.wait(timeout=5), 0)
 

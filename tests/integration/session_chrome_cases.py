@@ -23,7 +23,7 @@ from human_cli_fixture import (
     terminal_capture,
     terminal_exit,
 )
-from terminal_process import open_pty, spawn
+from terminal_process import close_pty, open_pty, spawn
 
 ROWS = 24
 BOTTOM = ROWS - 6  # The transcript's last row, where the marker sits.
@@ -76,7 +76,7 @@ class Chrome:
     def __exit__(self, kind, value, traceback):
         dispose_all(
             *(lambda caller=caller: stop_process(caller, timeout=5) for caller in self.callers),
-            *(lambda fd=fd: os.close(fd) for fd in self.descriptors),
+            *(lambda fd=fd: close_pty(fd) for fd in self.descriptors),
             lambda: fixture.stop_host(self.host) if self.host is not None else None,
             self.endpoint.shutdown, self.endpoint.server_close, lambda: self.thread.join(timeout=5),
         )

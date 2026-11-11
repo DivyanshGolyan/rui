@@ -11,7 +11,7 @@ import textwrap
 import unittest
 
 sys.path.insert(0, str(Path(__file__).parent))
-from platform_boundary import (bind_sites, build_violations, flag_violations, mac_path, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
+from platform_boundary import (bind_sites, build_violations, flag_violations, mac_path, pty_close_violations, python_sites, shell_sites, sites, typescript_sites,  # noqa: E402
                                unlistened_binds, violations, zig_sites)
 import build_files  # noqa: E402
 from select_tests import select  # noqa: E402
@@ -49,6 +49,22 @@ def committed_selection(path):
 
 
 class PlatformBoundaryTest(unittest.TestCase):
+    def test_pty_close_discipline(self):
+        bad = "def f():\n    master, slave = open_pty()\n    os.close(master)\n"
+        good = "def f():\n    master, slave = open_pty()\n    close_pty(master, slave)\n"
+        self.assertIn("close_pty", pty_close_violations(bad)[0])
+        self.assertEqual(pty_close_violations(good), [])
+        self.assertIn("close_pty", pty_close_violations(
+            "class Chrome:\n    def open(self):\n        master, slave = open_pty()\n"
+            "        self.descriptors += [master, slave]\n"
+            "    def close(self):\n        return (lambda fd=fd: os.close(fd) for fd in self.descriptors)\n")[0])
+        self.assertIn("close_pty", pty_close_violations(
+            "class P:\n    def open(self):\n        self.master, self.slave = open_pty()\n"
+            "    def close(self):\n        os.close(self.master)\n")[0])
+        for folder in ("integration", "qualification"):
+            for path in (Path(__file__).parents[1] / folder).rglob("*.py"):
+                self.assertEqual(pty_close_violations(path.read_text(), str(path)), [])
+
     def test_repository_platform_sites_are_all_under_mac_paths(self):
         self.assertEqual(violations(sites()), [])
 

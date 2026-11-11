@@ -100,10 +100,14 @@ pub const StartError = enum {
     store_locked,
     store_schema_missing,
     store_schema_behind,
-    mysql_version_unsupported,
-    mysql_durability_unsafe,
-    mysql_read_only,
-    mysql_binlog_unsafe,
+    mysql_version,
+    mariadb,
+    read_only_replica,
+    durability_innodb_flush_log_at_trx_commit,
+    durability_sync_binlog,
+    binlog_statement,
+    mysql_unreachable,
+    mysql_login,
     store_fenced,
     runtime_dir_unusable,
     tool_name_collision,
@@ -626,6 +630,38 @@ test "a launched Host's start failure is refused with its Store's codes only" {
         try std.testing.expectEqual(case.code, if (refusal) |value| value.code else null);
     }
     try std.testing.expect(!std.mem.eql(u8, startRefusal(.sqlite_dir, error.RuntimeDirectoryInUse).?.message, startRefusal(.sqlite_dir, error.RuntimeDirectoryUnusable).?.message));
+    const mysql_cases = [_]struct { err: anyerror, code: StartError }{
+        .{ .err = error.MysqlTooOld, .code = .mysql_version },
+        .{ .err = error.UnsupportedServer, .code = .mysql_version },
+        .{ .err = error.MysqlIsMariadb, .code = .mariadb },
+        .{ .err = error.MysqlReadOnly, .code = .read_only_replica },
+        .{ .err = error.MysqlFlushLogUnsafe, .code = .durability_innodb_flush_log_at_trx_commit },
+        .{ .err = error.MysqlSyncBinlogUnsafe, .code = .durability_sync_binlog },
+        .{ .err = error.MysqlStatementBinlog, .code = .binlog_statement },
+        .{ .err = error.ServerRefused, .code = .mysql_unreachable },
+        .{ .err = error.ConnectFailed, .code = .mysql_unreachable },
+        .{ .err = error.HostNotFound, .code = .mysql_unreachable },
+        .{ .err = error.InvalidHost, .code = .mysql_unreachable },
+        .{ .err = error.TlsRefused, .code = .mysql_unreachable },
+        .{ .err = error.TlsFailed, .code = .mysql_unreachable },
+        .{ .err = error.UntrustedPeer, .code = .mysql_unreachable },
+        .{ .err = error.PeerFailed, .code = .mysql_unreachable },
+        .{ .err = error.DeadlineExceeded, .code = .mysql_unreachable },
+        .{ .err = error.ConnectionLost, .code = .mysql_unreachable },
+        .{ .err = error.LoginRefused, .code = .mysql_login },
+        .{ .err = error.AuthMethodRefused, .code = .mysql_login },
+    };
+    for (mysql_cases) |case| {
+        const refusal = startRefusal(.mysql_url, case.err).?;
+        try std.testing.expectEqual(case.code, refusal.code);
+        try std.testing.expect(refusal.message.len > 0 and refusal.message.len <= max_refusal_message_bytes);
+        try std.testing.expect(startRefusal(.sqlite_dir, case.err) == null);
+    }
+    try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlFlushLogUnsafe).?.message, "innodb_flush_log_at_trx_commit=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlSyncBinlogUnsafe).?.message, "sync_binlog=1") != null);
+    try std.testing.expectEqualStrings("the MySQL server refused the connection before login", mysqlRefusal(error.ServerRefused).?.message);
+    try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.HostNotFound).?.message, mysqlRefusal(error.ConnectFailed).?.message));
+    try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.UntrustedPeer).?.message, mysqlRefusal(error.TlsFailed).?.message));
 }
 
 fn mysqlRefusal(err: anyerror) ?Refusal {
@@ -633,10 +669,23 @@ fn mysqlRefusal(err: anyerror) ?Refusal {
         error.StoreLocked => .{ .code = .store_locked, .message = "another Host owns this Store" },
         error.StoreSchemaMissing => .{ .code = .store_schema_missing, .message = "apply this build's MySQL schema before starting the Host" },
         error.StoreSchemaBehind, error.WrongStoreVersion, error.WrongStoreSchema => .{ .code = .store_schema_behind, .message = "the MySQL schema does not match this build" },
-        error.UnsupportedMysqlVersion, error.UnsupportedServer => .{ .code = .mysql_version_unsupported, .message = "MySQL 8.4 or newer is required; MariaDB is not supported" },
-        error.MysqlReadOnly => .{ .code = .mysql_read_only, .message = "the MySQL server must be writable" },
-        error.MysqlDurabilityTooWeak => .{ .code = .mysql_durability_unsafe, .message = "MySQL requires innodb_flush_log_at_trx_commit=1 and sync_binlog=1 when binlogging" },
-        error.MysqlStatementBinlog => .{ .code = .mysql_binlog_unsafe, .message = "MySQL STATEMENT binlogging is not supported" },
+        error.MysqlTooOld, error.UnsupportedServer => .{ .code = .mysql_version, .message = "MySQL 8.4 or newer is required" },
+        error.MysqlIsMariadb => .{ .code = .mariadb, .message = "MariaDB is not supported; use MySQL 8.4 or newer" },
+        error.MysqlReadOnly => .{ .code = .read_only_replica, .message = "MySQL requires read_only=OFF and super_read_only=OFF" },
+        error.MysqlFlushLogUnsafe => .{ .code = .durability_innodb_flush_log_at_trx_commit, .message = "MySQL requires innodb_flush_log_at_trx_commit=1" },
+        error.MysqlSyncBinlogUnsafe => .{ .code = .durability_sync_binlog, .message = "MySQL requires sync_binlog=1 when binlogging is enabled" },
+        error.MysqlStatementBinlog => .{ .code = .binlog_statement, .message = "MySQL STATEMENT binlogging is not supported; use ROW or MIXED" },
+        error.ServerRefused => .{ .code = .mysql_unreachable, .message = "the MySQL server refused the connection before login" },
+        error.ConnectFailed => .{ .code = .mysql_unreachable, .message = "could not connect to the MySQL server" },
+        error.HostNotFound => .{ .code = .mysql_unreachable, .message = "could not resolve the MySQL host" },
+        error.InvalidHost => .{ .code = .mysql_unreachable, .message = "the MySQL host address is invalid" },
+        error.TlsRefused => .{ .code = .mysql_unreachable, .message = "the MySQL server does not offer TLS" },
+        error.TlsFailed => .{ .code = .mysql_unreachable, .message = "the MySQL server's TLS handshake failed" },
+        error.UntrustedPeer => .{ .code = .mysql_unreachable, .message = "the MySQL server's TLS certificate is not trusted" },
+        error.PeerFailed => .{ .code = .mysql_unreachable, .message = "could not verify the MySQL server's TLS certificate" },
+        error.DeadlineExceeded => .{ .code = .mysql_unreachable, .message = "timed out connecting to the MySQL server" },
+        error.ConnectionLost => .{ .code = .mysql_unreachable, .message = "the MySQL connection was lost during startup" },
+        error.LoginRefused, error.AuthMethodRefused => .{ .code = .mysql_login, .message = "the MySQL server refused the login; check credentials and database access" },
         else => null,
     };
 }
@@ -680,7 +729,7 @@ test "each MySQL policy refusal has a static launch-frame code" {
     try std.testing.expectEqual(StartError.store_locked, mysqlRefusal(error.StoreLocked).?.code);
     try std.testing.expectEqual(StartError.store_schema_missing, mysqlRefusal(error.StoreSchemaMissing).?.code);
     try std.testing.expectEqual(StartError.store_schema_behind, mysqlRefusal(error.StoreSchemaBehind).?.code);
-    try std.testing.expect(mysqlRefusal(error.ConnectFailed) == null);
+    try std.testing.expect(mysqlRefusal(error.OutOfMemory) == null);
 }
 
 test "MCP launch frame defaults an absent call timeout" {
