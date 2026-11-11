@@ -123,7 +123,7 @@ pub const Store = struct {
     /// `.open` once it commits, each later write in a savepoint; `.lost`
     /// once a rollback failed, so the batch never commits. A write outside
     /// a batch (a test's own Entry) opens and commits its own.
-    batch: enum(u8) { none, ready, first, open, lost } = .none,
+    batch: enum(u8) { none, ready, first, open, saved, lost } = .none,
     /// Whether the current write's savepoint is open in the batch.
     savepoint: bool = false,
     /// Release a bulk writer's cache after the queue's outer commit, not
@@ -217,7 +217,7 @@ pub const Store = struct {
         ids.* = .{ .next = undefined };
         self.* = .{ .io = io, .engine = .{ .sqlite = opened }, .selector = stored_selector, .changes = changes };
         self.served = options.served;
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
         // The Store is in final storage, so the function may keep its address.
         try self.engine.sqlite.serve(&self.served);
         // Tells this opening's `since` tokens from another's. It grants
@@ -331,7 +331,7 @@ pub const Store = struct {
             if (connection.database.len >= self.engine.mysql.state.testing_database.len) return error.MysqlConfigTooLong;
             @memcpy(self.engine.mysql.state.testing_database[0..connection.database.len], connection.database);
         }
-        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .arm = armRerun, .recover = recoverRerun });
+        self.queue().* = .init(io, .{ .context = self, .start = startBatch, .finish = finishBatch, .closed = batchClosed, .arm = armRerun, .recover = recoverRerun });
         io.random(&self.instance);
         try loadIdentities(self, .full);
         self.queue().opened();
@@ -1928,7 +1928,10 @@ pub const Entry = struct {
         store.scratch_use = .none;
         // Counts autocommit and explicit-transaction writes alike. A
         // rolled-back change touched everything: never a missed change.
-        if (store.engine.totalChanges() != self.changes) {
+        // An attempt that lost its connection with nothing saved, and runs
+        // again, changed nothing yet: its second run records the change.
+        const reruns = store.engine == .mysql and store.engine.mysql.defersFence();
+        if (store.engine.totalChanges() != self.changes and !reruns) {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
@@ -2002,7 +2005,8 @@ pub fn begin(self: *Store) !void {
             return;
         },
         .open => {},
-        .first, .lost => unreachable,
+        // The Queue ends a saved batch before its next write.
+        .first, .saved, .lost => unreachable,
     }
     std.debug.assert(!self.savepoint);
     try self.engine.control(.savepoint);
@@ -2015,7 +2019,8 @@ pub fn begin(self: *Store) !void {
 pub fn commit(self: *Store) !void {
     switch (self.batch) {
         .first => {
-            self.batch = .open;
+            // Its COMMIT rode its last writes (`commitsWithWrites`).
+            self.batch = if (self.engine.inTransaction()) .open else .saved;
             return;
         },
         .open => {
@@ -2024,11 +2029,27 @@ pub fn commit(self: *Store) !void {
             return;
         },
         .none => {},
-        .ready, .lost => unreachable,
+        .ready, .saved, .lost => unreachable,
     }
     try self.engine.control(.commit);
     self.identities().taken = .empty;
     self.identities().second = 0;
+}
+
+/// Whether a write Access that commits now sends COMMIT with its last
+/// writes: on a network engine, when it is its batch's first write and no
+/// other write waits to share the batch's COMMIT. The batch is then saved
+/// and takes no more (`batchClosed`). A batch that runs again
+/// (`recoverRerun`) is no longer armed and holds every write it held, so
+/// it commits at its end.
+pub fn commitsWithWrites(self: *Store) bool {
+    return self.engine == .mysql and self.batch == .first and self.engine.mysql.state.armed and !self.queue().writeWaiting();
+}
+
+/// `Queue.Batch.closed`: the batch's COMMIT already ran.
+fn batchClosed(context: *anyopaque) bool {
+    const self: *Store = @ptrCast(@alignCast(context));
+    return self.batch == .saved;
 }
 
 fn startBatch(context: *anyopaque) void {
@@ -2107,7 +2128,7 @@ fn recoverRerun(context: *anyopaque) bool {
 
 fn commitBatch(self: *Store) !void {
     switch (self.batch) {
-        .ready => {},
+        .ready, .saved => {},
         .open => self.engine.control(.commit) catch |err| return fence(self, err),
         .lost => return fence(self, error.CanonicalRollbackFailed),
         .none, .first => unreachable,
@@ -2380,7 +2401,7 @@ pub fn rollbackAfterError(self: *Store, faults: Faults) !void {
             self.batch = .ready;
             return;
         },
-        .none, .ready => return rollbackTransaction(self, faults),
+        .none, .ready, .saved => return rollbackTransaction(self, faults),
         // A rollback that failed once fails again: nothing undid the write.
         .lost => return error.CanonicalRollbackFailed,
     }

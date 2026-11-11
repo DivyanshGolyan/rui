@@ -950,6 +950,62 @@ test "store.mysql live a write whose connection was lost with nothing saved runs
     }
 }
 
+/// A queued write of one content row and a touch of another's, as an
+/// entry point runs them.
+fn insertTouching(storage: *Store, id: u64, other: u64) !void {
+    const entry = try store_core.enter(storage, .none);
+    defer entry.release();
+    var access: store_access.Access(.write, error{LiveGuard}) = .open(&entry);
+    defer access.deinit();
+    access.write(live_insert, .{ .id = id, .digest = protocol.contentDigest(std.mem.asBytes(&id)), .length = 0 });
+    access.write(live_touch, .{ .id = other });
+    return entry.finishTransaction(error{LiveGuard}, .{}, access.end(.{}, access.commit()));
+}
+
+test "store.mysql live a lone write sends its transaction, its writes and its COMMIT as one message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch unreachable;
+    const state = storage.engine.mysql.state;
+    var before = state.connection.queries;
+    try storage.queue().write(insertTouching, .{ &storage, 9000400, 9000400 });
+    try std.testing.expectEqual(before + 1, state.connection.queries);
+    try std.testing.expect(!storage.engine.mysql.inTransaction());
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000400", .{}));
+    // A write that changes the wrong number of rows stops the message
+    // before its COMMIT: the server saves nothing of it.
+    const seq = state.commit_seq;
+    before = state.connection.queries;
+    try std.testing.expectError(error.LiveGuard, storage.queue().write(insertTouching, .{ &storage, 9000401, 9000499 }));
+    // The message, then ROLLBACK.
+    try std.testing.expectEqual(before + 2, state.connection.queries);
+    try std.testing.expect(!storage.isFenced());
+    try std.testing.expectEqual(seq, state.commit_seq);
+    try std.testing.expectEqual(seq, try queryU64(&storage, "SELECT commit_seq FROM store_owner WHERE owner_key=1", .{}));
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000401", .{}));
+    // The Store carries on.
+    try storage.queue().write(insertTouching, .{ &storage, 9000402, 9000400 });
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000402", .{}));
+}
+
+test "store.mysql live a lone write whose fence fails saves nothing, though COMMIT shares its message" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch |err| {
+        std.testing.expectEqual(error.StoreCloseFailed, err) catch unreachable;
+    };
+    // Another owner's commit, while this connection still holds GET_LOCK.
+    try exec(&storage, "UPDATE store_owner SET commit_seq=commit_seq+1 WHERE owner_key=1", .{});
+    if (storage.queue().write(insertHeld, .{ &storage, 9000500 })) |_| return error.TestUnexpectedResult else |_| {}
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectEqual(error.OwnershipLost, storage.engine.mysql.state.failure.?);
+    try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000500", .{}));
+}
+
 test "store.mysql live a batch that loses its connection mid-pass runs every write again" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

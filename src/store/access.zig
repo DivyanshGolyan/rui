@@ -252,6 +252,9 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 counted: u64,
                 none: void,
             },
+            /// Whether a guard's answer follows the write's
+            /// (`Mysql.guard`).
+            guarded: bool = false,
             /// What it reads in place when its pass steps it, in Debug and
             /// test builds.
             borrowed: Borrowed = .{},
@@ -609,7 +612,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
 
         /// The queued writes, then one compare-and-set per claiming
         /// Session, in the round that commits. The compare-and-sets are
-        /// bound only once the writes stepped without a failure.
+        /// bound only once the writes stepped without a failure. A
+        /// network engine's COMMIT rides the same round when the write is
+        /// its batch's only one (`store_core.commitsWithWrites`): each
+        /// write's guard stops the round before it (`Mysql.appendCommit`).
         fn finishWrites(a: *Self) Error!void {
             a.ensureOpen();
             if (a.store.engine == .sqlite) a.pass();
@@ -618,9 +624,30 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 const expected = claim.head.next_position.get();
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
+            const commits = a.bindCommit();
             a.pass();
             a.claimed = 0;
+            if (commits) {
+                if (a.store.engine.mysql.settleCommit()) |_| {
+                    // Saved, though the connection was lost on the way.
+                    if (a.failure) |err| if (err == error.CommitOutcomeUnknown) {
+                        a.failure = null;
+                    };
+                } else |err| a.failure = err;
+            }
             if (a.failure) |err| return err;
+        }
+
+        /// Binds COMMIT after the round's writes and queues its step; false
+        /// when COMMIT takes a round of its own.
+        fn bindCommit(a: *Self) bool {
+            if (a.failure != null or !store_core.commitsWithWrites(a.store)) return false;
+            const slot = a.reserve() orelse return false;
+            if (!a.store.engine.mysql.appendCommit()) return false;
+            slot.* = .{ .statement = null, .run = runCommit, .target = .{ .none = {} } };
+            slot.borrowed = .of(struct {}, &.{});
+            a.queued += 1;
+            return true;
         }
 
         /// Opens the transaction of a write Access before its first
@@ -677,6 +704,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 return false;
             };
             slot.borrowed = .of(S.Args, args);
+            if (comptime S.kind == .write and mode == .write and S.guarded) if (a.store.engine == .mysql) {
+                const mysql = &a.store.engine.mysql;
+                slot.guarded = switch (S.expect) {
+                    .exact => |exact| mysql.guard(false, exact.rows),
+                    .at_most => |rows| mysql.guard(true, rows),
+                    .counted => mysql.guard(false, target.counted),
+                };
+            };
             a.queued += 1;
             return true;
         }
@@ -807,8 +842,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                         .at_most => |rows| if (changed > rows) return error.CorruptStore,
                         .counted => |guard| if (changed != entry.target.counted) return comptime @as(Error, @errorCast(guard.otherwise)),
                     }
+                    if (entry.guarded) _ = try a.store.engine.stepWrite(entry.statement);
                 }
             }.run);
+        }
+
+        /// The COMMIT `finishWrites` bound after the round's writes.
+        fn runCommit(a: *Self, _: *const Queued) Error!void {
+            try a.store.engine.mysql.stepCommit();
         }
 
         /// A sink's chunk INSERT (`queueChunk`): one row.
