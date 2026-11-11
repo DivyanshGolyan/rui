@@ -2,14 +2,14 @@
 //! protocol.zig's JSON shapes: the request shapes the client writes and the
 //! reply shapes the Host writes. `zig build openapi` writes it to
 //! `openapi.json`; a test fails when the checked-in file differs from what
-//! this emits, and another parses a generated example of every request
-//! variant with the Host's own parser. Clients in other languages are
+//! this emits. Generated requests with all or no optional members, in their
+//! original and seeded random orders, exercise the Host's own parser. Clients in other languages are
 //! generated from that file.
 //!
 //! A shape is a tuple of literal JSON text and `protocol.Hole`s. To turn one
 //! into a schema, each hole is written as a marker string, the text is parsed
 //! as JSON, and each marker becomes its hole's schema. A shape here may also
-//! hold a marker type (see `ListOf`, `State`, `Content`) for the parts the
+//! hold a marker type (see `Optional`, `ListOf`, `State`, `Content`) for the parts the
 //! Host and client write in code rather than as one shape.
 const std = @import("std");
 const protocol = @import("protocol.zig");
@@ -29,7 +29,7 @@ const Route = struct {
     path: []const u8,
     kind: protocol.Kind,
     summary: []const u8,
-    /// Each a request shape; the request schema is any one of them.
+    /// One object shape, or genuinely exclusive target alternatives.
     variants: []const Variant,
     reply: Reply,
     /// The reply under HTTP 409 when a retried key meets different input.
@@ -39,7 +39,7 @@ const Route = struct {
 /// A request shape, kept as its two uses so `Route` stays a runtime value.
 const Variant = struct {
     schema: *const fn (*Document) anyerror!Value,
-    example: *const fn (*std.Io.Writer) anyerror!void,
+    example: *const fn (*std.Io.Writer, bool) anyerror!void,
 };
 
 fn variant(comptime shape: anytype, comptime examples: anytype) Variant {
@@ -48,8 +48,8 @@ fn variant(comptime shape: anytype, comptime examples: anytype) Variant {
         fn schema(d: *Document) anyerror!Value {
             return d.shapeSchema(value);
         }
-        fn example(out: *std.Io.Writer) anyerror!void {
-            return writeExample(out, value, examples);
+        fn example(out: *std.Io.Writer, optional: bool) anyerror!void {
+            return writeExampleWith(out, value, examples, optional);
         }
     };
     return .{ .schema = S.schema, .example = S.example };
@@ -104,29 +104,28 @@ pub const routes = [_]Route{
         .path = protocol.CommandKind.configure.route(),
         .kind = .configure,
         .summary = "Creates or reconfigures a Session. Retried by its key.",
-        .variants = &.{
-            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.tail, .{}),
-            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.reload_skills_tail, .{}),
-            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.reload_require_model_tail, .{}),
-            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.require_model_tail, .{}),
-            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_tail, .{}),
-            variant(protocol.configure_request.head ++ .{Configuration} ++ protocol.configure_request.preset_require_model_tail, .{}),
-        },
+        .variants = &.{variant(protocol.configure_request.head ++ .{Configuration} ++ .{
+            Optional(protocol.configure_request.reload_skills),
+            Optional(protocol.configure_request.require_model),
+            Optional(protocol.configure_request.preset),
+        } ++ protocol.configure_request.tail, .{})},
         .reply = jsonReply(.{ protocol.configuration_reply.accepted, protocol.configuration_reply.accepted_skills, protocol.configuration_reply.rejected }),
         .conflict = jsonReply(.{protocol.configuration_reply.conflict}),
     },
     .{
         .path = protocol.CommandKind.message.route(),
         .kind = .message,
-        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
-        .variants = &.{
-            variant(protocol.message_request.head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{}),
-            // A sending Session's address: an absolute Store path and a Session id.
-            variant(protocol.message_request.sender_head ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{ .{ 3, "\"/s\"" }, .{ 4, "\"aaaaaa\"" } }),
-            // A creating Message names no Session.
-            variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.tail, .{.{ 2, "\"\"" }}),
-            variant(protocol.message_request.head ++ protocol.message_request.configuration ++ .{MessageConfiguration} ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.require_model_tail, .{.{ 2, "\"\"" }}),
-        },
+        .summary = "Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. Only an empty `session` carries (and requires) `configuration`; `require_model` is allowed only with it. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON.",
+        .variants = &.{variant(protocol.message_request.head ++ .{Sender} ++ protocol.message_request.sender_handle ++ .{
+            Optional(protocol.message_request.configuration ++ .{MessageConfiguration}),
+        } ++ protocol.message_request.text ++ .{Content} ++ protocol.message_request.text_tail ++ .{
+            Optional(protocol.message_request.require_model),
+        } ++ protocol.message_request.tail, .{
+            // Only creation carries configuration and require_model. Exercise
+            // an addressed Message without them, and both nullable senders.
+            .{ 2, "\"\"", "\"aaaaaa\"" },
+            .{ 3, "{\"store\":\"/s\",\"session\":\"aaaaaa\"}", "null" },
+        })},
         .reply = jsonReply(.{ protocol.message_reply.accepted, protocol.message_reply.rejected }),
         .conflict = jsonReply(.{protocol.message_reply.conflict}),
     },
@@ -142,7 +141,7 @@ pub const routes = [_]Route{
         .path = protocol.CommandKind.session_archive.route(),
         .kind = .session_archive,
         .summary = "Archives or restores a Session. Archiving stops current and queued work. Retried by its key.",
-        .variants = &.{variant(protocol.session_archive_request, .{})},
+        .variants = &.{variant(protocol.session_archive_request.head ++ .{Optional(protocol.session_archive_request.archived)} ++ protocol.session_archive_request.tail, .{})},
         .reply = jsonReply(.{ protocol.session_archive_reply.accepted, protocol.session_archive_reply.rejected }),
         .conflict = jsonReply(.{protocol.session_archive_reply.conflict}),
     },
@@ -166,7 +165,7 @@ pub const routes = [_]Route{
         .path = "/v1/observe-command",
         .kind = .observe_command,
         .summary = "What became of the command sent with this key.",
-        .variants = &.{ variant(protocol.observe_command_without_since_request, .{}), variant(protocol.observe_command_request, .{}) },
+        .variants = &.{variant(protocol.observe_command_request.head ++ .{Optional(protocol.observe_command_request.since)} ++ protocol.observe_command_request.tail, .{})},
         .reply = .{ .json = observationSchema },
     },
     .{
@@ -195,23 +194,23 @@ pub const routes = [_]Route{
         .kind = .inspect_session,
         .summary = "A Session's report, or one failed provider response.",
         .variants = &.{
-            variant(protocol.inspect_session_request.current, .{}),
-            variant(protocol.inspect_session_request.current_since, .{}),
-            variant(protocol.inspect_session_request.full, .{}),
-            variant(protocol.inspect_session_request.failed_response, .{}),
+            variant(protocol.inspect_session_request.head ++ .{Optional(protocol.inspect_session_request.since)} ++ protocol.inspect_session_request.tail, .{}),
+            variant(protocol.inspect_session_request.head ++ protocol.inspect_session_request.profile ++ protocol.inspect_session_request.tail, .{}),
+            variant(protocol.inspect_session_request.head ++ protocol.inspect_session_request.failed_response ++ protocol.inspect_session_request.tail, .{}),
         },
         .reply = .report,
     },
     .{
         .path = "/v1/list-sessions",
         .kind = .list_sessions,
-        .summary = "One page of Sessions, newest first, or what changed since a token.",
-        .variants = &.{
-            variant(protocol.list_sessions_request, .{}),
-            // A token continues from the start of the list.
-            variant(protocol.list_sessions_since_request, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example } }),
-            variant(protocol.list_sessions_changed_request, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } }),
-        },
+        .summary = "One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`.",
+        .variants = &.{variant(protocol.list_sessions_request.head ++ .{
+            Optional(protocol.list_sessions_request.archive),
+        } ++ protocol.list_sessions_request.cursor ++ .{
+            Optional(protocol.list_sessions_request.since),
+            Optional(protocol.list_sessions_request.through),
+            Optional(protocol.list_sessions_request.after_reference),
+        } ++ protocol.list_sessions_request.tail, .{ .{ 3, "0" }, .{ 4, "0" }, .{ 5, since_example }, .{ 7, "\"aaaaaa\"" } })},
         .reply = jsonReply(.{
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.full_tail,
             protocol.session_list_reply.head ++ .{ListOf(protocol.SessionRow)} ++ protocol.session_list_reply.changed_tail,
@@ -232,21 +231,26 @@ pub const routes = [_]Route{
         .path = "/v1/conversation-content",
         .kind = .conversation_content,
         .summary = "The content of one conversation item.",
-        .variants = &.{variant(protocol.conversation_content_request, .{})},
+        .variants = &.{variant(protocol.conversation_content_request.head ++ .{Optional(protocol.conversation_content_request.stream)} ++ protocol.conversation_content_request.tail, .{})},
         .reply = .bytes,
     },
     .{
         .path = "/v1/activity-search",
         .kind = .activity_search,
         .summary = "Search public Session activity newest first with bounded snippets.",
-        .variants = &.{variant(protocol.activity_search_request, .{})},
+        .variants = &.{variant(protocol.activity_search_request.head ++ .{
+            Optional(protocol.activity_search_request.kinds),
+            Optional(protocol.activity_search_request.before_position),
+            Optional(protocol.activity_search_request.before_ordinal),
+            Optional(protocol.activity_search_request.limit),
+        } ++ protocol.activity_search_request.tail, .{})},
         .reply = jsonReply(.{activity_reply.search_reply.head ++ .{ListOf(ActivitySearchItem)} ++ activity_reply.search_reply.tail}),
     },
     .{
         .path = "/v1/activity-page",
         .kind = .activity_page,
         .summary = "One page of a Session's activity feed, with its work and queue at the page's boundary.",
-        .variants = &.{ variant(protocol.activity_page_request, .{}), variant(protocol.activity_page_since_request, .{}) },
+        .variants = &.{variant(protocol.activity_page_request.head ++ .{Optional(protocol.activity_page_request.since)} ++ protocol.activity_page_request.tail, .{})},
         .reply = jsonReply(.{ activity_reply.page_reply.head ++ .{ListOf(activity_reply.ItemJson)} ++ activity_reply.page_reply.tail, activity_reply.page_reply.unchanged }),
     },
     .{
@@ -286,6 +290,34 @@ comptime {
 // Marker types. Each has `openapi_shape` (a named component built from that
 // shape), or `openapi_inline` (an inline schema) with `openapi_example` when
 // requests use it.
+
+/// One omittable object member, including its leading comma. Unlike a nullable
+/// hole, this marker changes presence, not the member's value schema.
+fn Optional(comptime shape: anytype) type {
+    return struct {
+        pub const optional_shape = shape;
+        pub const member_name = blk: {
+            const first = shape[0];
+            if (!std.mem.startsWith(u8, first, ",\"")) @compileError("optional member must start with a comma and quoted name");
+            const end = std.mem.indexOfScalarPos(u8, first, 2, '"').?;
+            break :blk first[2..end];
+        };
+    };
+}
+
+fn isOptional(comptime part: anytype) bool {
+    return @TypeOf(part) == type and @hasDecl(part, "optional_shape");
+}
+
+/// A sender is required, but its value may be null or a full address.
+const Sender = struct {
+    pub fn openapi_inline(d: *Document) !Value {
+        return d.nullable(try d.shapeSchema(protocol.message_request.sender));
+    }
+    pub fn openapi_example(out: *std.Io.Writer) !void {
+        try out.writeAll("null");
+    }
+};
 
 /// A JSON array of `item`, which is a type or a shape.
 fn ListOf(comptime item: anytype) type {
@@ -386,21 +418,19 @@ fn toolName(d: *Document) !Value {
 fn configurationShape(comptime name: []const u8, comptime instructions: anytype, comptime output_schema: anytype) type {
     return struct {
         pub const openapi_name = name;
-        pub const openapi_optional_fields = .{"loaded_tools"};
         pub const openapi_shape = .{
-            "{\"workspace\":",          State(Hole{ .string = protocol.max_workspace_bytes }, false),
-            ",\"provider\":",           State(Hole{ .string = protocol.max_provider_bytes }, false),
-            ",\"model\":",              State(Hole{ .string = protocol.max_model_bytes }, false),
-            ",\"instructions\":",       instructions,
-            ",\"tools\":",              State(ToolNameList, false),
-            ",\"loaded_tools\":",       State(ToolNameList, false),
-            ",\"permission_mode\":",    State(Hole{ .string = 16 }, false),
-            ",\"output_schema\":",      output_schema,
-            ",\"compaction_trigger\":", State(Hole{ .string = 20 }, true),
-            ",\"output_reservation\":", State(Hole{ .string = 20 }, true),
-            ",\"reasoning_effort\":",   State(Hole{ .string = 16 }, true),
-            ",\"label\":",              State(Hole{ .string = protocol.max_label_bytes }, true),
-            "}",
+            "{\"workspace\":",                                               State(Hole{ .string = protocol.max_workspace_bytes }, false),
+            ",\"provider\":",                                                State(Hole{ .string = protocol.max_provider_bytes }, false),
+            ",\"model\":",                                                   State(Hole{ .string = protocol.max_model_bytes }, false),
+            ",\"instructions\":",                                            instructions,
+            ",\"tools\":",                                                   State(ToolNameList, false),
+            Optional(.{ ",\"loaded_tools\":", State(ToolNameList, false) }), ",\"permission_mode\":",
+            State(Hole{ .string = 16 }, false),                              ",\"output_schema\":",
+            output_schema,                                                   ",\"compaction_trigger\":",
+            State(Hole{ .string = 20 }, true),                               ",\"output_reservation\":",
+            State(Hole{ .string = 20 }, true),                               ",\"reasoning_effort\":",
+            State(Hole{ .string = 16 }, true),                               ",\"label\":",
+            State(Hole{ .string = protocol.max_label_bytes }, true),         "}",
         };
     };
 }
@@ -560,19 +590,7 @@ pub const Document = struct {
 
     fn typeSchema(d: *Document, comptime T: type) !Value {
         if (@hasDecl(T, "openapi_shape")) {
-            var schema = try d.shapeSchema(T.openapi_shape);
-            if (@hasDecl(T, "openapi_optional_fields")) {
-                const required = &schema.object.getPtr("required").?.array;
-                inline for (T.openapi_optional_fields) |optional| {
-                    for (required.items, 0..) |field, index| {
-                        if (std.mem.eql(u8, field.string, optional)) {
-                            _ = required.orderedRemove(index);
-                            break;
-                        }
-                    }
-                }
-            }
-            return schema;
+            return d.shapeSchema(T.openapi_shape);
         }
         if (@hasDecl(T, "openapi_shapes")) {
             var values: [T.openapi_shapes.len]Value = undefined;
@@ -691,8 +709,28 @@ pub const Document = struct {
         var text: std.Io.Writer.Allocating = .init(d.arena);
         var holes: std.ArrayList(Value) = .empty;
         var lists: std.ArrayList(bool) = .empty;
+        try d.appendShape(shape, Raw, &text, &holes, &lists);
+        const json = try std.json.parseFromSliceLeaky(Value, d.arena, text.written(), .{});
+        var schema = try d.fromJson(json, holes.items, lists.items);
+        inline for (shape) |part| {
+            if (comptime isOptional(part)) {
+                const required = &schema.object.getPtr("required").?.array;
+                for (required.items, 0..) |field, index| {
+                    if (std.mem.eql(u8, field.string, part.member_name)) {
+                        _ = required.orderedRemove(index);
+                        break;
+                    }
+                }
+            }
+        }
+        return schema;
+    }
+
+    fn appendShape(d: *Document, comptime shape: anytype, comptime Raw: ?type, text: *std.Io.Writer.Allocating, holes: *std.ArrayList(Value), lists: *std.ArrayList(bool)) anyerror!void {
         inline for (shape, 0..) |part, index| {
-            if (comptime isLiteral(part)) {
+            if (comptime isOptional(part)) {
+                try d.appendShape(part.optional_shape, Raw, text, holes, lists);
+            } else if (comptime isLiteral(part)) {
                 try text.writer.writeAll(part);
             } else {
                 const quoted = comptime isQuoted(shape, index);
@@ -713,8 +751,6 @@ pub const Document = struct {
                 }
             }
         }
-        const json = try std.json.parseFromSliceLeaky(Value, d.arena, text.written(), .{});
-        return d.fromJson(json, holes.items, lists.items);
     }
 
     fn fromJson(d: *Document, json: Value, holes: []const Value, lists: []const bool) !Value {
@@ -1025,23 +1061,46 @@ fn camel(arena: std.mem.Allocator, snake: []const u8) ![]const u8 {
 
 /// Writes `shape` with an example value in each hole: the hole's default,
 /// or the JSON `examples` gives for its index, as `.{ index, json }` pairs.
+/// A third entry overrides the example when optional members are absent.
 pub fn writeExample(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype) !void {
-    comptime var hole_index = 0;
+    return writeExampleWith(out, shape, examples, true);
+}
+
+fn writeExampleWith(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype, optional: bool) anyerror!void {
+    return writeExampleFrom(out, shape, examples, optional, 0);
+}
+
+fn holeCount(comptime shape: anytype) usize {
+    comptime var count = 0;
+    inline for (shape) |part| {
+        if (comptime isOptional(part)) {
+            count += comptime holeCount(part.optional_shape);
+        } else if (comptime !isLiteral(part)) count += 1;
+    }
+    return count;
+}
+
+fn writeExampleFrom(out: *std.Io.Writer, comptime shape: anytype, comptime examples: anytype, optional: bool, comptime first_hole: usize) anyerror!void {
+    comptime var hole_index = first_hole;
     inline for (shape, 0..) |part, index| {
-        if (comptime isLiteral(part)) {
+        if (comptime isOptional(part)) {
+            if (optional) try writeExampleFrom(out, part.optional_shape, examples, optional, hole_index);
+            hole_index += comptime holeCount(part.optional_shape);
+        } else if (comptime isLiteral(part)) {
             try out.writeAll(part);
         } else {
             const override = comptime blk: {
-                for (examples) |pair| if (pair[0] == hole_index) break :blk @as(?[]const u8, pair[1]);
-                break :blk @as(?[]const u8, null);
+                for (examples) |pair| if (pair[0] == hole_index) break :blk pair;
+                break :blk .{ 0, @as(?[]const u8, null) };
             };
             hole_index += 1;
-            if (override) |json| {
-                try out.writeAll(json);
+            const json: ?[]const u8 = if (comptime override.len == 3) (if (optional) override[1] else override[2]) else override[1];
+            if (json) |value| {
+                try out.writeAll(value);
             } else if (comptime @TypeOf(part) == type) {
                 if (@hasDecl(part, "openapi_example")) {
                     try part.openapi_example(out);
-                } else try writeExample(out, part.openapi_shape, .{});
+                } else try writeExampleWith(out, part.openapi_shape, .{}, optional);
             } else try writeHoleExample(out, part, comptime isQuoted(shape, index));
         }
     }
@@ -1090,37 +1149,95 @@ test "openapi.json is what the wire types emit" {
     }
 }
 
-test "the Host parses a generated example of every request variant" {
+test "openapi requests use one object except exclusive targets" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var document: Document = .init(arena.allocator());
+    _ = try document.build();
+    for (routes) |route| {
+        const name = try std.fmt.allocPrint(arena.allocator(), "{s}Request", .{try pascal(arena.allocator(), @tagName(route.kind))});
+        const schema = document.schemas.get(name).?.object;
+        switch (route.kind) {
+            .inspect_session, .skill_suggestions => try std.testing.expect(schema.contains("anyOf")),
+            else => {
+                try std.testing.expectEqual(@as(usize, 1), route.variants.len);
+                try std.testing.expectEqualStrings("object", schema.get("type").?.string);
+                try std.testing.expect(!schema.contains("anyOf"));
+            },
+        }
+    }
+    const configure = document.schemas.get("ConfigureRequest").?.object;
+    for ([_][]const u8{ "reload_skills", "require_model", "preset" }) |optional| {
+        try std.testing.expect(configure.get("properties").?.object.contains(optional));
+        for (configure.get("required").?.array.items) |required| try std.testing.expect(!std.mem.eql(u8, optional, required.string));
+    }
+}
+
+test "openapi requests parse with all or no optional members in any order" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const root_len = try tmp.dir.realPath(io, &root);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    var prng = std.Random.DefaultPrng.init(0x727569);
     for (&routes) |*route| {
         for (route.variants, 0..) |each, index| {
-            var body: std.Io.Writer.Allocating = .init(std.testing.allocator);
-            defer body.deinit();
-            try each.example(&body.writer);
-            const bytes = body.written();
-            var used = std.atomic.Value(u64).init(0);
-            var retained: ?@import("named_scratch.zig").Owner = null;
-            var ingress: wire_request.Ingress = undefined;
-            ingress.init(std.testing.allocator, .{
-                .io = io,
-                .content_length = bytes.len,
-                .scratch_path = root[0..root_len],
-                .request_number = 1,
-                .retained_scratch = &retained,
-                .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
-                .expected_kind = route.kind,
-            });
-            defer ingress.deinit();
-            ingress.feed(bytes) catch |err| return report(route, index, bytes, err);
-            const request = ingress.finish() catch |err| return report(route, index, bytes, err);
-            try std.testing.expectEqual(route.kind, std.meta.activeTag(request.*));
-            try request.removeTemporaryContent(io);
+            const schema = try each.schema(&document);
+            for ([_]bool{ true, false }) |optional| {
+                var body: std.Io.Writer.Allocating = .init(allocator);
+                try each.example(&body.writer, optional);
+                const json = try std.json.parseFromSliceLeaky(Value, allocator, body.written(), .{});
+                // Independently check coverage, so accidentally skipping a marker
+                // cannot silently turn the all-members example into a subset.
+                const expected = if (optional) schema.object.get("properties").?.object.count() else schema.object.get("required").?.array.items.len;
+                try std.testing.expectEqual(expected, json.object.count());
+                try std.testing.expect(conforms(document.schemas, schema, json));
+                try parseRequestExample(route, index, body.written(), root[0..root_len]);
+
+                const order = try allocator.alloc(usize, json.object.count());
+                for (order, 0..) |*slot, position| slot.* = position;
+                prng.random().shuffle(usize, order);
+                var unchanged = true;
+                for (order, 0..) |slot, position| unchanged = unchanged and slot == position;
+                if (unchanged and order.len > 1) std.mem.swap(usize, &order[0], &order[order.len - 1]);
+                var shuffled: std.Io.Writer.Allocating = .init(allocator);
+                try shuffled.writer.writeByte('{');
+                for (order, 0..) |slot, position| {
+                    if (position != 0) try shuffled.writer.writeByte(',');
+                    try std.json.Stringify.value(json.object.keys()[slot], .{}, &shuffled.writer);
+                    try shuffled.writer.writeByte(':');
+                    try std.json.Stringify.value(json.object.values()[slot], .{}, &shuffled.writer);
+                }
+                try shuffled.writer.writeByte('}');
+                try parseRequestExample(route, index, shuffled.written(), root[0..root_len]);
+            }
         }
     }
+}
+
+fn parseRequestExample(route: *const Route, index: usize, bytes: []const u8, scratch_path: []const u8) !void {
+    const io = std.testing.io;
+    var used = std.atomic.Value(u64).init(0);
+    var retained: ?@import("named_scratch.zig").Owner = null;
+    var ingress: wire_request.Ingress = undefined;
+    ingress.init(std.testing.allocator, .{
+        .io = io,
+        .content_length = bytes.len,
+        .scratch_path = scratch_path,
+        .request_number = 1,
+        .retained_scratch = &retained,
+        .scratch_budget = .{ .used = &used, .limit = 1024 * 1024 },
+        .expected_kind = route.kind,
+    });
+    defer ingress.deinit();
+    ingress.feed(bytes) catch |err| return report(route, index, bytes, err);
+    const request = ingress.finish() catch |err| return report(route, index, bytes, err);
+    try std.testing.expectEqual(route.kind, std.meta.activeTag(request.*));
+    try request.removeTemporaryContent(io);
 }
 
 test "every launch Wire field parses and conforms to its component schema" {

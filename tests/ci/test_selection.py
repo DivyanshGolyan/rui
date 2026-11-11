@@ -185,20 +185,32 @@ class SelectionTest(unittest.TestCase):
         self.assertNotIn("test-store", store)
 
     def test_upgrade_owners_select_standalone_fixture_in_both_phases(self):
-        paths = ("src/upgrade.zig", "src/installation_path.zig", "src/TerminalEditor.zig", "src/Installation.zig", "src/release_candidate.zig",
-                 "src/upgrade_process.zig", "src/HostLifecycle.zig", "src/host_identity.zig",
-                 "src/host_identity.c", "src/UpgradeJob.zig", "src/upgrade_status.zig", "src/stderr.zig", "src/host_launch.c",
-                 "src/cli.zig", "src/cli_args.zig", "src/client.zig", "src/slash_commands.zig",
-                 "src/Overview.zig", "src/overview_view.zig", "src/SessionFrontend.zig",
-                 "tests/integration/upgrade_integration.py", "release/publish.sh", "release/install.sh",
-                 "install.sh", "build.zig")
-        for path in paths:
+        # Expectations independent of the rule's tables: the other paths by
+        # hand, each with whether a PR also runs the previous-release check,
+        # and the Upgrade's own files by their names in the tree, so a new
+        # one is covered here without being listed and a path dropped from
+        # a table fails.
+        others = {"src/installation_path.zig": True, "src/TerminalEditor.zig": False, "src/Installation.zig": True,
+                  "src/release_candidate.zig": True, "src/HostLifecycle.zig": True, "src/host_identity.zig": True,
+                  "src/host_identity.c": True, "src/stderr.zig": False, "src/host_launch.c": True,
+                  "src/cli.zig": False, "src/cli_args.zig": False, "src/client.zig": False, "src/slash_commands.zig": False,
+                  "src/Overview.zig": False, "src/overview_view.zig": False, "src/SessionFrontend.zig": False,
+                  "tests/integration/upgrade_integration.py": False, "release/publish.sh": True, "release/install.sh": True,
+                  "install.sh": True, "build.zig": True}
+        source = Path(__file__).resolve().parents[2] / "src"
+        own = {f"src/{path.name}" for path in source.glob("*.zig") if path.name.lower().startswith("upgrade")}
+        self.assertLessEqual({"src/upgrade.zig", "src/upgrade_process.zig", "src/UpgradeJob.zig", "src/upgrade_status.zig"}, own)
+        self.assertEqual(own, {path for path in tree_graph().owners["upgrade-integration"] if "pgrade" in path})
+        # A file that does not exist yet, under either spelling.
+        expected = others | dict.fromkeys(own | {"src/upgrade_new.zig", "src/UpgradeNew.zig"}, True)
+        for path, upgrade_required in expected.items():
             for phase in ("development", "review"):
                 with self.subTest(path=path, phase=phase):
                     result = select([path], phase, AVAILABLE)
                     self.assertIn("upgrade-integration", result["targets"])
                     if phase == "review":
                         self.assertIn("upgrade-integration", result["native_targets"])
+                        self.assertEqual(result["upgrade_required"], upgrade_required)
 
     def test_installer_owners_select_standalone_fixture_in_both_phases(self):
         paths = ("tests/integration/installer_integration.py", "tests/ci/fake_rui.py",
@@ -376,7 +388,7 @@ class SelectionTest(unittest.TestCase):
                 reached = graph.targets(core) or set()
                 # What compiles the core or reads it, as fixtures read owned values.
                 compiled = {target for target, files in graph.reached.items() if core in files}
-                named = {target for target, (_, _, owners) in FIXTURES.items() if core in owners}
+                named = {target for target, owners in graph.owners.items() if core in owners}
                 self.assertTrue(named <= reached)
                 self.assertEqual(reached - compiled - named, set())
         for path in ("src/cli_value.zig", "src/draft_layout.zig", "src/keymap.zig"):
