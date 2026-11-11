@@ -1261,6 +1261,25 @@ test "store.mysql live a write saves in its one message whether or not the batch
     try std.testing.expect(carried[0] and carried[1]);
 }
 
+test "store.mysql live a carried survey whose read fails fences as the Host's own does, and the write stands" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var storage: Store = undefined;
+    try openLive(&storage, &tmp);
+    defer storage.close() catch |err| {
+        std.testing.expectEqual(error.StoreCloseFailed, err) catch unreachable;
+    };
+    _ = try storage.dispatchWork(false);
+    const generation = storage.commitGeneration();
+    // A table the survey reads is gone: its SELECT fails after COMMIT ran.
+    try rawExec(&storage, "RENAME TABLE session_stop_owed TO session_stop_owed_gone");
+    try storage.queue().write(insertHeld, .{ &storage, 9000950 });
+    try std.testing.expect(storage.isFenced());
+    try std.testing.expectEqual(generation + 1, storage.commitGeneration());
+    try rawExec(&storage, "RENAME TABLE session_stop_owed_gone TO session_stop_owed");
+    try std.testing.expectEqual(@as(u64, 1), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000950", .{}));
+}
+
 test "store.mysql live a lone write whose fence fails saves nothing, though COMMIT shares its message" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

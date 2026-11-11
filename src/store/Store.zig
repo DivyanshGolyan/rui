@@ -2044,34 +2044,42 @@ pub fn commitsWithWrites(self: *Store) bool {
     return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
 }
 
-/// Runs the dispatch survey in the message of `writer`'s last writes and
-/// COMMIT, which `writer` bound: the Host asks for it after every commit
-/// (`dispatchWork`), and here it costs no round trip of its own. The
-/// reads follow COMMIT, so they run in autocommit and see what it saved.
-/// False, with nothing sent, when the Host has not asked yet. The survey
-/// is kept only when that one round answered it: one that needs a second
-/// round is left to the Host's own `dispatchWork`, so a write's round
-/// trips stay what its transition takes. An answered survey read every
-/// answer before its own, COMMIT's among them, so it is kept only beside
-/// a writer that did not fail.
-pub noinline fn surveyAfterCommit(self: *Store, writer: anytype) bool {
-    if (self.identities().survey.asked == .never) return false;
-    const paused = self.identities().survey.asked == .paused;
-    self.identities().survey.kept = .none;
-    var survey: store_access.Access(.survey, error{}) = .{ .store = self, .rides = writer.ridden() };
-    defer survey.deinit();
-    const work: ?DispatchWork = model_admission_domain.dispatchWork(&survey, paused) catch null;
-    survey.carry();
-    writer.endRide(survey.failure);
-    if (work) |found| if (writer.failure == null) {
-        self.identities().survey.core = found.core;
-        self.identities().survey.mcp = found.mcp;
-        self.identities().survey.bash = found.bash;
-        self.identities().survey.message = found.message;
-        self.identities().survey.tool_continuation = found.tool_continuation;
-        self.identities().survey.kept = .fresh;
-    };
-    return true;
+/// Sends `writer`'s last writes and COMMIT, which it bound, with the
+/// dispatch survey's reads after them: the Host asks for that survey
+/// after every commit (`dispatchWork`), and here it costs no round trip
+/// of its own. The reads follow COMMIT, so they run in autocommit and see
+/// what it saved. The writer sends the message; the survey is in it whole
+/// or not at all, so one whose reads do not fit after COMMIT is dropped
+/// before the send, as is one the Host has not asked for yet. Its answer
+/// is kept only beside a writer that did not fail, and only when that one
+/// round gave it: checks that need more rounds are left to the Host's own
+/// `dispatchWork`. A read that fails after COMMIT fences, as it does when
+/// the Host asks, and the commit stands.
+pub noinline fn commitWithSurvey(self: *Store, writer: anytype) void {
+    const kept = &self.identities().survey;
+    if (kept.asked == .never) return writer.passCommit(null);
+    kept.kept = .none;
+    var reads: store_access.Access(.survey, error{}) = .{ .store = self, .tail = true };
+    defer reads.deinit();
+    var survey: model_admission_domain.DispatchSurvey = .{};
+    survey.queue(&reads, kept.asked == .paused);
+    if (reads.failure != null) {
+        self.engine.dropTail();
+        return writer.passCommit(null);
+    }
+    writer.passCommit(reads.asTail());
+    if (writer.failure != null) return;
+    const answer: anyerror!?DispatchWork = if (reads.failure) |err| err else survey.work();
+    const found = (answer catch |err| {
+        @as(anyerror!void, fence(self, err)) catch {};
+        return;
+    }) orelse return;
+    kept.core = found.core;
+    kept.mcp = found.mcp;
+    kept.bash = found.bash;
+    kept.message = found.message;
+    kept.tool_continuation = found.tool_continuation;
+    kept.kept = .fresh;
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2321,7 +2329,7 @@ const HostValues = struct {
     /// How the Host last asked `dispatchWork`, with new Turns held or not;
     /// until it asks, no commit carries the survey. With it, the dispatch
     /// survey a commit's message carried
-    /// (`surveyAfterCommit`), for the `dispatchWork` that asks before
+    /// (`commitWithSurvey`), for the `dispatchWork` that asks before
     /// anything else commits: `fresh` until its writer's entry point ends
     /// and advances the generation, then `ready` until the next advance.
     /// It fits the padding after `admitted_len`.
