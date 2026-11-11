@@ -1558,20 +1558,28 @@ test "Session list capture and cursor storage stay page bounded as dormant Sessi
             var root: [protocol.max_store_bytes]u8 = undefined;
             const workspace = root[0..try tmp.dir.realPath(std.testing.io, &root)];
             var used = std.atomic.Value(u64).init(0);
-            var first_length: usize = 0;
+            var first_fixed_length: usize = 0;
             for (0..1000) |i| {
                 var key_buffer: [32]u8 = undefined;
                 const key = try std.fmt.bufPrint(&key_buffer, "dormant-key-{d}", .{i});
                 var config = try completeConfiguration(key, "", workspace, "model");
                 try std.testing.expect(try storage.configure(&config, .{}) == .accepted);
                 if (i == 99 or i == 999) {
+                    // The change hint counts writes, not Sessions (and can
+                    // include rolled-back writes). Cross a wider token boundary
+                    // independently of the population's 100 -> 1000 boundary.
+                    _ = storage.commit_generation.fetchAdd(if (i == 99) 900 else 100000, .release);
                     const bytes = try testingSessionList(&storage, &tmp, .{}, &used, i + 1);
                     defer std.testing.allocator.free(bytes);
                     var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, bytes, .{});
                     defer parsed.deinit();
-                    try std.testing.expectEqual(@as(usize, protocol.session_list_page_size), parsed.value.object.get("sessions").?.array.items.len);
-                    // Only the ceiling and the token's generation gain a digit.
-                    if (i == 99) first_length = bytes.len else try std.testing.expect(bytes.len <= first_length + 2);
+                    const page = parsed.value.object;
+                    try std.testing.expectEqual(@as(usize, protocol.session_list_page_size), page.get("sessions").?.array.items.len);
+                    // The same first page and continuation remain byte bounded;
+                    // only the opaque token and ceiling may change their widths.
+                    const variable_bytes = page.get("since").?.string.len + page.get("next").?.object.get("ceiling").?.string.len;
+                    const fixed_bytes = bytes.len - variable_bytes;
+                    if (i == 99) first_fixed_length = fixed_bytes else try std.testing.expectEqual(first_fixed_length, fixed_bytes);
                     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
                 }
             }
