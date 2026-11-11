@@ -163,16 +163,16 @@ test "a call is checked against the offered records before its arguments" {
         // A Bash call that was not offered keeps its description.
         .{ .name = "bash", .arguments = valid, .offered = "", .expected = .unknown_tool, .described = true },
         .{ .name = "bash", .arguments = "{}", .offered = "web_search", .expected = .unknown_tool },
-        // Membership is independent of the runner.
-        .{ .name = "web_search", .arguments = "{}", .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = null },
+        // A provider-run tool never runs as a function call.
+        .{ .name = "web_search", .arguments = "{}", .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         .{ .name = "", .arguments = "{}", .offered = "", .expected = .unknown_tool },
         .{ .name = "bas", .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         .{ .name = "bashx", .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         .{ .name = &(@as([max_name_bytes + 1]u8, @splat('b'))), .arguments = valid, .offered = "bash,web_search,message_agent,start_agent,read_transcript,find_tools,skill", .expected = .unknown_tool },
         // A tool the Session offered before and withdrew is removed, not
-        // unknown, including provider-run tools.
+        // unknown; a provider-run one never runs as a call either way.
         .{ .name = "bash", .arguments = valid, .offered = "", .withdrawn = true, .expected = .unknown_tool, .described = true, .removed = true },
-        .{ .name = "web_search", .arguments = "{}", .offered = "", .withdrawn = true, .expected = .unknown_tool, .removed = true },
+        .{ .name = "web_search", .arguments = "{}", .offered = "", .withdrawn = true, .expected = .unknown_tool },
     }) |case| {
         var name: Source = .{ .bytes = case.name };
         var arguments: TestSource = .{ .bytes = case.arguments };
