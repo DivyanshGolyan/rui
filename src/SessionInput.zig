@@ -205,6 +205,22 @@ pub fn submitText(self: *Self, text: []const u8) Ticket {
     return self.seal(true);
 }
 
+/// Loans the staged Message's exact bytes, including slashes, without editing
+/// the active draft or its recall/rejection state. Scratch is consumed now.
+pub fn submitPreservingDraft(self: *Self, io: std.Io, file: std.Io.File, length: usize) !Ticket {
+    std.debug.assert(self.submitted == null);
+    if (length > capacity) return error.MessageTooLarge;
+    const bank = self.active ^ 1;
+    const bytes = self.banks[bank][0..length];
+    if (try file.readPositionalAll(io, bytes, 0) != length) return error.TruncatedRetryScratch;
+    self.editors[bank] = self.empty(bank);
+    self.editors[bank].length = length;
+    self.editors[bank].cursor = length;
+    self.serial += 1;
+    self.submitted = .{ .bank = bank, .literal = true };
+    return .{ .owner = self, .serial = self.serial };
+}
+
 fn seal(self: *Self, literal: bool) Ticket {
     self.serial += 1;
     self.submitted = .{ .bank = self.active, .literal = literal };
@@ -512,5 +528,37 @@ test "Tab puts in the list's first word at the draft's end and adds a tab anywhe
         _ = input.typed(case.typed);
         try std.testing.expectEqualStrings(case.shown, input.composition().bytes);
         try std.testing.expectEqual(case.shown.len, input.composition().cursor);
+    }
+}
+
+test "SessionInput retry loan preserves the whole active editor and recall even on scratch failure" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile(io, "retry", .{ .read = true });
+    defer file.close(io);
+    const text = "//literal\n\t café 💚\r\n";
+    try file.writePositionalAll(io, text, 0);
+    const self = try std.testing.allocator.create(Self);
+    defer std.testing.allocator.destroy(self);
+    for ([_]bool{ false, true }) |rejected| {
+        self.init();
+        _ = self.typed("aéZ\x1b[D");
+        self.recall = .{ .shown = .{ .position = 7, .end = 9 }, .pending = -1, .reading = true };
+        if (rejected) self.editors[self.active].rejected = .invalid;
+        const editor = self.editors[self.active];
+        const recall = self.recall;
+        const revision = self.revision;
+        try std.testing.expectError(error.TruncatedRetryScratch, self.submitPreservingDraft(io, file, text.len + 1));
+        try std.testing.expect(self.submitted == null);
+        const ticket = try self.submitPreservingDraft(io, file, text.len);
+        try std.testing.expectEqualStrings(text, try self.message(ticket));
+        try std.testing.expectEqualDeep(editor, self.editors[self.active]);
+        try std.testing.expectEqualDeep(recall, self.recall);
+        try std.testing.expectEqual(revision, self.revision);
+        try self.release(ticket);
+        try std.testing.expectEqualStrings("aéZ", self.composition().bytes);
+        try std.testing.expectEqualDeep(editor, self.editors[self.active]);
+        try std.testing.expectEqualDeep(recall, self.recall);
     }
 }
