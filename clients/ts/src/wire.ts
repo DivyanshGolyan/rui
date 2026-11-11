@@ -81,7 +81,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON. */
+        /** Sends a Message to a Session, or creates the Session when `session` is empty. Retried by its key. Each `/name` word in the text that names a skill in the recipient's catalog appends that skill to what the model reads; the text is saved as written. Only an empty `session` carries (and requires) `configuration`; `require_model` is allowed only with it. The body starts with the client environment, `X-Rui-Environment-Bytes` long, before the JSON. */
         post: operations["message"];
         delete?: never;
         options?: never;
@@ -251,7 +251,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** One page of Sessions, newest first, or what changed since a token. */
+        /** One page of Sessions, newest first, or what changed since a token. `through` and `after_reference` appear together, only with `since`; token reads start with zero `after` and `ceiling`. */
         post: operations["listSessions"];
         delete?: never;
         options?: never;
@@ -617,22 +617,7 @@ export interface components {
             /** @description Each at most once, in the order the enum lists them. */
             kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
             limit: components["schemas"]["Decimal"];
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "activity_page";
-            store: string;
-            session: string;
-            end: components["schemas"]["Decimal"] | null;
-            position: components["schemas"]["Decimal"];
-            ordinal: components["schemas"]["Decimal"] | null;
-            /** @enum {string} */
-            direction: "forward" | "backward";
-            /** @description Each at most once, in the order the enum lists them. */
-            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
-            limit: components["schemas"]["Decimal"];
-            since: string | null;
+            since?: string | null;
         };
         ActivitySearchFactsCursor: {
             position: components["schemas"]["Decimal"];
@@ -667,10 +652,10 @@ export interface components {
             session: string;
             query: string;
             /** @description Each at most once, in the order the enum lists them. */
-            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
-            before_position: components["schemas"]["Decimal"] | null;
-            before_ordinal: components["schemas"]["Decimal"] | null;
-            limit: components["schemas"]["Decimal"];
+            kinds?: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            before_position?: components["schemas"]["Decimal"] | null;
+            before_ordinal?: components["schemas"]["Decimal"] | null;
+            limit?: components["schemas"]["Decimal"];
         };
         AgentSpec: {
             model: string;
@@ -910,63 +895,11 @@ export interface components {
             key: string;
             session: string;
             configuration: components["schemas"]["Configuration"];
-        } | {
             /** @constant */
-            version: "11";
+            reload_skills?: true;
             /** @constant */
-            kind: "configure";
-            store: string;
-            key: string;
-            session: string;
-            configuration: components["schemas"]["Configuration"];
-            /** @constant */
-            reload_skills: true;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "configure";
-            store: string;
-            key: string;
-            session: string;
-            configuration: components["schemas"]["Configuration"];
-            /** @constant */
-            reload_skills: true;
-            /** @constant */
-            require_model: true;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "configure";
-            store: string;
-            key: string;
-            session: string;
-            configuration: components["schemas"]["Configuration"];
-            /** @constant */
-            require_model: true;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "configure";
-            store: string;
-            key: string;
-            session: string;
-            configuration: components["schemas"]["Configuration"];
-            preset: string;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "configure";
-            store: string;
-            key: string;
-            session: string;
-            configuration: components["schemas"]["Configuration"];
-            preset: string;
-            /** @constant */
-            require_model: true;
+            require_model?: true;
+            preset?: string;
         };
         ConversationContentRequest: {
             /** @constant */
@@ -980,7 +913,7 @@ export interface components {
             /** @constant */
             start: "0";
             /** @constant */
-            stream: true;
+            stream?: true;
         };
         ConversationPageReply: {
             /** @constant */
@@ -1344,14 +1277,7 @@ export interface components {
             kind: "inspect_session";
             store: string;
             session: string;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "inspect_session";
-            store: string;
-            session: string;
-            since: string | null;
+            since?: string | null;
         } | {
             /** @constant */
             version: "11";
@@ -1442,35 +1368,12 @@ export interface components {
             store: string;
             workspace: string | null;
             /** @enum {string} */
-            archive: "active" | "archived" | "all";
+            archive?: "active" | "archived" | "all";
             after: components["schemas"]["Decimal"];
             ceiling: components["schemas"]["Decimal"];
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "list_sessions";
-            store: string;
-            workspace: string | null;
-            /** @enum {string} */
-            archive: "active" | "archived" | "all";
-            after: components["schemas"]["Decimal"];
-            ceiling: components["schemas"]["Decimal"];
-            since: string;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "list_sessions";
-            store: string;
-            workspace: string | null;
-            /** @enum {string} */
-            archive: "active" | "archived" | "all";
-            after: components["schemas"]["Decimal"];
-            ceiling: components["schemas"]["Decimal"];
-            since: string;
-            through: components["schemas"]["Decimal"];
-            after_reference: string;
+            since?: string;
+            through?: components["schemas"]["Decimal"];
+            after_reference?: string;
         };
         MessageConfiguration: {
             workspace: {
@@ -1667,61 +1570,12 @@ export interface components {
             store: string;
             key: string;
             session: string;
-            sender: null;
-            sender_handle: string | null;
-            text: {
-                /** @constant */
-                state: "value";
-                /** @description Text of any length, saved as content. */
-                value: string;
-            };
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
             sender: {
                 store: string;
                 session: string;
-            };
+            } | null;
             sender_handle: string | null;
-            text: {
-                /** @constant */
-                state: "value";
-                /** @description Text of any length, saved as content. */
-                value: string;
-            };
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: null;
-            sender_handle: string | null;
-            configuration: components["schemas"]["MessageConfiguration"];
-            text: {
-                /** @constant */
-                state: "value";
-                /** @description Text of any length, saved as content. */
-                value: string;
-            };
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "message";
-            store: string;
-            key: string;
-            session: string;
-            sender: null;
-            sender_handle: string | null;
-            configuration: components["schemas"]["MessageConfiguration"];
+            configuration?: components["schemas"]["MessageConfiguration"];
             text: {
                 /** @constant */
                 state: "value";
@@ -1729,7 +1583,7 @@ export interface components {
                 value: string;
             };
             /** @constant */
-            require_model: true;
+            require_model?: true;
         };
         ModelInterruptionConflictReply: {
             /** @constant */
@@ -2893,14 +2747,7 @@ export interface components {
             kind: "observe_command";
             store: string;
             key: string;
-        } | {
-            /** @constant */
-            version: "11";
-            /** @constant */
-            kind: "observe_command";
-            store: string;
-            key: string;
-            since: string | null;
+            since?: string | null;
         };
         PageWork: {
             state: components["schemas"]["WorkStateJson"];
@@ -3070,7 +2917,7 @@ export interface components {
             store: string;
             key: string;
             session: string;
-            archived: boolean;
+            archived?: boolean;
         };
         SessionRow: {
             /** @enum {string} */

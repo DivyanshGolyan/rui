@@ -76,7 +76,64 @@ def assert_reaped(source, description, *, timeout=0.2, required_fields=None, obs
     raise AssertionError(f"{description} unexpectedly became ready")
 
 
+def prove_wait_hooks():
+    events = []
+    watched = [123]
+
+    def hook():
+        events.append("drain")
+
+    def descriptors():
+        events.append("descriptors")
+        return watched
+
+    def observe():
+        events.append("observe")
+        return events.count("observe") == 2
+
+    registration = (hook, descriptors)
+    with patch.object(host_process, "WAIT_HOOKS", [registration]):
+        wait_for(lambda: events.append("observe") or True, "hook ordering")
+        assert events == ["drain", "observe"], events
+        events.clear()
+        with patch.object(host_process.select, "select", return_value=(watched, [], [])) as readable, \
+             patch.object(host_process.time, "sleep") as sleep:
+            wait_for(observe, "readable wakeup")
+            readable.assert_called_once_with(watched, [], [], .025)
+            sleep.assert_not_called()
+        assert events == ["drain", "observe", "descriptors", "drain", "observe"], events
+        events.clear()
+        # The opt-out must skip both drainage and descriptor discovery even
+        # when the observation needs another poll.
+        with patch.object(host_process.select, "select") as readable, \
+             patch.object(host_process.time, "sleep") as sleep:
+            wait_for(observe, "drain opt-out", drain=False)
+            readable.assert_not_called()
+            sleep.assert_called_once_with(.025)
+        assert events == ["observe", "observe"], events
+
+        # Both idle sleeps and continuously readable descriptors spend only
+        # the remaining deadline, and readiness cannot prolong the wait.
+        for watched in ([123], []):
+            events.clear()
+            with patch.object(host_process.time, "monotonic", side_effect=[0, 0, .09, .1]), \
+                 patch.object(host_process.select, "select", return_value=(watched, [], [])) as readable, \
+                 patch.object(host_process.time, "sleep") as sleep:
+                try:
+                    wait_for(lambda: False, "remaining wait budget", interval=1, deadline=.1)
+                except host_process.WaitTimeout:
+                    pass
+                else:
+                    raise AssertionError("readiness prolonged the original deadline")
+                pause = readable if watched else sleep
+                other = sleep if watched else readable
+                pause.assert_called_once()
+                assert abs(pause.call_args.args[-1] - .01) < 1e-9, pause.call_args
+                other.assert_not_called()
+
+
 def main():
+    prove_wait_hooks()
     prove_dispose_all()
     prove_peer_disconnects()
     prove_peer_census()

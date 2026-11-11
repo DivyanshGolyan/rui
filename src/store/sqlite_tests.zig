@@ -2189,10 +2189,10 @@ test "historical preparation yields covered group populations under small allowa
         if (after != before) served += 1;
     }
     // One user input, 8 Operations each with its group of 16 calls, their
-    // 8 result groups and the end, each served by its own step after
-    // discovery yields.
+    // 8 result groups and the end, each served by its own step: a page of
+    // the scan holds whole groups, so discovery yields none between them.
     try std.testing.expectEqual(@as(usize, 1 + 8 + 8 * calls.len + 8 + 1), served);
-    try std.testing.expect(turns > served);
+    try std.testing.expectEqual(served, turns);
     try std.testing.expect(!storage.isFenced());
 }
 

@@ -640,6 +640,7 @@ test "a launched Host's start failure is refused with its Store's codes only" {
         .{ .err = error.MysqlFlushLogUnsafe, .code = .durability_innodb_flush_log_at_trx_commit },
         .{ .err = error.MysqlSyncBinlogUnsafe, .code = .durability_sync_binlog },
         .{ .err = error.MysqlStatementBinlog, .code = .binlog_statement },
+        .{ .err = error.ServerRefused, .code = .mysql_unreachable },
         .{ .err = error.ConnectFailed, .code = .mysql_unreachable },
         .{ .err = error.HostNotFound, .code = .mysql_unreachable },
         .{ .err = error.InvalidHost, .code = .mysql_unreachable },
@@ -665,6 +666,7 @@ test "a launched Host's start failure is refused with its Store's codes only" {
     }
     try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlFlushLogUnsafe).?.message, "innodb_flush_log_at_trx_commit=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlSyncBinlogUnsafe).?.message, "sync_binlog=1") != null);
+    try std.testing.expectEqualStrings("the MySQL server refused the connection before login", mysqlRefusal(error.ServerRefused).?.message);
     try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.HostNotFound).?.message, mysqlRefusal(error.ConnectFailed).?.message));
     try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.UntrustedPeer).?.message, mysqlRefusal(error.TlsFailed).?.message));
 }
@@ -680,6 +682,7 @@ fn mysqlRefusal(err: anyerror) ?Refusal {
         error.MysqlFlushLogUnsafe => .{ .code = .durability_innodb_flush_log_at_trx_commit, .message = "MySQL requires innodb_flush_log_at_trx_commit=1" },
         error.MysqlSyncBinlogUnsafe => .{ .code = .durability_sync_binlog, .message = "MySQL requires sync_binlog=1 when binlogging is enabled" },
         error.MysqlStatementBinlog => .{ .code = .binlog_statement, .message = "MySQL STATEMENT binlogging is not supported; use ROW or MIXED" },
+        error.ServerRefused => .{ .code = .mysql_unreachable, .message = "the MySQL server refused the connection before login" },
         error.ConnectFailed => .{ .code = .mysql_unreachable, .message = "could not connect to the MySQL server" },
         error.HostNotFound => .{ .code = .mysql_unreachable, .message = "could not resolve the MySQL host" },
         error.InvalidHost => .{ .code = .mysql_unreachable, .message = "the MySQL host address is invalid" },

@@ -20,7 +20,7 @@ from contextlib import contextmanager
 INTEGRATION = pathlib.Path(__file__).resolve().parents[2] / "integration"
 sys.path.insert(0, str(INTEGRATION))
 from host_process import dispose_all, stop_process
-from terminal_process import answers_to, open_pty, spawn
+from terminal_process import answers_to, close_pty, open_pty, spawn
 from terminal_screen import ScreenCapture
 
 LIMIT = 1024 * 1024
@@ -211,8 +211,8 @@ class DirectPty:
         dispose_all(
             lambda: self.pump() if self.process is not None else None,
             lambda: stop_process(self.process, timeout=5) if self.process is not None else None,
-            lambda: os.close(self.master) if self.master is not None else None,
-            lambda: os.close(self.slave) if self.slave is not None else None,
+            lambda: close_pty(self.master) if self.master is not None else None,
+            lambda: close_pty(self.slave) if self.slave is not None else None,
             *(stream.close for stream in self.files))
 
     def __enter__(self):
