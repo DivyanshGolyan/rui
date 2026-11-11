@@ -31,7 +31,8 @@ export interface McpServer {
 export interface ConnectOptions {
 	/** The MCP servers whose tools Sessions may name. */
 	tools?: McpServer[];
-	/** The Store: a SQLite directory or a mysql:// URL, sent only in the stdin launch frame. */
+	/** The Store: a SQLite directory or a mysql:// URL, sent only in the stdin launch frame.
+	 * MySQL TCP accepts only ssl-ca=<absolute PEM path> (percent encoding allowed) for exclusive CA trust; sockets refuse it and verification cannot be disabled. */
 	database: string;
 	/** The OpenAI-compatible provider. Only the key Adapter is offered to a launched Host (D149). */
 	provider: {

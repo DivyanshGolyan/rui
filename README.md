@@ -38,6 +38,7 @@ Provider usage may incur charges.
 Your application talks over a local socket to one shared Host that runs the Sessions.
 The Host shares networking and execution capacity and saves conversation state in SQLite or MySQL.
 Connect built-in tools or MCP servers, coordinate agents, and follow their activity through the client.
+For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
 See the [Host guide](docs/host.md) for capacity and lifecycle.
 
 ## Try it in your terminal
