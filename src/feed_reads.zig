@@ -39,6 +39,8 @@ pub fn Policy(comptime Cursor: type) type {
             window_provisional: ?Cursor = null,
             scan_continuing: bool = false,
             window_continuing: bool = false,
+            /// A press holds the same read exclusion as an active drag.
+            selection_held: bool = false,
             action_named: bool = false,
             choice_open: bool = false,
             submission: bool = false,
@@ -52,8 +54,8 @@ pub fn Policy(comptime Cursor: type) type {
             if (state.opening) return .opening;
             if (state.now_ns >= state.scan_due_ns) return .scan;
             switch (state.need) {
-                .above => return .fill_above,
-                .below => if (!state.at_end) return .fill_below,
+                .above => if (!state.selection_held) return .fill_above,
+                .below => if (!state.selection_held and !state.at_end) return .fill_below,
                 .none => {},
             }
             // Same permission rule and priority (after page work) as before.
@@ -358,5 +360,25 @@ test "feed_reads continues a paginated provisional replay without restarting or 
         try std.testing.expectEqual(@as(?u64, 10), next.replace_from);
         try std.testing.expect(next.continuing);
         try std.testing.expect(P.forwardAttaches(next.started_from, next.replace_from, state.high, state.window_provisional));
+    }
+}
+
+test "feed_reads holds fills during selection without holding scans or permission" {
+    const P = Policy(u64);
+    for ([_]@FieldType(P.State, "need"){ .above, .below }) |need| {
+        for ([_]bool{ false, true }) |at_end| {
+            for ([_]bool{ false, true }) |held| {
+                var state: P.State = .{ .opening = false, .now_ns = 0, .scan_due_ns = 1, .need = need, .at_end = at_end, .selection_held = held };
+                const fill: ?Read = if (held or (need == .below and at_end)) null else if (need == .above) .fill_above else .fill_below;
+                try std.testing.expectEqual(fill, P.nextRead(state));
+                // Selection excludes only fills, not independent work reads.
+                state.action_named = true;
+                try std.testing.expectEqual(fill orelse .permission, P.nextRead(state).?);
+                state.now_ns = state.scan_due_ns;
+                try std.testing.expectEqual(Read.scan, P.nextRead(state).?);
+                state.opening = true;
+                try std.testing.expectEqual(Read.opening, P.nextRead(state).?);
+            }
+        }
     }
 }

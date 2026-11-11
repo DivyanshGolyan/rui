@@ -2144,6 +2144,7 @@ fn feedState(self: *Self) FeedPolicy.State {
         .window_provisional = screen.feed.firstProvisional(),
         .scan_continuing = self.live.cursor.end != null,
         .window_continuing = screen.feed.forward_partial,
+        .selection_held = self.app_content.dragging(),
         .choice_open = screen.consent != null or self.app_consent.request != null,
         .action_named = self.live.work.first_action != null,
         .submission = self.submission.view() != null,
@@ -5211,4 +5212,35 @@ test "SessionFrontend scan after provisional eviction appends without an obsolet
     try std.testing.expectEqual(@as(usize, 3), held.screen.feed.count);
     try std.testing.expect(held.screen.feed.at_end);
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "answer after eviction") != null);
+}
+
+test "SessionFrontend feed press and drag hold both loading edges until release while scans continue" {
+    for ([_]@FieldType(FeedPolicy.State, "need"){ .above, .below }) |edge| {
+        const fixture = try FeedFixture.create();
+        defer fixture.destroy();
+        const held = fixture.held;
+        var words: [2048]u8 = undefined;
+        var out = std.Io.Writer.fixed(&words);
+        for (0..60) |line| try out.print("selection line {d:0>2}\n", .{line});
+        try fixture.page(.opening, &.{.{ .key = 100, .text = out.buffered() }}, edge == .below, edge == .above);
+        if (edge == .above) try held.self.scroll(false, 1000);
+        _ = try held.draw();
+        held.self.poll_at = std.math.maxInt(i96);
+        try std.testing.expectEqual(edge, held.self.feedState().need);
+        const fill: feed_reads.Read = if (edge == .above) .fill_above else .fill_below;
+        try std.testing.expectEqual(fill, FeedPolicy.nextRead(held.self.feedState()).?);
+        var ctx = held.context();
+        for ([_]vaxis.Mouse{
+            .{ .col = 0, .row = 1, .button = .left, .mods = .{}, .type = .press },
+            .{ .col = 4, .row = 2, .button = .left, .mods = .{}, .type = .drag },
+            .{ .col = 4, .row = 2, .button = .left, .mods = .{}, .type = .release },
+        }) |mouse| {
+            try held.self.app_content.widget().handleEvent(&ctx, .{ .mouse = mouse });
+            try std.testing.expectEqual(mouse.type != .release, held.self.app_content.dragging());
+            try std.testing.expectEqual(if (mouse.type == .release) @as(?feed_reads.Read, fill) else null, FeedPolicy.nextRead(held.self.feedState()));
+            held.self.poll_at = 0;
+            try std.testing.expectEqual(feed_reads.Read.scan, FeedPolicy.nextRead(held.self.feedState()).?);
+            held.self.poll_at = std.math.maxInt(i96);
+        }
+    }
 }

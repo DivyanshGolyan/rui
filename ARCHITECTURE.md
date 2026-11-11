@@ -2940,7 +2940,7 @@ Activity pages preserve both received and sent peer rows while scrolling in eith
 In a Session's feed, a press followed by a move to another cell starts a drag; the cells it crosses draw reversed, and release copies the shown text once through OSC 52 and clears the highlight; nothing persists.
 Selection resolves keyed rows and offsets: wrapped rows join, and indents, margin times and link addresses are left out; above `TerminalText.clipboard_limit` nothing is copied and the status bar says `Too large for the clipboard · /copy file`, otherwise `Copied N lines`.
 A drag held at the top or bottom row moves the same Feed anchor one row through text it already holds; incoming rows do not move the selection.
-No older page is read in under a press or drag; it waits for the release.
+No fill is read in under a press or drag, at either loading edge; it waits for the release. Live scans continue.
 A press or drag ends without copying when the pointer leaves the feed or its content is replaced, since vxfw sends no release then.
 
 Tool markers distinguish observed facts: `•` means unresolved, not proof that execution started; `?` means approval is required; `✓` means succeeded; `!` means failure or uncertainty with an explanation.
