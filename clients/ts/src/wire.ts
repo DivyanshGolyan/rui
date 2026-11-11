@@ -1299,6 +1299,10 @@ export interface components {
             operation: components["schemas"]["Decimal"];
             attempt: components["schemas"]["Decimal"];
         };
+        LastLineFields: {
+            position: components["schemas"]["Decimal"];
+            text: string | null;
+        };
         LaunchFrame: {
             /** @constant */
             v: 1;
@@ -2937,6 +2941,7 @@ export interface components {
             revision: components["schemas"]["Decimal"];
             end: components["schemas"]["Decimal"];
             first_message: components["schemas"]["FirstMessage"] | null;
+            last_line: components["schemas"]["LastLineFields"] | null;
             work: components["schemas"]["SessionWork"];
             peers: components["schemas"]["PeerFacts"];
         };
