@@ -166,6 +166,19 @@ fn bump(count: *TestCount) void {
     if (TestCount != u0) count.* += 1;
 }
 
+/// A survey's reads, bound after a write Access's COMMIT in its message
+/// (`Store.commitWithSurvey`). The writer's pass sends the message and,
+/// once its own statements stepped without a failure, has `step` take the
+/// reads' answers. False when a read failed: that failure is the survey's.
+pub const Tail = struct {
+    context: *anyopaque,
+    step: *const fn (*anyopaque) bool,
+};
+
+fn fences(err: anyerror) bool {
+    return err == error.StoreConnectionLost or err == error.CommitOutcomeUnknown or err == error.OwnershipLost;
+}
+
 pub fn Access(comptime mode: Mode, comptime Guards: type) type {
     return struct {
         const Self = @This();
@@ -193,6 +206,10 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// The queued writes a guard's answer follows (`Engine.guard`), a
         /// bit for each queue slot.
         guarded: u16 = 0,
+        /// This survey only binds reads after a writer's COMMIT (`Tail`):
+        /// it never sends, so a statement that would need a pass of its
+        /// own fails it instead.
+        tail: if (mode == .survey) bool else void = if (mode == .survey) false else {},
         /// Engine passes. Rounds, each one round trip on a network
         /// engine, count on the Store (`testing_content_work.rounds` for
         /// `run` and `commit`, `.content_rounds` for `readRaw`).
@@ -330,6 +347,15 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// empties the queue. A failure stops it, and the round that
         /// contains it reports it.
         fn pass(a: *Self) void {
+            a.passWith(null);
+        }
+
+        /// `pass`, with `tail`'s reads stepped after this Access's own.
+        fn passWith(a: *Self, tail: ?Tail) void {
+            if (mode == .survey) if (a.tail) {
+                if (a.failure == null) a.failure = error.StatementFailed;
+                return;
+            };
             bump(&a.passes);
             if (a.store.engine.batches() and a.failure == null)
                 for (a.queue[0..a.queued]) |*entry| entry.borrowed.check();
@@ -347,13 +373,14 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 };
                 a.store.engine.endStatement(entry.statement);
             }
+            // The tail's reads follow COMMIT, whose answer is among this
+            // Access's own: a read that fails is the tail's failure.
+            const tail_failed = if (tail) |reads| a.failure == null and !reads.step(reads.context) else false;
             if (a.queued != 0) a.store.engine.finishPass() catch |err| {
                 // Later statements already ran on MySQL. Their ordinary
                 // errors cannot replace the first guard/decoder failure;
                 // a lost connection or ownership always fences instead.
-                if (a.failure == null or err == error.StoreConnectionLost or
-                    err == error.CommitOutcomeUnknown or err == error.OwnershipLost)
-                    a.failure = err;
+                if (fences(err) or (a.failure == null and !tail_failed)) a.failure = err;
             };
             a.resetQueued() catch |err| {
                 if (a.failure == null or err == error.StoreConnectionLost or
@@ -618,7 +645,7 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
                 _ = a.queueStatement(advance, &.{ .session = claim.head, .expected = expected, .next = expected + claim.taken }, runWrite(advance), .{ .none = {} });
             };
             const commits = a.bindCommit();
-            a.pass();
+            if (commits and mode == .write) store_core.commitWithSurvey(a.store, a) else a.pass();
             a.claimed = 0;
             if (commits) {
                 if (a.store.engine.settleCommit()) |_| {
@@ -635,6 +662,31 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
         /// and every transaction exit, including abandon and failed rollback.
         fn transactional(a: *const Self) bool {
             return mode == .write or (mode == .single and a.store.engine.batches());
+        }
+
+        /// The pass that sends this Access's last writes and COMMIT, with
+        /// `tail`'s reads after them.
+        pub fn passCommit(a: *Self, tail: ?Tail) void {
+            comptime std.debug.assert(mode == .write);
+            a.passWith(tail);
+        }
+
+        /// This survey's bound reads, for the writer whose pass steps them.
+        pub fn asTail(a: *Self) Tail {
+            comptime std.debug.assert(mode == .survey);
+            return .{ .context = a, .step = stepTail };
+        }
+
+        fn stepTail(context: *anyopaque) bool {
+            const a: *Self = @ptrCast(@alignCast(context));
+            for (a.queue[0..a.queued]) |*entry| {
+                if (a.failure != null) break;
+                entry.run(a, entry) catch |err| {
+                    a.failure = err;
+                };
+                a.store.engine.endStatement(entry.statement);
+            }
+            return a.failure == null;
         }
 
         /// Binds COMMIT after the round's writes and queues its step; false

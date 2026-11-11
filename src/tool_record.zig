@@ -90,6 +90,8 @@ pub const Record = struct {
     owner: Owner,
     /// The MCP server that serves the tool, for an `.mcp` record only.
     server: []const u8 = "",
+    /// MCP ordering hint only; it never authorizes or retries a call.
+    read_only: bool = false,
 
     pub fn runner(self: *const Record) Runner {
         return Runner.of(self);
@@ -105,12 +107,13 @@ pub const max_tools = tool_name.max_tools;
 
 /// A record's identity: its name, owner, server and the content digests
 /// of its description and input schema. A tool that moves to another
-/// server is another record.
+/// server or changes its read-only hint is another record.
 pub fn recordDigest(member: *const Record) [32]u8 {
     return (RecordIdentity{
         .name = member.name,
         .owner = member.owner,
         .server = member.server,
+        .read_only = member.read_only,
         .description = content_string.digest(member.description),
         .input_schema = content_string.digest(member.input_schema),
     }).digest();
@@ -122,6 +125,7 @@ pub const RecordIdentity = struct {
     name: []const u8,
     owner: Owner,
     server: []const u8,
+    read_only: bool = false,
     description: [32]u8,
     input_schema: [32]u8,
 
@@ -133,6 +137,8 @@ pub const RecordIdentity = struct {
         hashField(&hash, self.server);
         hash.update(&self.description);
         hash.update(&self.input_schema);
+        // Absent/false keeps every pre-hint record and saved set byte-identical.
+        if (self.read_only) hashField(&hash, "read_only");
         return hash.finalResult();
     }
 };
@@ -204,7 +210,7 @@ pub const Catalog = struct {
 /// An MCP record names its server, in the tool-name grammar; any other
 /// record names none.
 pub fn validServer(each: *const Record) bool {
-    return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0;
+    return if (each.owner == .mcp) tool_name.valid(each.server) else each.server.len == 0 and !each.read_only;
 }
 
 /// The most records a Host's catalog holds; its saved set holds as many.
@@ -408,5 +414,24 @@ test "every built-in runner matches its table row" {
         const row = built_in_rows.get(tool);
         try std.testing.expectEqual(row.runner, Runner.of(record(tool)));
         try std.testing.expectEqual(row.runner == .core, coreTool(row.record.name) != null);
+    }
+}
+
+test "tool record read-only identity preserves existing digests" {
+    // Pinned from the pre-hint v1 recipe, including content's domain prefix.
+    const provider = recordDigest(&web_search_record);
+    try std.testing.expectEqualStrings("effe976e5ce171d6033b8cfefd755255535a6bbb32c075577842ac0358417fa0", &std.fmt.bytesToHex(provider, .lower));
+    const before: Record = .{ .name = "fetch_page", .owner = .mcp, .server = "docs", .description = "Fetch a page.", .input_schema = "{\"type\":\"object\"}" };
+    const old = recordDigest(&before);
+    try std.testing.expectEqualStrings("d7da1c4de845e471addfa3cc2335b2c3204d24499001d6cdc5e7f94b6169d822", &std.fmt.bytesToHex(old, .lower));
+    var read = before;
+    read.read_only = true;
+    try std.testing.expect(validServer(&read));
+    try std.testing.expect(!std.mem.eql(u8, &old, &recordDigest(&read)));
+    const identity: RecordIdentity = .{ .name = read.name, .owner = read.owner, .server = read.server, .read_only = true, .description = content_string.digest(read.description), .input_schema = content_string.digest(read.input_schema) };
+    try std.testing.expectEqualSlices(u8, &recordDigest(&read), &identity.digest());
+    inline for (.{ Owner.rui, Owner.provider }) |owner| {
+        const invalid: Record = .{ .name = "invalid", .owner = owner, .read_only = true };
+        try std.testing.expect(!validServer(&invalid));
     }
 }
