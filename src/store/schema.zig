@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 61;
+pub const schema_version: u32 = 62;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -48,6 +48,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
+    .{ .schema_version = 62, .digest = 0x3d68029b9bcbfdd0 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -348,6 +349,24 @@ pub const migrations = [_]Migration{
         .mysql = &.{
             "ALTER TABLE model_output_item DROP CHECK model_output_item_chk_10, ADD CHECK(description IS NULL OR (OCTET_LENGTH(description) BETWEEN 1 AND 200 AND (description IS NOT NULL)=(item_kind=5)))",
             "ALTER TABLE model_tool_call DROP CHECK model_tool_call_chk_3, ADD CHECK(description IS NULL OR OCTET_LENGTH(description) BETWEEN 1 AND 200)",
+        },
+    },
+    // Schema 62 (D184): the frozen MCP ordering hint is record identity.
+    // Existing records remain read_only=0 with their original digests.
+    // MySQL's original CHECK names run through 5 after the step to 52;
+    // append the read_only CHECK as 6, leaving existing names untouched.
+    .{
+        .from = 61,
+        .sqlite = &.{
+            "ALTER TABLE tool_record RENAME TO tool_record_61",
+            "CREATE TABLE tool_record(\n tool_record_id INTEGER PRIMARY KEY NOT NULL CHECK(tool_record_id>0),\n name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 64 AND (name NOT GLOB '*[^A-Za-z0-9_-]*' AND length(name)=length(CAST(name AS BLOB)))),\n owner TEXT NOT NULL CHECK((owner='rui' OR owner='provider' OR owner='mcp')),\n server TEXT NOT NULL CHECK(length(CAST(server AS BLOB))<=64 AND (server NOT GLOB '*[^A-Za-z0-9_-]*' AND length(server)=length(CAST(server AS BLOB))) AND (owner='mcp' AND length(CAST(server AS BLOB))>0 OR owner<>'mcp' AND length(CAST(server AS BLOB))=0)),\n read_only INTEGER NOT NULL DEFAULT 0 CHECK(read_only IN (0,1) AND (read_only=0 OR owner='mcp')),\n description_content_id INTEGER NOT NULL REFERENCES content(content_id),\n input_schema_content_id INTEGER NOT NULL REFERENCES content(content_id),\n UNIQUE(name,owner,server,read_only,description_content_id,input_schema_content_id)\n) STRICT",
+            "INSERT INTO tool_record(tool_record_id,name,owner,server,read_only,description_content_id,input_schema_content_id) SELECT tool_record_id,name,owner,server,0,description_content_id,input_schema_content_id FROM tool_record_61",
+            "DROP TABLE tool_record_61",
+        },
+        .mysql = &.{
+            "ALTER TABLE tool_record ADD COLUMN read_only TINYINT NOT NULL DEFAULT 0 AFTER server",
+            "ALTER TABLE tool_record DROP INDEX name, ADD UNIQUE(name,owner,server,read_only,description_content_id,input_schema_content_id)",
+            "ALTER TABLE tool_record ADD CHECK(read_only IN (0,1) AND (read_only=0 OR owner='mcp'))",
         },
     },
 };
@@ -696,11 +715,12 @@ pub const tables = [_]Table{
                 .type = .{ .text = .{ .min = 0, .max = tool_catalog.max_server_bytes } },
                 .check = "@charset(server,'A-Za-z0-9_-') AND (owner='mcp' AND @octets(server)>0 OR owner<>'mcp' AND @octets(server)=0)",
             },
+            .{ .name = "read_only", .type = .flag, .default = "0", .check = "(read_only=0 OR owner='mcp')" },
             .{ .name = "description_content_id", .type = .int },
             .{ .name = "input_schema_content_id", .type = .int },
         },
         .primary_key = &.{"tool_record_id"},
-        .uniques = &.{&.{ "name", "owner", "server", "description_content_id", "input_schema_content_id" }},
+        .uniques = &.{&.{ "name", "owner", "server", "read_only", "description_content_id", "input_schema_content_id" }},
         .foreign_keys = &.{
             references("description_content_id", "content", content_reference),
             references("input_schema_content_id", "content", content_reference),
