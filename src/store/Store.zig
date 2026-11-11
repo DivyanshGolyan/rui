@@ -59,8 +59,8 @@ const ActionResolutionCode = action_domain.ActionResolutionCode;
 const ActionSettlement = action_domain.ActionSettlement;
 const ActiveOperationFilter = action_domain.ActiveOperationFilter;
 const AttemptAdmission = model_admission_domain.AttemptAdmission;
-const McpExecutionInput = action_domain.McpExecutionInput;
-const BashExecutionInput = action_domain.BashExecutionInput;
+const ActionExecutionInput = action_domain.ActionExecutionInput;
+const ReadyAction = action_domain.ReadyAction;
 const CommandObservation = command_domain.CommandObservation;
 const ConfigureReply = configuration_domain.ConfigureReply;
 const Found = @import("access.zig").Found;
@@ -1114,42 +1114,53 @@ pub const Store = struct {
 
     pub fn admitNextActionAttempt(
         self: *Store,
-        bash_timeout_ms: u64,
+        timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        return self.queue().write(admitNextActionAttemptHeld, .{ self, bash_timeout_ms, faults });
+        return self.queue().write(admitNextActionAttemptHeld, .{ self, timeout_ms, faults });
     }
 
     fn admitNextActionAttemptHeld(
         self: *Store,
-        bash_timeout_ms: u64,
+        timeout_ms: u64,
         faults: Faults,
     ) !?ActionAttemptAdmission {
-        if (bash_timeout_ms == 0 or bash_timeout_ms > std.math.maxInt(i64)) return error.InvalidBashTimeout;
+        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
         const entry = try enter(self, .none);
         defer entry.release();
         var candidate: ReadAccess = .open(&entry);
         defer candidate.deinit();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, bash_timeout_ms, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, timeout_ms, faults)));
     }
 
-    pub fn admitMcpActionAttempt(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
-        return self.queue().write(admitMcpActionAttemptHeld, .{ self, action_id, timeout_ms, faults });
+    /// Admit a selected Rui-run Action; selection is rechecked under the writer.
+    /// Bash's slot owner uses `admitNextActionAttempt` to fuse selection and
+    /// admission at its existing one-read, one-write cost.
+    pub fn admitActionAttempt(self: *Store, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptAdmission {
+        return self.queue().write(admitActionAttemptHeld, .{ self, selected, timeout_ms, faults });
     }
-    fn admitMcpActionAttemptHeld(self: *Store, action_id: u64, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
-        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidMcpTimeout;
+    fn admitActionAttemptHeld(self: *Store, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptAdmission {
+        if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitMcpActionAttempt(&access, self.io, action_id, timeout_ms, faults)));
+        const binding = try entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitActionAttempt(&access, self.io, selected, timeout_ms, faults)));
+        return if (binding) |value| .{ .permit = .{ .binding = value } } else null;
     }
-    pub fn readMcpExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
-        return self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out });
+    /// `out` is decoded in place and valid only on success. The compile-time
+    /// runner selects the adapter's existing read plan, not persisted state.
+    pub fn readActionExecutionInput(self: *Store, comptime runner: tool_catalog.Runner, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
+        return switch (runner) {
+            .bash => self.queue().run(readBashExecutionInputHeld, .{ self, binding, out }),
+            .mcp => self.queue().run(readMcpExecutionInputHeld, .{ self, binding, out }),
+            .core, .provider => @compileError("only Action runners have execution input"),
+        };
     }
-    fn readMcpExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *McpExecutionInput) !void {
+
+    fn readMcpExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -1157,12 +1168,7 @@ pub const Store = struct {
         return entry.finish(Ordinary.action_attempt, action_domain.readMcpExecutionInput(&access, binding, out));
     }
 
-    /// `out` is valid only when this returns without error.
-    pub fn readBashExecutionInput(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
-        return self.queue().run(readBashExecutionInputHeld, .{ self, binding, out });
-    }
-
-    fn readBashExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *BashExecutionInput) !void {
+    fn readBashExecutionInputHeld(self: *Store, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
@@ -1391,26 +1397,31 @@ pub const Store = struct {
         return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
     }
 
-    pub fn nextMcpAction(self: *Store) !?action_domain.McpAction {
-        return self.queue().run(nextMcpActionHeld, .{self});
+    pub fn nextAction(self: *Store, comptime runner: tool_catalog.Runner) !?ReadyAction {
+        if (runner != .bash and runner != .mcp) @compileError("only Action runners can select Actions");
+        return self.queue().run(nextActionHeld, .{ self, runner });
     }
-    fn nextMcpActionHeld(self: *Store) !?action_domain.McpAction {
+    fn nextActionHeld(self: *Store, runner: tool_catalog.Runner) !?ReadyAction {
         const entry = try enter(self, .none);
         defer entry.release();
         var access: ReadAccess = .open(&entry);
         defer access.deinit();
-        return entry.finish(Ordinary.none, action_domain.nextMcpAction(&access));
+        return entry.finish(Ordinary.none, switch (runner) {
+            .bash => action_domain.nextAction(&access, .bash),
+            .mcp => action_domain.nextAction(&access, .mcp),
+            .core, .provider => unreachable,
+        });
     }
-    pub fn resolveMcpAction(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
-        return self.queue().write(resolveMcpActionHeld, .{ self, action_id, code, text, faults });
+    pub fn resolveAction(self: *Store, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+        return self.queue().write(resolveActionHeld, .{ self, selected, code, text, faults });
     }
-    fn resolveMcpActionHeld(self: *Store, action_id: u64, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
+    fn resolveActionHeld(self: *Store, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
         if (text.len == 0) return error.InvalidActionResult;
         const entry = try enter(self, .none);
         defer entry.release();
         var access: Access(.write, error{}) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.resolveMcpAction(&access, action_id, code, text, faults)));
+        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.resolveAction(&access, selected, code, text, faults)));
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {

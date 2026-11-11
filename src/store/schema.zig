@@ -3,6 +3,7 @@
 //! stored DDL is compared with it when it opens.
 
 const std = @import("std");
+const session_settings = @import("../session_settings.zig");
 const store_path = @import("../store_path.zig");
 const tool_name = @import("../tool_name.zig");
 const Bounded = @import("../bounded.zig").Bounded;
@@ -48,7 +49,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
-    .{ .schema_version = 62, .digest = 0x7d17bfc0849ac28c },
+    .{ .schema_version = 62, .digest = 0x3310b650e3928cb8 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -356,13 +357,13 @@ pub const migrations = [_]Migration{
         .from = 61,
         .sqlite = &.{
             "ALTER TABLE session_change RENAME TO session_change_before_62",
-            "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='reasoning_effort_refused' OR field='label')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n provider_text TEXT CHECK(provider_text IS NULL OR length(CAST(provider_text AS BLOB))<=520),\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) STRICT, WITHOUT ROWID",
+            "CREATE TABLE session_change(\n session_ref TEXT NOT NULL REFERENCES session(session_ref),\n position INTEGER NOT NULL CHECK(position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal>=0),\n revision INTEGER NOT NULL CHECK(revision>1),\n field TEXT NOT NULL CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused')),\n changed_at INTEGER NOT NULL CHECK(changed_at>0),\n provider_text TEXT CHECK(provider_text IS NULL OR length(CAST(provider_text AS BLOB))<=520),\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) STRICT, WITHOUT ROWID",
             "INSERT INTO session_change(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change_before_62",
             "DROP TABLE session_change_before_62",
             "UPDATE store_meta SET meta_value='12' WHERE meta_key='wire_version' AND meta_value='11'",
         },
         .mysql = &.{
-            "CREATE TABLE session_change_62(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n revision BIGINT NOT NULL,\n field VARCHAR(24) NOT NULL,\n changed_at BIGINT NOT NULL,\n provider_text TEXT,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK(position>0),\n CHECK(ordinal>=0),\n CHECK(revision>1),\n CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='reasoning_effort_refused' OR field='label')),\n CHECK(changed_at>0),\n CHECK(provider_text IS NULL OR OCTET_LENGTH(provider_text)<=520),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
+            "CREATE TABLE session_change_62(\n session_ref VARCHAR(6) NOT NULL,\n position BIGINT NOT NULL,\n ordinal BIGINT NOT NULL,\n revision BIGINT NOT NULL,\n field VARCHAR(24) NOT NULL,\n changed_at BIGINT NOT NULL,\n provider_text TEXT,\n PRIMARY KEY(session_ref,position,ordinal),\n UNIQUE(session_ref,revision,field),\n FOREIGN KEY(session_ref) REFERENCES session(session_ref),\n FOREIGN KEY(session_ref,revision) REFERENCES session_revision(session_ref,revision),\n CHECK(position>0),\n CHECK(ordinal>=0),\n CHECK(revision>1),\n CHECK((field='provider' OR field='model' OR field='instructions' OR field='tools' OR field='loaded_tools' OR field='permission_mode' OR field='output_schema' OR field='compaction_trigger' OR field='output_reservation' OR field='reasoning_effort' OR field='label' OR field='reasoning_effort_refused')),\n CHECK(changed_at>0),\n CHECK(provider_text IS NULL OR OCTET_LENGTH(provider_text)<=520),\n CHECK((field='reasoning_effort_refused')=(provider_text IS NOT NULL))\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_bin",
             "INSERT INTO session_change_62(session_ref,position,ordinal,revision,field,changed_at) SELECT session_ref,position,ordinal,revision,field,changed_at FROM session_change",
             "DROP TABLE session_change",
             "RENAME TABLE session_change_62 TO session_change",
@@ -847,7 +848,7 @@ pub const tables = [_]Table{
             .{ .name = "position", .type = .int, .check = "position>0" },
             .{ .name = "ordinal", .type = .int, .check = "ordinal>=0" },
             .{ .name = "revision", .type = .int, .check = "revision>1" },
-            .{ .name = "field", .type = .{ .tag = &.{ "provider", "model", "instructions", "tools", "loaded_tools", "permission_mode", "output_schema", "compaction_trigger", "output_reservation", "reasoning_effort", "reasoning_effort_refused", "label" } } },
+            .{ .name = "field", .type = .{ .tag = session_settings.revision_fields } },
             .{ .name = "changed_at", .type = .int, .check = "changed_at>0" },
             .{ .name = "provider_text", .type = .{ .text = .{ .min = 0, .max = @import("../outcome_code.zig").max_report_bytes } }, .nullable = true },
         },

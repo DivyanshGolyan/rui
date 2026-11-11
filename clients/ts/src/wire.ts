@@ -559,7 +559,7 @@ export interface components {
                 session_changed: {
                     revision: components["schemas"]["Decimal"];
                     /** @enum {string} */
-                    field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "reasoning_effort_refused" | "label";
+                    field: "provider" | "model" | "instructions" | "tools" | "loaded_tools" | "permission_mode" | "output_schema" | "compaction_trigger" | "output_reservation" | "reasoning_effort" | "label" | "reasoning_effort_refused";
                     provider_text: string | null;
                 };
             };

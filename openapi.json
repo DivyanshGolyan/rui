@@ -2007,8 +2007,8 @@
                           "compaction_trigger",
                           "output_reservation",
                           "reasoning_effort",
-                          "reasoning_effort_refused",
-                          "label"
+                          "label",
+                          "reasoning_effort_refused"
                         ]
                       },
                       "provider_text": {
