@@ -3074,10 +3074,10 @@ Failure abandons retained renderer text and pending writer bytes; synchronous ke
 
 `/history` uses existing public Conversation reads, independently of Admission.
 It prepares one page atomically in unlinked scratch: at most 16 retained spans of at most 8,192 raw bytes each, with a 128-KiB raw-content ceiling.
-Every Tool Result authenticates its entire canonical stream, including discarded prefixes, while only its certified-length suffix is staged.
-An independent hash of the received suffix authenticates its reread staged bytes; whole non-tool spans retain their canonical digest check.
+Every Tool Result authenticates its entire canonical stream for its heading facts, and none of it is staged.
+Whole non-tool spans retain their canonical digest check over the reread staged bytes.
 Metadata continuation, complete received bytes and reread staged bytes validate before output.
-Preparation retains explicit whole, tool-suffix, omitted non-tool or no-content authority per item; unstaged content has no readable scratch offset.
+Preparation retains explicit whole, tool-heading, omitted non-tool or no-content authority per item; unstaged content has no readable scratch offset.
 Ordinary preparation failure exposes no page content and retains the older cursor and draft for an explicit retry.
 Rendering I/O or integrity failure is fatal.
 Local command cancellation after the first nonempty output window is also fatal, preventing replay of an incomplete prefix within this invocation.
