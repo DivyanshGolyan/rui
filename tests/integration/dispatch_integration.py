@@ -29,6 +29,25 @@ from model_fixture import (
 from model_fixture import dispose_dispatch, stop_endpoint
 
 
+def seed_future_retries(store, sessions):
+    """Stopped-Host retry populations use their real built-in Session offers."""
+    database = sqlite3.connect(store / "rui.sqlite3")
+    try:
+        # The selector-only population deliberately omits Turns, not offers.
+        database.execute("PRAGMA foreign_keys=OFF")
+        inserted = database.executemany(
+            "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
+            "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,tool_set_id,context_window) "
+            "SELECT ?,?,session_ref,revision,1,1,1,9223372036854775807,1,0,"
+            "coalesce(loaded_tool_set_id,tool_set_id),? FROM session WHERE session_ref=?",
+            [(index, index, DEFAULTS.unlisted_context_window, session) for index, session in enumerate(sessions, 1)],
+        )
+        assert inserted.rowcount == len(sessions), inserted.rowcount
+        database.commit()
+    finally:
+        database.close()
+
+
 def history(items):
     """A request's input without its tool declarations, which
     openai-responses/2 writes at each Operation that offers new tools; the
@@ -4209,18 +4228,7 @@ def main(mode="all", correlation_case="all"):
                            for index in range(1, 101)]
         stop_host(backlog_host)
         processes.remove(backlog_host)
-        database = sqlite3.connect(backlog_store / "rui.sqlite3")
-        try:
-            database.execute("PRAGMA foreign_keys=OFF")
-            database.executemany(
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,context_window) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0,?)",
-                [(index, index, session, DEFAULTS.unlisted_context_window) for index, session in enumerate(backlog_history, 1)],
-            )
-            database.commit()
-        finally:
-            database.close()
+        seed_future_retries(backlog_store, backlog_history)
         backlog_host = start_host(
             backlog_store,
             f"http://127.0.0.1:{backlog_endpoint.server_port}/responses",
@@ -4298,18 +4306,7 @@ def main(mode="all", correlation_case="all"):
                             for index in range(1, 101)]
         stop_host(recovery_host)
         processes.remove(recovery_host)
-        database = sqlite3.connect(recovery_store / "rui.sqlite3")
-        try:
-            database.execute("PRAGMA foreign_keys=OFF")
-            database.executemany(
-                "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-                "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,context_window) "
-                "VALUES(?,?,?,1,1,1,1,9223372036854775807,1,0,?)",
-                [(index, index, session, DEFAULTS.unlisted_context_window) for index, session in enumerate(recovery_history, 1)],
-            )
-            database.commit()
-        finally:
-            database.close()
+        seed_future_retries(recovery_store, recovery_history)
         recovery_host = start_host(
             recovery_store,
             f"http://127.0.0.1:{recovery_endpoint.server_port}/responses",

@@ -461,6 +461,16 @@ Omission never clears a field.
 Settings are plain data captured at each configure invocation, before later caller mutation.
 Each Session evolves independently; sharing a settings object creates no shared configuration entity.
 
+Tool names remain exactly as supplied by MCP servers, without an inferred server namespace (D120).
+At Host startup, an unreachable server keeps its saved tool copies; a configured server with no records contributes no tools (D147).
+When a create or update spec names a tool absent from the catalog, admission refuses it as `mcp_server_unavailable` if any configured MCP server contributes no tools, otherwise `unknown_tool`.
+This is deliberately not an ownership claim: the refusal's advisory `message` says the name is unknown and lists every empty server that may provide it.
+The same catalog decision applies to a creating Message and `start_agent`; the latter returns a failed tool result naming `spec.tools`, without starting a Session.
+Known tools, including saved copies of an unreachable server's tools, remain admissible subject to the existing provider and child-narrowing rules.
+Only the rejection code is durable; direct replies derive the advisory message from the current Host's catalog and launch configuration, including on replay, with no extra Store read or format change.
+Other request refusals have a null advisory message.
+An admitted MCP call that cannot reach its server continues to return `mcp_server_unavailable` as a tool result (A-D116).
+
 The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and `/status`) on `session start`, `session configure` and interactive `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
 A Session can label itself from Bash with `--store "$RUI_STORE" --session "$RUI_ADDRESS"`, and its collaboration context names that command so a model asked to rename its Session finds it.
 Every Label change is a revision like any other configuration change.
@@ -1028,9 +1038,22 @@ Every Operation is placed, whatever its outcome, because its own request carried
 Under `openai-responses/2` function tools are declared inside the history too, so adding, rewording or removing one keeps the provider cache (D53-D55, D75).
 After each Operation element the history view declares, with `{"type":"additional_tools","role":"developer","tools":[…]}`, the function tools that Operation's frozen set holds and the set of the last earlier Operation since the span's start lacks; a tool record is saved once, so a reworded tool is a new record and is declared again.
 The first Operation after the span's start, or after a compaction base's anchor, declares its whole set, since the base covers the earlier declarations.
-A removed tool stays declared in the history, and a call to it gets the tool result `This tool was removed.`: settlement offers the Operation's own set and withdraws every tool an earlier revision of the Session offered.
+A removed tool stays declared in the history, and a call to it gets the tool result `This tool was removed.`: settlement offers the Operation's own set and withdraws every tool an earlier Operation offered or an earlier configuration revision loaded.
 The top-level `tools` holds only the provider-run tools (web search), which OpenAI ignores inside the history ([live check](research/responses-tools-probe/README.md)); turning one on or off changes the top and costs that one request the cache.
 Under `openai-responses/1` the top-level `tools` holds the Operation's whole set, as before.
+
+The Host lists each MCP server only at startup; it never re-lists or handles list-change notifications while running (D110).
+The Session's configured and loaded tool sets hold caller **intent**, snapshotted in each configuration revision; neither is a materialized current offer.
+Only configure and `find_tools` write that intent. Host tool set changes never write Session intent or create configuration revisions, and change rows are not used to reconstruct it.
+`store/domain/tool_offer.zig` owns one projection from intent and the Host's saved tool set: permitted MCP names resolve to today's identity (including server and read-only hint), unavailable names disappear, and built-ins retain their saved identity.
+The configured names remain a ceiling, including for a K1-narrowed child: a new Host tool with an unpermitted name is not granted automatically.
+An unavailable name returns only if it is still intended; an explicit equal-valued narrowing is authoritative, regardless of command-key spelling.
+Operation admission freezes the projected loaded offer in `model_operation.tool_set_id`, atomically with admission; retries, history declarations, settlement and MCP dispatch use that immutable offer, never a new projection.
+`find_tools` searches the same current projection and expands loaded intent, preserving previously loaded names that are temporarily unavailable, without loading unavailable names the caller never selected.
+Admission's existing facts round also reports whether the loaded intent names an MCP record the Host's saved tool set no longer holds; a tool record is saved once per identity, so otherwise the loaded intent set is the offer and admission takes no extra round.
+Only a changed or missing loaded MCP record costs a projection, which uses the Store's existing fixed scratch, not text-sized allocations.
+Schema 65 adds the Operation offer reference. Migration backfills each Operation from its own revision's effective loaded set, preserving historical requests exactly.
+Existing Session sets become intent as-is: conservatively, a name already missing from the Session's current effective sets does not return unless the caller asks again. No historical change-row inference attempts to recover lost intent.
 
 ### Codex wire binding
 
@@ -1308,13 +1331,13 @@ The model-visible **Tool Catalog** contains definitions/schema/result contracts,
 It holds `bash`, which Rui runs as Actions; `find_tools`, `message_agent`, `read_transcript`, `skill` and `start_agent`, which the core runs itself; and `web_search`, which the provider hosts: the request names it (OpenAI with live page access) and the provider runs it inside the response, so it never becomes an Action and needs no approval.
 The CLI and TUI put `bash`, `skill` and `web_search` in a fresh Session's spec; the Host never supplies a tools list (D104).
 CLI `--tools` accepts a comma list of those names or `none`; the public configuration and report arrays list each chosen tool once, in catalog order (`bash`, `find_tools`, `message_agent`, `read_transcript`, `skill`, `start_agent`, `web_search`).
-A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and is the set sent to the model and used to validate calls.
+A Session's optional `loaded_tools` uses the same name-list grammar (`--loaded-tools a,b|none` in the CLI), defaults to all its `tools`, and records loaded-name intent; the Operation's projected, frozen offer is sent to the model and used to validate calls.
 Every loaded name must be in its resulting tools or configure refuses `loaded_tools_not_in_tools`; a strict subset must contain `find_tools` or configure refuses `loaded_tools_unreachable`.
 Changing tools without specifying loaded_tools keeps equality when the saved sets were equal; otherwise it intersects the saved loaded set with the new tools and applies the same checks.
-The Session and each revision store a nullable `loaded_tool_set_id`, interned like `tool_set_id`, with NULL denoting equality; Current and Full reports expose both sets, and a newly loaded tool follows the existing `additional_tools` history path without discarding the cache prefix.
+The Session and each revision store intent as a nullable `loaded_tool_set_id`, interned like `tool_set_id`, with NULL denoting equality; Current and Full reports expose both sets, and a newly loaded tool follows the existing `additional_tools` history path without discarding the cache prefix.
 Who runs an accepted call is derived from its name, never stored.
 A **core tool** call runs as one core command, with no process: `message_agent(id, text)` admits `text` to Session `id` as a Message from the calling Session, with no client environment, and resolves the call `Delivered to ID.` in the same transaction; an unknown `id` resolves it failed and sends nothing.
-`find_tools(words)` searches the Session's saved, not-yet-loaded tools by name or description, ignoring ASCII case and matching any of one to eight space-separated words.
+`find_tools(words)` searches the Session's currently available, not-yet-loaded projected tools by name or description, ignoring ASCII case and matching any of one to eight space-separated words.
 SQL selects only unloaded candidates; the Host streams names and description windows through the shared `word_search.Matcher`, whose ASCII folding and carry give every Store engine the same answers (D216).
 It loads at most eight matches in name order, in one call-keyed command and one revision naming `loaded_tools`, committed with the call result.
 A no-match call writes no revision.
@@ -1325,6 +1348,8 @@ It uses the public activity visibility and provenance rules, never private provi
 `start_agent(task, attached, spec)` creates a Session configured by the full agent `spec` (model, effort, token-count compaction threshold, tools, initially loaded tools, Permission Mode, output reservation, instructions, output schema and label) in the caller's Workspace with its provider, admits `task` to it as its first Message from the caller under the key `rui.core/start_agent/<action>`, and resolves the call `Started ID.`, all in one transaction; an attached agent records the caller as its parent.
 Every refused `start_agent` spec fails the tool call and starts nothing, including a missing required field, a named provider or Workspace, unsupported effort or an excessive known-window compaction threshold (D140, D165, D166, D221).
 A spec that widens the caller's tools or asks for `bypass` under a caller that asks resolves the call failed with a result naming the field; the Host checks the arguments when it runs the call, not at admission.
+Both `start_agent` and native creation with a parent narrow against the parent's configured-name intent, not its loaded intent or current projected offer; ordinary configuration validation still refuses requested names absent from the Host tool set.
+The child saves only its own configured and loaded intent, with its effective offer frozen at each Operation admission by the same projection as any Session.
 The agent's Bash starts from the caller's client environment, installed as the task commits.
 A core tool acts only on the Store, so admission authorizes its call at once under either Permission Mode, and a stop cancels it like any other unattempted Action.
 Removed `edit`, duplicate names and alternate spellings reject rather than aliasing another selection.
@@ -1451,7 +1476,7 @@ Rui runs no DDL on MySQL (D203).
 `rui store schema --engine mysql` prints this build's canonical `schema.ddl(.mysql)` as one SQL file for the DB team to apply to an empty database.
 With `--from N` it instead prints every forward MySQL migration from format N to this build's format, oldest first (D223); the current format prints empty stdout successfully, and formats outside the migration baseline through the current format are usage errors naming that range, with no stdout.
 The composed migration finishes with one update of the saved format and wire version to this build's values; individual steps remain `schema.mysqlMigration(from)`, and this command never applies the SQL.
-The step to 52 lets tool records name an MCP server and keeps the Host's catalog set (T1e).
+The step to 52 lets tool records name an MCP server and keeps the Host tool set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
@@ -1463,7 +1488,8 @@ The step to 59 adds immutable skill catalog metadata and its ordinary turnless i
 The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4, naming their `message_skill` row), rebuilding `conversation_entry` on both engines, and moves Store wire metadata to 11; earlier rows are unchanged.
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
 The step to 63 drops `model_operation.usage_content_id`, rebuilding `model_operation` on SQLite, and deletes each saved raw usage report no other row references; the four counts are unchanged, and the file keeps the freed pages until it is vacuumed.
-The step to 64 freezes each model Operation's effective context window as a non-null integer in 0..4294967295, with no default (D238).
+The step to 64 renames `host_catalog` to `host_tool_set` and `action_operation.bash_timeout_ms` to `attempt_timeout_ms`, without changing their contents.
+The step to 69 freezes each model Operation's effective context window as a non-null integer in 0..4294967295, with no default (D238).
 It backfills every old Operation using its frozen settings revision's exact model and a literal mapping of the pre-change shipped snapshot, using 128,000 for absent or null windows, not the mutable saved catalog.
 This pins legacy escalation policy; the old rows did not retain their admission-time saved window, and migration does not claim to recover it.
 Existing floors, levels, counts, resolutions and references are preserved.
@@ -2482,6 +2508,9 @@ Exit, interruption or a disconnected caller never cancels Host work.
 
 **Bounded CLI editor (native terminal-display qualification pending):** The editor owns draft bytes, grapheme cursor and rendering within the frontend's terminal lifetime.
 App owns keyboard and paste decoding for the invocation; draft resets, bank switches and a permission card never replace its input runtime.
+Each chat keeps its own draft bytes, caret, recall anchor and rejection when switching through the list, returning to the overview or following a Session link; a newly opened chat starts empty unless it has a saved draft.
+Only inactive drafts with text or other draft state own storage in this invocation, with exact-length text keyed by the Session reference; taking one transfers it to the active editor, and sending clears that chat's draft.
+The overview's new-Session composer stays independent, and quitting forgets all drafts without writing them to the Store or disk.
 Terminal replies reach App rather than the editor, and an editor that did not see a paste begin rejects its remainder.
 Its caller supplies storage: up to 65,536 UTF-8 bytes for a Message.
 Validated submission borrows complete bytes; [staged persistent input](#staged-persistent-input) owns sealing, next-draft custody and Admission.

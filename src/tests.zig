@@ -46,6 +46,7 @@ test {
     _ = @import("model_adapter.zig");
     _ = @import("model_capability.zig");
     _ = @import("model_catalog.zig");
+    _ = @import("model_catalog_main.zig");
     _ = @import("models_dev.zig");
     _ = @import("descriptor_capacity.zig");
     _ = @import("os/descriptor_limit.zig");
@@ -106,6 +107,7 @@ test {
     _ = @import("read_transcript.zig");
     _ = @import("find_tools.zig");
     _ = @import("find_tools_tests.zig");
+    _ = @import("mcp_refresh_tests.zig");
     _ = @import("skills.zig");
     _ = @import("session_skills.zig");
     _ = @import("client.zig");

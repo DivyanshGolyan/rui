@@ -777,7 +777,7 @@ test "metadata seed MySQL missing masks retain canonical selector and id" {
     try std.testing.expect(!std.mem.eql(u8, &first, &second));
 }
 
-test "frozen context window schema 64 MySQL migration pins legacy policy and preserves live and settled rows" {
+test "frozen context window schema 69 MySQL migration pins legacy policy and preserves live and settled rows" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);
     defer mutex.unlock(io);
@@ -787,23 +787,52 @@ test "frozen context window schema 64 MySQL migration pins legacy policy and pre
     try load(migrated_database, store_testing.baseline_mysql_ddl, false);
     try load(migrated_database, store_testing.baseline_rows, true);
     inline for (schema.migrations) |step| {
-        if (step.from < 63) try load(migrated_database, schema.mysqlMigration(step.from), false);
+        if (step.from < 68) try load(migrated_database, schema.mysqlMigration(step.from), false);
     }
     try load(migrated_database, @embedFile("migration_window_rows.sql"), false);
-    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','63'),('wire_version','11')", false);
-    try load(migrated_database, schema.mysqlMigrationFrom(63).?, false);
+    try load(migrated_database, "INSERT INTO store_meta(meta_key,meta_value) VALUES('format','68'),('wire_version','11')", false);
+    try load(migrated_database, schema.mysqlMigrationFrom(68).?, false);
     try expectSameResults(&.{
         "SELECT operation_id,context_window FROM model_operation ORDER BY operation_id",
+        "SELECT operation_id,tool_set_id FROM model_operation ORDER BY operation_id",
         "SELECT operation_id FROM model_operation WHERE operation_id=3 AND resolution_code IS NULL AND retry_due_at_ms=0 AND attempt_at=1",
         "SELECT operation_id FROM model_operation WHERE operation_id=4 AND resolution_code='context_overflow' AND history_floor=3 AND history_level=2 AND history_dropped=4 AND output_reservation=8",
         "SELECT IS_NULLABLE,COLUMN_DEFAULT FROM information_schema.columns WHERE table_schema='" ++ migrated_database ++ "' AND table_name='model_operation' AND column_name='context_window'",
     }, &.{
         "SELECT 1,1050000 UNION ALL SELECT 2,128000 UNION ALL SELECT 3,1050000 UNION ALL SELECT 4,128000",
+        "SELECT 1,4 UNION ALL SELECT 2,2 UNION ALL SELECT 3,2 UNION ALL SELECT 4,2",
         "SELECT 3",
         "SELECT 4",
         "SELECT 'NO',NULL",
     });
     try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}
+
+test "schema 65 MySQL migration freezes each Operation offer and preserves Session intent" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    const name = "rui_offer_migration";
+    try setup("DROP DATABASE IF EXISTS " ++ name ++ ";CREATE DATABASE " ++ name);
+    defer restore("DROP DATABASE IF EXISTS " ++ name);
+    try load(name, store_testing.baseline_mysql_ddl, false);
+    try load(name, store_testing.baseline_rows, true);
+    inline for (schema.migrations) |step| {
+        if (comptime step.from < 64) try load(name, schema.mysqlMigration(step.from), false);
+    }
+    try load(name, store_testing.operation_offer_migration_seed, false);
+    try load(name, schema.mysqlMigration(64), false);
+    var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer rows.deinit();
+    try writeResult("SELECT operation_id,tool_set_id FROM " ++ name ++ ".model_operation ORDER BY operation_id", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:1 1:4\n 1:2 1:2\n 2:99 1:2", rows.written());
+    rows.clearRetainingCapacity();
+    try writeResult("SELECT revision,tool_set_id,loaded_tool_set_id FROM " ++ name ++ ".session WHERE session_ref='d8mv7p'", &rows.writer);
+    try std.testing.expectEqualStrings("\n 1:2 1:4 1:2", rows.written());
     done.migrations += 1;
     writeRecord();
 }

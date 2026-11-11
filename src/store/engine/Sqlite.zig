@@ -96,7 +96,8 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
 
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(content_string.max_bytes + 4096));
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 32);
+    // Selection batches admission facts, intent and recipe identities: 35 columns.
+    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 35);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, @import("../../json_limits.zig").max_depth);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);
