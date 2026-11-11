@@ -425,7 +425,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.* = .{ .init = init, .home = init.environ_map.get("HOME") orelse "", .store = store, .session = session, .directory = directory, .files = files, .command = command, .requests = requests, .status = status, .screen = screen, .interrupted = interrupted, .lender = lender, .colour = screen.colour };
     self.startInput();
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
-    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick } };
+    self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
@@ -579,6 +579,16 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: feed_window.Point) !vo
         self.dropMessageRequest();
         self.openCollapsed(target);
     }
+    try self.afterInput(ctx);
+}
+
+/// The synthetic feed link has exactly the key's admission and read path.
+fn appRetry(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.leaving != null or !self.retryable()) return;
+    self.shown_notice.dismiss();
+    try self.recover(null);
+    self.dirty = true;
     try self.afterInput(ctx);
 }
 
@@ -6087,4 +6097,79 @@ test "SessionFrontend close from browsed feed returns to end before saving the c
         try std.testing.expectEqualStrings(text, reopened.self.input.composition().bytes);
         try std.testing.expectEqual(caret, reopened.self.input.composition().cursor);
     }
+}
+
+/// Find the key's first painted cell using an independent literal Document,
+/// not the production EndingLine decorator or hit query.
+fn retryCellForTest(self: *Self) !struct { row: i16, col: i16 } {
+    const text = "× Model reply unreadable · ctrl+r retries\n";
+    const start = std.mem.indexOf(u8, text, "ctrl+r retries").?;
+    const width = self.app_content.drawn.width;
+    var expected: viewport.Sized(128, true) = .{ .sidenotes = true, .quotes = true };
+    try expected.append(text);
+    try expected.prepare();
+    const height = expected.lineRows(.{ .width = width, .method = self.app_content.method }, 0);
+    const cells = try std.testing.allocator.alloc(vaxis.Cell, @as(usize, height) * width);
+    defer std.testing.allocator.free(cells);
+    @memset(cells, .{});
+    var screen: vaxis.Screen = .{ .width = width, .height = height, .width_method = self.app_content.method, .buf = cells };
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen };
+    _ = expected.draw(win, .{}, true, false, .{}, .{});
+    for (cells, 0..) |cell, index| if (expected.cellOffset(cell) == start) return .{ .row = @intCast(self.app_content.drawn.pad + index / width), .col = @intCast(index % width) };
+    return error.RetryKeyNotDrawn;
+}
+
+test "failed reply retry click schedules the same exact Message with draft and caret kept at wide and wrapped widths" {
+    for ([_]u16{ 16, 80 }) |width| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size.width = width;
+        const self = &held.self;
+        const file = try held.tmp.dir.createFile(std.testing.io, "retry-click", .{ .read = true });
+        defer file.close(std.testing.io);
+        self.files.scratch = file;
+        const text = "/literal\n\t café 💚\r\n";
+        try file.writePositionalAll(std.testing.io, text, 0);
+        try seedFeed(held.screen, "× Model reply unreadable\n");
+        self.failedRetryForTest();
+        self.live.latest_ending.?.key = held.screen.feed.high.?;
+        try held.keys("draft éZ\x1b[D");
+        const before = self.input.snapshot();
+        _ = try held.draw();
+        const at = try self.retryCellForTest();
+        var ctx = held.context();
+        const content = self.app_content.widget();
+        try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .press } });
+        try std.testing.expect(self.retry_requested == null);
+        try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .release } });
+        try std.testing.expect(self.reader.thread == null); // A click schedules, never blocks on a read.
+        try std.testing.expectEqualDeep(self.live.latest_ending.?.key, self.retry_requested.?);
+        try self.stageRetryForTest(.{ .message = .{ .ending = self.live.latest_ending.?.key, .position = 1, .length = text.len } });
+        try self.settleReader();
+        try std.testing.expect(self.submission.intent.? == .message);
+        try std.testing.expectEqualStrings(text, try self.input.message(self.submission.intent.?.message));
+        try std.testing.expectEqualDeep(before, self.input.snapshot());
+        try std.testing.expectEqual(@as(u64, 1), self.admission.sent);
+        try std.testing.expect(!self.retryable());
+    }
+}
+
+test "failed reply retry click revalidates the frontend predicate before scheduling" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    _ = try held.draw();
+    const at = try self.retryCellForTest();
+    var ctx = held.context();
+    const content = self.app_content.widget();
+    try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .press } });
+    // No redraw: FeedView's frame still offers the link, but admission changed.
+    self.submission.intent = .{ .decision = .{ .action = 7, .decision = .deny } };
+    defer self.submission.intent = null;
+    try content.handleEvent(&ctx, .{ .mouse = .{ .row = at.row, .col = at.col, .button = .left, .mods = .{}, .type = .release } });
+    try std.testing.expect(self.retry_requested == null and self.reader.thread == null);
+    try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
 }

@@ -59,6 +59,8 @@ pub const byte_capacity = 65 * 1024;
 pub const open_capacity = 64;
 
 pub const LatestEnding = @import("feed_reads.zig").Ending(Key);
+/// Padding on a synthetic-only wrapped row has no resident text to select.
+pub const RetryHit = union(enum) { link: Key, padding };
 pub const Presentation = struct {
     latest_ending: ?LatestEnding = null,
     retry_actionable: bool = false,
@@ -67,6 +69,8 @@ pub const Presentation = struct {
 // Only the short, shared ending line is decorated, not arbitrary Message text.
 // This is frame-local presentation; no bytes/styles are written to Window.
 const EndingLine = struct {
+    key_start: usize = 0,
+    key_end: usize = 0,
     document: viewport.Sized(512, true) = .{ .dirty = false, .sidenotes = true, .quotes = true },
 
     fn init(self: *EndingLine, window: *const Window, entry: Window.Stored, offset: usize, presentation: Presentation) bool {
@@ -81,6 +85,8 @@ const EndingLine = struct {
         // Ending words and key strings come from marks, never content bytes.
         std.debug.assert(length < self.document.bytes.len);
         const head = end - offset;
+        self.key_start = head + suffix.len;
+        self.key_end = length;
         @memcpy(self.document.bytes[0..head], window.document.bytes[offset..end]);
         @memcpy(self.document.styles[0..head], window.document.styles[offset..end]);
         @memcpy(self.document.bytes[head..][0..suffix.len], suffix);
@@ -91,6 +97,19 @@ const EndingLine = struct {
         self.document.length = length + 1;
         self.document.width_method = window.document.width_method;
         return true;
+    }
+
+    /// Paint exactly the wrapped row drawWith paints, then ask that same
+    /// document which byte owns the cell. Margins/indent and the ending's
+    /// words are not part of the retry link.
+    fn hit(self: *const EndingLine, row: u16, cells: []vaxis.Cell, col: usize) bool {
+        if (col >= cells.len) return false;
+        @memset(cells, .{});
+        var screen: vaxis.Screen = .{ .width = @intCast(cells.len), .height = 1, .width_method = self.document.width_method, .buf = cells };
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = 1, .screen = &screen };
+        _ = self.document.draw(window, .{ .row = row }, true, false, .{}, .{});
+        const offset = self.document.cellOffset(cells[col]) orelse return false;
+        return offset >= self.key_start and offset < self.key_end;
     }
 };
 
@@ -306,6 +325,19 @@ pub const Window = struct {
             if (self.document.collapsed(entry.offset, entry.offset + entry.length).last == mark) return message;
         }
         return null;
+    }
+
+    /// A synthetic retry link uses EndingLine's own drawing/layout, never a
+    /// resident-text offset. The caller lends one pane-width row of cells.
+    pub fn retryAt(self: *const Window, position: viewport.Position, cells: []vaxis.Cell, col: usize, presentation: Presentation) ?RetryHit {
+        if (cells.len == 0) return null;
+        const point = self.pointAt(position.offset) orelse return null;
+        const entry = self.entries[self.indexOf(point.key) orelse return null];
+        var ending: EndingLine = .{};
+        if (!ending.init(self, entry, position.offset, presentation)) return null;
+        if (ending.hit(position.row, cells, col)) return .{ .link = entry.key };
+        const layout: viewport.Layout = .{ .width = @intCast(cells.len), .method = self.document.width_method };
+        return if (position.row >= self.document.lineRows(layout, position.offset)) .padding else null;
     }
 
     /// Logical text row beneath the pointer, excluding adjacency gaps/tail.

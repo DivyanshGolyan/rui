@@ -24,6 +24,8 @@ colour: bool = true,
 size: vxfw.Size = .{},
 handler: ?Handler = null,
 selection: ?Selection = null,
+/// A retry press is not a text selection; a drag cancels it outright.
+retry_press: ?struct { cell: Cell, ending: resident.Key } = null,
 drawn: Drawn = .{},
 
 pub const Handler = struct {
@@ -32,6 +34,7 @@ pub const Handler = struct {
     on_notice: *const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void,
     on_scroll: *const fn (*anyopaque, *vxfw.EventContext, up: bool) anyerror!void,
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, resident.Point) anyerror!void = null,
+    on_retry: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 pub const Openable = union(enum) { message: View.Collapsed, session: [6]u8 };
 const Cell = struct { row: i32, col: i32 };
@@ -178,13 +181,26 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?Spot {
     return self.keyed((Row{ .document = &self.window.document, .cells = cells, .line = line.offset }).spot(col));
 }
 
+/// Hit-test only a cell inside the feed pane. No clamping to text boundaries:
+/// blank space beside/below an ending must never become its retry link.
+fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.RetryHit {
+    if (!self.retry_actionable or at.row < 0 or at.col < 0 or at.row >= self.drawn.height or at.col >= self.drawn.width) return null;
+    const position = self.rowPosition(@intCast(at.row)) orelse return null;
+    const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
+    defer gpa.free(cells);
+    return self.window.retryAt(position, cells, @intCast(at.col), self.presentation());
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
-        .mouse_leave => if (self.selection != null) {
-            self.selection = null;
-            ctx.redraw = true;
+        .mouse_leave => {
+            self.retry_press = null;
+            if (self.selection != null) {
+                self.selection = null;
+                ctx.redraw = true;
+            }
         },
         .tick => {
             const held = if (self.selection) |*selection| selection else return;
@@ -204,9 +220,35 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
 fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) !void {
     const handler = self.handler orelse return;
     const at: Cell = .{ .row = value.row, .col = value.col };
+    if (self.retry_press) |pressed| switch (value.type) {
+        .drag => {
+            self.retry_press = null;
+            ctx.consumeEvent();
+            return;
+        },
+        .release => {
+            self.retry_press = null;
+            ctx.consumeEvent();
+            // X10 releases name no button; custody comes from the left press.
+            if ((value.button != .left and value.button != .none) or !std.meta.eql(at, pressed.cell)) return;
+            const hit = try self.retryAt(ctx.alloc, at) orelse return;
+            if (hit != .link or hit.link.order(pressed.ending) != .eq) return;
+            if (handler.on_retry) |retry| try retry(handler.userdata, ctx);
+            return;
+        },
+        .press => self.retry_press = null,
+        .motion => {},
+    };
     switch (value.type) {
         .press => {
             if (value.button != .left) return;
+            if (handler.on_retry != null) if (try self.retryAt(ctx.alloc, at)) |hit| {
+                // Synthetic-only wrap padding is not a resident text position.
+                // Leave the existing selection path to original body cells.
+                if (hit == .link) self.retry_press = .{ .cell = at, .ending = hit.link };
+                ctx.consumeEvent();
+                return;
+            };
             const spot = try self.spotAt(ctx.alloc, at) orelse return;
             self.selection = .{ .press = at, .anchor = spot, .head = spot };
             ctx.consumeEvent();
@@ -493,4 +535,142 @@ test "FeedView retry tail is frame-local, latest-key-only and gated by cause and
             _ = arena.reset(.retain_capacity);
         }
     };
+}
+
+const RetryClicks = struct {
+    count: usize = 0,
+    fn retry(raw: *anyopaque, _: *vxfw.EventContext) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.count += 1;
+    }
+    fn notice(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+    fn scroll(_: *anyopaque, _: *vxfw.EventContext, _: bool) !void {
+        return error.UnexpectedRetryScroll;
+    }
+    fn handler(self: *@This()) Handler {
+        return .{ .userdata = self, .on_retry = retry, .on_notice = notice, .on_scroll = @This().scroll };
+    }
+};
+
+fn retryMouse(view: *Self, ctx: *vxfw.EventContext, at: Cell, kind: vaxis.Mouse.Type) !void {
+    try view.widget().handleEvent(ctx, .{ .mouse = .{ .col = @intCast(at.col), .row = @intCast(at.row), .button = .left, .mods = .{}, .type = kind } });
+}
+
+test "FeedView retry click hits only painted suffix cells including wrapped tails at every width" {
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    const words = "× Model reply unreadable\n";
+    // A lookalike in retained text must not become a link.
+    const older = "ctrl+r retries elsewhere\n";
+    try window.append(&.{
+        .{ .key = .{ .position = 10 }, .text = .{ .bytes = older }, .tight = true },
+        .{ .key = .{ .position = 20 }, .text = .{ .bytes = words }, .tight = true },
+    });
+    var anchor: Feed = .{};
+    var clicks: RetryClicks = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") } };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
+    defer ctx.cmds.deinit(gpa);
+    // Independent literal and Document layout, not the production decorator or
+    // hit-query: every body, separator, indent, margin and link cell is checked.
+    const shown = older ++ "× Model reply unreadable · ctrl+r retries\n";
+    const start = std.mem.lastIndexOf(u8, shown, "ctrl+r retries").?;
+    var expected: viewport.Sized(256, true) = .{ .sidenotes = true, .quotes = true };
+    try expected.append(shown);
+    try expected.prepare();
+    for (1..141) |width| {
+        const surface = try testFrame(&view, arena.allocator(), @intCast(width), 180);
+        const height = expected.measure(.{ .width = @intCast(width), .method = .unicode }, .{}, 180).rows;
+        const cells = try gpa.alloc(vaxis.Cell, width * height);
+        defer gpa.free(cells);
+        @memset(cells, .{});
+        var screen: vaxis.Screen = .{ .width = @intCast(width), .height = @intCast(height), .width_method = .unicode, .buf = cells };
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = screen.height, .screen = &screen };
+        _ = expected.draw(win, .{}, true, false, .{}, .{});
+        const pad = 180 - height;
+        for (cells, 0..) |cell, index| {
+            const row = index / width;
+            const col = index % width;
+            try std.testing.expectEqualStrings(cell.char.grapheme, testCell(surface, pad + row, col));
+            const offset = expected.cellOffset(cell);
+            const link = if (offset) |at| at >= start and at < start + "ctrl+r retries".len else false;
+            const before = clicks.count;
+            const at: Cell = .{ .row = @intCast(pad + row), .col = @intCast(col) };
+            try retryMouse(&view, &ctx, at, .press);
+            try std.testing.expectEqual(before, clicks.count);
+            try retryMouse(&view, &ctx, at, .release);
+            try std.testing.expectEqual(before + @intFromBool(link), clicks.count);
+            try std.testing.expect(view.selection == null and view.retry_press == null);
+        }
+        try std.testing.expect(anchor.following());
+        try std.testing.expectEqualStrings(older ++ words, window.document.text());
+        _ = arena.reset(.retain_capacity);
+    }
+}
+
+test "FeedView retry click cancels drag departure and lost eligibility or ending identity" {
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    var anchor: Feed = .{};
+    var clicks: RetryClicks = .{};
+    const latest: resident.LatestEnding = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") };
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = latest };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
+    defer ctx.cmds.deinit(gpa);
+    _ = try testFrame(&view, arena.allocator(), 80, 4);
+    // Literal line: 24 ending columns, 3 separator columns, then the key.
+    const at: Cell = .{ .row = 3, .col = 27 };
+    const Cases = enum { drag_same, drag_away_back, release_elsewhere, leave, held, unkeyed, other_ending, hidden_press, disabled, no_press };
+    for (std.enums.values(Cases)) |case| {
+        view.retry_actionable = case != .disabled;
+        view.latest_ending = latest;
+        _ = try testFrame(&view, arena.allocator(), 80, 4);
+        if (case == .hidden_press) view.retry_actionable = false;
+        if (case != .no_press) try retryMouse(&view, &ctx, at, .press);
+        switch (case) {
+            .drag_same => try retryMouse(&view, &ctx, at, .drag),
+            .drag_away_back => {
+                try retryMouse(&view, &ctx, .{ .row = 3, .col = 0 }, .drag);
+                try retryMouse(&view, &ctx, at, .drag);
+            },
+            .leave => try view.widget().handleEvent(&ctx, .mouse_leave),
+            .held => view.retry_actionable = false,
+            .unkeyed => view.latest_ending.?.cause = @import("marks.zig").cause("provider_quota"),
+            .other_ending => view.latest_ending.?.key.ordinal += 1,
+            .release_elsewhere, .hidden_press, .disabled, .no_press => {},
+        }
+        if (case == .hidden_press) view.retry_actionable = true;
+        try retryMouse(&view, &ctx, if (case == .release_elsewhere) .{ .row = 3, .col = 0 } else at, .release);
+        try std.testing.expectEqual(@as(usize, 0), clicks.count);
+        try std.testing.expect(view.retry_press == null and view.selection == null);
+    }
+}
+
+test "FeedView retry click accepts left and legacy no-button release only" {
+    const gpa = std.testing.allocator;
+    const window = try testWindow();
+    defer gpa.destroy(window);
+    try window.append(&.{.{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" } }});
+    var anchor: Feed = .{};
+    var clicks: RetryClicks = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = clicks.handler(), .retry_actionable = true, .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") } };
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = gpa, .cmds = .empty };
+    defer ctx.cmds.deinit(gpa);
+    _ = try testFrame(&view, arena.allocator(), 80, 4);
+    for (std.enums.values(vaxis.Mouse.Button)) |button| {
+        clicks.count = 0;
+        try retryMouse(&view, &ctx, .{ .row = 3, .col = 27 }, .press);
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = 3, .col = 27, .button = button, .mods = .{}, .type = .release } });
+        try std.testing.expectEqual(@as(usize, @intFromBool(button == .left or button == .none)), clicks.count);
+        try std.testing.expect(view.retry_press == null);
+    }
 }
