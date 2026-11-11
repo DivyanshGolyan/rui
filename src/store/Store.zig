@@ -1286,6 +1286,13 @@ pub const Store = struct {
     }
 
     fn dispatchWorkHeld(self: *Store, paused: bool) !DispatchWork {
+        const survey = self.identities().survey;
+        const asked: @FieldType(Survey, "asked") = if (paused) .paused else .running;
+        self.identities().survey.kept = .none;
+        self.identities().survey.asked = asked;
+        // Nothing committed since the survey ran, right after its COMMIT.
+        if (survey.kept == .ready and survey.asked == asked and !self.isFenced())
+            return .{ .core = survey.core, .mcp = survey.mcp, .bash = survey.bash, .message = survey.message, .tool_continuation = survey.tool_continuation };
         const entry = try enter(self, .none);
         defer entry.release();
         var access: store_access.Access(.survey, error{}) = .open(&entry);
@@ -1925,6 +1932,7 @@ pub const Entry = struct {
             if (@import("builtin").is_test) if (untouchedForTesting(store)) |id|
                 std.debug.panic("rows of Session {s} changed, but the entry point that changed them did not touch it", .{&id});
             const generation = store.commit_generation.fetchAdd(1, .release) + 1;
+            store.identities().survey.kept = if (store.identities().survey.kept == .fresh) .ready else .none;
             store.changes.record(generation, &store.touched);
             if (store.commitWake().load(.acquire)) |wake| wake.set(store.io);
         }
@@ -2034,6 +2042,35 @@ pub fn commit(self: *Store) !void {
 /// it commits at its end.
 pub fn commitsWithWrites(self: *Store) bool {
     return self.engine.commitArmed() and self.batch == .first and !self.queue().writeWaiting();
+}
+
+/// Runs the dispatch survey in the message of `writer`'s last writes and
+/// COMMIT, which `writer` bound: the Host asks for it after every commit
+/// (`dispatchWork`), and here it costs no round trip of its own. The
+/// reads follow COMMIT, so they run in autocommit and see what it saved.
+/// False, with nothing sent, when the Host has not asked yet. The survey
+/// is kept only when that one round answered it: one that needs a second
+/// round is left to the Host's own `dispatchWork`, so a write's round
+/// trips stay what its transition takes. An answered survey read every
+/// answer before its own, COMMIT's among them, so it is kept only beside
+/// a writer that did not fail.
+pub noinline fn surveyAfterCommit(self: *Store, writer: anytype) bool {
+    if (self.identities().survey.asked == .never) return false;
+    const paused = self.identities().survey.asked == .paused;
+    self.identities().survey.kept = .none;
+    var survey: store_access.Access(.survey, error{}) = .{ .store = self, .rides = writer.ridden() };
+    defer survey.deinit();
+    const work: ?DispatchWork = model_admission_domain.dispatchWork(&survey, paused) catch null;
+    writer.endRide(survey.failure, survey.rides != null);
+    if (work) |found| if (writer.failure == null) {
+        self.identities().survey.core = found.core;
+        self.identities().survey.mcp = found.mcp;
+        self.identities().survey.bash = found.bash;
+        self.identities().survey.message = found.message;
+        self.identities().survey.tool_continuation = found.tool_continuation;
+        self.identities().survey.kept = .fresh;
+    };
+    return true;
 }
 
 /// `Queue.Batch.closed`: the batch's COMMIT already ran.
@@ -2280,6 +2317,25 @@ const HostValues = struct {
     /// (`Store.admitted`): one per write at most.
     admitted: [Queue.drain_limit + 1]Admitted = undefined,
     admitted_len: u8 = 0,
+    /// How the Host last asked `dispatchWork`, with new Turns held or not;
+    /// until it asks, no commit carries the survey. With it, the dispatch
+    /// survey a commit's message carried
+    /// (`surveyAfterCommit`), for the `dispatchWork` that asks before
+    /// anything else commits: `fresh` until its writer's entry point ends
+    /// and advances the generation, then `ready` until the next advance.
+    /// It fits the padding after `admitted_len`.
+    survey: Survey = .{},
+};
+
+const Survey = packed struct(u16) {
+    asked: enum(u2) { never, running, paused } = .never,
+    kept: enum(u2) { none, fresh, ready } = .none,
+    core: bool = false,
+    mcp: bool = false,
+    bash: bool = false,
+    message: bool = false,
+    tool_continuation: bool = false,
+    _: u7 = 0,
 };
 
 const Admitted = struct {
