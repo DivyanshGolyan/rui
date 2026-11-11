@@ -73,6 +73,7 @@ const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
 const DispatchWork = model_admission_domain.DispatchWork;
 const ModelFailure = model_settlement_domain.ModelFailure;
 const ModelFailureClass = model_settlement_domain.ModelFailureClass;
+const ModelTimings = model_settlement_domain.ModelTimings;
 const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 const ModelOperationKind = historical_domain.ModelOperationKind;
 const PermissionDecisionReply = command_domain.PermissionDecisionReply;
@@ -1540,7 +1541,19 @@ pub const Store = struct {
         disposition: ModelFailureClass,
         faults: Faults,
     ) !void {
-        return self.queue().write(settleModelAttemptFailureHeld, .{ self, binding, failure, disposition, faults });
+        return self.settleModelAttemptFailureTimed(binding, failure, disposition, .{}, faults);
+    }
+
+    /// Saves final-attempt durations in the resolution write, never on a retry.
+    pub fn settleModelAttemptFailureTimed(
+        self: *Store,
+        binding: AttemptBinding,
+        failure: ModelFailure,
+        disposition: ModelFailureClass,
+        timings: ModelTimings,
+        faults: Faults,
+    ) !void {
+        return self.queue().write(settleModelAttemptFailureHeld, .{ self, binding, failure, disposition, timings, faults });
     }
 
     fn settleModelAttemptFailureHeld(
@@ -1548,6 +1561,7 @@ pub const Store = struct {
         binding: AttemptBinding,
         failure: ModelFailure,
         disposition: ModelFailureClass,
+        timings: ModelTimings,
         faults: Faults,
     ) !void {
         const code = failure.code();
@@ -1563,7 +1577,7 @@ pub const Store = struct {
         defer entry.release();
         var access: Access(.write, Ordinary.attempt_binding) = .open(&entry);
         defer access.deinit();
-        return entry.finishTransaction(Ordinary.attempt_binding, faults, access.end(faults, model_settlement_domain.settleModelAttemptFailure(&access, self.io, binding, failure, disposition, faults)));
+        return entry.finishTransaction(Ordinary.attempt_binding, faults, access.end(faults, model_settlement_domain.settleModelAttemptFailure(&access, self.io, binding, failure, disposition, timings, faults)));
     }
 
     pub fn recoverOneExhaustedModelAttempt(

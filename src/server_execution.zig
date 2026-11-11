@@ -141,6 +141,8 @@ const ModelRefreshingSlot = struct {
     owner: AttemptOwner,
     rejected_generation: u64,
     request_id: protocol.Bounded(256),
+    // Moved from the retired Transfer, not another resident timing record.
+    timing: provider.AttemptTiming = .{},
     requested: bool = false,
     cancelled: bool = false,
 };
@@ -2025,8 +2027,8 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
     if (!active.cancelled) {
         const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id, .report = "" } };
         switch (result) {
-            .refreshed => |refreshed| settleFailure(host, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary),
-            .failed => |err| settleUnansweredFailure(host, active.owner.token, active.owner.binding, providers.leaseFailureCode(err), .ordinary),
+            .refreshed => |refreshed| settleFailureTimed(host, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary, modelTimings(&active.timing, host.io)),
+            .failed => |err| settleFailureTimed(host, active.owner.token, active.owner.binding, .{ .uncorrelated = providers.leaseFailureCode(err) }, .ordinary, modelTimings(&active.timing, host.io)),
             .ready => unreachable,
         }
     }
@@ -2051,6 +2053,7 @@ fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const Answer
         .owner = owner,
         .rejected_generation = rejected_generation,
         .request_id = answered.request_id,
+        .timing = answered.timing,
     });
     return true;
 }
@@ -2289,7 +2292,7 @@ fn completeTransfer(
                     .length = response.length,
                     .transfer = if (completion.outcome == .response_capture_failed) .capture_failed else .interrupted,
                 }, .{ .binding = owner.binding, .code = code, .request_id = active.transfer.requestId() });
-                settleUnansweredFailure(host, owner.token, owner.binding, code, disposition);
+                settleFailureTimed(host, owner.token, owner.binding, .{ .uncorrelated = code }, disposition, modelTimings(&active.transfer.timing, host.io));
             }
         },
     }
@@ -2420,6 +2423,7 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
         .response_id = validated.evidence.response_id,
         .model_evidence = accepted.model_evidence,
         .request_id = answered.request_id,
+        .timings = modelTimings(&answered.timing, host.io),
     };
     host.store.settleModelSuccess(owner.binding, &workspace.settlement, host.hooks.storeFaults(.{ .model_output = settlement_trace.storeTrace() })) catch |err| {
         if (err == error.SupersededByControl) {
@@ -2429,11 +2433,11 @@ fn completeSuccessfulTransfer(host: *Host, workspace: *Workspace, active: *Provi
             var detail: [512]u8 = undefined;
             const diagnostic = rejection.format(err, &detail);
             retainFailedResponse(host, rejected, answered.retention("contradictory_provider_output", diagnostic, http_status));
-            host.store.settleModelAttemptFailure(owner.binding, answered.rejection(
+            host.store.settleModelAttemptFailureTimed(owner.binding, answered.rejection(
                 "contradictory_provider_output",
                 diagnostic,
                 "",
-            ), .ordinary, host.hooks.storeFaults(.model_failure)) catch |failure_err| if (failure_err != error.SupersededByControl)
+            ), .ordinary, modelTimings(&answered.timing, host.io), host.hooks.storeFaults(.model_failure)) catch |failure_err| if (failure_err != error.SupersededByControl)
                 fenceDispatch(host, "model envelope rejection save", failure_err);
         } else {
             fenceDispatch(host, "model output import", err);
@@ -2532,25 +2536,27 @@ const AnsweredAttempt = struct {
     host: *Host,
     owner: AttemptOwner,
     request_id: protocol.Bounded(256),
+    // Transient copy survives Transfer cleanup through validation/settlement.
+    timing: provider.AttemptTiming,
 
     fn init(host: *Host, owner: AttemptOwner, transfer: *const provider.Transfer) AnsweredAttempt {
         var request_id: protocol.Bounded(256) = .{};
         request_id.set(transfer.requestId()) catch unreachable;
-        return .{ .host = host, .owner = owner, .request_id = request_id };
+        return .{ .host = host, .owner = owner, .request_id = request_id, .timing = transfer.timing };
     }
 
     /// `report` is the provider's own words for the failure; empty when it
     /// sent none.
     fn fail(self: *const AnsweredAttempt, code: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
-        settleFailure(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
+        settleFailureTimed(self.host, self.owner.token, self.owner.binding, .{ .correlated = .{
             .code = code,
             .request_id = self.request_id,
             .report = report,
-        } }, disposition);
+        } }, disposition, modelTimings(&self.timing, self.host.io));
     }
 
     fn reject(self: *const AnsweredAttempt, code: []const u8, diagnostic: []const u8, report: []const u8, disposition: store_module.ModelFailureClass) void {
-        settleFailure(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic, report), disposition);
+        settleFailureTimed(self.host, self.owner.token, self.owner.binding, self.rejection(code, diagnostic, report), disposition, modelTimings(&self.timing, self.host.io));
     }
 
     /// For a settlement whose terminal delivery is already claimed.
@@ -2614,18 +2620,28 @@ fn settleUnansweredFailure(
     code: []const u8,
     disposition: store_module.ModelFailureClass,
 ) void {
-    settleFailure(host, token, binding, .{ .uncorrelated = code }, disposition);
+    settleFailureTimed(host, token, binding, .{ .uncorrelated = code }, disposition, .{});
 }
 
-fn settleFailure(
+/// Snapshot at resolution, after interpretation/validation, on the same awake
+/// clock as the transport handoff and response callback.
+fn modelTimings(timing: *const provider.AttemptTiming, io: std.Io) store_module.ModelTimings {
+    return .{
+        .latency_ms = timing.elapsedMs(std.Io.Clock.awake.now(io)),
+        .first_event_ms = timing.firstEventMs(),
+    };
+}
+
+fn settleFailureTimed(
     host: *Host,
     token: execution.CustodyToken,
     binding: store_module.AttemptBinding,
     failure: store_module.ModelFailure,
     disposition: store_module.ModelFailureClass,
+    timings: store_module.ModelTimings,
 ) void {
     if (!host.custody.claimTerminalDelivery(token)) return;
-    host.store.settleModelAttemptFailure(binding, failure, disposition, host.hooks.storeFaults(.model_failure)) catch |err| if (err != error.SupersededByControl)
+    host.store.settleModelAttemptFailureTimed(binding, failure, disposition, timings, host.hooks.storeFaults(.model_failure)) catch |err| if (err != error.SupersededByControl)
         fenceDispatch(host, "model failure save", err);
 }
 
@@ -4368,4 +4384,39 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
     }
     try std.testing.expect(fail_index > 2);
     try std.testing.expect((try storage.readSkills(memory.allocator(), session.slice())).catalog.entries.len != entries.len);
+}
+
+test "model timings snapshot at resolution survives response cleanup and stays nullable before any event" {
+    const Clock = struct {
+        milliseconds: i64,
+
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            std.debug.assert(clock == .awake);
+            const self: *@This() = @ptrCast(@alignCast(userdata.?));
+            return .fromNanoseconds(@as(i96, self.milliseconds) * std.time.ns_per_ms);
+        }
+    };
+    var clock: Clock = .{ .milliseconds = 100 };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    const io: std.Io = .{ .userdata = &clock, .vtable = &vtable };
+    var timing: provider.AttemptTiming = .{};
+    try std.testing.expectEqual(store_module.ModelTimings{}, modelTimings(&timing, io));
+    timing.begin(std.Io.Clock.awake.now(io));
+    clock.milliseconds = 105;
+    timing.responseEvent(std.Io.Clock.awake.now(io));
+    var transfer: provider.Transfer = undefined;
+    transfer.headers = .{};
+    transfer.timing = timing;
+    var host: Host = undefined;
+    const answered = AnsweredAttempt.init(&host, .{}, &transfer);
+    // Response interpretation disposes the Transfer before validation. Its
+    // transient snapshot must still measure until resolution, not stop here.
+    transfer = undefined;
+    clock.milliseconds = 123;
+    try std.testing.expectEqual(store_module.ModelTimings{ .latency_ms = 23, .first_event_ms = 5 }, modelTimings(&answered.timing, io));
+    // A failed final retry before its first response cannot inherit the event.
+    timing.begin(std.Io.Clock.awake.now(io));
+    clock.milliseconds = 142;
+    try std.testing.expectEqual(store_module.ModelTimings{ .latency_ms = 19 }, modelTimings(&timing, io));
 }

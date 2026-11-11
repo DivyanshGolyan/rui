@@ -19,7 +19,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 61;
+pub const schema_version: u32 = 62;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -47,6 +47,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 59, .digest = 0xa3ebc37622ed945b },
     .{ .schema_version = 60, .digest = 0x6b696b3423202987 },
     .{ .schema_version = 61, .digest = 0xec460e03aa080495 },
+    .{ .schema_version = 62, .digest = 0x5337d98342a32362 },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -349,6 +350,16 @@ pub const migrations = [_]Migration{
             "ALTER TABLE model_tool_call DROP CHECK model_tool_call_chk_3, ADD CHECK(description IS NULL OR OCTET_LENGTH(description) BETWEEN 1 AND 200)",
         },
     },
+    .{
+        .from = 61,
+        .sqlite = &.{
+            "ALTER TABLE model_operation ADD COLUMN latency_ms INTEGER CHECK(latency_ms IS NULL OR latency_ms>=0)",
+            "ALTER TABLE model_operation ADD COLUMN first_event_ms INTEGER CHECK(first_event_ms IS NULL OR first_event_ms>=0)",
+        },
+        .mysql = &.{
+            "ALTER TABLE model_operation ADD COLUMN latency_ms BIGINT CHECK(latency_ms IS NULL OR latency_ms>=0) AFTER history_dropped, ADD COLUMN first_event_ms BIGINT CHECK(first_event_ms IS NULL OR first_event_ms>=0) AFTER latency_ms",
+        },
+    },
 };
 
 comptime {
@@ -490,6 +501,10 @@ pub const Column = struct {
     /// of its columns, and leaves this `.recipient`.
     read_by: ReadBy = .recipient,
     engines: Engines = .all,
+    /// SQLite ADD COLUMN appends ", " rather than a new line. Keep its
+    /// exact stored CREATE text on bootstrap too, so admission still checks
+    /// byte-for-byte equality after an additive migration.
+    sqlite_added: bool = false,
 };
 
 /// The engines a table or column exists on. Each engine's DDL, catalog
@@ -1068,6 +1083,9 @@ pub const tables = [_]Table{
             // or the compaction before it; the feed's `compacted` row shows
             // it, and zero for a compaction without a floor.
             .{ .name = "history_dropped", .type = .int, .nullable = true, .check = "history_dropped IS NULL OR history_dropped>=0" },
+            // Durations on the final attempt only; old Operations keep null.
+            .{ .name = "latency_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "latency_ms IS NULL OR latency_ms>=0" },
+            .{ .name = "first_event_ms", .type = .int, .nullable = true, .sqlite_added = true, .check = "first_event_ms IS NULL OR first_event_ms>=0" },
         },
         .primary_key = &.{"operation_id"},
         .uniques = &.{&.{ "operation_id", "session_ref" }},
@@ -2057,7 +2075,12 @@ const bootstrap_sql = [_][:0]const u8{ ddl(.sqlite), identity_sql, version_sql, 
 fn createTable(comptime table: Table) []const u8 {
     if (!table.engines.on(.sqlite)) @compileError("schema: " ++ table.name ++ " is not on SQLite");
     var lines: []const []const u8 = &.{};
-    for (table.columns) |column| lines = lines ++ .{columnDefinition(table, column)};
+    for (table.columns) |column| {
+        if (column.sqlite_added) {
+            if (lines.len == 0) @compileError("schema: an added column must follow an existing column");
+            lines = lines[0 .. lines.len - 1] ++ .{lines[lines.len - 1] ++ "," ++ columnDefinition(table, column)};
+        } else lines = lines ++ .{columnDefinition(table, column)};
+    }
     if (table.primary_key.len > 1) lines = lines ++ .{" PRIMARY KEY(" ++ list(table.primary_key) ++ ")"};
     for (table.uniques) |unique| {
         if (unique.len > 1) lines = lines ++ .{" UNIQUE(" ++ list(unique) ++ ")"};
@@ -2754,6 +2777,33 @@ test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes"
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
     // The widened lines and canonical table/index shapes survive reopening.
     try openExisting(std.testing.io, database, root, null);
+}
+
+test "model call timing migration preserves old resolutions with null final attempt timings" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [store_path.max_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var path_buffer: [store_path.max_bytes + 32]u8 = undefined;
+    const path = try std.fmt.bufPrintSentinel(&path_buffer, "{s}/store.sqlite3", .{root}, 0);
+    var raw: ?*c.sqlite3 = null;
+    defer _ = c.sqlite3_close(raw);
+    try std.testing.expectEqual(c.SQLITE_OK, c.sqlite3_open(path, &raw));
+    const database = raw.?;
+    try sqlite.exec(database, @embedFile("migration_baseline.sqlite.sql"));
+    try sqlite.exec(database, "PRAGMA foreign_keys=OFF;PRAGMA legacy_alter_table=ON");
+    try sqlite.exec(database, @embedFile("migration_baseline_rows.sql"));
+    for (migrations[0 .. migrations.len - 1]) |step| {
+        for (step.sqlite) |statement| try sqlite.exec(database, statement);
+    }
+    try sqlite.exec(database, "CREATE TEMP TABLE old_model_resolutions AS SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation");
+    try std.testing.expect((try sqlite.pragmaInt(database, "SELECT count(*) FROM old_model_resolutions")) > 0);
+    for (migrations[migrations.len - 1].sqlite) |statement| try sqlite.exec(database, statement);
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM model_operation WHERE latency_ms IS NOT NULL OR first_event_ms IS NOT NULL"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM old_model_resolutions EXCEPT SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation EXCEPT SELECT * FROM old_model_resolutions)"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET latency_ms=-1"));
+    try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE model_operation SET first_event_ms=-1"));
 }
 
 test "MySQL index hints require a named real-column index on that engine" {

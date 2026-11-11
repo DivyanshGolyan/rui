@@ -570,6 +570,37 @@ test "a MySQL Store at the migration baseline with its rows takes every migratio
     writeRecord();
 }
 
+test "model call timing MySQL migration preserves old resolutions with null final attempt timings" {
+    const io = std.testing.io;
+    mutex.lockUncancelable(io);
+    defer mutex.unlock(io);
+    _ = connection() orelse return if (state == .absent) error.SkipZigTest else error.MysqlUnavailable;
+    defer restore("USE " ++ database);
+    try setup("DROP DATABASE IF EXISTS " ++ migrated_database ++ ";CREATE DATABASE " ++ migrated_database);
+    try load(migrated_database, store_testing.baseline_mysql_ddl, false);
+    try load(migrated_database, store_testing.baseline_rows, true);
+    inline for (schema.migrations[0 .. schema.migrations.len - 1]) |step| {
+        try load(migrated_database, schema.mysqlMigration(step.from), false);
+    }
+    const facts = "SELECT operation_id,attempt_ordinal,resolution_code,resolved_at FROM model_operation ORDER BY operation_id";
+    var before: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer before.deinit();
+    try writeResult(facts, &before.writer);
+    try std.testing.expect(before.written().len > 0);
+    try load(migrated_database, schema.mysqlMigration(schema.migrations[schema.migrations.len - 1].from), false);
+    var after: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer after.deinit();
+    try writeResult(facts, &after.writer);
+    try std.testing.expectEqualStrings(before.written(), after.written());
+    var timings: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer timings.deinit();
+    try writeResult("SELECT count(*) FROM model_operation WHERE latency_ms IS NOT NULL OR first_event_ms IS NOT NULL", &timings.writer);
+    try std.testing.expectEqualStrings("\n 1:0", timings.written());
+    try expectCatalog(migrated_database);
+    done.migrations += 1;
+    writeRecord();
+}
+
 test "schema 55 migrates recovery index and wire 8 together to the current schema and wire" {
     const io = std.testing.io;
     mutex.lockUncancelable(io);

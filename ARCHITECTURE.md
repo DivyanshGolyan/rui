@@ -3234,7 +3234,7 @@ Permission preparation consumes the same normal Activity scan before showing the
 Current's active attention and history-independent query contract remain unchanged.
 This projection has fixed resident storage, not history-independent query cost.
 
-`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`, `session_changed`; and decimal-string `limit`, from 1 to 16.
+`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`, `session_changed`, `compacted`, `model_call`; and decimal-string `limit`, from 1 to 16.
 The cursor may name a row of any kind; the page lists only the asked kinds, and each row source is gated by the kinds before it reads, so a kind not asked for costs no read unless it shares a source with an asked one: `user` and `assistant` share the Conversation entries, and a `received`-only page passes over the person's admissions.
 A person's Messages alone are one seek in the index of Messages without a Session sender, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
@@ -3247,11 +3247,18 @@ A Session's own `turn_ended` row likewise carries its own `session`; forwarding 
 A `session_changed` row (D138, D218) is one setting a later revision changed, carrying `revision` and `field` (a configuration member's name: `provider`, `model`, `instructions`, `tools`, `permission_mode`, `output_schema`, `compaction_trigger`, `output_reservation`, `reasoning_effort` or `label`).
 The revision's commit writes them to `session_change` at a position taken when it is accepted, never edited; the revision keeps the current values, and a creation and a revision that changes nothing have none.
 A `compacted` row (D217) is a compaction that succeeded, at its compaction item's position (taken at settlement, so no earlier page gains it), carrying `operation` and `dropped`: how many conversation entries its floor left out beyond the one before it, zero for a compaction that made no room.
+A `model_call` row (D179, D219) is one resolved model Operation, including failures and compactions, at its admission position with ordinal zero, dated by resolution.
+It derives `model` from the Operation's immutable settings revision; `served_model` from stored model evidence (body first, then OpenAI header, then alternate header), never from the requested model; `input_tokens` from uncached plus cache-read plus cache-write tokens; `cached_tokens` from cache-read tokens; `output_tokens` from output usage; `status` from the resolution code; and `attempts` from the final attempt ordinal.
+Missing served-model evidence, usage and timings are null, not zero.
+Both timings describe the FINAL attempt only: `latency_ms` is request sent to resolution, and `first_event_ms` is request sent to the first HTTP response event (including an interim head), not the first token; a resolution before any such event leaves it null.
+No per-attempt history is stored; schema 62 adds two nullable nonnegative integer duration columns to `model_operation` on both engines without backfill.
+D219 explicitly excepts these derived rows from fixed-prefix stability: resolution may reveal a `model_call` within an earlier captured end, at its original admission position, never relocated to settlement.
+A forward follower already past that position does not replay it automatically; reread the earlier range to observe it.
 A nonnull ordinal identifies an actual row in this Session and end.
 Continue from the last returned row with that ordinal and the same end/direction.
 Null ordinal denotes a sequence boundary, excluding all rows at position; position zero starts either traversal.
 Forward catch-up captures a fresh end from the preceding end with null ordinal, so group ties are not replayed.
-Later appends and group completion cannot backfill an earlier prefix.
+Apart from D219 model-call resolution above, later appends and group completion cannot backfill an earlier prefix.
 Query work may grow with history; item bounds do not promise traversal latency.
 
 `POST /v1/activity-search` takes `kind:"activity_search"`, `session`, `query`, `kinds`, nullable decimal-string `before_position` and `before_ordinal`, and decimal-string `limit` with the Activity page's kind and limit rules.

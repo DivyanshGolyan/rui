@@ -163,8 +163,9 @@ pub const ActivityPage = struct {
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
+        const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -254,6 +255,20 @@ pub const ActivityPage = struct {
                 },
                 .session_changed => |change| fact.value = .{ .session_changed = .{ .revision = try id(change.revision, false), .field = change.field } },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
+                .model_call => |call| {
+                    if (call.model.slice().len == 0 or call.status.slice().len == 0 or (call.served_model != null and call.served_model.?.slice().len == 0)) return error.InvalidActivityPage;
+                    fact.value = .{ .model_call = .{
+                        .model = call.model.value,
+                        .served_model = if (call.served_model) |model| model.value else null,
+                        .input_tokens = if (call.input_tokens) |count| try decimalId(count, true) else null,
+                        .output_tokens = if (call.output_tokens) |count| try decimalId(count, true) else null,
+                        .cached_tokens = if (call.cached_tokens) |count| try decimalId(count, true) else null,
+                        .latency_ms = if (call.latency_ms) |count| try id(count, true) else null,
+                        .first_event_ms = if (call.first_event_ms) |count| try id(count, true) else null,
+                        .status = call.status.value,
+                        .attempts = try id(call.attempts, false),
+                    } };
+                },
                 .send_failed => |failed| {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = if (failed.target) |peer| try peer.peer() else null, .code = failed.code.value } };

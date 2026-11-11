@@ -6466,13 +6466,15 @@ test "persisted tool label corruption fences every publication route" {
     }
 }
 
-test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
+test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
     // Each Store holds `history` earlier units, a Message, its call item, the
     // call's rejection and its Turn's outcome, then the same Session tail: a
     // Message, twenty rejected calls and a stop. The opening's page and a
-    // forward page from the tail's first row read only the tail.
+    // forward page from the tail's first row read only the tail. At least
+    // 17 history units saturate every source's bounded lookahead, including
+    // model_call rows at admissions, before comparing exact VM steps.
     var steps: [2][2]i64 = undefined;
-    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+    for ([_]usize{ 32, 10_000 }, &steps) |history, *cost| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;

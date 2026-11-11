@@ -47,6 +47,13 @@ const context_changed = model_admission_domain.context_changed;
 /// once, dated by the Access.
 pub const operation_resolved_now_sql = "resolved_at=@now,attempt_at=NULL,retry_scheduled_at=NULL";
 
+/// Durations of the final Attempt only, measured on the awake monotonic clock.
+/// A missing send or response event remains NULL, never a fabricated zero.
+pub const ModelTimings = struct {
+    latency_ms: ?u64 = null,
+    first_event_ms: ?u64 = null,
+};
+
 pub const ModelFailureClass = union(enum) {
     ordinary,
     context_overflow,
@@ -121,6 +128,7 @@ const OutputMetadataRecord = output_format.OutputMetadataRecord;
 const OutputMetadataReader = output_format.OutputMetadataReader;
 
 pub const ValidatedOutput = struct {
+    timings: ModelTimings = .{},
     source: std.Io.File,
     source_length: u64,
     metadata: std.Io.File,
@@ -328,9 +336,9 @@ pub fn claimModelAuthRefresh(a: anytype, binding: AttemptBinding) !bool {
 /// saved one.
 const resolve_failure = rsql.Write(.{
     .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
-        "last_failure_code=coalesce(?5,last_failure_code)," ++ operation_resolved_now_sql ++ " " ++
+        "last_failure_code=coalesce(?5,last_failure_code),latency_ms=?8,first_event_ms=?9," ++ operation_resolved_now_sql ++ " " ++
         "WHERE operation_id=?1 AND session_ref=@session(?7) AND resolution_code IS NULL AND attempt_ordinal=?6",
-    .Args = struct { operation_id: u64, resolution: []const u8, content_id: ?u64, request_id: ?[]const u8, last_failure_code: ?[]const u8, attempt_ordinal: u64, session: rsql.SessionHead },
+    .Args = struct { operation_id: u64, resolution: []const u8, content_id: ?u64, request_id: ?[]const u8, last_failure_code: ?[]const u8, attempt_ordinal: u64, session: rsql.SessionHead, latency_ms: ?u64, first_event_ms: ?u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
@@ -394,6 +402,7 @@ pub fn settleModelAttemptFailure(
     binding: AttemptBinding,
     failure: ModelFailure,
     disposition: ModelFailureClass,
+    timings: ModelTimings,
     faults: Faults,
 ) !void {
     const code = failure.code();
@@ -434,6 +443,8 @@ pub fn settleModelAttemptFailure(
                 .content_id = diagnostic_id,
                 .request_id = optionalText(failure.requestId()),
                 .last_failure_code = if (disposition == .context_overflow) code else null,
+                .latency_ms = timings.latency_ms,
+                .first_event_ms = timings.first_event_ms,
                 .attempt_ordinal = binding.attempt_ordinal,
                 .session = session,
             });
@@ -480,6 +491,8 @@ pub fn settleModelAttemptFailure(
                     // The settling Attempt's correlation, like a terminal failure.
                     .request_id = optionalText(failure.requestId()),
                     .last_failure_code = code,
+                    .latency_ms = timings.latency_ms,
+                    .first_event_ms = timings.first_event_ms,
                     .attempt_ordinal = binding.attempt_ordinal,
                     .session = session,
                 });
@@ -800,7 +813,7 @@ const insert_action = rsql.Write(.{
 /// Resolves the settling Attempt with its output.
 const resolve_success = rsql.Write(.{
     .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,usage_content_id=?7,output_item_count=?8," ++
-        "usage_uncached_tokens=?9,usage_cache_read_tokens=?10,usage_cache_write_tokens=?11,usage_output_tokens=?12," ++ operation_resolved_now_sql ++ " " ++
+        "usage_uncached_tokens=?9,usage_cache_read_tokens=?10,usage_cache_write_tokens=?11,usage_output_tokens=?12,latency_ms=?15,first_event_ms=?16," ++ operation_resolved_now_sql ++ " " ++
         "WHERE operation_id=?1 AND session_ref=@session(?14) AND resolution_code IS NULL AND attempt_ordinal=?13",
     .Args = struct {
         operation_id: u64,
@@ -817,6 +830,8 @@ const resolve_success = rsql.Write(.{
         output: ?u64,
         attempt_ordinal: u64,
         session: rsql.SessionHead,
+        latency_ms: ?u64,
+        first_event_ms: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
@@ -1351,6 +1366,8 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .cache_read = if (usage) |counts| counts.cache_read else null,
         .cache_write = if (usage) |counts| counts.cache_write else null,
         .output = if (usage) |counts| counts.output else null,
+        .latency_ms = output.timings.latency_ms,
+        .first_event_ms = output.timings.first_event_ms,
         .attempt_ordinal = binding.attempt_ordinal,
         .session = row.session,
     });

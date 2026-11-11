@@ -100,6 +100,21 @@ function narrowed(entry: FeedEntry): void {
 			void dropped;
 			break;
 		}
+		case "model_call": {
+			const model: string = entry.model;
+			const served: string | null = entry.servedModel;
+			const input: string | null = entry.inputTokens;
+			const output: string | null = entry.outputTokens;
+			const cached: string | null = entry.cachedTokens;
+			const latency: string | null = entry.latencyMs;
+			const first: string | null = entry.firstEventMs;
+			const status: string = entry.status;
+			const attempts: string = entry.attempts;
+			// @ts-expect-error Model calls do not expose message text.
+			void entry.text;
+			void [model, served, input, output, cached, latency, first, status, attempts];
+			break;
+		}
 		default: {
 			const exhaustive: never = entry;
 			void exhaustive;
