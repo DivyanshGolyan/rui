@@ -2275,8 +2275,12 @@ def cmd_frames(args):
                 frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
             except (Exception, SystemExit) as error:
                 reason = str(error)
-                failed = True
-                print(f"verify-rui: {state['name']}: {reason}", file=sys.stderr)
+                if state["name"] in selected:
+                    failed = True
+                    print(f"verify-rui: {state['name']}: {reason}", file=sys.stderr)
+                else:
+                    print(f"verify-rui: warning: {state['name']}: {reason} "
+                          "(not selected; its failure does not fail this run)", file=sys.stderr)
                 if opened and state["name"] in selected:
                     try:
                         failure_capture = frame_capture(run, target, out, state, state_sizes[0], reason)

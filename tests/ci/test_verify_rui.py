@@ -394,7 +394,7 @@ class FramesTest(unittest.TestCase):
                 command(args)
             self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
 
-    def run_frames_scenario(self, scenario, sizes=None, capture_ok=True):
+    def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None):
         """Run the real loader/orchestrator with an inert OS and capture adapter."""
         command = self.helper["cmd_frames"]
         calls = []
@@ -407,7 +407,7 @@ class FramesTest(unittest.TestCase):
                                         sock=root / "tmux.sock", meta={"sha": "a" * 40},
                                         env=lambda **extra: extra, own=lambda *_args, **_kw: None)
             run.tmux = lambda *argv, **_kw: (calls.append(argv) or types.SimpleNamespace(returncode=0, stdout="999\n", stderr=""))
-            args = types.SimpleNamespace(sha="a" * 40, scenario=str(source), only=None, sizes=sizes,
+            args = types.SimpleNamespace(sha="a" * 40, scenario=str(source), only=only, sizes=sizes,
                                          out=str(root / "out"), no_png=True, keep=False)
 
             def capture(_run, _target, _out, state, size, reason):
@@ -416,9 +416,14 @@ class FramesTest(unittest.TestCase):
                         "ok": capture_ok, "status": "ok" if capture_ok else "failed", "note": "",
                         "reason": reason if capture_ok else "state left before capture: Working"}
 
+            def steps(_run, target, _steps, **_kwargs):
+                calls.append(("steps",))
+                if target == f"=frames:={failing_state}":
+                    raise self.helper["FrameFailure"]("fixture state failed")
+
             replacements = {"Run": lambda _path: run, "cmd_new": lambda _args: print(root),
                             "cmd_cleanup": lambda _args: None, "frame_wait": lambda *_args, **_kw: None,
-                            "frame_steps": lambda *_args, **_kw: calls.append(("steps",)), "frame_capture": capture}
+                            "frame_steps": steps, "frame_capture": capture}
             with patch.dict(command.__globals__, replacements), patch("shutil.which", return_value="/bin/tmux"), \
                     patch("time.sleep", side_effect=lambda seconds: calls.append(("sleep", seconds))), \
                     contextlib.redirect_stdout(io.StringIO()):
@@ -456,6 +461,25 @@ class FramesTest(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as result:
             self.run_frames_scenario(scenario, capture_ok=False)
         self.assertEqual(result.exception.code, 1)
+
+    def test_only_warns_for_failed_unselected_predecessor_and_records_selected_states(self):
+        scenario = {"sizes": ["100x30"], "states": [
+            {"name": "earlier", "open": "overview", "steps": []},
+            {"name": "selected", "open": "overview", "steps": []},
+        ]}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            calls, records = self.run_frames_scenario(scenario, only="selected", failing_state="earlier")
+        self.assertIn("warning: earlier: fixture state failed", err.getvalue())
+        self.assertIn("not selected; its failure does not fail this run", err.getvalue())
+        self.assertEqual([r["name"] for r in records], ["selected"])
+        self.assertTrue(records[0]["ok"])
+        self.assertEqual(calls.count(("steps",)), 2)  # Still drive the predecessor for side effects.
+        for only in (None, "earlier,selected", "earlier"):
+            with self.subTest(only=only), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as result:
+                self.run_frames_scenario(scenario, only=only, failing_state="earlier")
+            self.assertEqual(result.exception.code, 1)
 
     def test_expectation_defaults_to_last_wait_without_a_later_action(self):
         policy = self.helper["frame_expectations"]
