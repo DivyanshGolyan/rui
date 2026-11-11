@@ -231,6 +231,8 @@ pub const Job = struct {
     recall: ?Input.Step = null,
     /// Frozen live fact for scans; fills neither read nor publish it.
     latest_ending: ?LatestEnding = null,
+    /// Retry request: newest person Message strictly before this ending.
+    retry: ?Key = null,
     queued_line: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -296,8 +298,85 @@ pub const Job = struct {
         recalled: ?Input.Found = null,
         // The step passed over a sent Message the draft cannot hold.
         recall_passed: bool = false,
+        retry: ?Retry = null,
     } = .{},
 
+    /// Call only after a successful reader join. Scratch is borrowed until the
+    /// next reader starts; consume/copy the exact range before reusing it.
+    pub fn retryCompletion(self: *const Job, latest: ?LatestEnding) RetryCompletion {
+        const key = self.retry.?;
+        if (latest == null or !latest.?.matches(key)) return .stale;
+        return switch (self.result.retry.?) {
+            .message => |message| .{ .message = message },
+            .failure => |failure| .{ .failure = failure },
+        };
+    }
+};
+
+pub const RetryFailure = enum { no_message, too_large, incomplete, unavailable };
+pub const RetryMessage = struct { ending: Key, position: u64, length: usize };
+const Retry = union(enum) { message: RetryMessage, failure: RetryFailure };
+pub const RetryCompletion = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
+
+/// Runs on ClientTask, never on the key path. No fallback to an older Message:
+/// failure of the one newest admission fails the request. Transport, canonical
+/// Store, cancellation and local I/O failures retain ClientTask's error boundary.
+pub fn retry(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const key = job.retry.?;
+    const requests = task.requests();
+    try job.files.scratch.setLength(task.io, 0);
+    const page = switch (try requests.activityPage(job.store, job.session, .{
+        .end = key.position,
+        .position = key.position,
+        .ordinal = key.ordinal,
+        .direction = .backward,
+        .kinds = .initOne(.admission),
+        .limit = 1,
+    })) {
+        .page => |page| page,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    job.result.retry = .{ .failure = .no_message };
+    if (page.facts.count == 0) return;
+    const item = page.facts.items[0];
+    const content = item.value.admission.content;
+    if (content.length > Input.capacity) {
+        job.result.retry = .{ .failure = .too_large };
+        return;
+    }
+    var staging: RetryStaging = .{ .io = task.io, .file = job.files.scratch, .length = content.length };
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
+    const failed = requests.readActivityContent(job.store, job.session, item.position, item.ordinal, reference, &staging) catch |err| switch (err) {
+        error.ContentLengthMismatch, error.ContentBindingMismatch, error.InvalidResponse, error.TruncatedResponse => {
+            job.result.retry = .{ .failure = .incomplete };
+            return;
+        },
+        else => return err,
+    };
+    if (failed) |failure| {
+        if (failure.err() == error.CanonicalStoreFailure) return requests.failRead(failure);
+        job.result.retry = .{ .failure = .unavailable };
+        return;
+    }
+    if (staging.offset != content.length) {
+        job.result.retry = .{ .failure = .incomplete };
+        return;
+    }
+    job.result.retry = .{ .message = .{ .ending = key, .position = item.position, .length = @intCast(staging.offset) } };
+}
+
+const RetryStaging = struct {
+    io: std.Io,
+    file: std.Io.File,
+    length: u64,
+    offset: u64 = 0,
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        if (bytes.len > self.length - self.offset) return error.ContentLengthMismatch;
+        try self.file.writePositionalAll(self.io, bytes, self.offset);
+        self.offset += bytes.len;
+    }
 };
 
 /// One step over the Messages the person sent, from the one the draft
@@ -1884,4 +1963,85 @@ test "session_reads opening finds own newest ending outside resident rows and ac
     try std.testing.expectEqual(@as(usize, 4), host.pages);
     try std.testing.expectEqual(@as(usize, 0), host.contents);
     try std.testing.expectEqual(@as(usize, 0), job.result.row_count);
+}
+
+test "session_reads retry stages exact multi-window bytes before its ending and rejects stale completion" {
+    const text = try std.testing.allocator.alloc(u8, 3 * protocol.content_window_bytes + 7);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'a');
+    // A scalar crosses a content window; no escaping, normalization or trimming.
+    @memcpy(text[protocol.content_window_bytes - 1 ..][0.."💚é\n\t /".len], "💚é\n\t /");
+    text[0] = '/';
+    var message = FakeHost.message(1).admission;
+    message.content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
+    const tail = [_]FakeHost.Tail{
+        .{ .value = FakeHost.message(1) },
+        .{ .value = .{ .admission = message } },
+        .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+        .{ .value = FakeHost.message(4) }, // Newer than the requested ending: not eligible.
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &.{ FakeHost.text, text, "", "wrong" } };
+    var job: Job = .{ .retry = .{ .position = 3 } };
+    // FakeHost's scan capture is bounded; the large scratch is checked within
+    // its lifetime instead, after the production Task's real join.
+    const Read = struct {
+        job: *Job,
+        expected: []const u8,
+        fn run(action: *@This(), _: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const file = try dir.createFile(io, "retry", .{ .read = true });
+            defer file.close(io);
+            action.job.store = root;
+            action.job.session = "k7m2qx";
+            action.job.files = .{ .scratch = file, .inspection = file, .action = file, .status = file, .actions = .{ file, file } };
+            var task: Task = .{};
+            try task.start(io, action.job, retry);
+            try task.join();
+            const latest: LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("provider_http_500") };
+            const completion = action.job.retryCompletion(latest);
+            try std.testing.expectEqual(@as(u64, 2), completion.message.position);
+            try std.testing.expectEqualDeep(latest.key, completion.message.ending);
+            try std.testing.expectEqual(action.expected.len, completion.message.length);
+            const bytes = try std.testing.allocator.alloc(u8, action.expected.len);
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqual(bytes.len, try file.readPositionalAll(io, bytes, 0));
+            try std.testing.expectEqualStrings(action.expected, bytes);
+            for ([_]?LatestEnding{ null, .{ .key = .{ .position = 4 }, .cause = latest.cause }, .{ .key = .{ .position = 3, .ordinal = 1 }, .cause = latest.cause } }) |changed|
+                try std.testing.expect(action.job.retryCompletion(changed) == .stale);
+        }
+    };
+    var read: Read = .{ .job = &job, .expected = text };
+    try host.withHost(&read);
+    try std.testing.expectEqual(@as(usize, 1), host.pages);
+    try std.testing.expectEqual(@as(usize, 1), host.contents);
+}
+
+test "session_reads retry fails on newest unreadable Message without falling back" {
+    for ([_]enum { absent, too_large, refused, short, digest }{ .absent, .too_large, .refused, .short, .digest }) |case| {
+        var message = FakeHost.message(2).admission;
+        switch (case) {
+            .too_large => message.content.length = Input.capacity + 1,
+            .short => message.content.length += 1,
+            .digest => message.content.digest = @splat(0),
+            else => {},
+        }
+        const tail = [_]FakeHost.Tail{
+            .{ .value = FakeHost.message(1) },
+            .{ .value = .{ .admission = message } },
+            .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+        };
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .refuse_content = case == .refused };
+        var job: Job = .{ .retry = .{ .position = if (case == .absent) 1 else 3 } };
+        try host.readWith(&job, retry);
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        const expected: RetryFailure = switch (case) {
+            .absent => .no_message,
+            .too_large => .too_large,
+            .refused => .unavailable,
+            .short, .digest => .incomplete,
+        };
+        try std.testing.expectEqual(expected, job.retryCompletion(latest).failure);
+        try std.testing.expectEqual(@as(usize, 1), host.pages);
+        try std.testing.expectEqual(@as(usize, if (case == .absent or case == .too_large) 0 else 1), host.contents);
+    }
 }
