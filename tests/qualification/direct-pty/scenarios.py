@@ -220,6 +220,25 @@ def assert_navigation_history(screen, first, browsing):
         ("navigation marker row", lines[marked[0]], lines[marked[0] - 1], expected[-1])
 
 
+def status_work(tty, session, path_length):
+    tty.marker(" Status · ")
+    tty.marker(f" · {session}")
+    tty.marker("Permissions     ")
+    # Fourteen settings, two group headings, title and Work. Allow two
+    # wrapped rows per ordinary setting and both fixture paths at half-width
+    # (40 columns) to cover hanging indentation/word wrapping at 80 columns.
+    # PgDn moves half the 18-row inspection pane, so this is a document-row
+    # bound, not a retry timeout. Long HOME/Store paths need not fit at once.
+    max_rows = 14 * 2 + 2 + 1 + 1 + 2 * ((path_length + 39) // 40)
+    for _ in range((max_rows + 8) // 9):
+        if tty.screen.reached(" Work"):
+            break
+        generation = tty.screen.generation
+        tty.send(b"\x1b[6~")
+        tty.wait(lambda: True, label="status inspection page movement", after=generation)
+    assert tty.screen.reached(" Work"), ("status Work within bounded page", tty.screen.completed)
+
+
 def navigation(fixture, row):
     # A real completed answer supplies enough history for page and wheel input
     # to move the viewport; an empty Session cannot distinguish ignored keys.
@@ -249,10 +268,7 @@ def navigation(fixture, row):
     generation = tty.screen.generation
     chunks(tty, row["chunks"])
     if row.get("status"):
-        tty.marker(" Status · ")
-        tty.marker(f" · {fixture.session}")
-        tty.marker(" Work")
-        tty.marker("Permissions     ")
+        status_work(tty, fixture.session, max(len(str(fixture.root)), len(str(fixture.store))))
     else:
         tty.wait(scrolled_back, label="navigation moved feed anchor", after=generation)
         history(row["first_history"], True)
