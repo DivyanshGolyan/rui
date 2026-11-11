@@ -3080,7 +3080,7 @@ test "command observation full and both unchanged tiers render byte exactly with
     try std.testing.expectEqual(protocol.shapeBytes(protocol.command_observation_reply.absent), host_reply.commandObservationBytes(&observed));
 }
 
-test "Message observation work and recovery fit the unchanged resident response bound" {
+test "Message observation work and recovery fit their exchange-owned response bound" {
     const max = std.math.maxInt(u64);
     const escaped_key = @as([protocol.max_key_bytes]u8, @splat(1));
     const escaped_session = @as([protocol.max_session_bytes]u8, @splat(1));
@@ -3100,9 +3100,25 @@ test "Message observation work and recovery fit the unchanged resident response 
     var response: protocol.CommandObservationBuffer = .{};
     try response.render(host_reply.renderFullCommandObservation, .{ &escaped_key, &observation, &@as([change_ring.SessionToken.max_bytes]u8, @splat(1)) });
     try std.testing.expectEqual(protocol.command_observation_reply.maxBytes(.message) - protocol.shapeBytes(protocol.command_observation_reply.code), response.len);
-    // The existing response owner is sized by host-info's escaped Store path,
-    // not these added per-observation facts; no resident pool grows.
-    try std.testing.expectEqual(protocol.max_host_info_response_bytes, protocol.max_response_bytes);
+    // Observations use their exchange-owned writer, not ResponseBuffer.
+    // Neither host-info nor mutation diagnostics determine this bound.
+}
+
+test "MCP rejection diagnostics fit the protocol-owned response bound" {
+    // The resident owner must cover the complete string hole, not just the
+    // shorter semantic advisory emitted for valid tool/server names.
+    try std.testing.expect(protocol.configuration_reply.max_bytes <= protocol.max_response_bytes);
+    try std.testing.expect(protocol.message_reply.max_bytes <= protocol.max_response_bytes);
+    var catalog = tools.built_in;
+    catalog.configured_servers = &.{"notes"};
+    var response: protocol.ResponseBuffer = .{};
+    try response.render(host_reply.renderMessageReply, .{ "", store_module.MessageReply{ .rejected = .{
+        .replayed = false,
+        .code = .mcp_server_unavailable,
+        .message = catalog.missingTool("lookup"),
+        .content = .{ .length = 4, .digest = protocol.contentDigest("task") },
+    } } });
+    try std.testing.expect(std.mem.indexOf(u8, response.slice(), "MCP server notes is unavailable and may provide it") != null);
 }
 
 test "control response variants fit exact worst-case JSON bounds" {
