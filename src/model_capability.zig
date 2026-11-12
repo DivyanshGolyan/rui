@@ -205,6 +205,7 @@ test "every built-in provider is selectable by its label, and two ready ones ask
     try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(&both, null, null, null, null));
     try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&both, "openai", null, null, null)).selected.provider);
     readiness.set(.codex, .missing);
+    readiness.set(.chatgpt, .missing);
     const one = capabilities(&readiness);
     try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&one, null, null, null, null)).selected.provider);
 }

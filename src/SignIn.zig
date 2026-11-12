@@ -678,7 +678,7 @@ test "Sign-in launch reporting settles structured outcomes on screen and departu
                 .timeout => .failed(.readiness_timeout, error.HostReadinessUnconfirmed),
                 .unserved => .failed(.provider_unserved, error.HostModelUnavailable),
                 .incompatible => .failed(.incompatible, error.IncompatibleHost),
-                .warning => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved } } } } }, .warning = .invalid_openai_base_url },
+                .warning => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url },
             };
             if (case == .refusal) {
                 answer.launch.?.startup_len = refusal.len;

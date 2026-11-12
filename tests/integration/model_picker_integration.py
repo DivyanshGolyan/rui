@@ -101,7 +101,7 @@ def main():
                        cwd=state, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
         session_model = command_frame(master, "/model", lambda screen: "new Session: /model in overview" in screen)
-        assert "gpt-5.5" in session_model and "ChatGPT" in session_model, session_model
+        assert "gpt-5.5" in session_model and "Codex" in session_model, session_model
         assert "Known to Rui" not in session_model, session_model
         host_process.wait_for(saved_model, "overview default remains unchanged")
         os.write(master, b"\x03")

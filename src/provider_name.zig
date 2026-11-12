@@ -8,26 +8,31 @@ const std = @import("std");
 pub const Provider = enum {
     codex,
     openai,
+    chatgpt,
 
     /// The request and output grammar a new Session of this provider pins.
     pub fn codec(self: Provider) Codec {
         return self.facts().codec;
     }
 
-    /// The provider as the person knows it, in screen text.
+    /// The provider as the person knows it, where prose names it: a band,
+    /// the Host line, /status, a refusal.
     pub fn shown(self: Provider) []const u8 {
         return self.facts().shown;
     }
 
-    /// What a person signed in with, as the terminal names this provider.
+    /// The short label of what a person signed in with, where a sign-in is
+    /// chosen or read beside a model: the picker's control, the Session line
+    /// and the first-run choice. Short, so a narrow pane keeps it whole.
     pub fn signIn(self: Provider) []const u8 {
         return self.facts().sign_in;
     }
 
-    /// The shell command that signs this provider in.
-    pub fn login(self: Provider) []const u8 {
+    /// The shell command that signs this provider in, or null while Rui
+    /// has none for it; every renderer and `rui auth login` read this.
+    pub fn login(self: Provider) ?[]const u8 {
         return switch (self) {
-            inline else => |provider| "rui auth login " ++ @tagName(provider),
+            inline else => |provider| if (comptime provider.facts().login) "rui auth login " ++ @tagName(provider) else null,
         };
     }
 
@@ -41,16 +46,10 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .catalog, .runs_tools = &.{"web_search"} },
-            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .model_list = .live, .runs_tools = &.{"web_search"} },
+            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
+            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
         };
-    }
-
-    /// The one provider whose credential is `kind`. A second one is a
-    /// compile error: a view that names it must then learn which provider
-    /// a failure belongs to.
-    pub fn onlyWith(comptime kind: Facts.Credential) Provider {
-        return comptime only("credential", kind);
     }
 
     /// The one provider whose model list is fetched live: the Host keeps
@@ -75,6 +74,8 @@ pub const Facts = struct {
     shown: []const u8,
     sign_in: []const u8,
     credential: Credential,
+    /// Whether `rui auth login` signs this provider in.
+    login: bool,
     model_list: ModelList,
     /// The tools the provider runs on its side, by the names a `tools` list
     /// gives them. A Session of another provider cannot name them.
@@ -94,15 +95,35 @@ pub const Facts = struct {
 /// older one keeps it.
 pub const Codec = enum { @"openai-responses/1", @"openai-responses/2", @"openai-responses/3" };
 
-test "both OpenAI providers run web_search, and neither runs bash" {
+test "every OpenAI provider runs web_search, and none runs bash" {
     for (std.enums.values(Provider)) |provider| {
         try std.testing.expect(provider.runsTool("web_search"));
         try std.testing.expect(!provider.runsTool("bash"));
     }
 }
 
-test "each credential kind names its one provider" {
-    try std.testing.expectEqual(Provider.codex, comptime Provider.onlyWith(.sign_in));
-    try std.testing.expectEqual(Provider.openai, comptime Provider.onlyWith(.api_key));
+test "one provider fetches its model list live" {
     try std.testing.expectEqual(Provider.openai, comptime Provider.onlyLiveList());
+}
+
+test "every provider's name and sign-in read apart from the others', and only a provider with a login names one" {
+    for (std.enums.values(Provider), 0..) |provider, at| {
+        for (std.enums.values(Provider)[at + 1 ..]) |other| {
+            try std.testing.expect(!std.mem.eql(u8, provider.signIn(), other.signIn()));
+            try std.testing.expect(!std.mem.eql(u8, provider.shown(), other.shown()));
+            // The typed /model word is a sign-in's first word.
+            try std.testing.expect(!std.ascii.eqlIgnoreCase(firstWord(provider.signIn()), firstWord(other.signIn())));
+        }
+        if (provider.login()) |command| try std.testing.expect(std.mem.endsWith(u8, command, @tagName(provider)));
+    }
+    try std.testing.expectEqualStrings("Codex", Provider.codex.signIn());
+    try std.testing.expectEqualStrings("ChatGPT (device code)", Provider.codex.shown());
+    try std.testing.expectEqualStrings("ChatGPT", Provider.chatgpt.signIn());
+    try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
+    try std.testing.expectEqualStrings("rui auth login codex", Provider.codex.login().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), Provider.chatgpt.login());
+}
+
+fn firstWord(text: []const u8) []const u8 {
+    return text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
 }
