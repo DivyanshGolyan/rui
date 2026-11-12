@@ -462,7 +462,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.app_caps = caps;
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
-    self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
+    self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.input.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
     self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .unarchive = chromeClick(.unarchive) });
     return self.widget();
 }
@@ -755,7 +755,7 @@ fn hostFailure(self: *Self) bool {
 /// A modal panel takes keys before a permission card or feed child can act.
 fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const opens = event == .key_press and !self.app_hooks.root.pasting and (event.key_press.matches('i', .{ .alt = true }) or (self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })));
+    const opens = event == .key_press and !self.app_hooks.root.input.pasting and (event.key_press.matches('i', .{ .alt = true }) or (self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })));
     const input = switch (event) {
         .key_press, .paste_start, .paste_end, .invalid_key => true,
         else => false,
@@ -770,7 +770,7 @@ fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void
 /// command choices run, incomplete words and skills replace the draft.
 fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands_shared.Shown.Pick) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.app_consent.request != null or self.app_hooks.root.pasting) return;
+    if (self.app_consent.request != null or self.app_hooks.root.input.pasting) return;
     // A pointer names the row in the list the last frame drew, not the
     // list a key has stored since for a newly edited draft.
     const stored = &self.screen.commands;
@@ -802,7 +802,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             if (self.reader.thread == null) if (self.reading.prepared_action) |request| {
                 // Close the editor's paste transaction before hiding it. Root
                 // keeps the terminal paste flag until its actual end arrives.
-                const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
+                const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
                 if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
                 try self.screen.showFile(self.init.io, self.files.action, .action);
                 self.action_summary = self.reading.prepared_summary;
@@ -820,7 +820,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             ctx.redraw = ctx.redraw or self.dirty;
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
-            const pasting = self.app_hooks.root.pasting;
+            const pasting = self.app_hooks.root.input.pasting;
             self.shown_notice.dismiss();
             if (self.info_open) {
                 if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
@@ -958,7 +958,7 @@ fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
 /// Hands the Session back to the overview once it is leaving.
 fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.leaving) |outcome| {
-        const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
+        const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.input.pasting, false);
         if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
         if (self.app_hooks.drafts) |drafts| {
             try drafts.put(self.init.gpa, self.session, self.input.snapshot());
@@ -1156,7 +1156,7 @@ test "App Session retains the draft across a permission card arriving during pas
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
     self.input.editors[self.input.active].cursor = 4;
-    root.pasting = true;
+    root.input.pasting = true;
     try widget_.handleEvent(&ctx, .paste_start);
     try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "12" } });
     self.reading.prepared_action = 17;
@@ -1166,7 +1166,7 @@ test "App Session retains the draft across a permission card arriving during pas
     try std.testing.expectEqual(@as(?u64, 17), self.app_consent.drawn);
     try self.app_card.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
     try std.testing.expectEqual(@as(?u64, 17), self.app_consent.request);
-    root.pasting = false;
+    root.input.pasting = false;
     const before_scroll = self.app_preview.first;
     try std.testing.expect(screen.height > 0);
     const page_down: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.page_down } };
@@ -1177,11 +1177,11 @@ test "App Session retains the draft across a permission card arriving during pas
     _ = try widget_.draw(draw_context);
     try std.testing.expect(self.app_preview.first.order(before_scroll) == .gt);
     try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
-    root.pasting = true;
+    root.input.pasting = true;
     self.live.work.first_action = null;
     try widget_.handleEvent(&ctx, .tick);
     try widget_.handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0, .text = "discarded" } });
-    root.pasting = false;
+    root.input.pasting = false;
     try widget_.handleEvent(&ctx, .paste_end);
     try std.testing.expectEqualStrings("head12TAIL", self.input.composition().bytes);
     try std.testing.expectEqual(@as(usize, 6), self.input.composition().cursor);
@@ -8956,10 +8956,10 @@ test "App Session palette refuses clicks on stale drafts closed lists and during
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
     _ = try held.draw();
-    held.root.pasting = true;
+    held.root.input.pasting = true;
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
-    held.root.pasting = false;
+    held.root.input.pasting = false;
     held.self.app_consent.adopt(41);
     try widget_.handleEvent(&events, click);
     try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);

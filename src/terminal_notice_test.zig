@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
         defer runtime.deinit();
         var probe: ConsentProbe = .{ .replace_request = std.mem.eql(u8, args[1], "consent-replaced") };
         var root: @import("Root.zig") = .{ .overview = probe.widget(), .list = probe.widget(), .compose = probe.widget() };
-        probe.pasting = &root.pasting;
+        probe.pasting = &root.input.pasting;
         try runtime.run(root.widget());
         if (probe.decision) |decision|
             std.debug.print("decision={d}:{s}\n", .{ decision.action, @tagName(decision.choice) })
