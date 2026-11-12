@@ -52,9 +52,9 @@ INSERT INTO session_stop(command_key,session_ref,selected_turn_id,position,admis
 ('fixture-stop','rhvzwc',NULL,1,0,1793781720);
 INSERT INTO model_interruption_command(command_key,session_ref,turn_id,operation_id) VALUES
 ('fixture-interrupt','d8mv7p','1','1');
-INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,tool_set_id) VALUES
-(1,1,'d8mv7p',1,1,3,0,115200,0,NULL,1,1,0,NULL,NULL,'answer',5,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,4),
-(2,2,'brhkcj',1,2,3,0,115200,0,NULL,2,1,0,NULL,NULL,'tool_proposals',NULL,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,2);
+INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,output_item_count,attempt_ordinal,auth_refresh_claimed,retry_due_at_ms,last_failure_code,resolution_code,resolution_content_id,response_id,model_evidence,request_id,usage_uncached_tokens,usage_cache_read_tokens,usage_cache_write_tokens,usage_output_tokens,interrupted_by_command_key,attempt_at,retry_scheduled_at,resolved_at,tool_set_id,context_window) VALUES
+(1,1,'d8mv7p',1,1,3,0,115200,0,NULL,1,1,0,NULL,NULL,'answer',5,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,4,128000),
+(2,2,'brhkcj',1,2,3,0,115200,0,NULL,2,1,0,NULL,NULL,'tool_proposals',NULL,NULL,X'01000000000000',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,1793781720,2,128000);
 INSERT INTO conversation_entry(session_ref,entry_ordinal,session_position,entry_kind,turn_id,source_admission_id,source_revision,source_operation_id,source_item_ordinal,content_id,recorded_at) VALUES
 ('brhkcj',1,2,1,2,2,NULL,NULL,NULL,6,1793781720),
 ('d8mv7p',1,2,1,1,1,NULL,NULL,NULL,2,1793781720),

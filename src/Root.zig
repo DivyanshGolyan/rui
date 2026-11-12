@@ -60,6 +60,7 @@ pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !
 pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
     self.settings_open = false;
     self.settings_page.cancelChoice();
+    self.settings_page.keys_open = false;
     try ctx.requestFocus(self.session orelse self.overview);
     ctx.redraw = true;
 }
@@ -67,6 +68,7 @@ pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
 /// Settings takes the place of the main pane; it is no content of a feed.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.settings_page.refresh();
+    self.settings_page.keys_open = false;
     self.settings_open = true;
     try ctx.requestFocus(self.settings_page.widget());
     ctx.redraw = true;
@@ -93,7 +95,8 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         // One router for every key while settings is open. A paste goes
         // only to the text editor, never a choice or action. Esc
         // (or Ctrl-G, as everywhere) closes the topmost thing only: an open
-        // choice, else the page, unless an Upgrade can still be cancelled.
+        // keys reference or choice, else the page, unless an Upgrade can still
+        // be cancelled.
         // The page takes its own keys. Every other key is the app's, so
         // leaving and an Upgrade's Esc work as on the overview, which owns
         // them and takes nothing else under the page.
@@ -102,6 +105,9 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const closes = named == .escape or named == .ctrl_g;
             if (self.pasting) {
                 if (!self.settings_page.takesPaste()) ctx.consumeEvent();
+            } else if (closes and self.settings_page.keys_open) {
+                self.settings_page.keys_open = false;
+                ctx.consumeAndRedraw();
             } else if (closes and self.settings_page.hasChoice()) {
                 self.settings_page.cancelChoice();
                 ctx.consumeAndRedraw();
@@ -381,6 +387,15 @@ test "App root opens settings in both layouts and Escape closes the choice, then
 
         // Root captures Escape ahead of the focused page.
         const escape: vxfw.Event = .{ .key_press = .{ .codepoint = vaxis.Key.escape } };
+        root.settings_page.select(.keys);
+        try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(root.settings_page.keys_open);
+        ctx.phase = .capturing;
+        try root.widget().captureEvent(&ctx, escape);
+        try std.testing.expect(!root.settings_page.keys_open);
+        try std.testing.expect(root.settings_open);
+        try std.testing.expect(root.session == null);
+        root.settings_page.select(.model);
         try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(root.settings_page.hasChoice());
         ctx.phase = .capturing;
@@ -409,6 +424,16 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         // Escape from settings shows the retained Session again at both
         // widths and focuses it, without changing custody.
         try root.openSettings(&ctx);
+        root.settings_page.select(.keys);
+        try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(root.settings_page.keys_open);
+        ctx.consume_event = false;
+        try root.widget().captureEvent(&ctx, escape);
+        try std.testing.expect(ctx.consume_event);
+        try std.testing.expect(!root.settings_page.keys_open);
+        try std.testing.expect(root.settings_open);
+        try std.testing.expect(root.session.?.eql(session.widget()));
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(root.settings_page.widget()));
         try root.widget().captureEvent(&ctx, escape);
         const returned = try root.widget().draw(draw_context);
         try std.testing.expect(containsWidget(returned, session.widget()));
@@ -478,6 +503,16 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         } } };
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
         try root.openSettings(&ctx);
+        root.settings_page.select(.keys);
+        try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(root.settings_page.keys_open);
+        ctx.consume_event = false;
+        try root.widget().captureEvent(&ctx, escape);
+        try std.testing.expect(ctx.consume_event);
+        try std.testing.expect(!root.settings_page.keys_open);
+        try std.testing.expect(root.settings_open);
+        try std.testing.expectEqual(@as(usize, 0), fixture.escapes);
+        root.settings_page.select(.model);
         if (choice) {
             try root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
             try std.testing.expect(root.settings_page.hasChoice());
