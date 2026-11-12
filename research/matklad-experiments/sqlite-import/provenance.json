@@ -1,0 +1,22 @@
+{
+  "source_commit": "3bdadc8395716e587f3da11f0b85ecdb3b91274a",
+  "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "sqlite_macros": [
+    "-DSQLITE_THREADSAFE=0",
+    "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
+    "-DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096",
+    "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+    "-DSQLITE_DEFAULT_MMAP_SIZE=0",
+    "-DSQLITE_MAX_MMAP_SIZE=0",
+    "-DSQLITE_DEFAULT_SYNCHRONOUS=3",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+    "-DSQLITE_OMIT_SHARED_CACHE=1",
+    "-DSQLITE_TEMP_STORE=1",
+    "-DSQLITE_USE_URI=0",
+    "-DSQLITE_ENABLE_API_ARMOR=1"
+  ],
+  "sqlite_sha256": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189",
+  "probe_sha256": "923baa48123efa5f72ddc660d293c1656204cba7f6c1702a9cde01b540a7f788",
+  "note": "Apple system library versus repository-pinned SQLite; stage metrics from one fresh process per case"
+}

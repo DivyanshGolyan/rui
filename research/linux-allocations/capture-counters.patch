@@ -1,0 +1,60 @@
+diff --git a/src/provider.zig b/src/provider.zig
+index 09223e1..4b90564 100644
+--- a/src/provider.zig
++++ b/src/provider.zig
+@@ -280,6 +280,11 @@ pub const CaptureWriter = struct {
+     head: usize = 0,
+     count: usize = 0,
+     stopping: bool = false,
++    audit_offers: u64 = 0,
++    audit_pauses: u64 = 0,
++    audit_peak: usize = 0,
++    audit_completed: u64 = 0,
++    audit_pause_ns: i96 = 0,
+     test_gate_path: ?[]const u8 = null,
+     test_gate_min_written_bytes: usize = 0,
+ 
+@@ -349,7 +354,12 @@ pub const CaptureWriter = struct {
+         self.mutex.lockUncancelable(self.io);
+         defer self.mutex.unlock(self.io);
+         if (capture.failure != null) return 0;
+-        if (self.count == capacity) return c.CURL_WRITEFUNC_PAUSE;
++        self.audit_offers += 1;
++        self.audit_peak = @max(self.audit_peak, self.count);
++        if (self.count == capacity) {
++            self.audit_pauses += 1;
++            return c.CURL_WRITEFUNC_PAUSE;
++        }
+         if (capture.fail_write) {
+             capture.failure = .write_failed;
+             return 0;
+@@ -530,6 +540,7 @@ const TimeoutContext = struct {
+     last_download: c.curl_off_t = 0,
+     last_progress: std.Io.Clock.Timestamp = undefined,
+     paused_at: ?std.Io.Clock.Timestamp = null,
++    audit_pause_ns: i96 = 0,
+     armed: bool = false,
+     expired: bool = false,
+ 
+@@ -544,6 +555,7 @@ const TimeoutContext = struct {
+ 
+     fn resumeAfterPause(self: *TimeoutContext, now: std.Io.Clock.Timestamp) void {
+         const paused_at = self.paused_at orelse unreachable;
++        self.audit_pause_ns += paused_at.durationTo(now).raw.nanoseconds;
+         self.last_progress = self.last_progress.addDuration(paused_at.durationTo(now));
+         self.paused_at = null;
+     }
+@@ -811,6 +823,13 @@ pub const Transfer = struct {
+     pub fn deinit(self: *Transfer) void {
+         std.debug.assert(!self.in_reactor);
+         std.debug.assert(self.writer.drained(&self.response));
++        self.writer.mutex.lockUncancelable(self.writer.io);
++        self.writer.audit_completed += 1;
++        self.writer.audit_pause_ns += self.timeout_context.audit_pause_ns;
++        if (self.writer.audit_completed % 100 == 0) {
++            std.debug.print("{{\"capture_audit\":true,\"capacity\":{d},\"completed\":{d},\"offers\":{d},\"pauses\":{d},\"peak_count\":{d},\"pause_ns\":{d}}}\n", .{ CaptureWriter.capacity, self.writer.audit_completed, self.writer.audit_offers, self.writer.audit_pauses, self.writer.audit_peak, self.writer.audit_pause_ns });
++        }
++        self.writer.mutex.unlock(self.writer.io);
+         c.curl_easy_cleanup(self.easy);
+         freeHeaders(self.headers);
+         self.request.deinit();

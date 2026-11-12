@@ -1,0 +1,71 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 92 and seed -575984081107482489 with 1 worker on 10 cores with 910MB heap and 64MB offheap memory [pid: 24148] (Mac OS X 15.7.7 aarch64, Azul Systems, Inc. 21.0.9 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/divyanshgolyan/.codex/worktrees/2563/onepage/research/request-protocol-model/RequestProtocol.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Naturals.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/FiniteSets.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module RequestProtocol
+Starting... (2026-09-09 20:30:04)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-09 20:30:04.
+Error: Invariant SafeCancellation is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ cancelled = FALSE
+/\ answer = (a :> "none" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "none" @@ b :> "none")
+/\ intent = {}
+
+State 2: <SaveIntent line 17, col 18 to line 20, col 67 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "none" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "none" @@ b :> "none")
+/\ intent = {a}
+
+State 3: <Cancel line 38, col 11 to line 39, col 110 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "none" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = TRUE
+/\ stage = (a :> "none" @@ b :> "none")
+/\ intent = {a}
+
+State 4: <FinishCancel line 57, col 17 to line 61, col 117 of module RequestProtocol>
+/\ cancelled = TRUE
+/\ answer = (a :> "none" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = TRUE
+/\ stage = (a :> "none" @@ b :> "none")
+/\ intent = {a}
+
+29 states generated, 21 distinct states found, 10 states left on queue.
+The depth of the complete state graph search is 4.
+The average outdegree of the complete state graph is 2 (minimum is 0, the maximum 4 and the 95th percentile is 4).
+Finished in 00s at (2026-09-09 20:30:04)

@@ -1,0 +1,65 @@
+name: Install the selected fixtures' tools
+description: tmux, Go, Node and the Python fixture packages, for the selected targets only
+inputs:
+  targets:
+    description: Selected existing build targets
+    required: true
+  check-part:
+    description: Full-check partition, or compiled for a producer
+    required: true
+outputs:
+  screen:
+    description: Whether a selected step runs the PTY screen observer
+    value: ${{ steps.requirements.outputs.screen }}
+runs:
+  using: composite
+  steps:
+    - name: Select fixture dependencies
+      id: requirements
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        python3 - <<'PY'
+        import json, os, sys
+        sys.path.insert(0, 'tests/ci')
+        from select_tests import setup_requirements
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            for name, required in setup_requirements(json.loads(os.environ['TARGETS'])).items():
+                print(f'{name}={str(required).lower()}', file=output)
+        PY
+    - name: Install tmux for upgrade integration
+      if: ${{ steps.requirements.outputs.tmux == 'true' && inputs.check-part != 'compiled' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v tmux >/dev/null 2>&1; then
+          case "$(uname -s)" in
+            Darwin) brew install tmux ;;
+            Linux) sudo apt-get update -q; sudo apt-get install -yq tmux ;;
+            *) echo "tmux installation is unsupported on $(uname -s)" >&2; exit 1 ;;
+          esac
+        fi
+        command -v tmux
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      if: ${{ steps.requirements.outputs.go == 'true' }}
+      with:
+        go-version: '1.27.1'
+        cache: false
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      if: ${{ steps.requirements.outputs.node == 'true' }}
+      with:
+        node-version: '22'
+    - name: Install the TypeScript client's dependencies
+      if: ${{ steps.requirements.outputs.node == 'true' }}
+      shell: bash
+      working-directory: clients/ts
+      run: npm ci --ignore-scripts --no-audit --no-fund
+    - name: Install the selected Python fixture dependencies
+      if: ${{ steps.requirements.outputs.python == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 -m venv "$RUNNER_TEMP/rui-python"
+        "$RUNNER_TEMP/rui-python/bin/pip" --disable-pip-version-check install --retries 1 -r tests/integration/requirements.txt
+        echo "$RUNNER_TEMP/rui-python/bin" >> "$GITHUB_PATH"

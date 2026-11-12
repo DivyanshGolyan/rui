@@ -1,0 +1,911 @@
+package main
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"rui.local/qualification/measurement"
+	"rui.local/qualification/model-output/provider"
+)
+
+func TestExplicitInvalidSessionCLIRejectsBeforeLaunch(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "model-output")
+	if output, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("build CLI: %v: %s", err, output)
+	}
+	for _, sessions := range []string{"-1", "1"} {
+		root := t.TempDir()
+		command := exec.Command(binary, "--sessions="+sessions, "--expectation", "10 MB estimated base", "/nonexistent-rui")
+		command.Env = append(os.Environ(), "TMPDIR="+root)
+		output, err := command.CombinedOutput()
+		var exited *exec.ExitError
+		if !errors.As(err, &exited) || exited.ExitCode() != 2 || !strings.Contains(string(output), "--sessions must be 0, 10 or 100") {
+			t.Fatalf("sessions=%s: err=%v output=%s", sessions, err, output)
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("invalid session option created measurement state: %v %v", entries, err)
+		}
+	}
+	if runtime.GOOS == "linux" {
+		command := exec.Command(binary, "--sessions=0", "--expectation", "8 MiB estimated base", "/nonexistent-rui")
+		command.Env = append(os.Environ(), "TMPDIR="+t.TempDir())
+		output, err := command.CombinedOutput()
+		var exited *exec.ExitError
+		if !errors.As(err, &exited) || exited.ExitCode() != 1 || !strings.Contains(string(output), "open /nonexistent-rui") || !strings.Contains(string(output), "Linux PSS (macOS footprint pending)") {
+			t.Fatalf("valid Linux session observation failed before binary validation: err=%v output=%s", err, output)
+		}
+	}
+	output, err := exec.Command(binary).CombinedOutput()
+	var exited *exec.ExitError
+	if !errors.As(err, &exited) || exited.ExitCode() != 1 || !strings.Contains(string(output), "usage: measure-model-output") {
+		t.Fatalf("omitted --sessions changed existing dispatch: err=%v output=%s", err, output)
+	}
+}
+
+func TestSessionSourceEvidenceKeepsDirtyCheckoutAndSuppliedBinarySeparate(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"src/server.zig", "build.zig", "build.zig.zon", "tests/qualification/model-output/main.go", "tests/qualification/measurement/measurement.go", "tests/qualification/go.mod", "tests/qualification/go.sum"} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("clean source\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	binary := filepath.Join(t.TempDir(), "separate-rui")
+	if err := os.WriteFile(binary, []byte("separate binary\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sessionSourceEvidence(root, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src/server.zig"), []byte("dirty source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := sessionSourceEvidence(root, binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hashes := after["checkout_source_sha256"].(map[string]string)
+	if hashes["src/server.zig"] != "d2c3da588b6e34968f3c503abe0055569e3ccaf6a22f37d3495510a82b731963" || hashes["src/server.zig"] == before["checkout_source_sha256"].(map[string]string)["src/server.zig"] {
+		t.Fatalf("dirty source hash not retained: %v", hashes)
+	}
+	if after["binary_sha256"] != "31e4eac6a9fd3c6f0abb0f31c1089476090217980208844631ce58228ba13dd1" {
+		t.Fatalf("supplied binary was relabelled: %v", after)
+	}
+	provenance := after["binary_build_provenance"].(map[string]any)
+	if provenance["status"] != "unavailable" || provenance["source_revision"] != nil || provenance["build_mode"] != nil {
+		t.Fatalf("checkout was promoted to binary build authority: %v", provenance)
+	}
+}
+
+func TestSessionFootprintOptionsKeepIdleDistinctAndRequireEstimate(t *testing.T) {
+	for _, test := range []struct {
+		sessions int
+		hold     bool
+		valid    bool
+	}{
+		{0, false, true}, {10, false, true}, {100, false, true},
+		{100, true, true}, {0, true, false}, {10, true, false},
+		{-1, false, false}, {1, false, false}, {101, false, false},
+	} {
+		err := sessionMeasurementOptions(test.sessions, test.hold, "10 wakeups/s estimated from one 100 ms timer")
+		if (err == nil) != test.valid {
+			t.Fatalf("sessions=%d hold=%t: %v", test.sessions, test.hold, err)
+		}
+	}
+	for _, estimate := range []string{"", " ", "10\nrevised to 20"} {
+		if sessionMeasurementOptions(10, false, estimate) == nil {
+			t.Fatalf("accepted missing/multiline estimate %q", estimate)
+		}
+	}
+}
+
+func TestReduceStatusesIncludesEveryFamilyAndPreservesPrecedence(t *testing.T) {
+	families := 4
+	for family := range families {
+		for _, status := range []string{"target_miss", "incomplete", "failed"} {
+			rows := make([][]map[string]any, families)
+			for index := range rows {
+				rows[index] = []map[string]any{{"status": "passed"}}
+			}
+			rows[family][0]["status"] = status
+			if got := reduceStatuses(rows...); got != status {
+				t.Fatalf("family %d status %s reduced to %s", family, status, got)
+			}
+		}
+	}
+	if got := reduceStatuses([]map[string]any{{"status": "target_miss"}}, []map[string]any{{"status": "incomplete"}}, []map[string]any{{"status": "failed"}}); got != "failed" {
+		t.Fatalf("precedence reduced to %s", got)
+	}
+}
+
+func TestMemoryEvidenceBoundsOnlyHostAndRequiresMeasuredPeak(t *testing.T) {
+	under := wholeRui(measurement.ProcessSample{LiveDescendantProcesses: 1, Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1, LifetimePeakTolerance: 1}})
+	if got := memoryEvidenceStatus(under); got != "passed" {
+		t.Fatalf("Host-only boundary reduced to %s", got)
+	}
+	over := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes, LifetimePeakTolerance: 1}})
+	if got := memoryEvidenceStatus(under, over); got != "target_miss" {
+		t.Fatalf("upper-bound miss reduced to %s", got)
+	}
+	if got := memoryEvidenceStatus(map[string]any{"status": "complete"}); got != "incomplete" {
+		t.Fatalf("missing Host peak reduced to %s", got)
+	}
+	partial := measurement.ProcessSample{SamplingError: "lsof failed", Footprint: measurement.Footprint{LifetimePeakBytes: 1024}}
+	if got := memoryEvidenceStatus(wholeRui(partial)); got != "incomplete" {
+		t.Fatalf("partial observation qualified as %s", got)
+	}
+	if got := processDelta(map[string]any{"host": partial}, map[string]any{"host": partial}); got["status"] != "unavailable" {
+		t.Fatalf("partial sample fabricated a measured zero delta: %v", got)
+	}
+}
+
+func TestMissingPhysicalFootprintCannotQualifyPortableSample(t *testing.T) {
+	if got := memoryEvidenceStatus(wholeRui(measurement.ProcessSample{RSSBytes: 1024})); got != "incomplete" {
+		t.Fatalf("RSS without physical footprint qualified as %s", got)
+	}
+}
+
+func TestExpectedCapacityRequestDigest(t *testing.T) {
+	// Prompt prose has no pinned bytes; only the oracle's inputs are checked.
+	for _, test := range []struct {
+		workspace string
+		store     string
+	}{
+		{"/workspace", "/store"},
+		{"/tmp/a \"project\"\\tree\n<&雪\u2028", "/nonexistent-rui-root/s \"t\"\\o\n<&雪\u2028\x01"},
+	} {
+		bytes, digest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qx"}, test.workspace, test.store)
+		otherBytes, otherDigest := expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qx"}, test.workspace, "/other-store")
+		if otherBytes != bytes || otherDigest != digest {
+			t.Fatal("Store path became a model fact")
+		}
+		_, otherDigest = expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qy"}, test.workspace, test.store)
+		if otherDigest == digest {
+			t.Fatal("request oracle ignored the configuration's allocated identity")
+		}
+		_, otherDigest = expectedCapacityRequests([]string{"capacity-1-0"}, []string{"k7m2qx"}, "/other-workspace", test.store)
+		if otherDigest == digest {
+			t.Fatal("request oracle ignored the configuration's Workspace")
+		}
+	}
+}
+
+func TestOutputAuditQualifiesEverySemanticCount(t *testing.T) {
+	valid := outputAudit{CanonicalOutputItems: 33, PrivateContentRows: 35, AssistantProjections: 1}
+	if !outputAuditValid(valid, 32) || outputCaseStatus("passed", true) != "passed" {
+		t.Fatal("valid output audit was rejected")
+	}
+	mutations := []outputAudit{
+		{CanonicalOutputItems: 32, PrivateContentRows: 35, AssistantProjections: 1},
+		{CanonicalOutputItems: 33, PrivateContentRows: 34, AssistantProjections: 1},
+		{CanonicalOutputItems: 33, PrivateContentRows: 35, AssistantProjections: 2},
+	}
+	for _, audit := range mutations {
+		if outputAuditValid(audit, 32) {
+			t.Fatalf("mutated output audit was accepted: %+v", audit)
+		}
+	}
+	if got := outputCaseStatus("incomplete", false); got != "failed" {
+		t.Fatalf("semantic failure was hidden by memory status: %s", got)
+	}
+}
+
+func TestSpillVerdictRequiresEverySuccessPredicate(t *testing.T) {
+	attempt := 1
+	resolution := "answer"
+	zero := 0
+	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
+	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
+	validExecution := map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0"}
+	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, validExecution, validFacts, "", "observed"); status != "passed" {
+		t.Fatalf("valid spill success reduced to %s", status)
+	}
+	checks := []struct {
+		name      string
+		requests  int
+		execution map[string]any
+		facts     spillFacts
+		write     string
+	}{
+		{"request count", 0, validExecution, validFacts, "observed"},
+		{"dispatch fence", 1, map[string]any{"dispatch_fenced": true, "custody_occupied": "0", "scratch_used_bytes": "0"}, validFacts, "observed"},
+		{"retained scratch", 1, map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "1"}, validFacts, "observed"},
+		{"offline facts", 1, validExecution, spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 1, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution}, "observed"},
+		{"decreasing write counter", 1, validExecution, validFacts, "invalid"},
+	}
+	for _, check := range checks {
+		if status, _, _ := spillVerdict(true, true, false, check.requests, completeMemory, completeMemory, check.execution, check.facts, "", check.write); status != "failed" {
+			t.Fatalf("%s negative control reduced to %s", check.name, status)
+		}
+	}
+	priorFailure := "provider_http_503"
+	withPriorFailure := validFacts
+	withPriorFailure.LastFailureCode = &priorFailure
+	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, validExecution, withPriorFailure, "", "observed"); status != "failed" {
+		t.Fatalf("completed attempt with prior failure reduced to %s", status)
+	}
+	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, validExecution, validFacts, "", "unavailable"); status != "incomplete" {
+		t.Fatalf("missing write evidence reduced to %s", status)
+	}
+}
+
+func TestSpillVerdictRequiresExactCleanRollback(t *testing.T) {
+	attempt := 1
+	uncertain := 1
+	retryDue := int64(0)
+	rollback := spillFacts{IntegrityCheck: "ok", PartialTurns: 1, OperationCount: 1, AttemptOrdinal: &attempt, Uncertain: &uncertain, RetryDueAtMS: &retryDue}
+	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
+	message := "dispatch fenced after model output import failure: OutOfMemory"
+	if status, clean, expected := spillVerdict(false, false, true, 1, completeMemory, nil, nil, rollback, message, "unavailable"); status != "expected_memory_failure" || !clean || !expected {
+		t.Fatalf("valid rollback = %s clean=%t expected=%t", status, clean, expected)
+	}
+	if status, clean, expected := spillVerdict(false, false, false, 1, completeMemory, nil, nil, rollback, message, "unavailable"); status != "failed" || !clean || expected {
+		t.Fatalf("controller-stopped rollback = %s clean=%t expected=%t", status, clean, expected)
+	}
+	rollback.CanonicalOutputItems = 1
+	if status, _, _ := spillVerdict(false, false, true, 1, completeMemory, nil, nil, rollback, message, "unavailable"); status != "failed" {
+		t.Fatalf("dirty rollback reduced to %s", status)
+	}
+	rollback.CanonicalOutputItems = 0
+	if status, _, _ := spillVerdict(false, false, true, 1, completeMemory, nil, nil, rollback, "OutOfMemory", "unavailable"); status != "failed" {
+		t.Fatalf("non-specific OOM reduced to %s", status)
+	}
+	retryable := rollback
+	retryableUncertain := 0
+	futureDue := int64(123)
+	failure := "response_capture_failed"
+	retryable.Uncertain = &retryableUncertain
+	retryable.RetryDueAtMS = &futureDue
+	retryable.LastFailureCode = &failure
+	if status, _, _ := spillVerdict(false, false, true, 1, completeMemory, nil, nil, retryable, message, "unavailable"); status != "failed" {
+		t.Fatalf("scheduled retry reduced to %s", status)
+	}
+}
+
+func TestSpillVerdictFailurePrecedesMemoryEvidence(t *testing.T) {
+	attempt := 1
+	badFacts := spillFacts{IntegrityCheck: "bad", OperationCount: 1, AttemptOrdinal: &attempt}
+	for _, memory := range []map[string]any{
+		{"status": "incomplete"},
+		{"status": "complete"},
+	} {
+		if status, _, _ := spillVerdict(true, true, false, 1, memory, memory, map[string]any{}, badFacts, "", "observed"); status != "failed" {
+			t.Fatalf("bad completed facts with memory %v reduced to %s", memory, status)
+		}
+		if status, _, _ := spillVerdict(true, false, false, 1, memory, nil, nil, badFacts, "unexpected", "unavailable"); status != "failed" {
+			t.Fatalf("unexpected failure with memory %v reduced to %s", memory, status)
+		}
+	}
+	zero := 0
+	resolution := "answer"
+	validFacts := spillFacts{IntegrityCheck: "ok", CompletedTurns: 1, CanonicalOutputItems: 2, AssistantProjections: 1, OperationCount: 1, AttemptOrdinal: &attempt, ResolutionCode: &resolution, Uncertain: &zero}
+	execution := map[string]any{"dispatch_fenced": false, "custody_occupied": "0", "scratch_used_bytes": "0"}
+	completeMemory := wholeRui(measurement.ProcessSample{Footprint: measurement.Footprint{LifetimePeakBytes: hostFootprintTargetBytes - 1}})
+	if status, _, _ := spillVerdict(true, true, false, 1, completeMemory, completeMemory, execution, validFacts, "", "unavailable"); status != "incomplete" {
+		t.Fatalf("missing write evidence reduced to %s", status)
+	}
+}
+
+func TestSpillComparisonUsesSharedFailurePrecedence(t *testing.T) {
+	if got := spillComparisonStatus("failed", "incomplete"); got != "failed" {
+		t.Fatalf("failed plus incomplete reduced to %s", got)
+	}
+	if got := spillComparisonStatus("passed", "expected_memory_failure"); got != "passed" {
+		t.Fatalf("expected memory failure reduced to %s", got)
+	}
+}
+
+func TestSpillWriteEvidenceRejectsMissingAndDecreasingCounters(t *testing.T) {
+	initial := measurement.ProcessSample{DiskWriteBytes: 100}
+	if _, status := spillWriteEvidence(initial, nil); status != "unavailable" {
+		t.Fatalf("missing final sample reduced to %s", status)
+	}
+	decreasing := measurement.ProcessSample{DiskWriteBytes: 99}
+	if _, status := spillWriteEvidence(initial, &decreasing); status != "invalid" {
+		t.Fatalf("decreasing counter reduced to %s", status)
+	}
+	increasing := measurement.ProcessSample{DiskWriteBytes: 101}
+	if evidence, status := spillWriteEvidence(initial, &increasing); status != "observed" || evidence["delta_bytes"] != uint64(1) {
+		t.Fatalf("increasing counter = %s %v", status, evidence)
+	}
+}
+
+func TestSpillDiagnosticsRequireEffectiveConfiguration(t *testing.T) {
+	u64 := func(value uint64) *uint64 { return &value }
+	i64 := func(value int64) *int64 { return &value }
+	text := func(value string) *string { return &value }
+	diagnostic := func(spills uint64, threshold int64) sqliteDiagnostic {
+		return sqliteDiagnostic{Subject: "k7m2qx", HardHeapLimitBytes: u64(16 * 1024 * 1024), Synchronous: i64(2), JournalMode: text("wal"), CacheSizeSetting: i64(-32), CacheSpillThreshold: i64(threshold), CacheSpills: u64(spills), PageSizeBytes: u64(4096), MmapSizeBytes: u64(0), TempStore: i64(1), BusyTimeoutMS: u64(0), ProcessMemoryCurrentBytes: u64(0), ProcessMemoryHighwater: u64(0), CacheUsedBytes: u64(0)}
+	}
+	valid := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(1, 991)}
+	if !spillDiagnosticsValid(valid, "k7m2qx", true, true) {
+		t.Fatal("valid spill-on diagnostics were rejected")
+	}
+	invalid := append([]sqliteDiagnostic(nil), valid...)
+	invalid[1].Synchronous = i64(3)
+	if spillDiagnosticsValid(invalid, "k7m2qx", true, true) {
+		t.Fatal("mismatched synchronous setting was accepted")
+	}
+	if spillDiagnosticsValid(nil, "k7m2qx", true, true) {
+		t.Fatal("missing diagnostics were accepted")
+	}
+	if spillDiagnosticsValid(valid[:1], "k7m2qx", true, true) || spillDiagnosticsValid(append(valid, valid[1]), "k7m2qx", true, true) {
+		t.Fatal("wrong diagnostic population was accepted")
+	}
+	zero := []sqliteDiagnostic{diagnostic(0, 991), diagnostic(0, 991)}
+	if spillDiagnosticsValid(zero, "k7m2qx", true, true) {
+		t.Fatal("zero spill-on counter was accepted")
+	}
+	decreasing := []sqliteDiagnostic{diagnostic(2, 991), diagnostic(1, 991)}
+	if spillDiagnosticsValid(decreasing, "k7m2qx", true, true) {
+		t.Fatal("decreasing spill-on counter was accepted")
+	}
+	spillOff := []sqliteDiagnostic{diagnostic(0, 0), diagnostic(0, 0)}
+	if !spillDiagnosticsValid(spillOff, "k7m2qx", false, true) {
+		t.Fatal("valid spill-off diagnostics were rejected")
+	}
+	spillOff[1].CacheSpills = u64(1)
+	if spillDiagnosticsValid(spillOff, "k7m2qx", false, true) {
+		t.Fatal("nonzero spill-off counter was accepted")
+	}
+	if !spillDiagnosticsValid([]sqliteDiagnostic{diagnostic(0, 0)}, "k7m2qx", false, false) {
+		t.Fatal("expected-exit initial diagnostic was rejected")
+	}
+}
+
+func TestProductionDiagnosticsRejectOldCacheAndChangedGuarantees(t *testing.T) {
+	const valid = `{"page_size_bytes":4096,"cache_size_setting":-1024,"hard_heap_limit_bytes":16777216,"cache_spill_threshold":247,"synchronous":2,"journal_mode":"wal","mmap_size_bytes":0,"temp_store":1,"busy_timeout_ms":0,"process_memory_current_bytes":0,"process_memory_highwater_bytes":0,"cache_used_bytes":0,"cache_spills":0}`
+	var record sqliteDiagnostic
+	if err := json.Unmarshal([]byte(valid), &record); err != nil {
+		t.Fatal(err)
+	}
+	if productionDiagnosticsStatus([]sqliteDiagnostic{record}) != "passed" || productionDiagnosticsStatus(nil) != "incomplete" {
+		t.Fatal("invalid production diagnostic baseline")
+	}
+	for field, wrong := range map[string]any{
+		"cache_size_setting": -4096, "hard_heap_limit_bytes": 33554432,
+		"cache_spill_threshold": 0, "synchronous": 3, "journal_mode": "delete",
+		"mmap_size_bytes": 4096, "temp_store": 2, "busy_timeout_ms": 100,
+	} {
+		for _, value := range []any{wrong, nil} {
+			var fields map[string]any
+			if err := json.Unmarshal([]byte(valid), &fields); err != nil {
+				t.Fatal(err)
+			}
+			fields[field] = value
+			encoded, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var bad sqliteDiagnostic
+			if err := json.Unmarshal(encoded, &bad); err != nil {
+				t.Fatal(err)
+			}
+			if productionDiagnosticsStatus([]sqliteDiagnostic{record, bad}) != "failed" {
+				t.Fatalf("accepted %s=%v", field, value)
+			}
+		}
+	}
+	for _, field := range []string{"process_memory_current_bytes", "process_memory_highwater_bytes", "cache_used_bytes", "cache_spills"} {
+		for _, omit := range []bool{false, true} {
+			var fields map[string]any
+			if err := json.Unmarshal([]byte(valid), &fields); err != nil {
+				t.Fatal(err)
+			}
+			if omit {
+				delete(fields, field)
+			} else {
+				fields[field] = nil
+			}
+			encoded, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var missing sqliteDiagnostic
+			if err := json.Unmarshal(encoded, &missing); err != nil {
+				t.Fatal(err)
+			}
+			status := productionDiagnosticsStatus([]sqliteDiagnostic{record, missing})
+			if status != "incomplete" || qualificationExitCode(status) == 0 {
+				t.Fatalf("accepted missing usage %s (omitted=%v): %s", field, omit, status)
+			}
+			bad := record
+			bad.CacheSizeSetting = nil
+			for _, records := range [][]sqliteDiagnostic{{missing, bad}, {bad, missing}} {
+				if productionDiagnosticsStatus(records) != "failed" {
+					t.Fatal("missing usage hid invalid configuration")
+				}
+			}
+			if reduceStatuses([]map[string]any{{"status": "failed"}, {"status": status}}) != "failed" {
+				t.Fatal("missing usage hid earlier failure")
+			}
+		}
+	}
+}
+
+func TestSpillDiagnosticCacheSizeSettingPreservesRawPragmaMeaning(t *testing.T) {
+	decode := func(value string) sqliteDiagnostic {
+		t.Helper()
+		record := map[string]any{"rui_test_phase": "sqlite_diagnostic", "subject": "k7m2qx", "hard_heap_limit_bytes": "16777216", "cache_spills": "0", "cache_spill_threshold": "991", "synchronous": "2", "journal_mode": "wal", "process": "42", "run": "100", "sequence": "5"}
+		if value != "" { // An absent observation field is a null diagnostic value.
+			record["cache_size_setting"] = value
+		}
+		records, err := sqliteDiagnosticRecords([]map[string]any{{"rui_test_phase": "control_timing"}, record})
+		if err != nil || len(records) != 1 {
+			t.Fatalf("decode %s: records=%d err=%v", value, len(records), err)
+		}
+		return records[0]
+	}
+	for _, value := range []int64{-32, -4096} {
+		record := decode(fmt.Sprintf("%d", value))
+		if record.CacheSizeSetting == nil || *record.CacheSizeSetting != value {
+			t.Fatalf("cache size setting = %v, want %d", record.CacheSizeSetting, value)
+		}
+	}
+	missing := decode("")
+	if spillDiagnosticsValid([]sqliteDiagnostic{missing}, "k7m2qx", true, false) {
+		t.Fatal("missing cache_size_setting qualified")
+	}
+}
+
+func TestSpillDiagnosticDecoderRejectsMalformedAndUnknownFields(t *testing.T) {
+	malformed := map[string]any{"rui_test_phase": "sqlite_diagnostic", "cache_spills": "many"}
+	if _, err := sqliteDiagnosticRecords([]map[string]any{malformed}); err == nil {
+		t.Fatal("malformed diagnostic was accepted")
+	}
+	unknown := map[string]any{"rui_test_phase": "sqlite_diagnostic", "work_bytes": "1"}
+	if _, err := sqliteDiagnosticRecords([]map[string]any{unknown}); err == nil {
+		t.Fatal("diagnostic with a foreign field was accepted")
+	}
+}
+
+func TestExpectedCapacityWorkUsesIndependentCheckedArithmetic(t *testing.T) {
+	work, err := expectedCapacityWork(1, 60*time.Second, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work != (capacityWork{Batches: 1800, Events: 1800, Bytes: 468_000}) {
+		t.Fatalf("work = %+v", work)
+	}
+	stress, err := expectedCapacityWork(100, 60*time.Second, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stress != (capacityWork{Batches: 600_000, Events: 600_000, Bytes: 156_000_000}) {
+		t.Fatalf("stress work = %+v", stress)
+	}
+	if _, err := checkedCapacityMultiply(^uint64(0), 2); err == nil {
+		t.Fatal("overflow unexpectedly accepted")
+	}
+	if _, err := checkedCapacityAdd(^uint64(0), 1); err == nil {
+		t.Fatal("addition overflow unexpectedly accepted")
+	}
+}
+
+func validProviderSummary(t *testing.T) provider.Summary {
+	t.Helper()
+	encoded := `{
+		"delivery_method":"rational_pacing_v1",
+		"delivery_rule":{"batch_interval_ns":33333334,"allowed_delivery_variation_ns":33333334,"maximum_completion_gap_ns":66666668,"burst_window_ns":33333334,"maximum_batches_per_burst_window":2},
+		"expected_streams":1,"ready_streams":1,"offer_finished_streams":1,"terminal_finished_streams":1,
+		"valid_offer_streams":1,"timing_invalid_streams":0,"offer_failed_streams":0,"terminal_failed_streams":0,
+		"minimum_completed_batches":1800,"maximum_completed_batches":1800,
+		"completed_batches":1800,"completed_events":1800,"offer_bytes":468000,
+		"expected_batches":1800,"expected_events":1800,"expected_offer_bytes":468000,
+		"maximum_completion_delay":{"id":"stream","ordinal":7,"observed_ns":66666668},
+		"maximum_adjacent_gap":{"id":"stream","ordinal":8,"observed_ns":66666668},
+		"minimum_two_back_span":{"id":"stream","ordinal":9,"observed_ns":33333334},
+		"start_unix_ns":100000000000,"offer_horizon_unix_ns":160033333334,"hard_deadline_unix_ns":220000000000,
+		"earliest_final_completion_unix_ns":159966666666,"latest_final_completion_unix_ns":159966666666,
+		"event_bytes":260,"events_per_batch":1,"batches_per_stream":1800,"offer_seconds":60,"events_per_second":30
+	}`
+	var summary provider.Summary
+	if err := json.Unmarshal([]byte(encoded), &summary); err != nil {
+		t.Fatal(err)
+	}
+	return summary
+}
+
+func TestCapacityVerdictKeepsInvalidProviderEvidenceIncomplete(t *testing.T) {
+	offer := validProviderSummary(t)
+	valid := capacityVerdictInput{
+		Capacity: 1, EventsPerSecond: 30, Duration: 60 * time.Second, Offer: offer, Completion: offer,
+		ExpectedWork:  capacityWork{Batches: 1800, Events: 1800, Bytes: 468000},
+		CaptureStatus: "passed", CleanupStatus: "passed", RequestIntegrityStatus: "passed",
+		ResultDeliveryStatus: "passed", DurableAuditStatus: "passed", MemoryStatus: "passed", SustainedCPUStatus: "passed",
+	}
+	if got := capacityVerdict(valid); got != "passed" {
+		t.Fatalf("valid capacity reduced to %s", got)
+	}
+	incomplete := valid
+	incomplete.Offer.CompletedBatches--
+	if got := capacityVerdict(incomplete); got != "incomplete" {
+		t.Fatalf("incomplete provider work reduced to %s", got)
+	}
+	terminalFailure := valid
+	terminalFailure.Completion.TerminalFailedStreams = 1
+	if got := capacityVerdict(terminalFailure); got != "incomplete" {
+		t.Fatalf("terminal fixture failure reduced to %s", got)
+	}
+	hostFailure := valid
+	hostFailure.DurableAuditStatus = "failed"
+	hostFailure.Offer.CompletedBatches--
+	if got := capacityVerdict(hostFailure); got != "failed" {
+		t.Fatalf("Host semantic failure did not precede incomplete provider evidence: %s", got)
+	}
+	for name, mutate := range map[string]func(*provider.Summary){
+		"minimum batches":    func(s *provider.Summary) { s.MinimumBatches-- },
+		"event bytes":        func(s *provider.Summary) { s.EventBytes++ },
+		"missing completion": func(s *provider.Summary) { s.EarliestFinalCompletionUnixNS = 0 },
+		"collection timeout": func(s *provider.Summary) { s.LatestFinalCompletionUnixNS = s.HardDeadlineUnixNS + 1 },
+	} {
+		changed := valid
+		changed.Offer = validProviderSummary(t)
+		mutate(&changed.Offer)
+		if got := capacityVerdict(changed); got != "incomplete" {
+			t.Fatalf("inconsistent %s evidence reduced to %s", name, got)
+		}
+	}
+	jittered := valid
+	jittered.Offer = validProviderSummary(t)
+	jittered.Offer.ValidOfferStreams = 0
+	jittered.Offer.TimingInvalidStreams = 1
+	jittered.Offer.LateCompletionViolations = 100
+	jittered.Offer.CompletionGapViolations = 50
+	jittered.Offer.LatestFinalCompletionUnixNS += int64(time.Second)
+	if got := capacityVerdict(jittered); got != "passed" {
+		t.Fatalf("complete jittered workload reduced to %s", got)
+	}
+	jittered.CompleteWorkCPUSeconds = 121
+	if got := capacityVerdict(jittered); got != "target_miss" {
+		t.Fatalf("jitter excused excessive CPU: %s", got)
+	}
+}
+
+func TestTerminalFixtureFailureLeavesDependentHostFactsUnavailable(t *testing.T) {
+	offer := validProviderSummary(t)
+	completion := offer
+	completion.TerminalFailedStreams = 1
+	input := capacityVerdictInput{
+		Capacity: 1, EventsPerSecond: 30, Duration: 60 * time.Second, Offer: offer, Completion: completion,
+		ExpectedWork:  capacityWork{Batches: 1800, Events: 1800, Bytes: 468000},
+		CaptureStatus: "passed", CleanupStatus: "passed", RequestIntegrityStatus: "passed",
+		ResultDeliveryStatus: dependentObservationStatus(providerTerminalComplete(completion, 1), true, false),
+		DurableAuditStatus:   dependentObservationStatus(providerTerminalComplete(completion, 1), true, false),
+		MemoryStatus:         "passed", SustainedCPUStatus: "passed",
+	}
+	if input.ResultDeliveryStatus != "unavailable" || input.DurableAuditStatus != "unavailable" {
+		t.Fatalf("terminal prerequisite produced result %s audit %s", input.ResultDeliveryStatus, input.DurableAuditStatus)
+	}
+	if got := capacityVerdict(input); got != "incomplete" {
+		t.Fatalf("terminal fixture failure reduced to %s", got)
+	}
+	input.CleanupStatus = "failed"
+	if got := capacityVerdict(input); got != "failed" {
+		t.Fatalf("independent Host contradiction reduced to %s", got)
+	}
+	if got := dependentObservationStatus(true, true, false); got != "failed" {
+		t.Fatalf("available dependent contradiction reduced to %s", got)
+	}
+}
+
+func TestCapacityCPUWindowUsesConservativeQueryBrackets(t *testing.T) {
+	start := time.Unix(100, 0)
+	first := bracketedCPUSample{QueryStart: start.Add(10 * time.Second), QueryEnd: start.Add(10*time.Second + 5*time.Millisecond)}
+	second := bracketedCPUSample{QueryStart: first.QueryEnd.Add(40 * time.Second), QueryEnd: first.QueryEnd.Add(40*time.Second + 5*time.Millisecond)}
+	final := second.QueryEnd
+	if !capacityCPUWindowValid(start, 60*time.Second, first, second, final) {
+		t.Fatal("inclusive 40-second and final-completion boundaries were rejected")
+	}
+	tooShort := second
+	tooShort.QueryStart = first.QueryEnd.Add(40*time.Second - time.Nanosecond)
+	if capacityCPUWindowValid(start, 60*time.Second, first, tooShort, final) {
+		t.Fatal("short conservative interval was accepted")
+	}
+	afterWork := second
+	afterWork.QueryEnd = final.Add(time.Nanosecond)
+	if capacityCPUWindowValid(start, 60*time.Second, first, afterWork, final) {
+		t.Fatal("query extending past simultaneous work was accepted")
+	}
+	if capacityCPUWindowValid(start, 60*time.Second, first, second, time.Time{}) {
+		t.Fatal("missing provider completion boundary was accepted")
+	}
+	if status := sustainedCPUQualificationStatus(false, true, 1); status != "unavailable" {
+		t.Fatalf("partial valid-stream subset labeled CPU %s", status)
+	}
+}
+
+func TestCapacityAuditRejectsAttemptOneWithPriorFailure(t *testing.T) {
+	key := "capacity-1-round-1-0"
+	session := "k7m2qx"
+	row := capacityAuditRow{Key: key, Session: session, InputText: key, TurnOutcome: "completed", OperationSession: session, AttemptOrdinal: 1, ResolutionCode: "answer", ResponseID: "capacity-response-" + key, ModelEvidence: "010e006d6f64656c2d612d7365727665640e006d6f64656c2d612d7365727665640000", RequestID: "capacity-" + key, OutputItems: 1, PrivateOutputItems: 1, AssistantProjections: 1}
+	if !capacityAuditRowsValid([]capacityAuditRow{row}, []string{key}, []string{session}) {
+		t.Fatal("valid capacity audit row was rejected")
+	}
+	failure := "provider_http_503"
+	row.LastFailureCode = &failure
+	if capacityAuditRowsValid([]capacityAuditRow{row}, []string{key}, []string{session}) {
+		t.Fatal("attempt one with prior failure was accepted")
+	}
+	row.LastFailureCode = nil
+	for name, mutate := range map[string]func(*capacityAuditRow){
+		"output items":          func(row *capacityAuditRow) { row.OutputItems = 2 },
+		"private output items":  func(row *capacityAuditRow) { row.PrivateOutputItems = 0 },
+		"assistant projections": func(row *capacityAuditRow) { row.AssistantProjections = 2 },
+		"Turn outcome":          func(row *capacityAuditRow) { row.TurnOutcome = "answer" },
+		"Operation outcome":     func(row *capacityAuditRow) { row.ResolutionCode = "completed" },
+		"absent sources":        func(row *capacityAuditRow) { row.ModelEvidence = "01000000000000" },
+		"lost header":           func(row *capacityAuditRow) { row.ModelEvidence = "010e006d6f64656c2d612d73657276656400000000" },
+		"unexpected alternate": func(row *capacityAuditRow) {
+			row.ModelEvidence = row.ModelEvidence[:len(row.ModelEvidence)-4] + "010078"
+		},
+	} {
+		changed := row
+		mutate(&changed)
+		if capacityAuditRowsValid([]capacityAuditRow{changed}, []string{key}, []string{session}) {
+			t.Fatalf("mutated %s was accepted", name)
+		}
+	}
+}
+
+func TestModelEvidencePreservesSourceOrderAbsenceAndByteLengths(t *testing.T) {
+	for _, check := range []struct {
+		bytes string
+		want  [3]string
+	}{
+		{"\x01\x00\x00\x00\x00\x00\x00", [3]string{}},
+		{"\x01\x01\x00b\x00\x00\x02\x00é", [3]string{"b", "", "é"}},
+		{"\x01\x00\x00\x01\x00h\x00\x00", [3]string{"", "h", ""}},
+		{"\x01\x00\x01" + strings.Repeat("a", 256) + "\x00\x01" + strings.Repeat("b", 256) + "\x00\x01" + strings.Repeat("c", 256), [3]string{strings.Repeat("a", 256), strings.Repeat("b", 256), strings.Repeat("c", 256)}},
+	} {
+		got, err := decodeModelEvidence(hex.EncodeToString([]byte(check.bytes)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index, want := range check.want {
+			if (want == "" && got[index] != nil) || (want != "" && (got[index] == nil || *got[index] != want)) {
+				t.Fatalf("source %d: got %v, want %q", index, got[index], want)
+			}
+		}
+	}
+	for _, invalid := range []string{"", "\x02\x00\x00\x00\x00\x00\x00", "\x01\x00\x00\x00\x00\x00", "\x01\x00\x00\x00\x00\x01\x00", "\x01\x01\x00\xff\x00\x00\x00\x00", "\x01\x00\x00\x00\x00\x00\x00x", "\x01\x01\x01" + strings.Repeat("a", 257) + "\x00\x00\x00\x00"} {
+		if _, err := decodeModelEvidence(hex.EncodeToString([]byte(invalid))); err == nil {
+			t.Fatal("invalid evidence accepted")
+		}
+	}
+}
+
+func TestOfflineCapacityAuditsRunOnlyAfterHostStopAndCoverBothRounds(t *testing.T) {
+	requests := []capacityAuditRequest{
+		{keys: []string{"round-1"}, sessions: []string{"k7m2qx"}},
+		{keys: []string{"round-2"}, sessions: []string{"k7m2qy"}},
+	}
+	events := []string{}
+	results, err := offlineCapacityAudits(
+		func() error {
+			events = append(events, "host-stopped")
+			return nil
+		},
+		requests,
+		func(_ measurement.Deadline, _ string, keys, _ []string) ([]capacityAuditRow, bool, error) {
+			events = append(events, "audit-"+keys[0])
+			return []capacityAuditRow{{Key: keys[0]}}, true, nil
+		},
+		measurement.NewDeadline(time.Minute),
+		"store",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(events, ","), "host-stopped,audit-round-1,audit-round-2"; got != want {
+		t.Fatalf("events = %s, want %s", got, want)
+	}
+	if len(results) != 2 || !results[0].complete || !results[1].complete {
+		t.Fatalf("offline audit results = %+v", results)
+	}
+	first := capacityAuditIdentity([]string{"k7m2qx", "k7m2qy"}, 1)
+	second := capacityAuditIdentity([]string{"123abc", "456def"}, 2)
+	if strings.Join(first.keys, ",") != "capacity-2-round-1-0,capacity-2-round-1-1" || strings.Join(second.keys, ",") != "capacity-2-round-2-0,capacity-2-round-2-1" {
+		t.Fatalf("round-specific audit identities first=%v second=%v", first.keys, second.keys)
+	}
+	repeated := capacityAuditIdentity(first.sessions, 2)
+	if strings.Join(repeated.sessions, ",") != "k7m2qx,k7m2qy" {
+		t.Fatalf("repeat-work sessions are not stable: %v", repeated.sessions)
+	}
+	first.sessions[0] = "000000"
+	if repeated.sessions[0] != "k7m2qx" {
+		t.Fatal("later population changed an earlier audit identity")
+	}
+}
+
+func TestQualificationExitCodeRejectsNonPassingJSONStatuses(t *testing.T) {
+	for _, status := range []string{"failed", "target_miss", "incomplete", "unavailable", ""} {
+		if qualificationExitCode(status) == 0 {
+			t.Fatalf("status %q produced a successful process exit", status)
+		}
+	}
+	for _, status := range []string{"passed", "smoke_passed"} {
+		if qualificationExitCode(status) != 0 {
+			t.Fatalf("status %q produced a failed process exit", status)
+		}
+	}
+	encoded, code, err := encodedQualificationResult(map[string]any{"status": "failed", "evidence": "retained"})
+	if err != nil || code == 0 || !strings.Contains(string(encoded), `"status": "failed"`) || !strings.Contains(string(encoded), `"evidence": "retained"`) {
+		t.Fatalf("failed result was not preserved before nonzero exit: code=%d err=%v json=%s", code, err, encoded)
+	}
+}
+
+func TestOfflineCapacityAuditsRejectStopAuditAndMissingEvidenceFailures(t *testing.T) {
+	requests := []capacityAuditRequest{{keys: []string{"round-1"}, sessions: []string{"k7m2qx"}}}
+	audits := 0
+	if _, err := offlineCapacityAudits(
+		func() error { return errors.New("stop failed") }, requests,
+		func(_ measurement.Deadline, _ string, _, _ []string) ([]capacityAuditRow, bool, error) {
+			audits++
+			return nil, true, nil
+		}, measurement.NewDeadline(time.Minute), "store",
+	); err == nil || audits != 0 {
+		t.Fatalf("stop failure err=%v audits=%d", err, audits)
+	}
+	if _, err := offlineCapacityAudits(
+		func() error { return nil }, requests,
+		func(_ measurement.Deadline, _ string, _, _ []string) ([]capacityAuditRow, bool, error) {
+			return nil, false, errors.New("audit failed")
+		}, measurement.NewDeadline(time.Minute), "store",
+	); err == nil {
+		t.Fatal("audit failure was accepted")
+	}
+	results, err := offlineCapacityAudits(
+		func() error { return nil }, requests,
+		func(_ measurement.Deadline, _ string, _, _ []string) ([]capacityAuditRow, bool, error) {
+			return nil, false, nil
+		}, measurement.NewDeadline(time.Minute), "store",
+	)
+	if err != nil || len(results) != 1 || results[0].complete {
+		t.Fatalf("missing audit evidence = %+v err=%v", results, err)
+	}
+	if got := dependentObservationStatus(true, true, results[0].complete); got == "passed" {
+		t.Fatal("missing offline audit evidence passed")
+	}
+}
+
+func TestOfflineCapacityAuditsPreserveIndependentRoundsAfterFailure(t *testing.T) {
+	requests := []capacityAuditRequest{capacityAuditIdentity([]string{"k7m2qx"}, 1), capacityAuditIdentity([]string{"k7m2qy"}, 2), capacityAuditIdentity([]string{"123abc"}, 3)}
+	cause := errors.New("round 2 audit failed")
+	results, err := offlineCapacityAudits(func() error { return nil }, requests,
+		func(_ measurement.Deadline, _ string, keys, _ []string) ([]capacityAuditRow, bool, error) {
+			if keys[0] == requests[1].keys[0] {
+				return []capacityAuditRow{{Key: keys[0]}}, false, cause
+			}
+			return []capacityAuditRow{{Key: keys[0]}}, true, nil
+		}, measurement.NewDeadline(time.Minute), "store")
+	if !errors.Is(err, cause) || len(results) != 3 {
+		t.Fatalf("lost completed audits: results=%+v err=%v", results, err)
+	}
+	for index, result := range results {
+		if len(result.rows) != 1 || result.rows[0].Key != requests[index].keys[0] || result.complete != (index != 1) {
+			t.Fatalf("round %d lost or misattributed: %+v", index+1, result)
+		}
+	}
+}
+
+func TestCapacityCollectionKeepsCompletedWorkAndStopsAfterObservationFailure(t *testing.T) {
+	for _, completedFailedRound := range []bool{false, true} {
+		t.Run(fmt.Sprint(completedFailedRound), func(t *testing.T) {
+			cause := errors.New("retained observation failed")
+			calls := 0
+			rounds, err := measurement.CollectCompletedRounds(4, func(round int) (map[string]any, error) {
+				calls++
+				row := map[string]any{"round": round, "retained": map[string]any{}, "status": "incomplete", "durable_audit_prerequisite_met": true, "host_dimensions": map[string]any{"memory": "incomplete"}}
+				if round == 2 {
+					if completedFailedRound {
+						return row, cause
+					}
+					return nil, cause
+				}
+				return row, nil
+			})
+			want := 1
+			if completedFailedRound {
+				want = 2
+			}
+			if !errors.Is(err, cause) || calls != 2 || len(rounds) != want {
+				t.Fatalf("completed rounds=%v calls=%d err=%v", rounds, calls, err)
+			}
+			for _, row := range rounds {
+				if err := applyOfflineCapacityAudit(row, capacityAuditResult{complete: true}); err != nil {
+					t.Fatal(err)
+				}
+				if row["status"] != "incomplete" || row["all_results_audited"] != true || row["host_dimensions"].(map[string]any)["memory"] != "incomplete" {
+					t.Fatalf("audit changed missing memory into acceptance: %v", row)
+				}
+			}
+			result, err := finalizeQualification(capacityResult(1, 30, 4, true, rounds, 101, 102), err,
+				func() error { return errors.New("fact log close failed") })
+			encoded, code, encodeError := encodedQualificationResult(result)
+			if !errors.Is(err, cause) || encodeError != nil || code == 0 || !strings.Contains(string(encoded), "fact log close failed") || len(result["rounds"].([]map[string]any)) != want {
+				t.Fatalf("lost partial failure result=%s err=%v", encoded, err)
+			}
+		})
+	}
+}
+
+func TestApplyingMissingOfflineAuditEvidenceFailsRound(t *testing.T) {
+	row := map[string]any{
+		"status":                         "passed",
+		"durable_audit_prerequisite_met": true,
+		"host_dimensions":                map[string]any{},
+	}
+	if err := applyOfflineCapacityAudit(row, capacityAuditResult{}); err != nil {
+		t.Fatal(err)
+	}
+	if row["status"] != "failed" || row["all_results_audited"] != false || row["offline_audit_after_host_reaped"] != true {
+		t.Fatalf("missing audit evidence did not fail round: %v", row)
+	}
+	dimensions := row["host_dimensions"].(map[string]any)
+	if dimensions["durable_audit"] != "failed" {
+		t.Fatalf("durable audit dimension = %v", dimensions["durable_audit"])
+	}
+	passed := map[string]any{
+		"status":                         "passed",
+		"durable_audit_prerequisite_met": true,
+		"host_dimensions":                map[string]any{},
+	}
+	if err := applyOfflineCapacityAudit(passed, capacityAuditResult{complete: true}); err != nil {
+		t.Fatal(err)
+	}
+	if passed["status"] != "passed" || passed["all_results_audited"] != true || passed["host_dimensions"].(map[string]any)["durable_audit"] != "passed" {
+		t.Fatalf("successful offline audit did not preserve qualification: %v", passed)
+	}
+}
+
+func TestFailureAfterCompletedCapacityRoundRetainsEvidenceWithoutAuditClaim(t *testing.T) {
+	row := map[string]any{
+		"status":                         "passed",
+		"durable_audit_prerequisite_met": true,
+		"host_dimensions":                map[string]any{},
+		"retained":                       map[string]any{},
+	}
+	unavailableOfflineCapacityAudit(row)
+	result := capacityResult(8, 30, 2, false, []map[string]any{row}, 101, 102)
+	result, err := finalizeQualification(result, errors.New("round 2 failed"))
+	if err == nil || result["status"] != "failed" || len(result["rounds"].([]map[string]any)) != 1 {
+		t.Fatalf("partial capacity evidence was lost: result=%v err=%v", result, err)
+	}
+	dimensions := row["host_dimensions"].(map[string]any)
+	if dimensions["durable_audit"] != "unavailable" || row["all_results_audited"] != false || row["offline_audit_after_host_reaped"] != false {
+		t.Fatalf("partial row claimed a durable audit: %v", row)
+	}
+	if row["status"] != "incomplete" {
+		t.Fatalf("unaudited row status = %v", row["status"])
+	}
+}
+
+func TestCleanupOnlyFailureChangesFinalVerdictAndJoinsErrors(t *testing.T) {
+	result := map[string]any{"status": "passed", "artifacts": "/tmp/evidence", "rows": []any{"complete"}}
+	result, err := finalizeQualification(result, nil,
+		func() error { return errors.New("Host cleanup failed") },
+		func() error { return errors.New("fact log close failed") },
+	)
+	if err == nil || result["status"] != "failed" || result["artifacts"] != "/tmp/evidence" {
+		t.Fatalf("cleanup failure did not retain failed evidence: result=%v err=%v", result, err)
+	}
+	message, _ := result["error"].(string)
+	if !strings.Contains(message, "Host cleanup failed") || !strings.Contains(message, "fact log close failed") {
+		t.Fatalf("cleanup errors were not joined: %q", message)
+	}
+}

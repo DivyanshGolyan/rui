@@ -1,0 +1,1075 @@
+{"sent": 1, "sent_ns": 1139934356003000, "schedule_lateness_ns": 95000}
+{"ack": 1, "sent_ns": 1139934356003000, "ack_ns": 1139934357270000, "rtt_ns": 1267000}
+{"sent": 2, "sent_ns": 1139934380402000, "schedule_lateness_ns": 4494000}
+{"ack": 2, "sent_ns": 1139934380402000, "ack_ns": 1139934380545000, "rtt_ns": 143000}
+{"sent": 3, "sent_ns": 1139934403541000, "schedule_lateness_ns": 7633000}
+{"ack": 3, "sent_ns": 1139934403541000, "ack_ns": 1139934403633000, "rtt_ns": 92000}
+{"sent": 4, "sent_ns": 1139934416174000, "schedule_lateness_ns": 266000}
+{"ack": 4, "sent_ns": 1139934416174000, "ack_ns": 1139934416343000, "rtt_ns": 169000}
+{"sent": 5, "sent_ns": 1139934441221000, "schedule_lateness_ns": 5313000}
+{"ack": 5, "sent_ns": 1139934441221000, "ack_ns": 1139934441436000, "rtt_ns": 215000}
+{"sent": 6, "sent_ns": 1139934464150000, "schedule_lateness_ns": 8242000}
+{"ack": 6, "sent_ns": 1139934464150000, "ack_ns": 1139934464415000, "rtt_ns": 265000}
+{"sent": 7, "sent_ns": 1139934486640000, "schedule_lateness_ns": 10732000}
+{"ack": 7, "sent_ns": 1139934486640000, "ack_ns": 1139934486776000, "rtt_ns": 136000}
+{"sent": 8, "sent_ns": 1139934497701000, "schedule_lateness_ns": 1793000}
+{"ack": 8, "sent_ns": 1139934497701000, "ack_ns": 1139934498214000, "rtt_ns": 513000}
+{"sent": 9, "sent_ns": 1139934523293000, "schedule_lateness_ns": 7385000}
+{"ack": 9, "sent_ns": 1139934523293000, "ack_ns": 1139934523497000, "rtt_ns": 204000}
+{"sent": 10, "sent_ns": 1139934536033000, "schedule_lateness_ns": 125000}
+{"ack": 10, "sent_ns": 1139934536033000, "ack_ns": 1139934536429000, "rtt_ns": 396000}
+{"sent": 11, "sent_ns": 1139934558538000, "schedule_lateness_ns": 2630000}
+{"ack": 11, "sent_ns": 1139934558538000, "ack_ns": 1139934558715000, "rtt_ns": 177000}
+{"sent": 12, "sent_ns": 1139934580754000, "schedule_lateness_ns": 4846000}
+{"ack": 12, "sent_ns": 1139934580754000, "ack_ns": 1139934580914000, "rtt_ns": 160000}
+{"sent": 13, "sent_ns": 1139934603673000, "schedule_lateness_ns": 7765000}
+{"ack": 13, "sent_ns": 1139934603673000, "ack_ns": 1139934603976000, "rtt_ns": 303000}
+{"sent": 14, "sent_ns": 1139934626749000, "schedule_lateness_ns": 10841000}
+{"sent": 15, "sent_ns": 1139934636644000, "schedule_lateness_ns": 736000}
+{"sent": 16, "sent_ns": 1139934656030000, "schedule_lateness_ns": 122000}
+{"ack": 14, "sent_ns": 1139934626749000, "ack_ns": 1139934662042000, "rtt_ns": 35293000}
+{"ack": 15, "sent_ns": 1139934636644000, "ack_ns": 1139934662068000, "rtt_ns": 25424000}
+{"ack": 16, "sent_ns": 1139934656030000, "ack_ns": 1139934662073000, "rtt_ns": 6043000}
+{"sent": 17, "sent_ns": 1139934685464000, "schedule_lateness_ns": 9556000}
+{"sent": 18, "sent_ns": 1139934696140000, "schedule_lateness_ns": 232000}
+{"sent": 19, "sent_ns": 1139934717099000, "schedule_lateness_ns": 1191000}
+{"sent": 20, "sent_ns": 1139934736339000, "schedule_lateness_ns": 431000}
+{"ack": 17, "sent_ns": 1139934685464000, "ack_ns": 1139934739004000, "rtt_ns": 53540000}
+{"ack": 18, "sent_ns": 1139934696140000, "ack_ns": 1139934739026000, "rtt_ns": 42886000}
+{"ack": 19, "sent_ns": 1139934717099000, "ack_ns": 1139934739031000, "rtt_ns": 21932000}
+{"ack": 20, "sent_ns": 1139934736339000, "ack_ns": 1139934739035000, "rtt_ns": 2696000}
+{"sent": 21, "sent_ns": 1139934760657000, "schedule_lateness_ns": 4749000}
+{"sent": 22, "sent_ns": 1139934776733000, "schedule_lateness_ns": 825000}
+{"sent": 23, "sent_ns": 1139934796242000, "schedule_lateness_ns": 334000}
+{"sent": 24, "sent_ns": 1139934816496000, "schedule_lateness_ns": 588000}
+{"sent": 25, "sent_ns": 1139934836268000, "schedule_lateness_ns": 360000}
+{"sent": 26, "sent_ns": 1139934856402000, "schedule_lateness_ns": 494000}
+{"sent": 27, "sent_ns": 1139934877186000, "schedule_lateness_ns": 1278000}
+{"sent": 28, "sent_ns": 1139934896297000, "schedule_lateness_ns": 389000}
+{"sent": 29, "sent_ns": 1139934916655000, "schedule_lateness_ns": 747000}
+{"sent": 30, "sent_ns": 1139934936834000, "schedule_lateness_ns": 926000}
+{"sent": 31, "sent_ns": 1139934955955000, "schedule_lateness_ns": 47000}
+{"sent": 32, "sent_ns": 1139934976419000, "schedule_lateness_ns": 511000}
+{"sent": 33, "sent_ns": 1139934996592000, "schedule_lateness_ns": 684000}
+{"sent": 34, "sent_ns": 1139935016973000, "schedule_lateness_ns": 1065000}
+{"ack": 21, "sent_ns": 1139934760657000, "ack_ns": 1139935018970000, "rtt_ns": 258313000}
+{"ack": 22, "sent_ns": 1139934776733000, "ack_ns": 1139935018989000, "rtt_ns": 242256000}
+{"ack": 23, "sent_ns": 1139934796242000, "ack_ns": 1139935018993000, "rtt_ns": 222751000}
+{"ack": 24, "sent_ns": 1139934816496000, "ack_ns": 1139935018998000, "rtt_ns": 202502000}
+{"ack": 25, "sent_ns": 1139934836268000, "ack_ns": 1139935019002000, "rtt_ns": 182734000}
+{"ack": 26, "sent_ns": 1139934856402000, "ack_ns": 1139935019009000, "rtt_ns": 162607000}
+{"ack": 27, "sent_ns": 1139934877186000, "ack_ns": 1139935019013000, "rtt_ns": 141827000}
+{"ack": 28, "sent_ns": 1139934896297000, "ack_ns": 1139935019017000, "rtt_ns": 122720000}
+{"ack": 29, "sent_ns": 1139934916655000, "ack_ns": 1139935019020000, "rtt_ns": 102365000}
+{"ack": 30, "sent_ns": 1139934936834000, "ack_ns": 1139935019023000, "rtt_ns": 82189000}
+{"ack": 31, "sent_ns": 1139934955955000, "ack_ns": 1139935019026000, "rtt_ns": 63071000}
+{"ack": 32, "sent_ns": 1139934976419000, "ack_ns": 1139935019031000, "rtt_ns": 42612000}
+{"ack": 33, "sent_ns": 1139934996592000, "ack_ns": 1139935019034000, "rtt_ns": 22442000}
+{"ack": 34, "sent_ns": 1139935016973000, "ack_ns": 1139935019037000, "rtt_ns": 2064000}
+{"sent": 35, "sent_ns": 1139935043349000, "schedule_lateness_ns": 7441000}
+{"sent": 36, "sent_ns": 1139935056119000, "schedule_lateness_ns": 211000}
+{"sent": 37, "sent_ns": 1139935076819000, "schedule_lateness_ns": 911000}
+{"sent": 38, "sent_ns": 1139935096294000, "schedule_lateness_ns": 386000}
+{"sent": 39, "sent_ns": 1139935116613000, "schedule_lateness_ns": 705000}
+{"sent": 40, "sent_ns": 1139935137116000, "schedule_lateness_ns": 1208000}
+{"ack": 35, "sent_ns": 1139935043349000, "ack_ns": 1139935148819000, "rtt_ns": 105470000}
+{"ack": 36, "sent_ns": 1139935056119000, "ack_ns": 1139935148850000, "rtt_ns": 92731000}
+{"ack": 37, "sent_ns": 1139935076819000, "ack_ns": 1139935148856000, "rtt_ns": 72037000}
+{"ack": 38, "sent_ns": 1139935096294000, "ack_ns": 1139935148863000, "rtt_ns": 52569000}
+{"ack": 39, "sent_ns": 1139935116613000, "ack_ns": 1139935148867000, "rtt_ns": 32254000}
+{"ack": 40, "sent_ns": 1139935137116000, "ack_ns": 1139935148871000, "rtt_ns": 11755000}
+{"sent": 41, "sent_ns": 1139935160858000, "schedule_lateness_ns": 4950000}
+{"ack": 41, "sent_ns": 1139935160858000, "ack_ns": 1139935164929000, "rtt_ns": 4071000}
+{"sent": 42, "sent_ns": 1139935177495000, "schedule_lateness_ns": 1587000}
+{"ack": 42, "sent_ns": 1139935177495000, "ack_ns": 1139935178838000, "rtt_ns": 1343000}
+{"sent": 43, "sent_ns": 1139935202823000, "schedule_lateness_ns": 6915000}
+{"ack": 43, "sent_ns": 1139935202823000, "ack_ns": 1139935203991000, "rtt_ns": 1168000}
+{"sent": 44, "sent_ns": 1139935226021000, "schedule_lateness_ns": 10113000}
+{"ack": 44, "sent_ns": 1139935226021000, "ack_ns": 1139935226715000, "rtt_ns": 694000}
+{"sent": 45, "sent_ns": 1139935239347000, "schedule_lateness_ns": 3439000}
+{"ack": 45, "sent_ns": 1139935239347000, "ack_ns": 1139935240880000, "rtt_ns": 1533000}
+{"sent": 46, "sent_ns": 1139935266282000, "schedule_lateness_ns": 10374000}
+{"ack": 46, "sent_ns": 1139935266282000, "ack_ns": 1139935268641000, "rtt_ns": 2359000}
+{"sent": 47, "sent_ns": 1139935280107000, "schedule_lateness_ns": 4199000}
+{"ack": 47, "sent_ns": 1139935280107000, "ack_ns": 1139935280222000, "rtt_ns": 115000}
+{"sent": 48, "sent_ns": 1139935303326000, "schedule_lateness_ns": 7418000}
+{"ack": 48, "sent_ns": 1139935303326000, "ack_ns": 1139935304607000, "rtt_ns": 1281000}
+{"sent": 49, "sent_ns": 1139935327674000, "schedule_lateness_ns": 11766000}
+{"ack": 49, "sent_ns": 1139935327674000, "ack_ns": 1139935328994000, "rtt_ns": 1320000}
+{"sent": 50, "sent_ns": 1139935341533000, "schedule_lateness_ns": 5625000}
+{"ack": 50, "sent_ns": 1139935341533000, "ack_ns": 1139935343089000, "rtt_ns": 1556000}
+{"sent": 51, "sent_ns": 1139935365337000, "schedule_lateness_ns": 9429000}
+{"ack": 51, "sent_ns": 1139935365337000, "ack_ns": 1139935365882000, "rtt_ns": 545000}
+{"sent": 52, "sent_ns": 1139935379028000, "schedule_lateness_ns": 3120000}
+{"ack": 52, "sent_ns": 1139935379028000, "ack_ns": 1139935382598000, "rtt_ns": 3570000}
+{"sent": 53, "sent_ns": 1139935407769000, "schedule_lateness_ns": 11861000}
+{"ack": 53, "sent_ns": 1139935407769000, "ack_ns": 1139935411156000, "rtt_ns": 3387000}
+{"sent": 54, "sent_ns": 1139935423708000, "schedule_lateness_ns": 7800000}
+{"ack": 54, "sent_ns": 1139935423708000, "ack_ns": 1139935424108000, "rtt_ns": 400000}
+{"sent": 55, "sent_ns": 1139935436664000, "schedule_lateness_ns": 756000}
+{"ack": 55, "sent_ns": 1139935436664000, "ack_ns": 1139935437975000, "rtt_ns": 1311000}
+{"sent": 56, "sent_ns": 1139935460864000, "schedule_lateness_ns": 4956000}
+{"ack": 56, "sent_ns": 1139935460864000, "ack_ns": 1139935461541000, "rtt_ns": 677000}
+{"sent": 57, "sent_ns": 1139935484450000, "schedule_lateness_ns": 8542000}
+{"ack": 57, "sent_ns": 1139935484450000, "ack_ns": 1139935485581000, "rtt_ns": 1131000}
+{"sent": 58, "sent_ns": 1139935496864000, "schedule_lateness_ns": 956000}
+{"ack": 58, "sent_ns": 1139935496864000, "ack_ns": 1139935499314000, "rtt_ns": 2450000}
+{"sent": 59, "sent_ns": 1139935521944000, "schedule_lateness_ns": 6036000}
+{"ack": 59, "sent_ns": 1139935521944000, "ack_ns": 1139935522888000, "rtt_ns": 944000}
+{"sent": 60, "sent_ns": 1139935547133000, "schedule_lateness_ns": 11225000}
+{"ack": 60, "sent_ns": 1139935547133000, "ack_ns": 1139935547277000, "rtt_ns": 144000}
+{"sent": 61, "sent_ns": 1139935559240000, "schedule_lateness_ns": 3332000}
+{"ack": 61, "sent_ns": 1139935559240000, "ack_ns": 1139935559307000, "rtt_ns": 67000}
+{"sent": 62, "sent_ns": 1139935582087000, "schedule_lateness_ns": 6179000}
+{"ack": 62, "sent_ns": 1139935582087000, "ack_ns": 1139935582865000, "rtt_ns": 778000}
+{"sent": 63, "sent_ns": 1139935605819000, "schedule_lateness_ns": 9911000}
+{"ack": 63, "sent_ns": 1139935605819000, "ack_ns": 1139935607939000, "rtt_ns": 2120000}
+{"sent": 64, "sent_ns": 1139935620505000, "schedule_lateness_ns": 4597000}
+{"ack": 64, "sent_ns": 1139935620505000, "ack_ns": 1139935620860000, "rtt_ns": 355000}
+{"sent": 65, "sent_ns": 1139935644577000, "schedule_lateness_ns": 8669000}
+{"ack": 65, "sent_ns": 1139935644577000, "ack_ns": 1139935644648000, "rtt_ns": 71000}
+{"sent": 66, "sent_ns": 1139935657186000, "schedule_lateness_ns": 1278000}
+{"ack": 66, "sent_ns": 1139935657186000, "ack_ns": 1139935657726000, "rtt_ns": 540000}
+{"sent": 67, "sent_ns": 1139935680085000, "schedule_lateness_ns": 4177000}
+{"ack": 67, "sent_ns": 1139935680085000, "ack_ns": 1139935682550000, "rtt_ns": 2465000}
+{"sent": 68, "sent_ns": 1139935707414000, "schedule_lateness_ns": 11506000}
+{"ack": 68, "sent_ns": 1139935707414000, "ack_ns": 1139935710647000, "rtt_ns": 3233000}
+{"sent": 69, "sent_ns": 1139935722051000, "schedule_lateness_ns": 6143000}
+{"ack": 69, "sent_ns": 1139935722051000, "ack_ns": 1139935722892000, "rtt_ns": 841000}
+{"sent": 70, "sent_ns": 1139935744905000, "schedule_lateness_ns": 8997000}
+{"ack": 70, "sent_ns": 1139935744905000, "ack_ns": 1139935745036000, "rtt_ns": 131000}
+{"sent": 71, "sent_ns": 1139935767258000, "schedule_lateness_ns": 11350000}
+{"ack": 71, "sent_ns": 1139935767258000, "ack_ns": 1139935768946000, "rtt_ns": 1688000}
+{"sent": 72, "sent_ns": 1139935780299000, "schedule_lateness_ns": 4391000}
+{"ack": 72, "sent_ns": 1139935780299000, "ack_ns": 1139935780573000, "rtt_ns": 274000}
+{"sent": 73, "sent_ns": 1139935805672000, "schedule_lateness_ns": 9764000}
+{"ack": 73, "sent_ns": 1139935805672000, "ack_ns": 1139935805890000, "rtt_ns": 218000}
+{"sent": 74, "sent_ns": 1139935818246000, "schedule_lateness_ns": 2338000}
+{"ack": 74, "sent_ns": 1139935818246000, "ack_ns": 1139935820001000, "rtt_ns": 1755000}
+{"sent": 75, "sent_ns": 1139935844165000, "schedule_lateness_ns": 8257000}
+{"ack": 75, "sent_ns": 1139935844165000, "ack_ns": 1139935845110000, "rtt_ns": 945000}
+{"sent": 76, "sent_ns": 1139935857707000, "schedule_lateness_ns": 1799000}
+{"ack": 76, "sent_ns": 1139935857707000, "ack_ns": 1139935861912000, "rtt_ns": 4205000}
+{"sent": 77, "sent_ns": 1139935882745000, "schedule_lateness_ns": 6837000}
+{"ack": 77, "sent_ns": 1139935882745000, "ack_ns": 1139935884149000, "rtt_ns": 1404000}
+{"sent": 78, "sent_ns": 1139935905151000, "schedule_lateness_ns": 9243000}
+{"ack": 78, "sent_ns": 1139935905151000, "ack_ns": 1139935906043000, "rtt_ns": 892000}
+{"sent": 79, "sent_ns": 1139935918009000, "schedule_lateness_ns": 2101000}
+{"ack": 79, "sent_ns": 1139935918009000, "ack_ns": 1139935919376000, "rtt_ns": 1367000}
+{"sent": 80, "sent_ns": 1139935941500000, "schedule_lateness_ns": 5592000}
+{"ack": 80, "sent_ns": 1139935941500000, "ack_ns": 1139935942628000, "rtt_ns": 1128000}
+{"sent": 81, "sent_ns": 1139935965832000, "schedule_lateness_ns": 9924000}
+{"ack": 81, "sent_ns": 1139935965832000, "ack_ns": 1139935965977000, "rtt_ns": 145000}
+{"sent": 82, "sent_ns": 1139935977256000, "schedule_lateness_ns": 1348000}
+{"ack": 82, "sent_ns": 1139935977256000, "ack_ns": 1139935977364000, "rtt_ns": 108000}
+{"sent": 83, "sent_ns": 1139935998849000, "schedule_lateness_ns": 2941000}
+{"ack": 83, "sent_ns": 1139935998849000, "ack_ns": 1139935999318000, "rtt_ns": 469000}
+{"sent": 84, "sent_ns": 1139936021782000, "schedule_lateness_ns": 5874000}
+{"ack": 84, "sent_ns": 1139936021782000, "ack_ns": 1139936022134000, "rtt_ns": 352000}
+{"sent": 85, "sent_ns": 1139936046451000, "schedule_lateness_ns": 10543000}
+{"ack": 85, "sent_ns": 1139936046451000, "ack_ns": 1139936047076000, "rtt_ns": 625000}
+{"sent": 86, "sent_ns": 1139936057699000, "schedule_lateness_ns": 1791000}
+{"ack": 86, "sent_ns": 1139936057699000, "ack_ns": 1139936057948000, "rtt_ns": 249000}
+{"sent": 87, "sent_ns": 1139936081007000, "schedule_lateness_ns": 5099000}
+{"ack": 87, "sent_ns": 1139936081007000, "ack_ns": 1139936081098000, "rtt_ns": 91000}
+{"sent": 88, "sent_ns": 1139936102398000, "schedule_lateness_ns": 6490000}
+{"ack": 88, "sent_ns": 1139936102398000, "ack_ns": 1139936102581000, "rtt_ns": 183000}
+{"sent": 89, "sent_ns": 1139936123904000, "schedule_lateness_ns": 7996000}
+{"ack": 89, "sent_ns": 1139936123904000, "ack_ns": 1139936124021000, "rtt_ns": 117000}
+{"sent": 90, "sent_ns": 1139936145303000, "schedule_lateness_ns": 9395000}
+{"ack": 90, "sent_ns": 1139936145303000, "ack_ns": 1139936145440000, "rtt_ns": 137000}
+{"sent": 91, "sent_ns": 1139936158008000, "schedule_lateness_ns": 2100000}
+{"ack": 91, "sent_ns": 1139936158008000, "ack_ns": 1139936158270000, "rtt_ns": 262000}
+{"sent": 92, "sent_ns": 1139936181081000, "schedule_lateness_ns": 5173000}
+{"ack": 92, "sent_ns": 1139936181081000, "ack_ns": 1139936181170000, "rtt_ns": 89000}
+{"sent": 93, "sent_ns": 1139936203772000, "schedule_lateness_ns": 7864000}
+{"ack": 93, "sent_ns": 1139936203772000, "ack_ns": 1139936203858000, "rtt_ns": 86000}
+{"sent": 94, "sent_ns": 1139936224982000, "schedule_lateness_ns": 9074000}
+{"ack": 94, "sent_ns": 1139936224982000, "ack_ns": 1139936225197000, "rtt_ns": 215000}
+{"sent": 95, "sent_ns": 1139936247951000, "schedule_lateness_ns": 12043000}
+{"ack": 95, "sent_ns": 1139936247951000, "ack_ns": 1139936248250000, "rtt_ns": 299000}
+{"sent": 96, "sent_ns": 1139936258635000, "schedule_lateness_ns": 2727000}
+{"ack": 96, "sent_ns": 1139936258635000, "ack_ns": 1139936258761000, "rtt_ns": 126000}
+{"sent": 97, "sent_ns": 1139936282911000, "schedule_lateness_ns": 7003000}
+{"ack": 97, "sent_ns": 1139936282911000, "ack_ns": 1139936283419000, "rtt_ns": 508000}
+{"sent": 98, "sent_ns": 1139936296008000, "schedule_lateness_ns": 100000}
+{"ack": 98, "sent_ns": 1139936296008000, "ack_ns": 1139936296143000, "rtt_ns": 135000}
+{"sent": 99, "sent_ns": 1139936319979000, "schedule_lateness_ns": 4071000}
+{"ack": 99, "sent_ns": 1139936319979000, "ack_ns": 1139936320055000, "rtt_ns": 76000}
+{"sent": 100, "sent_ns": 1139936343595000, "schedule_lateness_ns": 7687000}
+{"ack": 100, "sent_ns": 1139936343595000, "ack_ns": 1139936344140000, "rtt_ns": 545000}
+{"sent": 101, "sent_ns": 1139936365328000, "schedule_lateness_ns": 9420000}
+{"ack": 101, "sent_ns": 1139936365328000, "ack_ns": 1139936365474000, "rtt_ns": 146000}
+{"sent": 102, "sent_ns": 1139936376675000, "schedule_lateness_ns": 767000}
+{"ack": 102, "sent_ns": 1139936376675000, "ack_ns": 1139936376729000, "rtt_ns": 54000}
+{"sent": 103, "sent_ns": 1139936398969000, "schedule_lateness_ns": 3061000}
+{"ack": 103, "sent_ns": 1139936398969000, "ack_ns": 1139936399108000, "rtt_ns": 139000}
+{"sent": 104, "sent_ns": 1139936420999000, "schedule_lateness_ns": 5091000}
+{"ack": 104, "sent_ns": 1139936420999000, "ack_ns": 1139936421065000, "rtt_ns": 66000}
+{"sent": 105, "sent_ns": 1139936444459000, "schedule_lateness_ns": 8551000}
+{"ack": 105, "sent_ns": 1139936444459000, "ack_ns": 1139936444601000, "rtt_ns": 142000}
+{"sent": 106, "sent_ns": 1139936465595000, "schedule_lateness_ns": 9687000}
+{"ack": 106, "sent_ns": 1139936465595000, "ack_ns": 1139936465679000, "rtt_ns": 84000}
+{"sent": 107, "sent_ns": 1139936477013000, "schedule_lateness_ns": 1105000}
+{"ack": 107, "sent_ns": 1139936477013000, "ack_ns": 1139936477112000, "rtt_ns": 99000}
+{"sent": 108, "sent_ns": 1139936500002000, "schedule_lateness_ns": 4094000}
+{"ack": 108, "sent_ns": 1139936500002000, "ack_ns": 1139936500179000, "rtt_ns": 177000}
+{"sent": 109, "sent_ns": 1139936525149000, "schedule_lateness_ns": 9241000}
+{"ack": 109, "sent_ns": 1139936525149000, "ack_ns": 1139936525234000, "rtt_ns": 85000}
+{"sent": 110, "sent_ns": 1139936536743000, "schedule_lateness_ns": 835000}
+{"ack": 110, "sent_ns": 1139936536743000, "ack_ns": 1139936536796000, "rtt_ns": 53000}
+{"sent": 111, "sent_ns": 1139936557129000, "schedule_lateness_ns": 1221000}
+{"ack": 111, "sent_ns": 1139936557129000, "ack_ns": 1139936557446000, "rtt_ns": 317000}
+{"sent": 112, "sent_ns": 1139936579067000, "schedule_lateness_ns": 3159000}
+{"ack": 112, "sent_ns": 1139936579067000, "ack_ns": 1139936579719000, "rtt_ns": 652000}
+{"sent": 113, "sent_ns": 1139936602528000, "schedule_lateness_ns": 6620000}
+{"ack": 113, "sent_ns": 1139936602528000, "ack_ns": 1139936602643000, "rtt_ns": 115000}
+{"sent": 114, "sent_ns": 1139936626592000, "schedule_lateness_ns": 10684000}
+{"ack": 114, "sent_ns": 1139936626592000, "ack_ns": 1139936626676000, "rtt_ns": 84000}
+{"sent": 115, "sent_ns": 1139936639080000, "schedule_lateness_ns": 3172000}
+{"ack": 115, "sent_ns": 1139936639080000, "ack_ns": 1139936639153000, "rtt_ns": 73000}
+{"sent": 116, "sent_ns": 1139936660029000, "schedule_lateness_ns": 4121000}
+{"ack": 116, "sent_ns": 1139936660029000, "ack_ns": 1139936660161000, "rtt_ns": 132000}
+{"sent": 117, "sent_ns": 1139936684970000, "schedule_lateness_ns": 9062000}
+{"ack": 117, "sent_ns": 1139936684970000, "ack_ns": 1139936685059000, "rtt_ns": 89000}
+{"sent": 118, "sent_ns": 1139936697427000, "schedule_lateness_ns": 1519000}
+{"ack": 118, "sent_ns": 1139936697427000, "ack_ns": 1139936697567000, "rtt_ns": 140000}
+{"sent": 119, "sent_ns": 1139936719189000, "schedule_lateness_ns": 3281000}
+{"ack": 119, "sent_ns": 1139936719189000, "ack_ns": 1139936719298000, "rtt_ns": 109000}
+{"sent": 120, "sent_ns": 1139936744008000, "schedule_lateness_ns": 8100000}
+{"ack": 120, "sent_ns": 1139936744008000, "ack_ns": 1139936744093000, "rtt_ns": 85000}
+{"sent": 121, "sent_ns": 1139936766538000, "schedule_lateness_ns": 10630000}
+{"ack": 121, "sent_ns": 1139936766538000, "ack_ns": 1139936766805000, "rtt_ns": 267000}
+{"sent": 122, "sent_ns": 1139936778320000, "schedule_lateness_ns": 2412000}
+{"ack": 122, "sent_ns": 1139936778320000, "ack_ns": 1139936778432000, "rtt_ns": 112000}
+{"sent": 123, "sent_ns": 1139936801356000, "schedule_lateness_ns": 5448000}
+{"ack": 123, "sent_ns": 1139936801356000, "ack_ns": 1139936801413000, "rtt_ns": 57000}
+{"sent": 124, "sent_ns": 1139936824789000, "schedule_lateness_ns": 8881000}
+{"ack": 124, "sent_ns": 1139936824789000, "ack_ns": 1139936825007000, "rtt_ns": 218000}
+{"sent": 125, "sent_ns": 1139936836477000, "schedule_lateness_ns": 569000}
+{"ack": 125, "sent_ns": 1139936836477000, "ack_ns": 1139936836547000, "rtt_ns": 70000}
+{"sent": 126, "sent_ns": 1139936861382000, "schedule_lateness_ns": 5474000}
+{"ack": 126, "sent_ns": 1139936861382000, "ack_ns": 1139936861554000, "rtt_ns": 172000}
+{"sent": 127, "sent_ns": 1139936886660000, "schedule_lateness_ns": 10752000}
+{"ack": 127, "sent_ns": 1139936886660000, "ack_ns": 1139936886728000, "rtt_ns": 68000}
+{"sent": 128, "sent_ns": 1139936896773000, "schedule_lateness_ns": 865000}
+{"ack": 128, "sent_ns": 1139936896773000, "ack_ns": 1139936896910000, "rtt_ns": 137000}
+{"sent": 129, "sent_ns": 1139936919980000, "schedule_lateness_ns": 4072000}
+{"ack": 129, "sent_ns": 1139936919980000, "ack_ns": 1139936920104000, "rtt_ns": 124000}
+{"sent": 130, "sent_ns": 1139936944175000, "schedule_lateness_ns": 8267000}
+{"ack": 130, "sent_ns": 1139936944175000, "ack_ns": 1139936944325000, "rtt_ns": 150000}
+{"sent": 131, "sent_ns": 1139936967759000, "schedule_lateness_ns": 11851000}
+{"ack": 131, "sent_ns": 1139936967759000, "ack_ns": 1139936967858000, "rtt_ns": 99000}
+{"sent": 132, "sent_ns": 1139936978881000, "schedule_lateness_ns": 2973000}
+{"ack": 132, "sent_ns": 1139936978881000, "ack_ns": 1139936978962000, "rtt_ns": 81000}
+{"sent": 133, "sent_ns": 1139937004061000, "schedule_lateness_ns": 8153000}
+{"ack": 133, "sent_ns": 1139937004061000, "ack_ns": 1139937004140000, "rtt_ns": 79000}
+{"sent": 134, "sent_ns": 1139937026215000, "schedule_lateness_ns": 10307000}
+{"ack": 134, "sent_ns": 1139937026215000, "ack_ns": 1139937026295000, "rtt_ns": 80000}
+{"sent": 135, "sent_ns": 1139937036664000, "schedule_lateness_ns": 756000}
+{"ack": 135, "sent_ns": 1139937036664000, "ack_ns": 1139937036790000, "rtt_ns": 126000}
+{"sent": 136, "sent_ns": 1139937061931000, "schedule_lateness_ns": 6023000}
+{"ack": 136, "sent_ns": 1139937061931000, "ack_ns": 1139937062055000, "rtt_ns": 124000}
+{"sent": 137, "sent_ns": 1139937085668000, "schedule_lateness_ns": 9760000}
+{"ack": 137, "sent_ns": 1139937085668000, "ack_ns": 1139937085755000, "rtt_ns": 87000}
+{"sent": 138, "sent_ns": 1139937098278000, "schedule_lateness_ns": 2370000}
+{"ack": 138, "sent_ns": 1139937098278000, "ack_ns": 1139937098388000, "rtt_ns": 110000}
+{"sent": 139, "sent_ns": 1139937123494000, "schedule_lateness_ns": 7586000}
+{"ack": 139, "sent_ns": 1139937123494000, "ack_ns": 1139937123585000, "rtt_ns": 91000}
+{"sent": 140, "sent_ns": 1139937144988000, "schedule_lateness_ns": 9080000}
+{"ack": 140, "sent_ns": 1139937144988000, "ack_ns": 1139937145089000, "rtt_ns": 101000}
+{"sent": 141, "sent_ns": 1139937157635000, "schedule_lateness_ns": 1727000}
+{"ack": 141, "sent_ns": 1139937157635000, "ack_ns": 1139937157748000, "rtt_ns": 113000}
+{"sent": 142, "sent_ns": 1139937182597000, "schedule_lateness_ns": 6689000}
+{"ack": 142, "sent_ns": 1139937182597000, "ack_ns": 1139937182667000, "rtt_ns": 70000}
+{"sent": 143, "sent_ns": 1139937205256000, "schedule_lateness_ns": 9348000}
+{"ack": 143, "sent_ns": 1139937205256000, "ack_ns": 1139937205408000, "rtt_ns": 152000}
+{"sent": 144, "sent_ns": 1139937219658000, "schedule_lateness_ns": 3750000}
+{"ack": 144, "sent_ns": 1139937219658000, "ack_ns": 1139937219851000, "rtt_ns": 193000}
+{"sent": 145, "sent_ns": 1139937245731000, "schedule_lateness_ns": 9823000}
+{"ack": 145, "sent_ns": 1139937245731000, "ack_ns": 1139937245839000, "rtt_ns": 108000}
+{"sent": 146, "sent_ns": 1139937256877000, "schedule_lateness_ns": 969000}
+{"ack": 146, "sent_ns": 1139937256877000, "ack_ns": 1139937259227000, "rtt_ns": 2350000}
+{"sent": 147, "sent_ns": 1139937282032000, "schedule_lateness_ns": 6124000}
+{"ack": 147, "sent_ns": 1139937282032000, "ack_ns": 1139937282158000, "rtt_ns": 126000}
+{"sent": 148, "sent_ns": 1139937296376000, "schedule_lateness_ns": 468000}
+{"ack": 148, "sent_ns": 1139937296376000, "ack_ns": 1139937296899000, "rtt_ns": 523000}
+{"sent": 149, "sent_ns": 1139937321307000, "schedule_lateness_ns": 5399000}
+{"ack": 149, "sent_ns": 1139937321307000, "ack_ns": 1139937321703000, "rtt_ns": 396000}
+{"sent": 150, "sent_ns": 1139937348118000, "schedule_lateness_ns": 12210000}
+{"ack": 150, "sent_ns": 1139937348118000, "ack_ns": 1139937348271000, "rtt_ns": 153000}
+{"sent": 151, "sent_ns": 1139937360019000, "schedule_lateness_ns": 4111000}
+{"ack": 151, "sent_ns": 1139937360019000, "ack_ns": 1139937360534000, "rtt_ns": 515000}
+{"sent": 152, "sent_ns": 1139937390084000, "schedule_lateness_ns": 14176000}
+{"ack": 152, "sent_ns": 1139937390084000, "ack_ns": 1139937390477000, "rtt_ns": 393000}
+{"sent": 153, "sent_ns": 1139937402182000, "schedule_lateness_ns": 6274000}
+{"ack": 153, "sent_ns": 1139937402182000, "ack_ns": 1139937402334000, "rtt_ns": 152000}
+{"sent": 154, "sent_ns": 1139937425504000, "schedule_lateness_ns": 9596000}
+{"ack": 154, "sent_ns": 1139937425504000, "ack_ns": 1139937426210000, "rtt_ns": 706000}
+{"sent": 155, "sent_ns": 1139937438700000, "schedule_lateness_ns": 2792000}
+{"ack": 155, "sent_ns": 1139937438700000, "ack_ns": 1139937439369000, "rtt_ns": 669000}
+{"sent": 156, "sent_ns": 1139937461644000, "schedule_lateness_ns": 5736000}
+{"ack": 156, "sent_ns": 1139937461644000, "ack_ns": 1139937461750000, "rtt_ns": 106000}
+{"sent": 157, "sent_ns": 1139937488247000, "schedule_lateness_ns": 12339000}
+{"ack": 157, "sent_ns": 1139937488247000, "ack_ns": 1139937488369000, "rtt_ns": 122000}
+{"sent": 158, "sent_ns": 1139937500074000, "schedule_lateness_ns": 4166000}
+{"ack": 158, "sent_ns": 1139937500074000, "ack_ns": 1139937500192000, "rtt_ns": 118000}
+{"sent": 159, "sent_ns": 1139937523690000, "schedule_lateness_ns": 7782000}
+{"ack": 159, "sent_ns": 1139937523690000, "ack_ns": 1139937523829000, "rtt_ns": 139000}
+{"sent": 160, "sent_ns": 1139937536401000, "schedule_lateness_ns": 493000}
+{"ack": 160, "sent_ns": 1139937536401000, "ack_ns": 1139937536518000, "rtt_ns": 117000}
+{"sent": 161, "sent_ns": 1139937560844000, "schedule_lateness_ns": 4936000}
+{"ack": 161, "sent_ns": 1139937560844000, "ack_ns": 1139937560934000, "rtt_ns": 90000}
+{"sent": 162, "sent_ns": 1139937585542000, "schedule_lateness_ns": 9634000}
+{"ack": 162, "sent_ns": 1139937585542000, "ack_ns": 1139937589136000, "rtt_ns": 3594000}
+{"sent": 163, "sent_ns": 1139937601626000, "schedule_lateness_ns": 5718000}
+{"ack": 163, "sent_ns": 1139937601626000, "ack_ns": 1139937601907000, "rtt_ns": 281000}
+{"sent": 164, "sent_ns": 1139937624625000, "schedule_lateness_ns": 8717000}
+{"ack": 164, "sent_ns": 1139937624625000, "ack_ns": 1139937627405000, "rtt_ns": 2780000}
+{"sent": 165, "sent_ns": 1139937639607000, "schedule_lateness_ns": 3699000}
+{"ack": 165, "sent_ns": 1139937639607000, "ack_ns": 1139937639876000, "rtt_ns": 269000}
+{"sent": 166, "sent_ns": 1139937668353000, "schedule_lateness_ns": 12445000}
+{"ack": 166, "sent_ns": 1139937668353000, "ack_ns": 1139937668690000, "rtt_ns": 337000}
+{"sent": 167, "sent_ns": 1139937680776000, "schedule_lateness_ns": 4868000}
+{"ack": 167, "sent_ns": 1139937680776000, "ack_ns": 1139937681387000, "rtt_ns": 611000}
+{"sent": 168, "sent_ns": 1139937705144000, "schedule_lateness_ns": 9236000}
+{"ack": 168, "sent_ns": 1139937705144000, "ack_ns": 1139937705295000, "rtt_ns": 151000}
+{"sent": 169, "sent_ns": 1139937721092000, "schedule_lateness_ns": 5184000}
+{"ack": 169, "sent_ns": 1139937721092000, "ack_ns": 1139937721229000, "rtt_ns": 137000}
+{"sent": 170, "sent_ns": 1139937745161000, "schedule_lateness_ns": 9253000}
+{"ack": 170, "sent_ns": 1139937745161000, "ack_ns": 1139937745705000, "rtt_ns": 544000}
+{"sent": 171, "sent_ns": 1139937759410000, "schedule_lateness_ns": 3502000}
+{"ack": 171, "sent_ns": 1139937759410000, "ack_ns": 1139937759840000, "rtt_ns": 430000}
+{"sent": 172, "sent_ns": 1139937785544000, "schedule_lateness_ns": 9636000}
+{"ack": 172, "sent_ns": 1139937785544000, "ack_ns": 1139937785663000, "rtt_ns": 119000}
+{"sent": 173, "sent_ns": 1139937798243000, "schedule_lateness_ns": 2335000}
+{"ack": 173, "sent_ns": 1139937798243000, "ack_ns": 1139937801363000, "rtt_ns": 3120000}
+{"sent": 174, "sent_ns": 1139937822217000, "schedule_lateness_ns": 6309000}
+{"ack": 174, "sent_ns": 1139937822217000, "ack_ns": 1139937822344000, "rtt_ns": 127000}
+{"sent": 175, "sent_ns": 1139937851101000, "schedule_lateness_ns": 15193000}
+{"ack": 175, "sent_ns": 1139937851101000, "ack_ns": 1139937851255000, "rtt_ns": 154000}
+{"sent": 176, "sent_ns": 1139937863569000, "schedule_lateness_ns": 7661000}
+{"ack": 176, "sent_ns": 1139937863569000, "ack_ns": 1139937863656000, "rtt_ns": 87000}
+{"sent": 177, "sent_ns": 1139937885865000, "schedule_lateness_ns": 9957000}
+{"ack": 177, "sent_ns": 1139937885865000, "ack_ns": 1139937886026000, "rtt_ns": 161000}
+{"sent": 178, "sent_ns": 1139937897955000, "schedule_lateness_ns": 2047000}
+{"ack": 178, "sent_ns": 1139937897955000, "ack_ns": 1139937898224000, "rtt_ns": 269000}
+{"sent": 179, "sent_ns": 1139937921731000, "schedule_lateness_ns": 5823000}
+{"ack": 179, "sent_ns": 1139937921731000, "ack_ns": 1139937921843000, "rtt_ns": 112000}
+{"sent": 180, "sent_ns": 1139937946460000, "schedule_lateness_ns": 10552000}
+{"ack": 180, "sent_ns": 1139937946460000, "ack_ns": 1139937946713000, "rtt_ns": 253000}
+{"sent": 181, "sent_ns": 1139937959244000, "schedule_lateness_ns": 3336000}
+{"ack": 181, "sent_ns": 1139937959244000, "ack_ns": 1139937959445000, "rtt_ns": 201000}
+{"sent": 182, "sent_ns": 1139937984544000, "schedule_lateness_ns": 8636000}
+{"ack": 182, "sent_ns": 1139937984544000, "ack_ns": 1139937984718000, "rtt_ns": 174000}
+{"sent": 183, "sent_ns": 1139938007014000, "schedule_lateness_ns": 11106000}
+{"ack": 183, "sent_ns": 1139938007014000, "ack_ns": 1139938007256000, "rtt_ns": 242000}
+{"sent": 184, "sent_ns": 1139938019177000, "schedule_lateness_ns": 3269000}
+{"ack": 184, "sent_ns": 1139938019177000, "ack_ns": 1139938019399000, "rtt_ns": 222000}
+{"sent": 185, "sent_ns": 1139938042288000, "schedule_lateness_ns": 6380000}
+{"ack": 185, "sent_ns": 1139938042288000, "ack_ns": 1139938042570000, "rtt_ns": 282000}
+{"sent": 186, "sent_ns": 1139938066593000, "schedule_lateness_ns": 10685000}
+{"ack": 186, "sent_ns": 1139938066593000, "ack_ns": 1139938066749000, "rtt_ns": 156000}
+{"sent": 187, "sent_ns": 1139938077021000, "schedule_lateness_ns": 1113000}
+{"ack": 187, "sent_ns": 1139938077021000, "ack_ns": 1139938077147000, "rtt_ns": 126000}
+{"sent": 188, "sent_ns": 1139938100782000, "schedule_lateness_ns": 4874000}
+{"ack": 188, "sent_ns": 1139938100782000, "ack_ns": 1139938100929000, "rtt_ns": 147000}
+{"sent": 189, "sent_ns": 1139938121691000, "schedule_lateness_ns": 5783000}
+{"ack": 189, "sent_ns": 1139938121691000, "ack_ns": 1139938122099000, "rtt_ns": 408000}
+{"sent": 190, "sent_ns": 1139938144697000, "schedule_lateness_ns": 8789000}
+{"ack": 190, "sent_ns": 1139938144697000, "ack_ns": 1139938144890000, "rtt_ns": 193000}
+{"sent": 191, "sent_ns": 1139938157022000, "schedule_lateness_ns": 1114000}
+{"ack": 191, "sent_ns": 1139938157022000, "ack_ns": 1139938157290000, "rtt_ns": 268000}
+{"sent": 192, "sent_ns": 1139938180229000, "schedule_lateness_ns": 4321000}
+{"sent": 193, "sent_ns": 1139938196171000, "schedule_lateness_ns": 263000}
+{"ack": 192, "sent_ns": 1139938180229000, "ack_ns": 1139938212345000, "rtt_ns": 32116000}
+{"ack": 193, "sent_ns": 1139938196171000, "ack_ns": 1139938212370000, "rtt_ns": 16199000}
+{"sent": 194, "sent_ns": 1139938223830000, "schedule_lateness_ns": 7922000}
+{"sent": 195, "sent_ns": 1139938236978000, "schedule_lateness_ns": 1070000}
+{"sent": 196, "sent_ns": 1139938256457000, "schedule_lateness_ns": 549000}
+{"ack": 194, "sent_ns": 1139938223830000, "ack_ns": 1139938275771000, "rtt_ns": 51941000}
+{"ack": 195, "sent_ns": 1139938236978000, "ack_ns": 1139938275795000, "rtt_ns": 38817000}
+{"ack": 196, "sent_ns": 1139938256457000, "ack_ns": 1139938275801000, "rtt_ns": 19344000}
+{"sent": 197, "sent_ns": 1139938285840000, "schedule_lateness_ns": 9932000}
+{"sent": 198, "sent_ns": 1139938295949000, "schedule_lateness_ns": 41000}
+{"sent": 199, "sent_ns": 1139938316251000, "schedule_lateness_ns": 343000}
+{"sent": 200, "sent_ns": 1139938336880000, "schedule_lateness_ns": 972000}
+{"sent": 201, "sent_ns": 1139938356944000, "schedule_lateness_ns": 1036000}
+{"sent": 202, "sent_ns": 1139938376145000, "schedule_lateness_ns": 237000}
+{"sent": 203, "sent_ns": 1139938396667000, "schedule_lateness_ns": 759000}
+{"sent": 204, "sent_ns": 1139938415928000, "schedule_lateness_ns": 20000}
+{"sent": 205, "sent_ns": 1139938436181000, "schedule_lateness_ns": 273000}
+{"sent": 206, "sent_ns": 1139938456499000, "schedule_lateness_ns": 591000}
+{"sent": 207, "sent_ns": 1139938476786000, "schedule_lateness_ns": 878000}
+{"sent": 208, "sent_ns": 1139938496207000, "schedule_lateness_ns": 299000}
+{"sent": 209, "sent_ns": 1139938516258000, "schedule_lateness_ns": 350000}
+{"sent": 210, "sent_ns": 1139938536894000, "schedule_lateness_ns": 986000}
+{"ack": 197, "sent_ns": 1139938285840000, "ack_ns": 1139938553216000, "rtt_ns": 267376000}
+{"ack": 198, "sent_ns": 1139938295949000, "ack_ns": 1139938553243000, "rtt_ns": 257294000}
+{"ack": 199, "sent_ns": 1139938316251000, "ack_ns": 1139938553249000, "rtt_ns": 236998000}
+{"ack": 200, "sent_ns": 1139938336880000, "ack_ns": 1139938553252000, "rtt_ns": 216372000}
+{"ack": 201, "sent_ns": 1139938356944000, "ack_ns": 1139938553256000, "rtt_ns": 196312000}
+{"ack": 202, "sent_ns": 1139938376145000, "ack_ns": 1139938553260000, "rtt_ns": 177115000}
+{"ack": 203, "sent_ns": 1139938396667000, "ack_ns": 1139938553263000, "rtt_ns": 156596000}
+{"ack": 204, "sent_ns": 1139938415928000, "ack_ns": 1139938553267000, "rtt_ns": 137339000}
+{"ack": 205, "sent_ns": 1139938436181000, "ack_ns": 1139938553271000, "rtt_ns": 117090000}
+{"ack": 206, "sent_ns": 1139938456499000, "ack_ns": 1139938553275000, "rtt_ns": 96776000}
+{"ack": 207, "sent_ns": 1139938476786000, "ack_ns": 1139938553278000, "rtt_ns": 76492000}
+{"ack": 208, "sent_ns": 1139938496207000, "ack_ns": 1139938553322000, "rtt_ns": 57115000}
+{"ack": 209, "sent_ns": 1139938516258000, "ack_ns": 1139938553334000, "rtt_ns": 37076000}
+{"ack": 210, "sent_ns": 1139938536894000, "ack_ns": 1139938553339000, "rtt_ns": 16445000}
+{"sent": 211, "sent_ns": 1139938565878000, "schedule_lateness_ns": 9970000}
+{"sent": 212, "sent_ns": 1139938577177000, "schedule_lateness_ns": 1269000}
+{"sent": 213, "sent_ns": 1139938596861000, "schedule_lateness_ns": 953000}
+{"sent": 214, "sent_ns": 1139938616594000, "schedule_lateness_ns": 686000}
+{"sent": 215, "sent_ns": 1139938636792000, "schedule_lateness_ns": 884000}
+{"sent": 216, "sent_ns": 1139938656178000, "schedule_lateness_ns": 270000}
+{"ack": 211, "sent_ns": 1139938565878000, "ack_ns": 1139938669886000, "rtt_ns": 104008000}
+{"ack": 212, "sent_ns": 1139938577177000, "ack_ns": 1139938669911000, "rtt_ns": 92734000}
+{"ack": 213, "sent_ns": 1139938596861000, "ack_ns": 1139938669916000, "rtt_ns": 73055000}
+{"ack": 214, "sent_ns": 1139938616594000, "ack_ns": 1139938669920000, "rtt_ns": 53326000}
+{"ack": 215, "sent_ns": 1139938636792000, "ack_ns": 1139938669924000, "rtt_ns": 33132000}
+{"ack": 216, "sent_ns": 1139938656178000, "ack_ns": 1139938669927000, "rtt_ns": 13749000}
+{"sent": 217, "sent_ns": 1139938682012000, "schedule_lateness_ns": 6104000}
+{"ack": 217, "sent_ns": 1139938682012000, "ack_ns": 1139938683035000, "rtt_ns": 1023000}
+{"sent": 218, "sent_ns": 1139938708163000, "schedule_lateness_ns": 12255000}
+{"ack": 218, "sent_ns": 1139938708163000, "ack_ns": 1139938709707000, "rtt_ns": 1544000}
+{"sent": 219, "sent_ns": 1139938722100000, "schedule_lateness_ns": 6192000}
+{"ack": 219, "sent_ns": 1139938722100000, "ack_ns": 1139938725824000, "rtt_ns": 3724000}
+{"sent": 220, "sent_ns": 1139938738373000, "schedule_lateness_ns": 2465000}
+{"ack": 220, "sent_ns": 1139938738373000, "ack_ns": 1139938740913000, "rtt_ns": 2540000}
+{"sent": 221, "sent_ns": 1139938763655000, "schedule_lateness_ns": 7747000}
+{"ack": 221, "sent_ns": 1139938763655000, "ack_ns": 1139938764250000, "rtt_ns": 595000}
+{"sent": 222, "sent_ns": 1139938776601000, "schedule_lateness_ns": 693000}
+{"ack": 222, "sent_ns": 1139938776601000, "ack_ns": 1139938777051000, "rtt_ns": 450000}
+{"sent": 223, "sent_ns": 1139938801173000, "schedule_lateness_ns": 5265000}
+{"ack": 223, "sent_ns": 1139938801173000, "ack_ns": 1139938801241000, "rtt_ns": 68000}
+{"sent": 224, "sent_ns": 1139938825060000, "schedule_lateness_ns": 9152000}
+{"ack": 224, "sent_ns": 1139938825060000, "ack_ns": 1139938831170000, "rtt_ns": 6110000}
+{"sent": 225, "sent_ns": 1139938843959000, "schedule_lateness_ns": 8051000}
+{"ack": 225, "sent_ns": 1139938843959000, "ack_ns": 1139938846608000, "rtt_ns": 2649000}
+{"sent": 226, "sent_ns": 1139938859158000, "schedule_lateness_ns": 3250000}
+{"ack": 226, "sent_ns": 1139938859158000, "ack_ns": 1139938859758000, "rtt_ns": 600000}
+{"sent": 227, "sent_ns": 1139938883107000, "schedule_lateness_ns": 7199000}
+{"ack": 227, "sent_ns": 1139938883107000, "ack_ns": 1139938886425000, "rtt_ns": 3318000}
+{"sent": 228, "sent_ns": 1139938898666000, "schedule_lateness_ns": 2758000}
+{"ack": 228, "sent_ns": 1139938898666000, "ack_ns": 1139938901168000, "rtt_ns": 2502000}
+{"sent": 229, "sent_ns": 1139938924659000, "schedule_lateness_ns": 8751000}
+{"ack": 229, "sent_ns": 1139938924659000, "ack_ns": 1139938926114000, "rtt_ns": 1455000}
+{"sent": 230, "sent_ns": 1139938938655000, "schedule_lateness_ns": 2747000}
+{"ack": 230, "sent_ns": 1139938938655000, "ack_ns": 1139938941454000, "rtt_ns": 2799000}
+{"sent": 231, "sent_ns": 1139938963821000, "schedule_lateness_ns": 7913000}
+{"ack": 231, "sent_ns": 1139938963821000, "ack_ns": 1139938966127000, "rtt_ns": 2306000}
+{"sent": 232, "sent_ns": 1139938978352000, "schedule_lateness_ns": 2444000}
+{"ack": 232, "sent_ns": 1139938978352000, "ack_ns": 1139938981613000, "rtt_ns": 3261000}
+{"sent": 233, "sent_ns": 1139939006692000, "schedule_lateness_ns": 10784000}
+{"ack": 233, "sent_ns": 1139939006692000, "ack_ns": 1139939006978000, "rtt_ns": 286000}
+{"sent": 234, "sent_ns": 1139939019508000, "schedule_lateness_ns": 3600000}
+{"ack": 234, "sent_ns": 1139939019508000, "ack_ns": 1139939019885000, "rtt_ns": 377000}
+{"sent": 235, "sent_ns": 1139939042585000, "schedule_lateness_ns": 6677000}
+{"ack": 235, "sent_ns": 1139939042585000, "ack_ns": 1139939043284000, "rtt_ns": 699000}
+{"sent": 236, "sent_ns": 1139939068092000, "schedule_lateness_ns": 12184000}
+{"ack": 236, "sent_ns": 1139939068092000, "ack_ns": 1139939071748000, "rtt_ns": 3656000}
+{"sent": 237, "sent_ns": 1139939084370000, "schedule_lateness_ns": 8462000}
+{"ack": 237, "sent_ns": 1139939084370000, "ack_ns": 1139939087763000, "rtt_ns": 3393000}
+{"sent": 238, "sent_ns": 1139939100303000, "schedule_lateness_ns": 4395000}
+{"ack": 238, "sent_ns": 1139939100303000, "ack_ns": 1139939103756000, "rtt_ns": 3453000}
+{"sent": 239, "sent_ns": 1139939116312000, "schedule_lateness_ns": 404000}
+{"ack": 239, "sent_ns": 1139939116312000, "ack_ns": 1139939119833000, "rtt_ns": 3521000}
+{"sent": 240, "sent_ns": 1139939144578000, "schedule_lateness_ns": 8670000}
+{"ack": 240, "sent_ns": 1139939144578000, "ack_ns": 1139939146428000, "rtt_ns": 1850000}
+{"sent": 241, "sent_ns": 1139939159022000, "schedule_lateness_ns": 3114000}
+{"ack": 241, "sent_ns": 1139939159022000, "ack_ns": 1139939163381000, "rtt_ns": 4359000}
+{"sent": 242, "sent_ns": 1139939186828000, "schedule_lateness_ns": 10920000}
+{"ack": 242, "sent_ns": 1139939186828000, "ack_ns": 1139939187318000, "rtt_ns": 490000}
+{"sent": 243, "sent_ns": 1139939199885000, "schedule_lateness_ns": 3977000}
+{"ack": 243, "sent_ns": 1139939199885000, "ack_ns": 1139939202187000, "rtt_ns": 2302000}
+{"sent": 244, "sent_ns": 1139939227306000, "schedule_lateness_ns": 11398000}
+{"ack": 244, "sent_ns": 1139939227306000, "ack_ns": 1139939228882000, "rtt_ns": 1576000}
+{"sent": 245, "sent_ns": 1139939241252000, "schedule_lateness_ns": 5344000}
+{"ack": 245, "sent_ns": 1139939241252000, "ack_ns": 1139939242761000, "rtt_ns": 1509000}
+{"sent": 246, "sent_ns": 1139939265912000, "schedule_lateness_ns": 10004000}
+{"ack": 246, "sent_ns": 1139939265912000, "ack_ns": 1139939267435000, "rtt_ns": 1523000}
+{"sent": 247, "sent_ns": 1139939279445000, "schedule_lateness_ns": 3537000}
+{"ack": 247, "sent_ns": 1139939279445000, "ack_ns": 1139939279828000, "rtt_ns": 383000}
+{"sent": 248, "sent_ns": 1139939304884000, "schedule_lateness_ns": 8976000}
+{"ack": 248, "sent_ns": 1139939304884000, "ack_ns": 1139939305097000, "rtt_ns": 213000}
+{"sent": 249, "sent_ns": 1139939316313000, "schedule_lateness_ns": 405000}
+{"ack": 249, "sent_ns": 1139939316313000, "ack_ns": 1139939316647000, "rtt_ns": 334000}
+{"sent": 250, "sent_ns": 1139939341771000, "schedule_lateness_ns": 5863000}
+{"ack": 250, "sent_ns": 1139939341771000, "ack_ns": 1139939341935000, "rtt_ns": 164000}
+{"sent": 251, "sent_ns": 1139939363693000, "schedule_lateness_ns": 7785000}
+{"ack": 251, "sent_ns": 1139939363693000, "ack_ns": 1139939364203000, "rtt_ns": 510000}
+{"sent": 252, "sent_ns": 1139939376586000, "schedule_lateness_ns": 678000}
+{"ack": 252, "sent_ns": 1139939376586000, "ack_ns": 1139939378588000, "rtt_ns": 2002000}
+{"sent": 253, "sent_ns": 1139939401649000, "schedule_lateness_ns": 5741000}
+{"ack": 253, "sent_ns": 1139939401649000, "ack_ns": 1139939401783000, "rtt_ns": 134000}
+{"sent": 254, "sent_ns": 1139939423347000, "schedule_lateness_ns": 7439000}
+{"ack": 254, "sent_ns": 1139939423347000, "ack_ns": 1139939423874000, "rtt_ns": 527000}
+{"sent": 255, "sent_ns": 1139939436423000, "schedule_lateness_ns": 515000}
+{"ack": 255, "sent_ns": 1139939436423000, "ack_ns": 1139939436797000, "rtt_ns": 374000}
+{"sent": 256, "sent_ns": 1139939461248000, "schedule_lateness_ns": 5340000}
+{"ack": 256, "sent_ns": 1139939461248000, "ack_ns": 1139939461786000, "rtt_ns": 538000}
+{"sent": 257, "sent_ns": 1139939483907000, "schedule_lateness_ns": 7999000}
+{"ack": 257, "sent_ns": 1139939483907000, "ack_ns": 1139939484256000, "rtt_ns": 349000}
+{"sent": 258, "sent_ns": 1139939505562000, "schedule_lateness_ns": 9654000}
+{"ack": 258, "sent_ns": 1139939505562000, "ack_ns": 1139939505663000, "rtt_ns": 101000}
+{"sent": 259, "sent_ns": 1139939516462000, "schedule_lateness_ns": 554000}
+{"ack": 259, "sent_ns": 1139939516462000, "ack_ns": 1139939516530000, "rtt_ns": 68000}
+{"sent": 260, "sent_ns": 1139939541642000, "schedule_lateness_ns": 5734000}
+{"ack": 260, "sent_ns": 1139939541642000, "ack_ns": 1139939541735000, "rtt_ns": 93000}
+{"sent": 261, "sent_ns": 1139939565365000, "schedule_lateness_ns": 9457000}
+{"ack": 261, "sent_ns": 1139939565365000, "ack_ns": 1139939565536000, "rtt_ns": 171000}
+{"sent": 262, "sent_ns": 1139939578811000, "schedule_lateness_ns": 2903000}
+{"ack": 262, "sent_ns": 1139939578811000, "ack_ns": 1139939579050000, "rtt_ns": 239000}
+{"sent": 263, "sent_ns": 1139939602637000, "schedule_lateness_ns": 6729000}
+{"ack": 263, "sent_ns": 1139939602637000, "ack_ns": 1139939602715000, "rtt_ns": 78000}
+{"sent": 264, "sent_ns": 1139939625869000, "schedule_lateness_ns": 9961000}
+{"ack": 264, "sent_ns": 1139939625869000, "ack_ns": 1139939626148000, "rtt_ns": 279000}
+{"sent": 265, "sent_ns": 1139939636341000, "schedule_lateness_ns": 433000}
+{"ack": 265, "sent_ns": 1139939636341000, "ack_ns": 1139939636589000, "rtt_ns": 248000}
+{"sent": 266, "sent_ns": 1139939660837000, "schedule_lateness_ns": 4929000}
+{"ack": 266, "sent_ns": 1139939660837000, "ack_ns": 1139939660910000, "rtt_ns": 73000}
+{"sent": 267, "sent_ns": 1139939681510000, "schedule_lateness_ns": 5602000}
+{"ack": 267, "sent_ns": 1139939681510000, "ack_ns": 1139939681788000, "rtt_ns": 278000}
+{"sent": 268, "sent_ns": 1139939703129000, "schedule_lateness_ns": 7221000}
+{"ack": 268, "sent_ns": 1139939703129000, "ack_ns": 1139939703460000, "rtt_ns": 331000}
+{"sent": 269, "sent_ns": 1139939724528000, "schedule_lateness_ns": 8620000}
+{"ack": 269, "sent_ns": 1139939724528000, "ack_ns": 1139939724871000, "rtt_ns": 343000}
+{"sent": 270, "sent_ns": 1139939736428000, "schedule_lateness_ns": 520000}
+{"ack": 270, "sent_ns": 1139939736428000, "ack_ns": 1139939736617000, "rtt_ns": 189000}
+{"sent": 271, "sent_ns": 1139939760620000, "schedule_lateness_ns": 4712000}
+{"ack": 271, "sent_ns": 1139939760620000, "ack_ns": 1139939760865000, "rtt_ns": 245000}
+{"sent": 272, "sent_ns": 1139939784712000, "schedule_lateness_ns": 8804000}
+{"ack": 272, "sent_ns": 1139939784712000, "ack_ns": 1139939784967000, "rtt_ns": 255000}
+{"sent": 273, "sent_ns": 1139939795977000, "schedule_lateness_ns": 69000}
+{"ack": 273, "sent_ns": 1139939795977000, "ack_ns": 1139939796158000, "rtt_ns": 181000}
+{"sent": 274, "sent_ns": 1139939818842000, "schedule_lateness_ns": 2934000}
+{"ack": 274, "sent_ns": 1139939818842000, "ack_ns": 1139939819438000, "rtt_ns": 596000}
+{"sent": 275, "sent_ns": 1139939840013000, "schedule_lateness_ns": 4105000}
+{"ack": 275, "sent_ns": 1139939840013000, "ack_ns": 1139939840302000, "rtt_ns": 289000}
+{"sent": 276, "sent_ns": 1139939864096000, "schedule_lateness_ns": 8188000}
+{"ack": 276, "sent_ns": 1139939864096000, "ack_ns": 1139939867303000, "rtt_ns": 3207000}
+{"sent": 277, "sent_ns": 1139939878320000, "schedule_lateness_ns": 2412000}
+{"ack": 277, "sent_ns": 1139939878320000, "ack_ns": 1139939878575000, "rtt_ns": 255000}
+{"sent": 278, "sent_ns": 1139939902168000, "schedule_lateness_ns": 6260000}
+{"ack": 278, "sent_ns": 1139939902168000, "ack_ns": 1139939902262000, "rtt_ns": 94000}
+{"sent": 279, "sent_ns": 1139939927089000, "schedule_lateness_ns": 11181000}
+{"ack": 279, "sent_ns": 1139939927089000, "ack_ns": 1139939927172000, "rtt_ns": 83000}
+{"sent": 280, "sent_ns": 1139939939124000, "schedule_lateness_ns": 3216000}
+{"ack": 280, "sent_ns": 1139939939124000, "ack_ns": 1139939939283000, "rtt_ns": 159000}
+{"sent": 281, "sent_ns": 1139939961684000, "schedule_lateness_ns": 5776000}
+{"ack": 281, "sent_ns": 1139939961684000, "ack_ns": 1139939961737000, "rtt_ns": 53000}
+{"sent": 282, "sent_ns": 1139939982566000, "schedule_lateness_ns": 6658000}
+{"ack": 282, "sent_ns": 1139939982566000, "ack_ns": 1139939982738000, "rtt_ns": 172000}
+{"sent": 283, "sent_ns": 1139940003620000, "schedule_lateness_ns": 7712000}
+{"ack": 283, "sent_ns": 1139940003620000, "ack_ns": 1139940003695000, "rtt_ns": 75000}
+{"sent": 284, "sent_ns": 1139940025493000, "schedule_lateness_ns": 9585000}
+{"ack": 284, "sent_ns": 1139940025493000, "ack_ns": 1139940025565000, "rtt_ns": 72000}
+{"sent": 285, "sent_ns": 1139940035946000, "schedule_lateness_ns": 38000}
+{"ack": 285, "sent_ns": 1139940035946000, "ack_ns": 1139940036006000, "rtt_ns": 60000}
+{"sent": 286, "sent_ns": 1139940058897000, "schedule_lateness_ns": 2989000}
+{"ack": 286, "sent_ns": 1139940058897000, "ack_ns": 1139940058994000, "rtt_ns": 97000}
+{"sent": 287, "sent_ns": 1139940080742000, "schedule_lateness_ns": 4834000}
+{"ack": 287, "sent_ns": 1139940080742000, "ack_ns": 1139940080974000, "rtt_ns": 232000}
+{"sent": 288, "sent_ns": 1139940103194000, "schedule_lateness_ns": 7286000}
+{"ack": 288, "sent_ns": 1139940103194000, "ack_ns": 1139940103290000, "rtt_ns": 96000}
+{"sent": 289, "sent_ns": 1139940126617000, "schedule_lateness_ns": 10709000}
+{"ack": 289, "sent_ns": 1139940126617000, "ack_ns": 1139940126667000, "rtt_ns": 50000}
+{"sent": 290, "sent_ns": 1139940137559000, "schedule_lateness_ns": 1651000}
+{"ack": 290, "sent_ns": 1139940137559000, "ack_ns": 1139940137630000, "rtt_ns": 71000}
+{"sent": 291, "sent_ns": 1139940162358000, "schedule_lateness_ns": 6450000}
+{"ack": 291, "sent_ns": 1139940162358000, "ack_ns": 1139940162427000, "rtt_ns": 69000}
+{"sent": 292, "sent_ns": 1139940186271000, "schedule_lateness_ns": 10363000}
+{"ack": 292, "sent_ns": 1139940186271000, "ack_ns": 1139940187139000, "rtt_ns": 868000}
+{"sent": 293, "sent_ns": 1139940197241000, "schedule_lateness_ns": 1333000}
+{"ack": 293, "sent_ns": 1139940197241000, "ack_ns": 1139940197377000, "rtt_ns": 136000}
+{"sent": 294, "sent_ns": 1139940219467000, "schedule_lateness_ns": 3559000}
+{"ack": 294, "sent_ns": 1139940219467000, "ack_ns": 1139940219542000, "rtt_ns": 75000}
+{"sent": 295, "sent_ns": 1139940244185000, "schedule_lateness_ns": 8277000}
+{"ack": 295, "sent_ns": 1139940244185000, "ack_ns": 1139940244307000, "rtt_ns": 122000}
+{"sent": 296, "sent_ns": 1139940268186000, "schedule_lateness_ns": 12278000}
+{"ack": 296, "sent_ns": 1139940268186000, "ack_ns": 1139940268278000, "rtt_ns": 92000}
+{"sent": 297, "sent_ns": 1139940280782000, "schedule_lateness_ns": 4874000}
+{"ack": 297, "sent_ns": 1139940280782000, "ack_ns": 1139940280909000, "rtt_ns": 127000}
+{"sent": 298, "sent_ns": 1139940303545000, "schedule_lateness_ns": 7637000}
+{"ack": 298, "sent_ns": 1139940303545000, "ack_ns": 1139940303651000, "rtt_ns": 106000}
+{"sent": 299, "sent_ns": 1139940327188000, "schedule_lateness_ns": 11280000}
+{"ack": 299, "sent_ns": 1139940327188000, "ack_ns": 1139940327268000, "rtt_ns": 80000}
+{"sent": 300, "sent_ns": 1139940338581000, "schedule_lateness_ns": 2673000}
+{"ack": 300, "sent_ns": 1139940338581000, "ack_ns": 1139940338670000, "rtt_ns": 89000}
+{"sent": 301, "sent_ns": 1139940363263000, "schedule_lateness_ns": 7355000}
+{"ack": 301, "sent_ns": 1139940363263000, "ack_ns": 1139940363355000, "rtt_ns": 92000}
+{"sent": 302, "sent_ns": 1139940387360000, "schedule_lateness_ns": 11452000}
+{"ack": 302, "sent_ns": 1139940387360000, "ack_ns": 1139940387476000, "rtt_ns": 116000}
+{"sent": 303, "sent_ns": 1139940399205000, "schedule_lateness_ns": 3297000}
+{"ack": 303, "sent_ns": 1139940399205000, "ack_ns": 1139940399355000, "rtt_ns": 150000}
+{"sent": 304, "sent_ns": 1139940423687000, "schedule_lateness_ns": 7779000}
+{"ack": 304, "sent_ns": 1139940423687000, "ack_ns": 1139940423925000, "rtt_ns": 238000}
+{"sent": 305, "sent_ns": 1139940445483000, "schedule_lateness_ns": 9575000}
+{"ack": 305, "sent_ns": 1139940445483000, "ack_ns": 1139940445608000, "rtt_ns": 125000}
+{"sent": 306, "sent_ns": 1139940458067000, "schedule_lateness_ns": 2159000}
+{"ack": 306, "sent_ns": 1139940458067000, "ack_ns": 1139940458382000, "rtt_ns": 315000}
+{"sent": 307, "sent_ns": 1139940481375000, "schedule_lateness_ns": 5467000}
+{"ack": 307, "sent_ns": 1139940481375000, "ack_ns": 1139940481430000, "rtt_ns": 55000}
+{"sent": 308, "sent_ns": 1139940504797000, "schedule_lateness_ns": 8889000}
+{"ack": 308, "sent_ns": 1139940504797000, "ack_ns": 1139940504862000, "rtt_ns": 65000}
+{"sent": 309, "sent_ns": 1139940516302000, "schedule_lateness_ns": 394000}
+{"ack": 309, "sent_ns": 1139940516302000, "ack_ns": 1139940516375000, "rtt_ns": 73000}
+{"sent": 310, "sent_ns": 1139940540347000, "schedule_lateness_ns": 4439000}
+{"ack": 310, "sent_ns": 1139940540347000, "ack_ns": 1139940540414000, "rtt_ns": 67000}
+{"sent": 311, "sent_ns": 1139940565257000, "schedule_lateness_ns": 9349000}
+{"ack": 311, "sent_ns": 1139940565257000, "ack_ns": 1139940565338000, "rtt_ns": 81000}
+{"sent": 312, "sent_ns": 1139940577750000, "schedule_lateness_ns": 1842000}
+{"ack": 312, "sent_ns": 1139940577750000, "ack_ns": 1139940577845000, "rtt_ns": 95000}
+{"sent": 313, "sent_ns": 1139940601051000, "schedule_lateness_ns": 5143000}
+{"ack": 313, "sent_ns": 1139940601051000, "ack_ns": 1139940601116000, "rtt_ns": 65000}
+{"sent": 314, "sent_ns": 1139940624038000, "schedule_lateness_ns": 8130000}
+{"ack": 314, "sent_ns": 1139940624038000, "ack_ns": 1139940624203000, "rtt_ns": 165000}
+{"sent": 315, "sent_ns": 1139940648426000, "schedule_lateness_ns": 12518000}
+{"ack": 315, "sent_ns": 1139940648426000, "ack_ns": 1139940648526000, "rtt_ns": 100000}
+{"sent": 316, "sent_ns": 1139940660295000, "schedule_lateness_ns": 4387000}
+{"ack": 316, "sent_ns": 1139940660295000, "ack_ns": 1139940660357000, "rtt_ns": 62000}
+{"sent": 317, "sent_ns": 1139940684614000, "schedule_lateness_ns": 8706000}
+{"ack": 317, "sent_ns": 1139940684614000, "ack_ns": 1139940684676000, "rtt_ns": 62000}
+{"sent": 318, "sent_ns": 1139940706999000, "schedule_lateness_ns": 11091000}
+{"ack": 318, "sent_ns": 1139940706999000, "ack_ns": 1139940707085000, "rtt_ns": 86000}
+{"sent": 319, "sent_ns": 1139940718664000, "schedule_lateness_ns": 2756000}
+{"ack": 319, "sent_ns": 1139940718664000, "ack_ns": 1139940718782000, "rtt_ns": 118000}
+{"sent": 320, "sent_ns": 1139940742339000, "schedule_lateness_ns": 6431000}
+{"ack": 320, "sent_ns": 1139940742339000, "ack_ns": 1139940742446000, "rtt_ns": 107000}
+{"sent": 321, "sent_ns": 1139940766073000, "schedule_lateness_ns": 10165000}
+{"ack": 321, "sent_ns": 1139940766073000, "ack_ns": 1139940766175000, "rtt_ns": 102000}
+{"sent": 322, "sent_ns": 1139940777595000, "schedule_lateness_ns": 1687000}
+{"ack": 322, "sent_ns": 1139940777595000, "ack_ns": 1139940777715000, "rtt_ns": 120000}
+{"sent": 323, "sent_ns": 1139940802143000, "schedule_lateness_ns": 6235000}
+{"ack": 323, "sent_ns": 1139940802143000, "ack_ns": 1139940802253000, "rtt_ns": 110000}
+{"sent": 324, "sent_ns": 1139940827351000, "schedule_lateness_ns": 11443000}
+{"ack": 324, "sent_ns": 1139940827351000, "ack_ns": 1139940827452000, "rtt_ns": 101000}
+{"sent": 325, "sent_ns": 1139940840077000, "schedule_lateness_ns": 4169000}
+{"ack": 325, "sent_ns": 1139940840077000, "ack_ns": 1139940840263000, "rtt_ns": 186000}
+{"sent": 326, "sent_ns": 1139940864153000, "schedule_lateness_ns": 8245000}
+{"ack": 326, "sent_ns": 1139940864153000, "ack_ns": 1139940864258000, "rtt_ns": 105000}
+{"sent": 327, "sent_ns": 1139940876611000, "schedule_lateness_ns": 703000}
+{"ack": 327, "sent_ns": 1139940876611000, "ack_ns": 1139940876708000, "rtt_ns": 97000}
+{"sent": 328, "sent_ns": 1139940902231000, "schedule_lateness_ns": 6323000}
+{"ack": 328, "sent_ns": 1139940902231000, "ack_ns": 1139940902643000, "rtt_ns": 412000}
+{"sent": 329, "sent_ns": 1139940924183000, "schedule_lateness_ns": 8275000}
+{"ack": 329, "sent_ns": 1139940924183000, "ack_ns": 1139940927542000, "rtt_ns": 3359000}
+{"sent": 330, "sent_ns": 1139940940093000, "schedule_lateness_ns": 4185000}
+{"ack": 330, "sent_ns": 1139940940093000, "ack_ns": 1139940940182000, "rtt_ns": 89000}
+{"sent": 331, "sent_ns": 1139940968321000, "schedule_lateness_ns": 12413000}
+{"ack": 331, "sent_ns": 1139940968321000, "ack_ns": 1139940968479000, "rtt_ns": 158000}
+{"sent": 332, "sent_ns": 1139940979325000, "schedule_lateness_ns": 3417000}
+{"ack": 332, "sent_ns": 1139940979325000, "ack_ns": 1139940979411000, "rtt_ns": 86000}
+{"sent": 333, "sent_ns": 1139940996481000, "schedule_lateness_ns": 573000}
+{"ack": 333, "sent_ns": 1139940996481000, "ack_ns": 1139940996619000, "rtt_ns": 138000}
+{"sent": 334, "sent_ns": 1139941019931000, "schedule_lateness_ns": 4023000}
+{"ack": 334, "sent_ns": 1139941019931000, "ack_ns": 1139941020059000, "rtt_ns": 128000}
+{"sent": 335, "sent_ns": 1139941044996000, "schedule_lateness_ns": 9088000}
+{"ack": 335, "sent_ns": 1139941044996000, "ack_ns": 1139941045153000, "rtt_ns": 157000}
+{"sent": 336, "sent_ns": 1139941057775000, "schedule_lateness_ns": 1867000}
+{"ack": 336, "sent_ns": 1139941057775000, "ack_ns": 1139941061100000, "rtt_ns": 3325000}
+{"sent": 337, "sent_ns": 1139941082337000, "schedule_lateness_ns": 6429000}
+{"ack": 337, "sent_ns": 1139941082337000, "ack_ns": 1139941082536000, "rtt_ns": 199000}
+{"sent": 338, "sent_ns": 1139941104844000, "schedule_lateness_ns": 8936000}
+{"ack": 338, "sent_ns": 1139941104844000, "ack_ns": 1139941105124000, "rtt_ns": 280000}
+{"sent": 339, "sent_ns": 1139941120743000, "schedule_lateness_ns": 4835000}
+{"ack": 339, "sent_ns": 1139941120743000, "ack_ns": 1139941121101000, "rtt_ns": 358000}
+{"sent": 340, "sent_ns": 1139941145555000, "schedule_lateness_ns": 9647000}
+{"ack": 340, "sent_ns": 1139941145555000, "ack_ns": 1139941145673000, "rtt_ns": 118000}
+{"sent": 341, "sent_ns": 1139941161281000, "schedule_lateness_ns": 5373000}
+{"ack": 341, "sent_ns": 1139941161281000, "ack_ns": 1139941161622000, "rtt_ns": 341000}
+{"sent": 342, "sent_ns": 1139941186962000, "schedule_lateness_ns": 11054000}
+{"ack": 342, "sent_ns": 1139941186962000, "ack_ns": 1139941187684000, "rtt_ns": 722000}
+{"sent": 343, "sent_ns": 1139941198722000, "schedule_lateness_ns": 2814000}
+{"ack": 343, "sent_ns": 1139941198722000, "ack_ns": 1139941198840000, "rtt_ns": 118000}
+{"sent": 344, "sent_ns": 1139941226595000, "schedule_lateness_ns": 10687000}
+{"ack": 344, "sent_ns": 1139941226595000, "ack_ns": 1139941226742000, "rtt_ns": 147000}
+{"sent": 345, "sent_ns": 1139941239320000, "schedule_lateness_ns": 3412000}
+{"ack": 345, "sent_ns": 1139941239320000, "ack_ns": 1139941239437000, "rtt_ns": 117000}
+{"sent": 346, "sent_ns": 1139941263304000, "schedule_lateness_ns": 7396000}
+{"ack": 346, "sent_ns": 1139941263304000, "ack_ns": 1139941263429000, "rtt_ns": 125000}
+{"sent": 347, "sent_ns": 1139941285490000, "schedule_lateness_ns": 9582000}
+{"ack": 347, "sent_ns": 1139941285490000, "ack_ns": 1139941285640000, "rtt_ns": 150000}
+{"sent": 348, "sent_ns": 1139941298133000, "schedule_lateness_ns": 2225000}
+{"ack": 348, "sent_ns": 1139941298133000, "ack_ns": 1139941298360000, "rtt_ns": 227000}
+{"sent": 349, "sent_ns": 1139941323503000, "schedule_lateness_ns": 7595000}
+{"ack": 349, "sent_ns": 1139941323503000, "ack_ns": 1139941323616000, "rtt_ns": 113000}
+{"sent": 350, "sent_ns": 1139941348270000, "schedule_lateness_ns": 12362000}
+{"ack": 350, "sent_ns": 1139941348270000, "ack_ns": 1139941348424000, "rtt_ns": 154000}
+{"sent": 351, "sent_ns": 1139941363294000, "schedule_lateness_ns": 7386000}
+{"ack": 351, "sent_ns": 1139941363294000, "ack_ns": 1139941363419000, "rtt_ns": 125000}
+{"sent": 352, "sent_ns": 1139941375978000, "schedule_lateness_ns": 70000}
+{"ack": 352, "sent_ns": 1139941375978000, "ack_ns": 1139941376114000, "rtt_ns": 136000}
+{"sent": 353, "sent_ns": 1139941401073000, "schedule_lateness_ns": 5165000}
+{"ack": 353, "sent_ns": 1139941401073000, "ack_ns": 1139941401188000, "rtt_ns": 115000}
+{"sent": 354, "sent_ns": 1139941427003000, "schedule_lateness_ns": 11095000}
+{"ack": 354, "sent_ns": 1139941427003000, "ack_ns": 1139941427194000, "rtt_ns": 191000}
+{"sent": 355, "sent_ns": 1139941438356000, "schedule_lateness_ns": 2448000}
+{"ack": 355, "sent_ns": 1139941438356000, "ack_ns": 1139941438613000, "rtt_ns": 257000}
+{"sent": 356, "sent_ns": 1139941463666000, "schedule_lateness_ns": 7758000}
+{"ack": 356, "sent_ns": 1139941463666000, "ack_ns": 1139941463840000, "rtt_ns": 174000}
+{"sent": 357, "sent_ns": 1139941478391000, "schedule_lateness_ns": 2483000}
+{"ack": 357, "sent_ns": 1139941478391000, "ack_ns": 1139941478579000, "rtt_ns": 188000}
+{"sent": 358, "sent_ns": 1139941504624000, "schedule_lateness_ns": 8716000}
+{"ack": 358, "sent_ns": 1139941504624000, "ack_ns": 1139941505004000, "rtt_ns": 380000}
+{"sent": 359, "sent_ns": 1139941527520000, "schedule_lateness_ns": 11612000}
+{"ack": 359, "sent_ns": 1139941527520000, "ack_ns": 1139941527633000, "rtt_ns": 113000}
+{"sent": 360, "sent_ns": 1139941540190000, "schedule_lateness_ns": 4282000}
+{"ack": 360, "sent_ns": 1139941540190000, "ack_ns": 1139941540277000, "rtt_ns": 87000}
+{"sent": 361, "sent_ns": 1139941565149000, "schedule_lateness_ns": 9241000}
+{"ack": 361, "sent_ns": 1139941565149000, "ack_ns": 1139941565686000, "rtt_ns": 537000}
+{"sent": 362, "sent_ns": 1139941577852000, "schedule_lateness_ns": 1944000}
+{"ack": 362, "sent_ns": 1139941577852000, "ack_ns": 1139941578096000, "rtt_ns": 244000}
+{"sent": 363, "sent_ns": 1139941602756000, "schedule_lateness_ns": 6848000}
+{"ack": 363, "sent_ns": 1139941602756000, "ack_ns": 1139941602912000, "rtt_ns": 156000}
+{"sent": 364, "sent_ns": 1139941624647000, "schedule_lateness_ns": 8739000}
+{"ack": 364, "sent_ns": 1139941624647000, "ack_ns": 1139941624887000, "rtt_ns": 240000}
+{"sent": 365, "sent_ns": 1139941635937000, "schedule_lateness_ns": 29000}
+{"ack": 365, "sent_ns": 1139941635937000, "ack_ns": 1139941636113000, "rtt_ns": 176000}
+{"sent": 366, "sent_ns": 1139941659463000, "schedule_lateness_ns": 3555000}
+{"ack": 366, "sent_ns": 1139941659463000, "ack_ns": 1139941659574000, "rtt_ns": 111000}
+{"sent": 367, "sent_ns": 1139941684809000, "schedule_lateness_ns": 8901000}
+{"ack": 367, "sent_ns": 1139941684809000, "ack_ns": 1139941685065000, "rtt_ns": 256000}
+{"sent": 368, "sent_ns": 1139941696865000, "schedule_lateness_ns": 957000}
+{"ack": 368, "sent_ns": 1139941696865000, "ack_ns": 1139941697080000, "rtt_ns": 215000}
+{"sent": 369, "sent_ns": 1139941721283000, "schedule_lateness_ns": 5375000}
+{"ack": 369, "sent_ns": 1139941721283000, "ack_ns": 1139941721575000, "rtt_ns": 292000}
+{"sent": 370, "sent_ns": 1139941746074000, "schedule_lateness_ns": 10166000}
+{"ack": 370, "sent_ns": 1139941746074000, "ack_ns": 1139941746247000, "rtt_ns": 173000}
+{"sent": 371, "sent_ns": 1139941758796000, "schedule_lateness_ns": 2888000}
+{"ack": 371, "sent_ns": 1139941758796000, "ack_ns": 1139941759123000, "rtt_ns": 327000}
+{"sent": 372, "sent_ns": 1139941782956000, "schedule_lateness_ns": 7048000}
+{"ack": 372, "sent_ns": 1139941782956000, "ack_ns": 1139941783112000, "rtt_ns": 156000}
+{"sent": 373, "sent_ns": 1139941807942000, "schedule_lateness_ns": 12034000}
+{"sent": 374, "sent_ns": 1139941816969000, "schedule_lateness_ns": 1061000}
+{"ack": 373, "sent_ns": 1139941807942000, "ack_ns": 1139941831774000, "rtt_ns": 23832000}
+{"ack": 374, "sent_ns": 1139941816969000, "ack_ns": 1139941831836000, "rtt_ns": 14867000}
+{"sent": 375, "sent_ns": 1139941844046000, "schedule_lateness_ns": 8138000}
+{"sent": 376, "sent_ns": 1139941856603000, "schedule_lateness_ns": 695000}
+{"sent": 377, "sent_ns": 1139941877192000, "schedule_lateness_ns": 1284000}
+{"ack": 375, "sent_ns": 1139941844046000, "ack_ns": 1139941893064000, "rtt_ns": 49018000}
+{"ack": 376, "sent_ns": 1139941856603000, "ack_ns": 1139941893090000, "rtt_ns": 36487000}
+{"ack": 377, "sent_ns": 1139941877192000, "ack_ns": 1139941893095000, "rtt_ns": 15903000}
+{"sent": 378, "sent_ns": 1139941904532000, "schedule_lateness_ns": 8624000}
+{"sent": 379, "sent_ns": 1139941916328000, "schedule_lateness_ns": 420000}
+{"sent": 380, "sent_ns": 1139941936155000, "schedule_lateness_ns": 247000}
+{"sent": 381, "sent_ns": 1139941956404000, "schedule_lateness_ns": 496000}
+{"sent": 382, "sent_ns": 1139941977108000, "schedule_lateness_ns": 1200000}
+{"sent": 383, "sent_ns": 1139941996624000, "schedule_lateness_ns": 716000}
+{"sent": 384, "sent_ns": 1139942016161000, "schedule_lateness_ns": 253000}
+{"sent": 385, "sent_ns": 1139942036818000, "schedule_lateness_ns": 910000}
+{"sent": 386, "sent_ns": 1139942056110000, "schedule_lateness_ns": 202000}
+{"sent": 387, "sent_ns": 1139942076054000, "schedule_lateness_ns": 146000}
+{"sent": 388, "sent_ns": 1139942096780000, "schedule_lateness_ns": 872000}
+{"sent": 389, "sent_ns": 1139942116490000, "schedule_lateness_ns": 582000}
+{"sent": 390, "sent_ns": 1139942137062000, "schedule_lateness_ns": 1154000}
+{"sent": 391, "sent_ns": 1139942156461000, "schedule_lateness_ns": 553000}
+{"sent": 392, "sent_ns": 1139942176167000, "schedule_lateness_ns": 259000}
+{"ack": 378, "sent_ns": 1139941904532000, "ack_ns": 1139942189134000, "rtt_ns": 284602000}
+{"ack": 379, "sent_ns": 1139941916328000, "ack_ns": 1139942189164000, "rtt_ns": 272836000}
+{"ack": 380, "sent_ns": 1139941936155000, "ack_ns": 1139942189170000, "rtt_ns": 253015000}
+{"ack": 381, "sent_ns": 1139941956404000, "ack_ns": 1139942189174000, "rtt_ns": 232770000}
+{"ack": 382, "sent_ns": 1139941977108000, "ack_ns": 1139942189178000, "rtt_ns": 212070000}
+{"ack": 383, "sent_ns": 1139941996624000, "ack_ns": 1139942189181000, "rtt_ns": 192557000}
+{"ack": 384, "sent_ns": 1139942016161000, "ack_ns": 1139942189185000, "rtt_ns": 173024000}
+{"ack": 385, "sent_ns": 1139942036818000, "ack_ns": 1139942189188000, "rtt_ns": 152370000}
+{"ack": 386, "sent_ns": 1139942056110000, "ack_ns": 1139942189192000, "rtt_ns": 133082000}
+{"ack": 387, "sent_ns": 1139942076054000, "ack_ns": 1139942189195000, "rtt_ns": 113141000}
+{"ack": 388, "sent_ns": 1139942096780000, "ack_ns": 1139942189198000, "rtt_ns": 92418000}
+{"ack": 389, "sent_ns": 1139942116490000, "ack_ns": 1139942189202000, "rtt_ns": 72712000}
+{"ack": 390, "sent_ns": 1139942137062000, "ack_ns": 1139942189207000, "rtt_ns": 52145000}
+{"ack": 391, "sent_ns": 1139942156461000, "ack_ns": 1139942189212000, "rtt_ns": 32751000}
+{"ack": 392, "sent_ns": 1139942176167000, "ack_ns": 1139942189215000, "rtt_ns": 13048000}
+{"sent": 393, "sent_ns": 1139942201599000, "schedule_lateness_ns": 5691000}
+{"sent": 394, "sent_ns": 1139942216025000, "schedule_lateness_ns": 117000}
+{"sent": 395, "sent_ns": 1139942236703000, "schedule_lateness_ns": 795000}
+{"sent": 396, "sent_ns": 1139942256162000, "schedule_lateness_ns": 254000}
+{"sent": 397, "sent_ns": 1139942276691000, "schedule_lateness_ns": 783000}
+{"sent": 398, "sent_ns": 1139942296266000, "schedule_lateness_ns": 358000}
+{"ack": 393, "sent_ns": 1139942201599000, "ack_ns": 1139942311351000, "rtt_ns": 109752000}
+{"ack": 394, "sent_ns": 1139942216025000, "ack_ns": 1139942311383000, "rtt_ns": 95358000}
+{"ack": 395, "sent_ns": 1139942236703000, "ack_ns": 1139942311394000, "rtt_ns": 74691000}
+{"ack": 396, "sent_ns": 1139942256162000, "ack_ns": 1139942311398000, "rtt_ns": 55236000}
+{"ack": 397, "sent_ns": 1139942276691000, "ack_ns": 1139942311402000, "rtt_ns": 34711000}
+{"ack": 398, "sent_ns": 1139942296266000, "ack_ns": 1139942311406000, "rtt_ns": 15140000}
+{"sent": 399, "sent_ns": 1139942321791000, "schedule_lateness_ns": 5883000}
+{"ack": 399, "sent_ns": 1139942321791000, "ack_ns": 1139942329627000, "rtt_ns": 7836000}
+{"sent": 400, "sent_ns": 1139942341181000, "schedule_lateness_ns": 5273000}
+{"ack": 400, "sent_ns": 1139942341181000, "ack_ns": 1139942345214000, "rtt_ns": 4033000}
+{"sent": 401, "sent_ns": 1139942357207000, "schedule_lateness_ns": 1299000}
+{"ack": 401, "sent_ns": 1139942357207000, "ack_ns": 1139942357973000, "rtt_ns": 766000}
+{"sent": 402, "sent_ns": 1139942383066000, "schedule_lateness_ns": 7158000}
+{"ack": 402, "sent_ns": 1139942383066000, "ack_ns": 1139942385087000, "rtt_ns": 2021000}
+{"sent": 403, "sent_ns": 1139942396916000, "schedule_lateness_ns": 1008000}
+{"ack": 403, "sent_ns": 1139942396916000, "ack_ns": 1139942398750000, "rtt_ns": 1834000}
+{"sent": 404, "sent_ns": 1139942421912000, "schedule_lateness_ns": 6004000}
+{"ack": 404, "sent_ns": 1139942421912000, "ack_ns": 1139942422067000, "rtt_ns": 155000}
+{"sent": 405, "sent_ns": 1139942446035000, "schedule_lateness_ns": 10127000}
+{"ack": 405, "sent_ns": 1139942446035000, "ack_ns": 1139942446522000, "rtt_ns": 487000}
+{"sent": 406, "sent_ns": 1139942457838000, "schedule_lateness_ns": 1930000}
+{"ack": 406, "sent_ns": 1139942457838000, "ack_ns": 1139942460150000, "rtt_ns": 2312000}
+{"sent": 407, "sent_ns": 1139942484527000, "schedule_lateness_ns": 8619000}
+{"ack": 407, "sent_ns": 1139942484527000, "ack_ns": 1139942488150000, "rtt_ns": 3623000}
+{"sent": 408, "sent_ns": 1139942498707000, "schedule_lateness_ns": 2799000}
+{"ack": 408, "sent_ns": 1139942498707000, "ack_ns": 1139942500477000, "rtt_ns": 1770000}
+{"sent": 409, "sent_ns": 1139942524220000, "schedule_lateness_ns": 8312000}
+{"ack": 409, "sent_ns": 1139942524220000, "ack_ns": 1139942524579000, "rtt_ns": 359000}
+{"sent": 410, "sent_ns": 1139942537193000, "schedule_lateness_ns": 1285000}
+{"ack": 410, "sent_ns": 1139942537193000, "ack_ns": 1139942537761000, "rtt_ns": 568000}
+{"sent": 411, "sent_ns": 1139942561665000, "schedule_lateness_ns": 5757000}
+{"ack": 411, "sent_ns": 1139942561665000, "ack_ns": 1139942563735000, "rtt_ns": 2070000}
+{"sent": 412, "sent_ns": 1139942586687000, "schedule_lateness_ns": 10779000}
+{"ack": 412, "sent_ns": 1139942586687000, "ack_ns": 1139942587606000, "rtt_ns": 919000}
+{"sent": 413, "sent_ns": 1139942598692000, "schedule_lateness_ns": 2784000}
+{"ack": 413, "sent_ns": 1139942598692000, "ack_ns": 1139942600345000, "rtt_ns": 1653000}
+{"sent": 414, "sent_ns": 1139942622923000, "schedule_lateness_ns": 7015000}
+{"ack": 414, "sent_ns": 1139942622923000, "ack_ns": 1139942623793000, "rtt_ns": 870000}
+{"sent": 415, "sent_ns": 1139942636364000, "schedule_lateness_ns": 456000}
+{"ack": 415, "sent_ns": 1139942636364000, "ack_ns": 1139942638265000, "rtt_ns": 1901000}
+{"sent": 416, "sent_ns": 1139942659402000, "schedule_lateness_ns": 3494000}
+{"ack": 416, "sent_ns": 1139942659402000, "ack_ns": 1139942660555000, "rtt_ns": 1153000}
+{"sent": 417, "sent_ns": 1139942684002000, "schedule_lateness_ns": 8094000}
+{"ack": 417, "sent_ns": 1139942684002000, "ack_ns": 1139942686694000, "rtt_ns": 2692000}
+{"sent": 418, "sent_ns": 1139942699268000, "schedule_lateness_ns": 3360000}
+{"ack": 418, "sent_ns": 1139942699268000, "ack_ns": 1139942700673000, "rtt_ns": 1405000}
+{"sent": 419, "sent_ns": 1139942724305000, "schedule_lateness_ns": 8397000}
+{"ack": 419, "sent_ns": 1139942724305000, "ack_ns": 1139942724525000, "rtt_ns": 220000}
+{"sent": 420, "sent_ns": 1139942737079000, "schedule_lateness_ns": 1171000}
+{"ack": 420, "sent_ns": 1139942737079000, "ack_ns": 1139942738175000, "rtt_ns": 1096000}
+{"sent": 421, "sent_ns": 1139942762156000, "schedule_lateness_ns": 6248000}
+{"ack": 421, "sent_ns": 1139942762156000, "ack_ns": 1139942762800000, "rtt_ns": 644000}
+{"sent": 422, "sent_ns": 1139942784010000, "schedule_lateness_ns": 8102000}
+{"ack": 422, "sent_ns": 1139942784010000, "ack_ns": 1139942787957000, "rtt_ns": 3947000}
+{"sent": 423, "sent_ns": 1139942798687000, "schedule_lateness_ns": 2779000}
+{"ack": 423, "sent_ns": 1139942798687000, "ack_ns": 1139942802814000, "rtt_ns": 4127000}
+{"sent": 424, "sent_ns": 1139942826603000, "schedule_lateness_ns": 10695000}
+{"ack": 424, "sent_ns": 1139942826603000, "ack_ns": 1139942826987000, "rtt_ns": 384000}
+{"sent": 425, "sent_ns": 1139942839519000, "schedule_lateness_ns": 3611000}
+{"ack": 425, "sent_ns": 1139942839519000, "ack_ns": 1139942841221000, "rtt_ns": 1702000}
+{"sent": 426, "sent_ns": 1139942863506000, "schedule_lateness_ns": 7598000}
+{"ack": 426, "sent_ns": 1139942863506000, "ack_ns": 1139942863972000, "rtt_ns": 466000}
+{"sent": 427, "sent_ns": 1139942886402000, "schedule_lateness_ns": 10494000}
+{"ack": 427, "sent_ns": 1139942886402000, "ack_ns": 1139942889753000, "rtt_ns": 3351000}
+{"sent": 428, "sent_ns": 1139942901763000, "schedule_lateness_ns": 5855000}
+{"ack": 428, "sent_ns": 1139942901763000, "ack_ns": 1139942905859000, "rtt_ns": 4096000}
+{"sent": 429, "sent_ns": 1139942918280000, "schedule_lateness_ns": 2372000}
+{"ack": 429, "sent_ns": 1139942918280000, "ack_ns": 1139942920350000, "rtt_ns": 2070000}
+{"sent": 430, "sent_ns": 1139942944201000, "schedule_lateness_ns": 8293000}
+{"ack": 430, "sent_ns": 1139942944201000, "ack_ns": 1139942945958000, "rtt_ns": 1757000}
+{"sent": 431, "sent_ns": 1139942958527000, "schedule_lateness_ns": 2619000}
+{"ack": 431, "sent_ns": 1139942958527000, "ack_ns": 1139942959303000, "rtt_ns": 776000}
+{"sent": 432, "sent_ns": 1139942983972000, "schedule_lateness_ns": 8064000}
+{"ack": 432, "sent_ns": 1139942983972000, "ack_ns": 1139942984441000, "rtt_ns": 469000}
+{"sent": 433, "sent_ns": 1139942996976000, "schedule_lateness_ns": 1068000}
+{"ack": 433, "sent_ns": 1139942996976000, "ack_ns": 1139942998429000, "rtt_ns": 1453000}
+{"sent": 434, "sent_ns": 1139943022481000, "schedule_lateness_ns": 6573000}
+{"ack": 434, "sent_ns": 1139943022481000, "ack_ns": 1139943023636000, "rtt_ns": 1155000}
+{"sent": 435, "sent_ns": 1139943046695000, "schedule_lateness_ns": 10787000}
+{"ack": 435, "sent_ns": 1139943046695000, "ack_ns": 1139943047968000, "rtt_ns": 1273000}
+{"sent": 436, "sent_ns": 1139943059531000, "schedule_lateness_ns": 3623000}
+{"ack": 436, "sent_ns": 1139943059531000, "ack_ns": 1139943061538000, "rtt_ns": 2007000}
+{"sent": 437, "sent_ns": 1139943084469000, "schedule_lateness_ns": 8561000}
+{"ack": 437, "sent_ns": 1139943084469000, "ack_ns": 1139943086301000, "rtt_ns": 1832000}
+{"sent": 438, "sent_ns": 1139943098888000, "schedule_lateness_ns": 2980000}
+{"ack": 438, "sent_ns": 1139943098888000, "ack_ns": 1139943100011000, "rtt_ns": 1123000}
+{"sent": 439, "sent_ns": 1139943135598000, "schedule_lateness_ns": 19690000}
+{"sent": 440, "sent_ns": 1139943136675000, "schedule_lateness_ns": 767000}
+{"ack": 439, "sent_ns": 1139943135598000, "ack_ns": 1139943136770000, "rtt_ns": 1172000}
+{"ack": 440, "sent_ns": 1139943136675000, "ack_ns": 1139943136985000, "rtt_ns": 310000}
+{"sent": 441, "sent_ns": 1139943159085000, "schedule_lateness_ns": 3177000}
+{"ack": 441, "sent_ns": 1139943159085000, "ack_ns": 1139943161511000, "rtt_ns": 2426000}
+{"sent": 442, "sent_ns": 1139943184851000, "schedule_lateness_ns": 8943000}
+{"ack": 442, "sent_ns": 1139943184851000, "ack_ns": 1139943185478000, "rtt_ns": 627000}
+{"sent": 443, "sent_ns": 1139943195975000, "schedule_lateness_ns": 67000}
+{"ack": 443, "sent_ns": 1139943195975000, "ack_ns": 1139943196750000, "rtt_ns": 775000}
+{"sent": 444, "sent_ns": 1139943218886000, "schedule_lateness_ns": 2978000}
+{"ack": 444, "sent_ns": 1139943218886000, "ack_ns": 1139943219096000, "rtt_ns": 210000}
+{"sent": 445, "sent_ns": 1139943240450000, "schedule_lateness_ns": 4542000}
+{"ack": 445, "sent_ns": 1139943240450000, "ack_ns": 1139943240653000, "rtt_ns": 203000}
+{"sent": 446, "sent_ns": 1139943261997000, "schedule_lateness_ns": 6089000}
+{"ack": 446, "sent_ns": 1139943261997000, "ack_ns": 1139943262140000, "rtt_ns": 143000}
+{"sent": 447, "sent_ns": 1139943283248000, "schedule_lateness_ns": 7340000}
+{"ack": 447, "sent_ns": 1139943283248000, "ack_ns": 1139943283701000, "rtt_ns": 453000}
+{"sent": 448, "sent_ns": 1139943296315000, "schedule_lateness_ns": 407000}
+{"ack": 448, "sent_ns": 1139943296315000, "ack_ns": 1139943296406000, "rtt_ns": 91000}
+{"sent": 449, "sent_ns": 1139943319145000, "schedule_lateness_ns": 3237000}
+{"ack": 449, "sent_ns": 1139943319145000, "ack_ns": 1139943320485000, "rtt_ns": 1340000}
+{"sent": 450, "sent_ns": 1139943343284000, "schedule_lateness_ns": 7376000}
+{"ack": 450, "sent_ns": 1139943343284000, "ack_ns": 1139943343488000, "rtt_ns": 204000}
+{"sent": 451, "sent_ns": 1139943368266000, "schedule_lateness_ns": 12358000}
+{"ack": 451, "sent_ns": 1139943368266000, "ack_ns": 1139943368359000, "rtt_ns": 93000}
+{"sent": 452, "sent_ns": 1139943380564000, "schedule_lateness_ns": 4656000}
+{"ack": 452, "sent_ns": 1139943380564000, "ack_ns": 1139943380713000, "rtt_ns": 149000}
+{"sent": 453, "sent_ns": 1139943402524000, "schedule_lateness_ns": 6616000}
+{"ack": 453, "sent_ns": 1139943402524000, "ack_ns": 1139943402668000, "rtt_ns": 144000}
+{"sent": 454, "sent_ns": 1139943426629000, "schedule_lateness_ns": 10721000}
+{"ack": 454, "sent_ns": 1139943426629000, "ack_ns": 1139943426747000, "rtt_ns": 118000}
+{"sent": 455, "sent_ns": 1139943437169000, "schedule_lateness_ns": 1261000}
+{"ack": 455, "sent_ns": 1139943437169000, "ack_ns": 1139943437279000, "rtt_ns": 110000}
+{"sent": 456, "sent_ns": 1139943459940000, "schedule_lateness_ns": 4032000}
+{"ack": 456, "sent_ns": 1139943459940000, "ack_ns": 1139943460173000, "rtt_ns": 233000}
+{"sent": 457, "sent_ns": 1139943481056000, "schedule_lateness_ns": 5148000}
+{"ack": 457, "sent_ns": 1139943481056000, "ack_ns": 1139943481351000, "rtt_ns": 295000}
+{"sent": 458, "sent_ns": 1139943503649000, "schedule_lateness_ns": 7741000}
+{"ack": 458, "sent_ns": 1139943503649000, "ack_ns": 1139943503924000, "rtt_ns": 275000}
+{"sent": 459, "sent_ns": 1139943526195000, "schedule_lateness_ns": 10287000}
+{"ack": 459, "sent_ns": 1139943526195000, "ack_ns": 1139943526591000, "rtt_ns": 396000}
+{"sent": 460, "sent_ns": 1139943538007000, "schedule_lateness_ns": 2099000}
+{"ack": 460, "sent_ns": 1139943538007000, "ack_ns": 1139943538066000, "rtt_ns": 59000}
+{"sent": 461, "sent_ns": 1139943562363000, "schedule_lateness_ns": 6455000}
+{"ack": 461, "sent_ns": 1139943562363000, "ack_ns": 1139943562516000, "rtt_ns": 153000}
+{"sent": 462, "sent_ns": 1139943585471000, "schedule_lateness_ns": 9563000}
+{"ack": 462, "sent_ns": 1139943585471000, "ack_ns": 1139943585596000, "rtt_ns": 125000}
+{"sent": 463, "sent_ns": 1139943596519000, "schedule_lateness_ns": 611000}
+{"ack": 463, "sent_ns": 1139943596519000, "ack_ns": 1139943596567000, "rtt_ns": 48000}
+{"sent": 464, "sent_ns": 1139943619888000, "schedule_lateness_ns": 3980000}
+{"ack": 464, "sent_ns": 1139943619888000, "ack_ns": 1139943620168000, "rtt_ns": 280000}
+{"sent": 465, "sent_ns": 1139943640818000, "schedule_lateness_ns": 4910000}
+{"ack": 465, "sent_ns": 1139943640818000, "ack_ns": 1139943640891000, "rtt_ns": 73000}
+{"sent": 466, "sent_ns": 1139943662330000, "schedule_lateness_ns": 6422000}
+{"ack": 466, "sent_ns": 1139943662330000, "ack_ns": 1139943662492000, "rtt_ns": 162000}
+{"sent": 467, "sent_ns": 1139943685555000, "schedule_lateness_ns": 9647000}
+{"ack": 467, "sent_ns": 1139943685555000, "ack_ns": 1139943685664000, "rtt_ns": 109000}
+{"sent": 468, "sent_ns": 1139943707018000, "schedule_lateness_ns": 11110000}
+{"ack": 468, "sent_ns": 1139943707018000, "ack_ns": 1139943707105000, "rtt_ns": 87000}
+{"sent": 469, "sent_ns": 1139943718423000, "schedule_lateness_ns": 2515000}
+{"ack": 469, "sent_ns": 1139943718423000, "ack_ns": 1139943718493000, "rtt_ns": 70000}
+{"sent": 470, "sent_ns": 1139943741362000, "schedule_lateness_ns": 5454000}
+{"ack": 470, "sent_ns": 1139943741362000, "ack_ns": 1139943741445000, "rtt_ns": 83000}
+{"sent": 471, "sent_ns": 1139943764347000, "schedule_lateness_ns": 8439000}
+{"ack": 471, "sent_ns": 1139943764347000, "ack_ns": 1139943764429000, "rtt_ns": 82000}
+{"sent": 472, "sent_ns": 1139943776614000, "schedule_lateness_ns": 706000}
+{"ack": 472, "sent_ns": 1139943776614000, "ack_ns": 1139943776700000, "rtt_ns": 86000}
+{"sent": 473, "sent_ns": 1139943800540000, "schedule_lateness_ns": 4632000}
+{"ack": 473, "sent_ns": 1139943800540000, "ack_ns": 1139943800654000, "rtt_ns": 114000}
+{"sent": 474, "sent_ns": 1139943821872000, "schedule_lateness_ns": 5964000}
+{"ack": 474, "sent_ns": 1139943821872000, "ack_ns": 1139943821959000, "rtt_ns": 87000}
+{"sent": 475, "sent_ns": 1139943844594000, "schedule_lateness_ns": 8686000}
+{"ack": 475, "sent_ns": 1139943844594000, "ack_ns": 1139943844707000, "rtt_ns": 113000}
+{"sent": 476, "sent_ns": 1139943857261000, "schedule_lateness_ns": 1353000}
+{"ack": 476, "sent_ns": 1139943857261000, "ack_ns": 1139943857347000, "rtt_ns": 86000}
+{"sent": 477, "sent_ns": 1139943881307000, "schedule_lateness_ns": 5399000}
+{"ack": 477, "sent_ns": 1139943881307000, "ack_ns": 1139943881407000, "rtt_ns": 100000}
+{"sent": 478, "sent_ns": 1139943904920000, "schedule_lateness_ns": 9012000}
+{"ack": 478, "sent_ns": 1139943904920000, "ack_ns": 1139943905035000, "rtt_ns": 115000}
+{"sent": 479, "sent_ns": 1139943927437000, "schedule_lateness_ns": 11529000}
+{"ack": 479, "sent_ns": 1139943927437000, "ack_ns": 1139943927572000, "rtt_ns": 135000}
+{"sent": 480, "sent_ns": 1139943938637000, "schedule_lateness_ns": 2729000}
+{"ack": 480, "sent_ns": 1139943938637000, "ack_ns": 1139943938753000, "rtt_ns": 116000}
+{"sent": 481, "sent_ns": 1139943963851000, "schedule_lateness_ns": 7943000}
+{"ack": 481, "sent_ns": 1139943963851000, "ack_ns": 1139943964057000, "rtt_ns": 206000}
+{"sent": 482, "sent_ns": 1139943987147000, "schedule_lateness_ns": 11239000}
+{"ack": 482, "sent_ns": 1139943987147000, "ack_ns": 1139943987227000, "rtt_ns": 80000}
+{"sent": 483, "sent_ns": 1139943999585000, "schedule_lateness_ns": 3677000}
+{"ack": 483, "sent_ns": 1139943999585000, "ack_ns": 1139943999664000, "rtt_ns": 79000}
+{"sent": 484, "sent_ns": 1139944024243000, "schedule_lateness_ns": 8335000}
+{"ack": 484, "sent_ns": 1139944024243000, "ack_ns": 1139944024314000, "rtt_ns": 71000}
+{"sent": 485, "sent_ns": 1139944046508000, "schedule_lateness_ns": 10600000}
+{"ack": 485, "sent_ns": 1139944046508000, "ack_ns": 1139944046601000, "rtt_ns": 93000}
+{"sent": 486, "sent_ns": 1139944059142000, "schedule_lateness_ns": 3234000}
+{"ack": 486, "sent_ns": 1139944059142000, "ack_ns": 1139944059280000, "rtt_ns": 138000}
+{"sent": 487, "sent_ns": 1139944083645000, "schedule_lateness_ns": 7737000}
+{"ack": 487, "sent_ns": 1139944083645000, "ack_ns": 1139944084082000, "rtt_ns": 437000}
+{"sent": 488, "sent_ns": 1139944096622000, "schedule_lateness_ns": 714000}
+{"ack": 488, "sent_ns": 1139944096622000, "ack_ns": 1139944096782000, "rtt_ns": 160000}
+{"sent": 489, "sent_ns": 1139944121019000, "schedule_lateness_ns": 5111000}
+{"ack": 489, "sent_ns": 1139944121019000, "ack_ns": 1139944121118000, "rtt_ns": 99000}
+{"sent": 490, "sent_ns": 1139944146205000, "schedule_lateness_ns": 10297000}
+{"ack": 490, "sent_ns": 1139944146205000, "ack_ns": 1139944146329000, "rtt_ns": 124000}
+{"sent": 491, "sent_ns": 1139944158264000, "schedule_lateness_ns": 2356000}
+{"ack": 491, "sent_ns": 1139944158264000, "ack_ns": 1139944158389000, "rtt_ns": 125000}
+{"sent": 492, "sent_ns": 1139944182530000, "schedule_lateness_ns": 6622000}
+{"ack": 492, "sent_ns": 1139944182530000, "ack_ns": 1139944182681000, "rtt_ns": 151000}
+{"sent": 493, "sent_ns": 1139944205800000, "schedule_lateness_ns": 9892000}
+{"ack": 493, "sent_ns": 1139944205800000, "ack_ns": 1139944205928000, "rtt_ns": 128000}
+{"sent": 494, "sent_ns": 1139944216277000, "schedule_lateness_ns": 369000}
+{"ack": 494, "sent_ns": 1139944216277000, "ack_ns": 1139944216406000, "rtt_ns": 129000}
+{"sent": 495, "sent_ns": 1139944238701000, "schedule_lateness_ns": 2793000}
+{"ack": 495, "sent_ns": 1139944238701000, "ack_ns": 1139944238792000, "rtt_ns": 91000}
+{"sent": 496, "sent_ns": 1139944263868000, "schedule_lateness_ns": 7960000}
+{"ack": 496, "sent_ns": 1139944263868000, "ack_ns": 1139944263970000, "rtt_ns": 102000}
+{"sent": 497, "sent_ns": 1139944276527000, "schedule_lateness_ns": 619000}
+{"ack": 497, "sent_ns": 1139944276527000, "ack_ns": 1139944276630000, "rtt_ns": 103000}
+{"sent": 498, "sent_ns": 1139944300670000, "schedule_lateness_ns": 4762000}
+{"ack": 498, "sent_ns": 1139944300670000, "ack_ns": 1139944300804000, "rtt_ns": 134000}
+{"sent": 499, "sent_ns": 1139944324744000, "schedule_lateness_ns": 8836000}
+{"ack": 499, "sent_ns": 1139944324744000, "ack_ns": 1139944324847000, "rtt_ns": 103000}
+{"sent": 500, "sent_ns": 1139944337345000, "schedule_lateness_ns": 1437000}
+{"ack": 500, "sent_ns": 1139944337345000, "ack_ns": 1139944337440000, "rtt_ns": 95000}
+{"sent": 501, "sent_ns": 1139944360869000, "schedule_lateness_ns": 4961000}
+{"ack": 501, "sent_ns": 1139944360869000, "ack_ns": 1139944360954000, "rtt_ns": 85000}
+{"sent": 502, "sent_ns": 1139944385863000, "schedule_lateness_ns": 9955000}
+{"ack": 502, "sent_ns": 1139944385863000, "ack_ns": 1139944386007000, "rtt_ns": 144000}
+{"sent": 503, "sent_ns": 1139944398563000, "schedule_lateness_ns": 2655000}
+{"ack": 503, "sent_ns": 1139944398563000, "ack_ns": 1139944398777000, "rtt_ns": 214000}
+{"sent": 504, "sent_ns": 1139944423649000, "schedule_lateness_ns": 7741000}
+{"ack": 504, "sent_ns": 1139944423649000, "ack_ns": 1139944423801000, "rtt_ns": 152000}
+{"sent": 505, "sent_ns": 1139944435943000, "schedule_lateness_ns": 35000}
+{"ack": 505, "sent_ns": 1139944435943000, "ack_ns": 1139944436034000, "rtt_ns": 91000}
+{"sent": 506, "sent_ns": 1139944463451000, "schedule_lateness_ns": 7543000}
+{"ack": 506, "sent_ns": 1139944463451000, "ack_ns": 1139944463925000, "rtt_ns": 474000}
+{"sent": 507, "sent_ns": 1139944476405000, "schedule_lateness_ns": 497000}
+{"ack": 507, "sent_ns": 1139944476405000, "ack_ns": 1139944476489000, "rtt_ns": 84000}
+{"sent": 508, "sent_ns": 1139944504080000, "schedule_lateness_ns": 8172000}
+{"ack": 508, "sent_ns": 1139944504080000, "ack_ns": 1139944504257000, "rtt_ns": 177000}
+{"sent": 509, "sent_ns": 1139944516190000, "schedule_lateness_ns": 282000}
+{"ack": 509, "sent_ns": 1139944516190000, "ack_ns": 1139944516350000, "rtt_ns": 160000}
+{"sent": 510, "sent_ns": 1139944543673000, "schedule_lateness_ns": 7765000}
+{"ack": 510, "sent_ns": 1139944543673000, "ack_ns": 1139944543833000, "rtt_ns": 160000}
+{"sent": 511, "sent_ns": 1139944559172000, "schedule_lateness_ns": 3264000}
+{"ack": 511, "sent_ns": 1139944559172000, "ack_ns": 1139944559257000, "rtt_ns": 85000}
+{"sent": 512, "sent_ns": 1139944582859000, "schedule_lateness_ns": 6951000}
+{"ack": 512, "sent_ns": 1139944582859000, "ack_ns": 1139944582933000, "rtt_ns": 74000}
+{"sent": 513, "sent_ns": 1139944606792000, "schedule_lateness_ns": 10884000}
+{"ack": 513, "sent_ns": 1139944606792000, "ack_ns": 1139944606890000, "rtt_ns": 98000}
+{"sent": 514, "sent_ns": 1139944619461000, "schedule_lateness_ns": 3553000}
+{"ack": 514, "sent_ns": 1139944619461000, "ack_ns": 1139944619864000, "rtt_ns": 403000}
+{"sent": 515, "sent_ns": 1139944643055000, "schedule_lateness_ns": 7147000}
+{"ack": 515, "sent_ns": 1139944643055000, "ack_ns": 1139944643475000, "rtt_ns": 420000}
+{"sent": 516, "sent_ns": 1139944666263000, "schedule_lateness_ns": 10355000}
+{"ack": 516, "sent_ns": 1139944666263000, "ack_ns": 1139944668368000, "rtt_ns": 2105000}
+{"sent": 517, "sent_ns": 1139944680913000, "schedule_lateness_ns": 5005000}
+{"ack": 517, "sent_ns": 1139944680913000, "ack_ns": 1139944681467000, "rtt_ns": 554000}
+{"sent": 518, "sent_ns": 1139944706286000, "schedule_lateness_ns": 10378000}
+{"ack": 518, "sent_ns": 1139944706286000, "ack_ns": 1139944706753000, "rtt_ns": 467000}
+{"sent": 519, "sent_ns": 1139944721015000, "schedule_lateness_ns": 5107000}
+{"ack": 519, "sent_ns": 1139944721015000, "ack_ns": 1139944722046000, "rtt_ns": 1031000}
+{"sent": 520, "sent_ns": 1139944745016000, "schedule_lateness_ns": 9108000}
+{"ack": 520, "sent_ns": 1139944745016000, "ack_ns": 1139944745222000, "rtt_ns": 206000}
+{"sent": 521, "sent_ns": 1139944756307000, "schedule_lateness_ns": 399000}
+{"ack": 521, "sent_ns": 1139944756307000, "ack_ns": 1139944756467000, "rtt_ns": 160000}
+{"sent": 522, "sent_ns": 1139944782284000, "schedule_lateness_ns": 6376000}
+{"ack": 522, "sent_ns": 1139944782284000, "ack_ns": 1139944782491000, "rtt_ns": 207000}
+{"sent": 523, "sent_ns": 1139944803397000, "schedule_lateness_ns": 7489000}
+{"ack": 523, "sent_ns": 1139944803397000, "ack_ns": 1139944803528000, "rtt_ns": 131000}
+{"sent": 524, "sent_ns": 1139944827134000, "schedule_lateness_ns": 11226000}
+{"ack": 524, "sent_ns": 1139944827134000, "ack_ns": 1139944827217000, "rtt_ns": 83000}
+{"sent": 525, "sent_ns": 1139944839747000, "schedule_lateness_ns": 3839000}
+{"ack": 525, "sent_ns": 1139944839747000, "ack_ns": 1139944839852000, "rtt_ns": 105000}
+{"sent": 526, "sent_ns": 1139944868672000, "schedule_lateness_ns": 12764000}
+{"ack": 526, "sent_ns": 1139944868672000, "ack_ns": 1139944868972000, "rtt_ns": 300000}
+{"sent": 527, "sent_ns": 1139944881496000, "schedule_lateness_ns": 5588000}
+{"ack": 527, "sent_ns": 1139944881496000, "ack_ns": 1139944881801000, "rtt_ns": 305000}
+{"sent": 528, "sent_ns": 1139944904917000, "schedule_lateness_ns": 9009000}
+{"ack": 528, "sent_ns": 1139944904917000, "ack_ns": 1139944905079000, "rtt_ns": 162000}
+{"sent": 529, "sent_ns": 1139944918801000, "schedule_lateness_ns": 2893000}
+{"ack": 529, "sent_ns": 1139944918801000, "ack_ns": 1139944918997000, "rtt_ns": 196000}
+{"sent": 530, "sent_ns": 1139944943298000, "schedule_lateness_ns": 7390000}
+{"ack": 530, "sent_ns": 1139944943298000, "ack_ns": 1139944943571000, "rtt_ns": 273000}
+{"sent": 531, "sent_ns": 1139944967161000, "schedule_lateness_ns": 11253000}
+{"ack": 531, "sent_ns": 1139944967161000, "ack_ns": 1139944967277000, "rtt_ns": 116000}
+{"sent": 532, "sent_ns": 1139944980721000, "schedule_lateness_ns": 4813000}
+{"ack": 532, "sent_ns": 1139944980721000, "ack_ns": 1139944981213000, "rtt_ns": 492000}
+{"sent": 533, "sent_ns": 1139945004058000, "schedule_lateness_ns": 8150000}
+{"ack": 533, "sent_ns": 1139945004058000, "ack_ns": 1139945004122000, "rtt_ns": 64000}
+{"sent": 534, "sent_ns": 1139945018181000, "schedule_lateness_ns": 2273000}
+{"ack": 534, "sent_ns": 1139945018181000, "ack_ns": 1139945018451000, "rtt_ns": 270000}
+{"sent": 535, "sent_ns": 1139945042271000, "schedule_lateness_ns": 6363000}
+{"ack": 535, "sent_ns": 1139945042271000, "ack_ns": 1139945042383000, "rtt_ns": 112000}
+{"sent": 536, "sent_ns": 1139945057075000, "schedule_lateness_ns": 1167000}
+{"ack": 536, "sent_ns": 1139945057075000, "ack_ns": 1139945057832000, "rtt_ns": 757000}
+{"sent": 537, "sent_ns": 1139945082605000, "schedule_lateness_ns": 6697000}
+{"ack": 537, "sent_ns": 1139945082605000, "ack_ns": 1139945082751000, "rtt_ns": 146000}
+{"sent_total": 537, "send_errors": 0, "unacknowledged": 0}

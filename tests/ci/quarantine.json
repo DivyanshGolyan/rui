@@ -1,0 +1,20 @@
+{
+  "flakes": [
+    {
+      "signature": "tests/integration/human_cli_integration.py: caller = spawn([str(fixture.RUI), *arguments], cwd=workspace, env=env, pass_fds=(() if ready_write is None else (ready_write,)), stdin=slave, stdout=slave, stderr=subprocess.PIPE) raised PermissionError",
+      "path": "tests/integration/human_cli_integration.py",
+      "issue": 1147,
+      "owner": "DivyanshGolyan",
+      "added": "2026-11-09",
+      "expires": "2026-11-23"
+    },
+    {
+      "signature": "tests/integration/terminal_restoration_integration.py: caller = spawn([str(fixture.RUI), \"session\", \"resume\", \"--store\", str(store), \"--\", session], stdin=slave, stdout=slave, stderr=subprocess.PIPE, ...<3 lines>... \"RUI_TERMINAL_CHOICE_RELEASE\": str(release), \"RUI_TERMINAL_DRAIN_RELEASE\": str(drain), \"RUI_TEST_ACTION_READY_FD\": str(write_ready)}, pass_fds=(write_ready,)) raised PermissionError",
+      "path": "tests/integration/terminal_restoration_integration.py",
+      "issue": 1147,
+      "owner": "DivyanshGolyan",
+      "added": "2026-11-09",
+      "expires": "2026-11-23"
+    }
+  ]
+}

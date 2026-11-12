@@ -1,0 +1,5 @@
+{
+  "status": "mixed",
+  "completed_case": "h2-wan1024-u16",
+  "diagnostic": "Proxy EOF forwarding raised ENOTCONN after complete H2 request/response; fixed wrapper before qualification rerun. H1 case aborted on incomplete upload; result code was not logged in this source snapshot. Preserved for diagnosis, excluded from successful performance tables."
+}

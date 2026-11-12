@@ -1,0 +1,5 @@
+{
+  "status": "failed",
+  "qualification": false,
+  "reason": "Large HTTP/1.1 upload returned curl send error 55; research harness aborted on incomplete upload. See stderr and transport_failure record. Remaining matrix cases did not run."
+}

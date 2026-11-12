@@ -1,0 +1,297 @@
+{
+  "synthetic": true,
+  "provenance": {
+    "codex_commit": "968835997714baaff199cfed5f89a2c65d8ca77d",
+    "codex_source": "https://github.com/openai/codex/blob/968835997714baaff199cfed5f89a2c65d8ca77d/codex-rs/core/src/compact_remote_v2.rs",
+    "openai_node_commit": "fe2d6a382623b00753f002de539f8a26c936b5be",
+    "transform_source": "https://github.com/openai/openai-node/blob/fe2d6a382623b00753f002de539f8a26c936b5be/src/lib/responses/ResponseInputItems.ts",
+    "interpretation": "Raw JSON retains open fields and removes response-only created_by. SDK-only parsed fields are not interpreted as raw-wire omissions. Synthetic opaque strings are not actual encrypted data."
+  },
+  "response": {
+    "requested_model": "synthetic-model-a",
+    "model": "synthetic-model-a-snapshot",
+    "id": "synthetic-response-1",
+    "status": "completed",
+    "output": [
+      {
+        "type": "reasoning",
+        "id": "r1",
+        "status": "completed",
+        "summary": [
+          {
+            "type": "summary_text",
+            "text": "Synthetic summary."
+          }
+        ],
+        "encrypted_content": "synthetic-private",
+        "created_by": "synthetic-author",
+        "extension": {
+          "nested": [
+            {
+              "x": 1
+            }
+          ]
+        },
+        "parsed": "raw-open-field"
+      },
+      {
+        "type": "message",
+        "id": "m1",
+        "status": "completed",
+        "role": "assistant",
+        "phase": "final_answer",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "Hello.",
+            "annotations": [],
+            "logprobs": [],
+            "extension": {
+              "x": true
+            }
+          }
+        ]
+      },
+      {
+        "type": "function_call",
+        "id": "f1",
+        "status": "completed",
+        "call_id": "call1",
+        "name": "Bash",
+        "arguments": "{\"command\":\"pwd\"}",
+        "extension": {
+          "future": 2
+        }
+      }
+    ],
+    "request_id": "synthetic-request-1"
+  },
+  "expected_replay": [
+    {
+      "type": "reasoning",
+      "id": "r1",
+      "status": "completed",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "Synthetic summary."
+        }
+      ],
+      "encrypted_content": "synthetic-private",
+      "extension": {
+        "nested": [
+          {
+            "x": 1
+          }
+        ]
+      },
+      "parsed": "raw-open-field"
+    },
+    {
+      "type": "message",
+      "id": "m1",
+      "status": "completed",
+      "role": "assistant",
+      "phase": "final_answer",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hello.",
+          "annotations": [],
+          "logprobs": [],
+          "extension": {
+            "x": true
+          }
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "id": "f1",
+      "status": "completed",
+      "call_id": "call1",
+      "name": "Bash",
+      "arguments": "{\"command\":\"pwd\"}",
+      "extension": {
+        "future": 2
+      }
+    }
+  ],
+  "compaction_response": {
+    "requested_model": "synthetic-model-a",
+    "model": "synthetic-model-a-snapshot",
+    "id": "synthetic-compact-1",
+    "status": "completed",
+    "output": [
+      {
+        "type": "reasoning",
+        "id": "r2",
+        "summary": [],
+        "encrypted_content": "synthetic-pre-compaction"
+      },
+      {
+        "type": "compaction",
+        "id": "c1",
+        "encrypted_content": "synthetic-compacted",
+        "extension": {
+          "x": [
+            1,
+            2
+          ]
+        }
+      },
+      {
+        "type": "message",
+        "id": "m2",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "output_text",
+            "text": "After compact.",
+            "annotations": []
+          }
+        ]
+      }
+    ]
+  },
+  "suffix": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Entire pending input."
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": "Entire pending instruction."
+    }
+  ],
+  "expected_compacted_replay": [
+    {
+      "type": "message",
+      "role": "developer",
+      "content": "Initial instructions."
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Original complete question."
+    },
+    {
+      "type": "compaction",
+      "id": "c1",
+      "encrypted_content": "synthetic-compacted",
+      "extension": {
+        "x": [
+          1,
+          2
+        ]
+      }
+    },
+    {
+      "type": "message",
+      "id": "m2",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "After compact.",
+          "annotations": []
+        }
+      ]
+    },
+    {
+      "type": "message",
+      "role": "user",
+      "content": "Entire pending input."
+    },
+    {
+      "type": "message",
+      "role": "developer",
+      "content": "Entire pending instruction."
+    }
+  ],
+  "retained_host_input": [
+    {
+      "source_ref": "host-input-1",
+      "item": {
+        "type": "message",
+        "role": "developer",
+        "content": "Initial instructions."
+      }
+    },
+    {
+      "source_ref": "host-input-2",
+      "item": {
+        "type": "message",
+        "role": "user",
+        "content": "Original complete question."
+      }
+    }
+  ],
+  "expected_retained_source_refs": [
+    "host-input-1",
+    "host-input-2"
+  ],
+  "tool_result": {
+    "type": "function_call_output",
+    "call_id": "call1",
+    "output": "{\"exit_code\":0,\"stdout\":\"/synthetic/workspace\\n\"}"
+  },
+  "expected_tool_loop_replay": [
+    {
+      "type": "reasoning",
+      "id": "r1",
+      "status": "completed",
+      "summary": [
+        {
+          "type": "summary_text",
+          "text": "Synthetic summary."
+        }
+      ],
+      "encrypted_content": "synthetic-private",
+      "extension": {
+        "nested": [
+          {
+            "x": 1
+          }
+        ]
+      },
+      "parsed": "raw-open-field"
+    },
+    {
+      "type": "message",
+      "id": "m1",
+      "status": "completed",
+      "role": "assistant",
+      "phase": "final_answer",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "Hello.",
+          "annotations": [],
+          "logprobs": [],
+          "extension": {
+            "x": true
+          }
+        }
+      ]
+    },
+    {
+      "type": "function_call",
+      "id": "f1",
+      "status": "completed",
+      "call_id": "call1",
+      "name": "Bash",
+      "arguments": "{\"command\":\"pwd\"}",
+      "extension": {
+        "future": 2
+      }
+    },
+    {
+      "type": "function_call_output",
+      "call_id": "call1",
+      "output": "{\"exit_code\":0,\"stdout\":\"/synthetic/workspace\\n\"}"
+    }
+  ]
+}

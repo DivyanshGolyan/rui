@@ -1,0 +1,3299 @@
+{
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "source_commit": "3bdadc8395716e587f3da11f0b85ecdb3b91274a",
+  "sqlite_package": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+  "sqlite_macros": [
+    "-DSQLITE_THREADSAFE=0",
+    "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
+    "-DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096",
+    "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+    "-DSQLITE_DEFAULT_MMAP_SIZE=0",
+    "-DSQLITE_MAX_MMAP_SIZE=0",
+    "-DSQLITE_DEFAULT_SYNCHRONOUS=3",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+    "-DSQLITE_OMIT_SHARED_CACHE=1",
+    "-DSQLITE_TEMP_STORE=1",
+    "-DSQLITE_USE_URI=0",
+    "-DSQLITE_ENABLE_API_ARMOR=1"
+  ],
+  "probe_sha256": "68781a98afe9abdc53148935363c92aa47961ec4f7d9efa6d7eecbba45d59a27",
+  "cases": [
+    {
+      "case": "stalled-batch-50ms",
+      "repeat": 2,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 50,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 60.668,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 57.597,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 56.148,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 61.184,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 60.387,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 61.435,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 62.075,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 64.36,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 61.909,
+        "dispatch_marker_ms": 61.909,
+        "settlement_ack_ms": 62.522,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 438088,
+        "peak_logical_scratch": 54761,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1360704,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "small",
+      "repeat": 2,
+      "records": 1000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 4.07,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 1.978,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 1.731,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 1.882,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 2.658,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 2.787,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 2.741,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 2.669,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 4.801,
+        "dispatch_marker_ms": 4.801,
+        "settlement_ack_ms": 5.426,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 4387608,
+        "peak_logical_scratch": 1096902,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1213184,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "byte-budget-1MiB",
+      "repeat": 2,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 1048576,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 3.324,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 3.366,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 3.56,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 3.39,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 3.518,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 3.309,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 3.43,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 3.46,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 4.123,
+        "dispatch_marker_ms": 4.123,
+        "settlement_ack_ms": 4.538,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 8783344,
+        "peak_logical_scratch": 1097918,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "stalled-batch-50ms",
+      "repeat": 0,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 50,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 60.585,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 60.482,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 59.027,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 61.072,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 61.006,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 62.767,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 61.915,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 59.828,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 61.602,
+        "dispatch_marker_ms": 61.602,
+        "settlement_ack_ms": 62.163,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 438088,
+        "peak_logical_scratch": 54761,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "deadline-10ms",
+      "repeat": 2,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 10.112,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 10.107,
+          "bytes": 3680562,
+          "rows": 6700,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 10.02,
+          "bytes": 3680562,
+          "rows": 6700,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 10.04,
+          "bytes": 3515712,
+          "rows": 6400,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 10.068,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 10.046,
+          "bytes": 3295908,
+          "rows": 6000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 10.094,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 10.094,
+          "bytes": 3735518,
+          "rows": 6800,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 11.185,
+        "dispatch_marker_ms": 11.185,
+        "settlement_ack_ms": 11.666,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 28620266,
+        "peak_logical_scratch": 3735518,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "slow-deadline-10ms",
+      "repeat": 0,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 1,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 10.227,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 10.198,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 10.229,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 10.339,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 10.36,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 10.432,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 10.424,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 10.422,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 10.918,
+        "dispatch_marker_ms": 10.918,
+        "settlement_ack_ms": 11.325,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 2632056,
+        "peak_logical_scratch": 329007,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1049152,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "byte-budget-1MiB",
+      "repeat": 0,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 1048576,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 3.548,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 3.34,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 3.486,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 3.605,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 4.347,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 3.191,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 3.536,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 3.791,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 4.386,
+        "dispatch_marker_ms": 4.386,
+        "settlement_ack_ms": 4.842,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 8783344,
+        "peak_logical_scratch": 1097918,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1147456,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "batch-10",
+      "repeat": 0,
+      "records": 10000,
+      "width": 128,
+      "batch": 10,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 26.258,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 25.941,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 25.423,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 25.475,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 25.362,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 24.628,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 24.631,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 24.389,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 26.983,
+        "dispatch_marker_ms": 26.983,
+        "settlement_ack_ms": 27.463,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1327808,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "batch-1000",
+      "repeat": 2,
+      "records": 10000,
+      "width": 128,
+      "batch": 1000,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 13.725,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 13.703,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 15.711,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 14.846,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 14.799,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 13.967,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 14.398,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 14.169,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 14.281,
+        "dispatch_marker_ms": 14.281,
+        "settlement_ack_ms": 14.651,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1180288,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "large",
+      "repeat": 2,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 164.913,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 165.052,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 169.473,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 182.314,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 180.005,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 160.692,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 149.375,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 170.59,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 165.629,
+        "dispatch_marker_ms": 165.629,
+        "settlement_ack_ms": 166.063,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 440311640,
+        "peak_logical_scratch": 110077910,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1180288,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "deadline-10ms",
+      "repeat": 0,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 10.114,
+          "bytes": 3405818,
+          "rows": 6200,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 10.032,
+          "bytes": 3625608,
+          "rows": 6600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 10.022,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 10.058,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 10.02,
+          "bytes": 3460758,
+          "rows": 6300,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 10.126,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 10.011,
+          "bytes": 3460758,
+          "rows": 6300,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 10.131,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 11.141,
+        "dispatch_marker_ms": 11.141,
+        "settlement_ack_ms": 11.657,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 28235614,
+        "peak_logical_scratch": 3625608,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "batch-1000",
+      "repeat": 0,
+      "records": 10000,
+      "width": 128,
+      "batch": 1000,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 13.998,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 13.473,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 14.014,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 14.046,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 14.106,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 15.233,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 13.901,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 14.011,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 14.48,
+        "dispatch_marker_ms": 14.48,
+        "settlement_ack_ms": 14.843,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114752,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "slow-deadline-10ms",
+      "repeat": 1,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 1,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 10.298,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 10.173,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 10.371,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 10.319,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 10.351,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 11.583,
+          "bytes": 383861,
+          "rows": 700,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 10.538,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 10.55,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 11.034,
+        "dispatch_marker_ms": 11.034,
+        "settlement_ack_ms": 11.438,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 2686910,
+        "peak_logical_scratch": 383861,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "large",
+      "repeat": 1,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 160.067,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 155.627,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 163.91,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 157.677,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 163.009,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 158.972,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 158.366,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 158.892,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 160.807,
+        "dispatch_marker_ms": 160.807,
+        "settlement_ack_ms": 161.31,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 440311640,
+        "peak_logical_scratch": 110077910,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1229440,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "batch-10",
+      "repeat": 1,
+      "records": 10000,
+      "width": 128,
+      "batch": 10,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 33.801,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 23.324,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 23.578,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 23.564,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 23.503,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 23.482,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 24.322,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 25.074,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 34.426,
+        "dispatch_marker_ms": 34.426,
+        "settlement_ack_ms": 34.805,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1180288,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "deadline-10ms",
+      "repeat": 1,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 10.132,
+          "bytes": 3680562,
+          "rows": 6700,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 10.119,
+          "bytes": 3625608,
+          "rows": 6600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 10.04,
+          "bytes": 3460758,
+          "rows": 6300,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 10.017,
+          "bytes": 3460758,
+          "rows": 6300,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 10.07,
+          "bytes": 3515712,
+          "rows": 6400,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 10.079,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 10.07,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 10.091,
+          "bytes": 3570668,
+          "rows": 6500,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 11.195,
+        "dispatch_marker_ms": 11.195,
+        "settlement_ack_ms": 11.587,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 28455402,
+        "peak_logical_scratch": 3680562,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "settlements-after-backlog",
+      "repeat": 2,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": false,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 15.052,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 15.113,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 15.812,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 15.642,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 15.638,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 15.576,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 15.555,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 15.623,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 15.619,
+        "dispatch_marker_ms": 15.619,
+        "settlement_ack_ms": 131.24,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1147456,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "large",
+      "repeat": 0,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 161.394,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 150.016,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 156.662,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 180.834,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 213.031,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 286.864,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 199.574,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 173.256,
+          "bytes": 55038955,
+          "rows": 100000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 161.942,
+        "dispatch_marker_ms": 161.942,
+        "settlement_ack_ms": 162.292,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 440311640,
+        "peak_logical_scratch": 110077910,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1245824,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "small",
+      "repeat": 1,
+      "records": 1000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 2.021,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 1.714,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 2.032,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 1.872,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 1.944,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 2.001,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 1.962,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 1.969,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 2.576,
+        "dispatch_marker_ms": 2.576,
+        "settlement_ack_ms": 2.967,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 4387608,
+        "peak_logical_scratch": 1096902,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1196672,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "stalled-batch-50ms",
+      "repeat": 1,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 50,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 51.687,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 58.934,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 62.655,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 54.016,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 60.544,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 56.472,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 60.802,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 58.947,
+          "bytes": 54761,
+          "rows": 100,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 52.826,
+        "dispatch_marker_ms": 52.826,
+        "settlement_ack_ms": 53.316,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 438088,
+        "peak_logical_scratch": 54761,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "medium",
+      "repeat": 0,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 14.932,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 14.531,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 15.859,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 15.831,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 15.487,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 15.703,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 15.443,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 15.806,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 15.4,
+        "dispatch_marker_ms": 15.4,
+        "settlement_ack_ms": 15.73,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1164032,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "medium",
+      "repeat": 2,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 18.684,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 16.941,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 16.662,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 17.456,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 16.57,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 17.506,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 15.229,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 15.043,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 19.61,
+        "dispatch_marker_ms": 19.611,
+        "settlement_ack_ms": 19.978,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1278592,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "wide",
+      "repeat": 2,
+      "records": 100000,
+      "width": 1024,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 757.683,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 884.963,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 934.191,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 857.823,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 884.249,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 801.932,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 822.756,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 761.695,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 758.423,
+        "dispatch_marker_ms": 758.423,
+        "settlement_ack_ms": 758.84,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 2411511640,
+        "peak_logical_scratch": 602877910,
+        "heap_baseline": 176160,
+        "heap_peak": 181840,
+        "footprint_after_churn": 1524416,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "batch-10",
+      "repeat": 2,
+      "records": 10000,
+      "width": 128,
+      "batch": 10,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 23.991,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 23.334,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 24.856,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 23.754,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 23.617,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 23.955,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 23.707,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 24.325,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 24.55,
+        "dispatch_marker_ms": 24.55,
+        "settlement_ack_ms": 24.892,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1098304,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "settlements-after-backlog",
+      "repeat": 1,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": false,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 14.889,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 14.416,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 15.884,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 16.244,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 15.998,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 17.326,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 15.886,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 15.47,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 15.395,
+        "dispatch_marker_ms": 15.395,
+        "settlement_ack_ms": 133.208,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1245824,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "slow-scratch",
+      "repeat": 1,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 1,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 169.301,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 178.596,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 203.75,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 177.397,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 181.829,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 177.013,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 242.762,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 256.952,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 170.182,
+        "dispatch_marker_ms": 170.182,
+        "settlement_ack_ms": 170.751,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1278720,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "byte-budget-1MiB",
+      "repeat": 1,
+      "records": 100000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 1048576,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 3.245,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 3.193,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 3.518,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 3.423,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 3.413,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 3.613,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 3.702,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 3.601,
+          "bytes": 1097918,
+          "rows": 2000,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 4.144,
+        "dispatch_marker_ms": 4.144,
+        "settlement_ack_ms": 4.57,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 8783344,
+        "peak_logical_scratch": 1097918,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1131136,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "slow-scratch",
+      "repeat": 0,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 1,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 183.004,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 176.86,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 225.361,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 249.922,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 246.961,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 252.337,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 233.934,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 170.76,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 183.829,
+        "dispatch_marker_ms": 183.829,
+        "settlement_ack_ms": 184.357,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1327808,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "wide",
+      "repeat": 1,
+      "records": 100000,
+      "width": 1024,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 725.892,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 771.664,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 855.469,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 829.603,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 816.629,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 768.862,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 784.585,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 747.631,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 726.577,
+        "dispatch_marker_ms": 726.577,
+        "settlement_ack_ms": 727.011,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 2411511640,
+        "peak_logical_scratch": 602877910,
+        "heap_baseline": 176160,
+        "heap_peak": 181840,
+        "footprint_after_churn": 1557248,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "settlements-after-backlog",
+      "repeat": 0,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": false,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 16.796,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 14.752,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 15.238,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 15.242,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 15.685,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 15.688,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 15.47,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 16.151,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 17.313,
+        "dispatch_marker_ms": 17.313,
+        "settlement_ack_ms": 132.023,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "wide",
+      "repeat": 0,
+      "records": 100000,
+      "width": 1024,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 774.207,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 923.185,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 913.686,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 850.02,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 818.957,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 764.366,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 770.745,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 764.053,
+          "bytes": 301438955,
+          "rows": 100000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 774.965,
+        "dispatch_marker_ms": 774.965,
+        "settlement_ack_ms": 775.571,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 2411511640,
+        "peak_logical_scratch": 602877910,
+        "heap_baseline": 176160,
+        "heap_peak": 181840,
+        "footprint_after_churn": 1540800,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "batch-1000",
+      "repeat": 1,
+      "records": 10000,
+      "width": 128,
+      "batch": 1000,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 14.7,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 14.329,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 14.718,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 15.872,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 14.606,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 17.631,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 15.409,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 14.783,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 15.365,
+        "dispatch_marker_ms": 15.365,
+        "settlement_ack_ms": 15.781,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1098304,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "medium",
+      "repeat": 1,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 15.848,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 14.825,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 15.403,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 16.094,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 15.313,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 14.908,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 15.617,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 15.732,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 16.514,
+        "dispatch_marker_ms": 16.514,
+        "settlement_ack_ms": 16.991,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1180288,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "slow-deadline-10ms",
+      "repeat": 2,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 1,
+      "budget_ms": 10,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 10.373,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 10.257,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 10.328,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 10.482,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 10.298,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 10.641,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 10.483,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 10.518,
+          "bytes": 329007,
+          "rows": 600,
+          "aborted": true
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 11.008,
+        "dispatch_marker_ms": 11.008,
+        "settlement_ack_ms": 11.454,
+        "complete": 0,
+        "failed": 8,
+        "total_scratch_written": 2632056,
+        "peak_logical_scratch": 329007,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1114688,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "slow-scratch",
+      "repeat": 2,
+      "records": 10000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 1,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 176.557,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 227.663,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 184.529,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 236.688,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 260.618,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 198.167,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 175.487,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 184.217,
+          "bytes": 5493953,
+          "rows": 10000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 178.23,
+        "dispatch_marker_ms": 178.23,
+        "settlement_ack_ms": 179.239,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 43951624,
+        "peak_logical_scratch": 10987906,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1344320,
+        "sqlite": "3.53.4"
+      }
+    },
+    {
+      "case": "small",
+      "repeat": 0,
+      "records": 1000,
+      "width": 128,
+      "batch": 100,
+      "delay_ms": 0,
+      "budget_ms": 0,
+      "byte_budget": 0,
+      "fair": true,
+      "captures": [
+        {
+          "event": "capture",
+          "ordinal": 0,
+          "ms": 1.922,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 1,
+          "ms": 1.781,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 2,
+          "ms": 1.938,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 3,
+          "ms": 2.072,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 4,
+          "ms": 1.859,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 5,
+          "ms": 2.143,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 6,
+          "ms": 2.034,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        },
+        {
+          "event": "capture",
+          "ordinal": 7,
+          "ms": 2.008,
+          "bytes": 548451,
+          "rows": 1000,
+          "aborted": false
+        }
+      ],
+      "summary": {
+        "event": "summary",
+        "control_ack_ms": 2.45,
+        "dispatch_marker_ms": 2.45,
+        "settlement_ack_ms": 2.858,
+        "complete": 8,
+        "failed": 0,
+        "total_scratch_written": 4387608,
+        "peak_logical_scratch": 1096902,
+        "heap_baseline": 176160,
+        "heap_peak": 181376,
+        "footprint_after_churn": 1180288,
+        "sqlite": "3.53.4"
+      }
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+--- a/lib/transfer.c
++++ b/lib/transfer.c
+@@ -608,4 +608,4 @@ CURLcode Curl_retry_request(struct Curl_easy *data, char **url)
+-  if(conn->bits.reuse &&
++  if(data->set.method != HTTPREQ_POST && conn->bits.reuse &&
+      (data->req.bytecount + data->req.headerbytecount == 0) &&
+      ((!data->req.no_body && !data->req.done) ||
+       (conn->scheme->protocol & PROTO_FAMILY_HTTP))
+--- a/lib/multi.c
++++ b/lib/multi.c
+@@ -2064,3 +2064,4 @@
+   else if((result == CURLE_HTTP2_STREAM) &&
+-          Curl_h2_http_1_1_error(data)) {
++          data->set.method != HTTPREQ_POST &&
++          Curl_h2_http_1_1_error(data)) {
+     CURLcode ret = Curl_retry_request(data, &newurl);
+--- a/lib/http2.c
++++ b/lib/http2.c
+@@ -65,10 +65,10 @@
+ #define H2_NW_SEND_CHUNKS       1
+ /* this is how much we want "in flight" for a stream, unthrottled */
+-#define H2_STREAM_WINDOW_SIZE_MAX   (10 * 1024 * 1024)
++#define H2_STREAM_WINDOW_SIZE_MAX   (8 * 1024)
+ /* this is how much we want "in flight" for a stream, initially, IFF
+  * nghttp2 allows us to tweak the local window size. */
+ #if NGHTTP2_HAS_SET_LOCAL_WINDOW_SIZE
+-#define H2_STREAM_WINDOW_SIZE_INITIAL  (64 * 1024)
++#define H2_STREAM_WINDOW_SIZE_INITIAL  (8 * 1024)
+ #else
+ #define H2_STREAM_WINDOW_SIZE_INITIAL H2_STREAM_WINDOW_SIZE_MAX
+ #endif
+@@ -81,7 +81,7 @@
+ /* We need to accommodate the max number of streams with their window sizes on
+  * the overall connection. Streams might become PAUSED which will block their
+  * received QUOTA in the connection window. If we run out of space, the server
+  * is blocked from sending us any data. See #10988 for an issue with this. */
+-#define HTTP2_HUGE_WINDOW_SIZE (100 * H2_STREAM_WINDOW_SIZE_MAX)
++#define HTTP2_HUGE_WINDOW_SIZE (100 * 10 * 1024 * 1024)
+-
++
+ #define H2_SETTINGS_IV_LEN 3
+--- a/lib/vtls/vtls.c
++++ b/lib/vtls/vtls.c
+@@ -1696,1 +1696,8 @@ CURLcode Curl_alpn_set_negotiated(struct Curl_cfilter *cf,
++  /* A completed TLS handshake without h2 cannot authorize an HTTPS POST. */
++  if(data->state.http_neg.wanted == CURL_HTTP_V2x &&
++     (proto_len != 2 || !proto || memcmp(proto, "h2", 2))) {
++    failf(data, "ALPN: server did not negotiate h2");
++    return CURLE_HTTP2;
++  }
++
+   if(connssl->negotiated.alpn) {

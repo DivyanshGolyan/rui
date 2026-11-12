@@ -1,0 +1,10 @@
+{
+  "source_checkout": "/Users/divyanshgolyan/code/personal/onepage",
+  "source_commit": "c8f5e1cb674f9f4fd81d7e04ccbc3a4a22331fed",
+  "files": {
+    "ARCHITECTURE.md": "44f622da29a48987bda431815661505631b7ffdf5215d1a12a0063712a99772b",
+    "VERIFICATION.md": "b96792d503ed849ce192b1cf9176a3f0ef3d569174c06503019f913f52ea1726",
+    "docs/adr/0024-capture-run-inspection-before-delivery.md": "557b83ad81ffd2a9b345897a8bf9e070818b434b26e60ffbbf0156ce71992a1d",
+    "research/inspection-capture-proof/single_connection.c": "add106b343e1a4a249db39d03564201c913026754a35242988d674e71bd45a2b"
+  }
+}

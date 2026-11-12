@@ -1,0 +1,136 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 33 and seed 763662685874844724 with 1 worker on 10 cores with 910MB heap and 64MB offheap memory [pid: 24152] (Mac OS X 15.7.7 aarch64, Azul Systems, Inc. 21.0.9 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /Users/divyanshgolyan/.codex/worktrees/2563/onepage/research/request-protocol-model/RequestProtocol.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Naturals.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/FiniteSets.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Sequences.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module RequestProtocol
+Starting... (2026-09-09 20:30:05)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-09 20:30:05.
+Error: Invariant NoReplay is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ cancelled = FALSE
+/\ answer = (a :> "none" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "none" @@ b :> "none")
+/\ intent = {}
+
+State 2: <SaveIntent line 17, col 18 to line 20, col 67 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "none" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "none" @@ b :> "none")
+/\ intent = {a}
+
+State 3: <Send line 21, col 12 to line 24, col 61 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "none" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {}
+/\ sent = {a}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "none" @@ b :> "none")
+/\ intent = {a}
+
+State 4: <Core line 25, col 12 to line 33, col 95 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "accepted" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {a}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "ready" @@ b :> "none")
+/\ intent = {a}
+
+State 5: <Admit line 40, col 13 to line 42, col 117 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "accepted" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 0 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {a}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "admitted" @@ b :> "none")
+/\ intent = {a}
+
+State 6: <Start line 43, col 13 to line 46, col 109 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "accepted" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 1 @@ b :> 0)
+/\ crashes = 0
+/\ reply = {a}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "running" @@ b :> "none")
+/\ intent = {a}
+
+State 7: <Crash line 62, col 10 to line 68, col 92 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "accepted" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 1 @@ b :> 0)
+/\ crashes = 1
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "ready" @@ b :> "none")
+/\ intent = {a}
+
+State 8: <Admit line 40, col 13 to line 42, col 117 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "accepted" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 1 @@ b :> 0)
+/\ crashes = 1
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "admitted" @@ b :> "none")
+/\ intent = {a}
+
+State 9: <Start line 43, col 13 to line 46, col 109 of module RequestProtocol>
+/\ cancelled = FALSE
+/\ answer = (a :> "accepted" @@ b :> "none")
+/\ recorded = {}
+/\ starts = (a :> 2 @@ b :> 0)
+/\ crashes = 1
+/\ reply = {}
+/\ sent = {}
+/\ stopAsked = {}
+/\ cancelling = FALSE
+/\ stage = (a :> "running" @@ b :> "none")
+/\ intent = {a}
+
+1662 states generated, 656 distinct states found, 277 states left on queue.
+The depth of the complete state graph search is 9.
+The average outdegree of the complete state graph is 2 (minimum is 0, the maximum 5 and the 95th percentile is 3).
+Finished in 00s at (2026-09-09 20:30:05)

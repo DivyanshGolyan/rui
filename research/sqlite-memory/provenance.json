@@ -1,0 +1,41 @@
+{
+  "revision": "b1d25138f70e6a7b4c1d27523d5b051f6de34d7a",
+  "machine": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "hardware": [
+    "MacBookPro18,1",
+    "17179869184",
+    "10"
+  ],
+  "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "zig": ".{\n    .zig_exe = \"/opt/homebrew/Cellar/zig/0.16.0_1/bin/zig\",\n    .lib_dir = \"/opt/homebrew/Cellar/zig/0.16.0_1/lib/zig\",\n    .std_dir = \"/opt/homebrew/Cellar/zig/0.16.0_1/lib/zig/std\",\n    .global_cache_dir = \"/Users/divyanshgolyan/.cache/zig\",\n    .version = \"0.16.0\",\n    .target = \"aarch64-macos.15.7.7...15.7.7-none\",\n    .env = .{\n        .ZIG_GLOBAL_CACHE_DIR = null,\n        .ZIG_LOCAL_CACHE_DIR = null,\n        .ZIG_LIB_DIR = null,\n        .ZIG_LIBC = null,\n        .ZIG_BUILD_RUNNER = null,\n        .ZIG_BUILD_ERROR_STYLE = null,\n        .ZIG_BUILD_MULTILINE_ERRORS = null,\n        .ZIG_VERBOSE_LINK = null,\n        .ZIG_VERBOSE_CC = null,\n        .ZIG_DEBUG_CMD = null,\n        .ZIG_IS_DETECTING_LIBC_PATHS = null,\n        .ZIG_IS_TRYING_TO_NOT_CALL_ITSELF = null,\n        .NIX_CFLAGS_COMPILE = null,\n        .NIX_CFLAGS_LINK = null,\n        .NIX_LDFLAGS = null,\n        .C_INCLUDE_PATH = null,\n        .CPLUS_INCLUDE_PATH = null,\n        .LIBRARY_PATH = null,\n        .CC = null,\n        .NO_COLOR = \"1\",\n        .CLICOLOR_FORCE = null,\n        .XDG_CACHE_HOME = null,\n        .LOCALAPPDATA = null,\n        .HOME = \"/Users/divyanshgolyan\",\n        .PROGRAMDATA = null,\n        .HOMEBREW_PREFIX = \"/opt/homebrew\",\n    },\n}\n",
+  "sqlite_sha256": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189",
+  "sqlite_package_hash": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+  "macros": [
+    "-DSQLITE_THREADSAFE=0",
+    "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
+    "-DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096",
+    "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+    "-DSQLITE_DEFAULT_MMAP_SIZE=0",
+    "-DSQLITE_MAX_MMAP_SIZE=0",
+    "-DSQLITE_DEFAULT_SYNCHRONOUS=3",
+    "-DSQLITE_DQS=0",
+    "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+    "-DSQLITE_OMIT_SHARED_CACHE=1",
+    "-DSQLITE_TEMP_STORE=1",
+    "-DSQLITE_USE_URI=0",
+    "-DSQLITE_ENABLE_API_ARMOR=1"
+  ],
+  "schema": "CREATE TABLE content (\n    content_id INTEGER PRIMARY KEY,\n    session_id BLOB NOT NULL CHECK (length(session_id) = 8),\n    content_ref BLOB NOT NULL CHECK (length(content_ref) = 8),\n    byte_length INTEGER NOT NULL CHECK (byte_length >= 1),\n    digest BLOB NOT NULL CHECK (length(digest) = 32),\n    payload BLOB NOT NULL CHECK (length(payload) = byte_length),\n    UNIQUE (session_id, content_ref),\n    FOREIGN KEY (session_id) REFERENCES session (session_id)\n) STRICT",
+  "source_sha256": {
+    "src/host_store.zig": "41bea8383341e7952a2f8cc17076d433732c2003c72a6473a750bfa180e79ffd",
+    "build.zig": "285c92ad14382b197260f3e3d065b3e73981923f0b554b4a02b6cc4376cdfcea",
+    "ARCHITECTURE.md": "114b55e8b3fbe9a8a331f4b36ed05d9cecf180e7e9ab0c3b05e870bc03ab3ab2",
+    "VERIFICATION.md": "b28162f65ef887abf48a12d984fd346b5e76424bd49ff2fde02bef571e7213a6",
+    "research/sqlite-memory/probe.c": "e253e8b4f20f15500988657598fbd80dc5ef8d3bd83010f76a8e6bd71ef93c5a",
+    "research/sqlite-memory/run.py": "0caa8ec056ce2d5fde7dfd9a10b93d478caca5cdf44dce0edd85dcba662cdb12"
+  },
+  "measurement_note": "fresh process per case; Mac physical footprint stage samples, SQLite high-water continuous; malloc zone includes SQLite and libc, do not sum; source and database scratch removed per case",
+  "vm_stat_before": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                9450.\nPages active:                            213629.\nPages inactive:                          211611.\nPages speculative:                         1244.\nPages throttled:                              0.\nPages wired down:                        252974.\nPages purgeable:                            226.\n\"Translation faults\":               21633955669.\nPages copy-on-write:                 1184860537.\nPages zero filled:                  10446901742.\nPages reactivated:                   4898015272.\nPages purged:                         389448265.\nFile-backed pages:                       141839.\nAnonymous pages:                         284645.\nPages stored in compressor:             2370395.\nPages occupied by compressor:            318371.\nDecompressions:                      4321802662.\nCompressions:                        4911073887.\nPageins:                              616806271.\nPageouts:                               9105773.\nSwapins:                               22022261.\nSwapouts:                              25643116.\n",
+  "filesystem": "Filesystem   1024-blocks      Used Available Capacity iused      ifree %iused  Mounted on\n/dev/disk3s5   482797652 335357752 117092396    75% 6015484 1170923960    1%   /System/Volumes/Data\n",
+  "vm_stat_after": "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free:                                4266.\nPages active:                            224898.\nPages inactive:                          221940.\nPages speculative:                         1523.\nPages throttled:                              0.\nPages wired down:                        253965.\nPages purgeable:                            959.\n\"Translation faults\":               21634128299.\nPages copy-on-write:                 1184869134.\nPages zero filled:                  10446982591.\nPages reactivated:                   4898017653.\nPages purged:                         389448269.\nFile-backed pages:                       137662.\nAnonymous pages:                         310699.\nPages stored in compressor:             2333804.\nPages occupied by compressor:            300680.\nDecompressions:                      4321833324.\nCompressions:                        4911076783.\nPageins:                              616806834.\nPageouts:                               9105803.\nSwapins:                               22022277.\nSwapouts:                              25643116.\n"
+}

@@ -1,0 +1,103 @@
+{
+  "retrieved_utc": "2026-09-10T20:20:33.825467+00:00",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/c4803685d3df70b1b2e0b929aeebf65e60c3847f/source/allocator.c",
+      "sha256": "67a2256728208de5dc51c8452b15b0f5ee41586627e8cc881015e11fa604ef22",
+      "bytes": 13750,
+      "checked_symbols": [
+        "AWS_PANIC_OOM"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/awslabs/aws-c-common/c4803685d3df70b1b2e0b929aeebf65e60c3847f/include/aws/common/assert.h",
+      "sha256": "7bf141c5af60696eb7fe9cf6d99c9a4f86040e766cc9038beccf3e606f633745",
+      "bytes": 11349,
+      "checked_symbols": [
+        "AWS_PANIC_OOM",
+        "abort()"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/nghttp2/nghttp2/v1.70.0/lib/includes/nghttp2/nghttp2.h",
+      "sha256": "0bd0ee37b1b08fa38f9b773de201fe431846fda2bd0bed44f642c6c332e2e342",
+      "bytes": 242356,
+      "checked_symbols": [
+        "nghttp2_option_set_no_auto_window_update",
+        "nghttp2_session_consume_connection",
+        "nghttp2_session_consume_stream",
+        "nghttp2_session_client_new3"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/nghttp2/nghttp2/v1.70.0/lib/nghttp2_session.c",
+      "sha256": "9328dfe880e1b35cc837c144612a5fe37f97ef407051de2bc21853869449a30d",
+      "bytes": 249040,
+      "checked_symbols": [
+        "session_update_consumed_size"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/curl/curl/curl-8_22_0/lib/http2.c",
+      "sha256": "c8de9362868e02885fff334ba2d01099cb722763111b965949ed319cac6945b4",
+      "bytes": 95688,
+      "checked_symbols": [
+        "cf_h2_update_local_win"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/curl/curl/curl-8_22_0/lib/transfer.c",
+      "sha256": "9722994bdd5864fc0a4c82d98b122b0318609d801712511d917b22380efb1b9b",
+      "bytes": 28993,
+      "checked_symbols": [
+        "Curl_retry_request",
+        "refused_stream"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/2b563f8a7bd67a902a8b558bb44113748045877c/include/aws/http/connection.h",
+      "sha256": "7e0245be2a2ca986fe86353e6c7e37574c6aef768ef27dd6f8bd992e3b8f0b0c",
+      "bytes": 28610,
+      "checked_symbols": [
+        "conn_manual_window_management",
+        "aws_http2_connection_update_window"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/2b563f8a7bd67a902a8b558bb44113748045877c/source/h2_connection.c",
+      "sha256": "9fe9acdd1c1abdf6676361d0a4115a2ce0fe71e8303857f6434c21798b51a477",
+      "bytes": 126976,
+      "checked_symbols": [
+        "conn_manual_window_management",
+        "AWS_ERROR_HTTP_GOAWAY_RECEIVED"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/awslabs/aws-c-http/2b563f8a7bd67a902a8b558bb44113748045877c/include/aws/http/request_response.h",
+      "sha256": "fb86345afd8044ae904c9366fd4d0dbd73351e64215664d2545239761ff8ff20",
+      "bytes": 51865,
+      "checked_symbols": [
+        "aws_http_stream_update_window",
+        "aws_http_stream_cancel"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/awslabs/aws-c-io/c2d222b73000ddcc5aeed837f4434560a47bad47/source/s2n/s2n_tls_channel_handler.c",
+      "sha256": "55250adc4fc721d76089e67f77610373ecca490923f35f97b4d1fc6946d917a0",
+      "bytes": 76096,
+      "checked_symbols": [
+        "aws_mem_acquire",
+        "s2n_mem_set_callbacks"
+      ]
+    },
+    {
+      "url": "https://raw.githubusercontent.com/h2o/h2o/cac7e6568ad98a848f099ecd0a18b881f632479a/lib/common/http2client.c",
+      "sha256": "397c0a1e9e74590a531bcb7c5411ef6e9e633a35136d78af44f8030726f9f5c5",
+      "bytes": 57206,
+      "checked_symbols": [
+        "h2o_buffer_append",
+        "update_window"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "utc": "2026-09-10T19:25:09Z",
+  "revision": "cb6c39a0564eba3480bf1c6f393c6f3ed9c4bbca",
+  "machine": {
+    "system": "Darwin",
+    "node": "1993-X2",
+    "release": "24.6.0",
+    "version": "Darwin Kernel Version 24.6.0: Tue Apr 21 20:19:01 PDT 2026; root:xnu-11417.140.69.710.16~1/RELEASE_ARM64_T6000",
+    "machine": "arm64",
+    "processor": "arm"
+  },
+  "cpu": "Apple M1 Pro",
+  "memory": "17179869184",
+  "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+  "command": [
+    "cc",
+    "-fsanitize=address,undefined",
+    "-fno-omit-frame-pointer",
+    "-O2",
+    "-g",
+    "-Wall",
+    "-Wextra",
+    "-Wno-deprecated-declarations",
+    "-DCURL_STATICLIB",
+    "-I/private/tmp/onepage-transport-memory-build/curl-8.22.0/include",
+    "-I/opt/homebrew/Cellar/openssl@3/3.6.3/include",
+    "/Users/divyanshgolyan/.codex/worktrees/4511/onepage/research/transport-memory/capture.c",
+    "/private/tmp/onepage-transport-memory-build/curl-8.22.0/lib/.libs/libcurl.a",
+    "/private/tmp/onepage-transport-memory-build/ng/lib/libnghttp2.a",
+    "-L/opt/homebrew/Cellar/openssl@3/3.6.3/lib",
+    "-lssl",
+    "-lcrypto",
+    "-lz",
+    "-lpthread",
+    "-framework",
+    "CoreFoundation",
+    "-framework",
+    "CoreServices",
+    "-framework",
+    "Security",
+    "-framework",
+    "SystemConfiguration",
+    "-o",
+    "/private/tmp/onepage-transport-memory-build/capture-0cf81480f48a"
+  ],
+  "linked": "/private/tmp/onepage-transport-memory-build/capture-0cf81480f48a:\n\t/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib (compatibility version 3.0.0, current version 3.0.0)\n\t/usr/lib/libz.1.dylib (compatibility version 1.0.0, current version 1.2.12)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n\t/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation (compatibility version 150.0.0, current version 3502.1.255)\n\t/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices (compatibility version 1.0.0, current version 1226.0.0)\n\t/System/Library/Frameworks/Security.framework/Versions/A/Security (compatibility version 1.0.0, current version 61439.120.27)\n\t/System/Library/Frameworks/SystemConfiguration.framework/Versions/A/SystemConfiguration (compatibility version 1.0.0, current version 1351.120.3)\n\t@rpath/libclang_rt.asan_osx_dynamic.dylib (compatibility version 0.0.0, current version 0.0.0)",
+  "openssl": "OpenSSL 3.6.3 9 Jun 2026 (Library: OpenSSL 3.6.3 9 Jun 2026)\nbuilt on: Tue Jun  9 11:46:57 2026 UTC\nplatform: darwin64-arm64-cc\noptions:  bn(64,64)\ncompiler: clang -fPIC -arch arm64 -O3 -Wall -DL_ENDIAN -DOPENSSL_PIC -D_REENTRANT -DOPENSSL_BUILDING_OPENSSL -DNDEBUG\nOPENSSLDIR: \"/opt/homebrew/etc/openssl@3\"\nENGINESDIR: \"/opt/homebrew/Cellar/openssl@3/3.6.3/lib/engines-3\"\nMODULESDIR: \"/opt/homebrew/Cellar/openssl@3/3.6.3/lib/ossl-modules\"\nSeeding source: os-specific\nCPUINFO: OPENSSL_armcap=0x987d",
+  "python_dependencies": "h2==4.3.0\nhpack==4.2.0\nhyperframe==6.1.0",
+  "sources_sha256": {
+    "capture.c": "7ef04cfc133adcc9797c235767bb9486f74c639a0160272a46462d383b78f877",
+    "probe.c": "13c3335ae5a66eacae292c54ff7617f070827d6712e67d0dea1fb81e9d6445bb",
+    "capture_run.py": "b35973517558bca05400e3c49a202f404e5309e0bc16c80ee048dca451803ae2",
+    "capture_server.py": "3cafaa63a79e78f14ca22c5573d54f7dd46a7c16c471781d756cb1da4a1bd283",
+    "capture_control.py": "4bad2fc347a9728cf7c6c919f60fccf18d49b1fa9a7ef8b4702774850641ce8f"
+  },
+  "binaries_sha256": {
+    "/private/tmp/onepage-transport-memory-build/capture-0cf81480f48a": "55a52dc0da3f9e0bd1ef6e240c1f8667c526d2f0d934a7973cec8c04e00a5619",
+    "/private/tmp/onepage-transport-memory-build/curl-8.22.0/lib/.libs/libcurl.a": "6463876783ebc45d2fc88c92d42bdb37974677493ccd1886f5144f5840e1b2e8",
+    "/private/tmp/onepage-transport-memory-build/ng/lib/libnghttp2.a": "03f63d807b70ce1a252f6cee76d46466dc06e0f1d21632d189d9b13f80f0e191",
+    "/opt/homebrew/Cellar/openssl@3/3.6.3/lib/libssl.3.dylib": "3032e722b7b34f6bc0469695d715d62475fb2c6eecb00bbf0c07629c73108e08",
+    "/opt/homebrew/Cellar/openssl@3/3.6.3/lib/libcrypto.3.dylib": "8e2010fd46cb85dd6423d68c2b69b355a6ad4dfcb1ce83e6f4071b6a705404a7"
+  }
+}

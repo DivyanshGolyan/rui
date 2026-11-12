@@ -1,0 +1,147 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 0 and seed 1 with 1 worker on 10 cores with 455MB heap and 64MB offheap memory [pid: 38347] (Mac OS X 15.7.7 aarch64, Homebrew 17.0.19 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-session-tlc-wh1vsdm8/SessionTerminal.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Naturals.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Sequences.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/FiniteSets.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/TLC.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module SessionTerminal
+Starting... (2026-09-05 13:30:12)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-05 13:30:12.
+Error: Invariant ExcludedNeverApplied is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+s = [ admitted |-> {"A"},
+  projected |-> {"A"},
+  requests |-> <<>>,
+  receipts |-> {},
+  active |-> 1,
+  outcome |-> <<"open", "unused">>,
+  fence |-> <<"none", "none">>,
+  current |-> 0,
+  launched |-> {},
+  retired |-> {},
+  reply |-> <<"none", "none", "none", "none">>,
+  discarded |-> {},
+  up |-> TRUE,
+  enabled |-> TRUE,
+  epoch |-> 0,
+  crashes |-> 0,
+  excluded |-> {},
+  invalid |-> {},
+  frozen |-> <<"none", "none">> ]
+
+State 2: <AdmitB line 35, col 5 to line 37, col 48 of module SessionTerminal>
+s = [ admitted |-> {"A", "B"},
+  projected |-> {"A"},
+  requests |-> <<>>,
+  receipts |-> {},
+  active |-> 1,
+  outcome |-> <<"open", "unused">>,
+  fence |-> <<"none", "none">>,
+  current |-> 0,
+  launched |-> {},
+  retired |-> {},
+  reply |-> <<"none", "none", "none", "none">>,
+  discarded |-> {},
+  up |-> TRUE,
+  enabled |-> TRUE,
+  epoch |-> 0,
+  crashes |-> 0,
+  excluded |-> {},
+  invalid |-> {},
+  frozen |-> <<"none", "none">> ]
+
+State 3: <Fail line 95, col 5 to line 100, col 53 of module SessionTerminal>
+s = [ admitted |-> {"A", "B"},
+  projected |-> {"A"},
+  requests |-> <<>>,
+  receipts |-> {},
+  active |-> 1,
+  outcome |-> <<"open", "unused">>,
+  fence |-> <<"failed", "none">>,
+  current |-> 0,
+  launched |-> {},
+  retired |-> {},
+  reply |-> <<"none", "none", "none", "none">>,
+  discarded |-> {},
+  up |-> TRUE,
+  enabled |-> TRUE,
+  epoch |-> 0,
+  crashes |-> 0,
+  excluded |-> {"B"},
+  invalid |-> {},
+  frozen |-> <<"none", "none">> ]
+
+State 4: <Finalize line 119, col 5 to line 124, col 75 of module SessionTerminal>
+s = [ admitted |-> {"A", "B"},
+  projected |-> {"A"},
+  requests |-> <<>>,
+  receipts |-> {},
+  active |-> 0,
+  outcome |-> <<"failed", "unused">>,
+  fence |-> <<"failed", "none">>,
+  current |-> 0,
+  launched |-> {},
+  retired |-> {},
+  reply |-> <<"none", "none", "none", "none">>,
+  discarded |-> {},
+  up |-> TRUE,
+  enabled |-> TRUE,
+  epoch |-> 0,
+  crashes |-> 0,
+  excluded |-> {"B"},
+  invalid |-> {},
+  frozen |-> <<"failed", "none">> ]
+
+State 5: <Continue line 40, col 5 to line 44, col 35 of module SessionTerminal>
+s = [ admitted |-> {"A", "B", "C"},
+  projected |-> {"A", "C"},
+  requests |-> <<>>,
+  receipts |-> {},
+  active |-> 2,
+  outcome |-> <<"failed", "open">>,
+  fence |-> <<"failed", "none">>,
+  current |-> 0,
+  launched |-> {},
+  retired |-> {},
+  reply |-> <<"none", "none", "none", "none">>,
+  discarded |-> {},
+  up |-> TRUE,
+  enabled |-> TRUE,
+  epoch |-> 0,
+  crashes |-> 0,
+  excluded |-> {"B"},
+  invalid |-> {},
+  frozen |-> <<"failed", "none">> ]
+
+State 6: <Prepare line 49, col 5 to line 56, col 75 of module SessionTerminal>
+s = [ admitted |-> {"A", "B", "C"},
+  projected |-> {"A", "B", "C"},
+  requests |-> <<[turn |-> 2, epoch |-> 0, input |-> {"A", "B", "C"}]>>,
+  receipts |-> {},
+  active |-> 2,
+  outcome |-> <<"failed", "open">>,
+  fence |-> <<"failed", "none">>,
+  current |-> 1,
+  launched |-> {},
+  retired |-> {},
+  reply |-> <<"none", "none", "none", "none">>,
+  discarded |-> {},
+  up |-> TRUE,
+  enabled |-> TRUE,
+  epoch |-> 0,
+  crashes |-> 0,
+  excluded |-> {"B"},
+  invalid |-> {},
+  frozen |-> <<"failed", "none">> ]
+
+127 states generated, 105 distinct states found, 52 states left on queue.
+The depth of the complete state graph search is 6.
+The average outdegree of the complete state graph is 2 (minimum is 1, the maximum 5 and the 95th percentile is 4).
+Finished in 00s at (2026-09-05 13:30:12)

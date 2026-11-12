@@ -1,0 +1,18 @@
+.{
+    .name = .rui_screen,
+    .version = "0.1.0",
+    .fingerprint = 0xdfb55914f3048ad9,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        // libghostty-vt 1.0.0 builds only with Zig 0.17.x; moving Rui to
+        // Zig 0.18 needs a newer libghostty-vt release.
+        .ghostty_vt = .{
+            .url = "https://release.files.ghostty.org/libghostty-vt/1.0.0/libghostty-vt-1.0.0.tar.gz",
+            .hash = "ghostty-1.4.1-dev-5UdBC42jUAH6gFTaUyXGtolbhTf27EW0SZkK_lx5_fhQ",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}

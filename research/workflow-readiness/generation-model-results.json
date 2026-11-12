@@ -1,0 +1,16 @@
+{
+  "scope": "abstract relational model, not production JS or crash qualification",
+  "sqlite": "3.53.4",
+  "passed": [
+    "new result enables a generation without waiting for unrelated B",
+    "live view remains fixed despite concurrent completions and new call bindings",
+    "replacement rollback leaves interrupted generation discoverable",
+    "fresh connection recovery captures newer results without historical visibility markers",
+    "partially admitted equal keyed operation is reused; changed input conflicts",
+    "replacement generation fences abandoned publication",
+    "publication catches concurrently finished dependencies; considered results do not retrigger",
+    "successful null, stable failure and missing result are distinct",
+    "interruption permits fresh evaluation without a newly completed dependency",
+    "cancellation and terminality fence replacement admission"
+  ]
+}

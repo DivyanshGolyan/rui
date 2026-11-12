@@ -1,0 +1,2 @@
+{"ready": true, "up_B_s": 33554432, "down_B_s": 67108864, "one_way_delay_ms": 40, "global_queue_chunks_per_direction": 256, "chunk_max": 16384}
+{"connections": 1, "maximum_connections": 1, "received_up": 1050741514, "received_down": 11463487, "forwarded_up": 1050741514, "forwarded_down": 11463487}

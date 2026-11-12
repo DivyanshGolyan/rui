@@ -1,0 +1,40 @@
+{
+  "connections": 1,
+  "live": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 316,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 312,
+    "phase": "live",
+    "phys_footprint": 15517568,
+    "phys_footprint_peak": 15550336,
+    "pid": 70474,
+    "rss_exit": 0,
+    "rss_kib": 22160,
+    "timestamp_unix": 1790162575.697494
+  },
+  "release_to_last_commit_ms": 1767.0087079750374,
+  "request_count": 100,
+  "requests_sha256": "7f015e978ea3cd9081b560d94a7858637ce23bb3b461849f3216ba24400e8d78",
+  "response_sha256": "75351890be18969717ccc780f9ec57eda81d93b32951ecce74cd52f6c30b4969",
+  "serviced_idle": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 16,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 12,
+    "phase": "serviced-idle",
+    "phys_footprint": 16877440,
+    "phys_footprint_peak": 17074048,
+    "pid": 70474,
+    "rss_exit": 0,
+    "rss_kib": 22784,
+    "timestamp_unix": 1790162580.423693
+  },
+  "streams": 100,
+  "topology": "h2",
+  "upload_bytes": 16384
+}

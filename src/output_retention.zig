@@ -1,0 +1,674 @@
+const std = @import("std");
+const named_scratch = @import("named_scratch.zig");
+const protocol = @import("protocol.zig");
+const ScratchBudget = @import("ScratchBudget.zig");
+
+const capacity = @import("retention_capacity.zig");
+pub const orchestration_bytes = capacity.orchestration_bytes;
+const State = capacity.State;
+pub const Entry = capacity.Entry;
+
+pub const Token = struct {
+    index: usize,
+    generation: u64,
+};
+
+pub const Pair = struct {
+    stdout: Token,
+    stderr: Token,
+};
+
+pub const Queue = struct {
+    io: std.Io,
+    scratch_path: []const u8,
+    budget: ScratchBudget,
+    entries: []Entry,
+    removal: named_scratch.Removal,
+    mutex: std.Io.Mutex = .init,
+    next_sequence: u64 = 1,
+
+    pub fn initialize(
+        io: std.Io,
+        scratch_path: []const u8,
+        budget: ScratchBudget,
+        entries: []Entry,
+    ) Queue {
+        return initializeWithRemoval(io, scratch_path, budget, entries, .native);
+    }
+
+    pub fn initializeWithRemoval(
+        io: std.Io,
+        scratch_path: []const u8,
+        budget: ScratchBudget,
+        entries: []Entry,
+        removal: named_scratch.Removal,
+    ) Queue {
+        // Entries start empty, as `.{}` or all zero bytes, so fresh pages need
+        // no initializing pass and an unused entry never becomes resident.
+        for (entries) |entry| std.debug.assert(entry.state == .free);
+        return .{
+            .io = io,
+            .scratch_path = scratch_path,
+            .budget = budget,
+            .entries = entries,
+            .removal = removal,
+        };
+    }
+
+    pub fn sharedBudget(self: *Queue) ScratchBudget {
+        return .{
+            .used = self.budget.used,
+            .limit = self.budget.limit,
+            .reclaim_context = self,
+            .reclaim_fn = reclaimForReservation,
+        };
+    }
+
+    pub fn retainPair(
+        self: *Queue,
+        stdout_name: []const u8,
+        stdout_charged: u64,
+        stderr_name: []const u8,
+        stderr_charged: u64,
+    ) !bool {
+        const pair = (try self.reservePair(stdout_name, stdout_charged, stderr_name, stderr_charged)) orelse return false;
+        self.publishPair(pair) catch |err| {
+            self.releaseReservation(pair.stdout);
+            self.releaseReservation(pair.stderr);
+            return err;
+        };
+        return true;
+    }
+
+    pub fn reservePair(
+        self: *Queue,
+        stdout_name: []const u8,
+        stdout_charged: u64,
+        stderr_name: []const u8,
+        stderr_charged: u64,
+    ) !?Pair {
+        const tokens = (try self.reserveEntries(2, .{ stdout_name, stderr_name }, .{ stdout_charged, stderr_charged })) orelse return null;
+        return .{ .stdout = tokens[0], .stderr = tokens[1] };
+    }
+
+    pub fn publishPair(self: *Queue, pair: Pair) !void {
+        if (pair.stdout.index == pair.stderr.index) return error.InvalidRetentionTransition;
+        try self.publish(&.{ pair.stdout, pair.stderr });
+    }
+
+    /// Write optional output of a known rendered length, without a second
+    /// payload buffer. The callback must write exactly `length` bytes on success.
+    /// Once created, even a partial file belongs to this queue: failed writes
+    /// are not advertised, but keep their charge until ordinary cleanup confirms
+    /// removal. No producer handle survives publication and no fsync is needed.
+    pub noinline fn writeFile(self: *Queue, name: []const u8, length: u64, context: anytype, write: anytype) bool {
+        const tokens = (self.reserveEntries(1, .{name}, .{length}) catch return false) orelse return false;
+        const token = tokens[0];
+        defer self.releaseReservation(token);
+        const budget = self.sharedBudget();
+        if (!budget.allocate(length)) return false;
+        var created = false;
+        defer if (!created) budget.release(length);
+        var directory = std.Io.Dir.cwd().openDir(self.io, self.scratch_path, .{}) catch return false;
+        defer directory.close(self.io);
+        const file = directory.createFile(self.io, name, .{
+            .exclusive = true,
+            .permissions = .fromMode(0o600),
+        }) catch return false;
+        created = true;
+        defer {
+            file.close(self.io);
+            // This method alone owns the still-reserved token. Even a failed
+            // write hands its closed file to retention, never loses custody.
+            self.publish(&.{token}) catch unreachable;
+        }
+        var buffer: [4096]u8 = undefined;
+        var out = file.writer(self.io, &buffer);
+        write(&out.interface, context) catch return false;
+        out.interface.flush() catch return false;
+        return true;
+    }
+
+    fn reserveEntries(self: *Queue, comptime count: usize, file_names: [count][]const u8, charges: [count]u64) !?[count]Token {
+        var names: [count]protocol.Bounded(96) = @splat(.{});
+        for (&names, file_names) |*name, value| try name.set(value);
+        while (true) {
+            self.mutex.lockUncancelable(self.io);
+            const next = std.math.add(u64, self.next_sequence, count) catch {
+                self.mutex.unlock(self.io);
+                return error.RetentionSequenceExhausted;
+            };
+            var free: [count]usize = undefined;
+            var found: usize = 0;
+            for (self.entries, 0..) |entry, index| {
+                if (entry.state != .free) continue;
+                free[found] = index;
+                found += 1;
+                if (found == free.len) break;
+            }
+            if (found == free.len) {
+                var tokens: [count]Token = undefined;
+                for (free, 0..) |index, token_index| {
+                    const entry = &self.entries[index];
+                    entry.generation +%= 1;
+                    if (entry.generation == 0) entry.generation = 1;
+                    entry.state = .reserved;
+                    entry.sequence = self.next_sequence + token_index;
+                    entry.name = names[token_index];
+                    entry.charged = charges[token_index];
+                    tokens[token_index] = .{ .index = index, .generation = entry.generation };
+                }
+                self.next_sequence = next;
+                self.mutex.unlock(self.io);
+                return tokens;
+            }
+            self.mutex.unlock(self.io);
+            if (!self.evictOldest()) return null;
+        }
+    }
+
+    fn publish(self: *Queue, tokens: []const Token) !void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        for (tokens) |token| {
+            const entry = try self.current(token);
+            if (entry.state != .reserved) return error.InvalidRetentionTransition;
+        }
+        for (tokens) |token| self.entries[token.index].state = .retained;
+    }
+
+    pub fn releaseReservation(self: *Queue, token: Token) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const entry = self.current(token) catch return;
+        if (entry.state == .reserved) entry.* = .{ .generation = entry.generation };
+    }
+
+    pub fn cleanupAll(self: *Queue) void {
+        for (self.entries, 0..) |_, index| {
+            self.mutex.lockUncancelable(self.io);
+            const entry = &self.entries[index];
+            if (entry.state != .retained and entry.state != .failed) {
+                self.mutex.unlock(self.io);
+                continue;
+            }
+            const generation = entry.generation;
+            const name = entry.name;
+            const charged = entry.charged;
+            entry.state = .evicting;
+            self.mutex.unlock(self.io);
+            _ = named_scratch.removeNameWith(self.io, self.scratch_path, name.slice(), self.removal) catch {
+                self.markEvictionFailed(index, generation);
+                continue;
+            };
+            self.mutex.lockUncancelable(self.io);
+            self.entries[index] = .{ .generation = generation };
+            self.budget.release(charged);
+            self.mutex.unlock(self.io);
+        }
+    }
+
+    pub fn occupied(self: *Queue) usize {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        var count: usize = 0;
+        for (self.entries) |entry| {
+            if (entry.state != .free) count += 1;
+        }
+        return count;
+    }
+
+    fn current(self: *Queue, token: Token) !*Entry {
+        if (token.index >= self.entries.len) return error.ForeignRetentionToken;
+        const entry = &self.entries[token.index];
+        if (entry.generation != token.generation) return error.StaleRetentionToken;
+        return entry;
+    }
+
+    fn evictOldest(self: *Queue) bool {
+        self.mutex.lockUncancelable(self.io);
+        var oldest: ?usize = null;
+        for (self.entries, 0..) |entry, index| {
+            if (entry.state != .retained) continue;
+            if (oldest == null or entry.sequence < self.entries[oldest.?].sequence) oldest = index;
+        }
+        const index = oldest orelse {
+            self.mutex.unlock(self.io);
+            return false;
+        };
+        const entry = &self.entries[index];
+        entry.state = .evicting;
+        const generation = entry.generation;
+        const name = entry.name;
+        const charged = entry.charged;
+        self.mutex.unlock(self.io);
+
+        _ = named_scratch.removeNameWith(self.io, self.scratch_path, name.slice(), self.removal) catch {
+            self.markEvictionFailed(index, generation);
+            return false;
+        };
+        self.mutex.lockUncancelable(self.io);
+        const selected = &self.entries[index];
+        std.debug.assert(selected.generation == generation and selected.state == .evicting);
+        selected.* = .{ .generation = generation };
+        self.budget.release(charged);
+        self.mutex.unlock(self.io);
+        return true;
+    }
+
+    fn reclaimForReservation(context: *anyopaque, amount: u64, limit: u64) bool {
+        const self: *Queue = @ptrCast(@alignCast(context));
+        const limited = self.budget.narrowed(limit);
+        while (!limited.charge(amount)) {
+            if (!self.evictOldest()) return false;
+        }
+        return true;
+    }
+
+    fn markEvictionFailed(self: *Queue, index: usize, generation: u64) void {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        const entry = &self.entries[index];
+        if (entry.generation == generation and entry.state == .evicting) entry.state = .failed;
+    }
+};
+
+test "retention entry capacity derives from fixed orchestration memory" {
+    try std.testing.expect(@sizeOf(Entry) > 0);
+    try std.testing.expect(orchestration_bytes / @sizeOf(Entry) >= 2);
+}
+
+test "retention evicts the oldest pair without refunding newer files" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 16 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-out", .data = "a" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "old-err", .data = "b" });
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expect(try queue.retainPair("old-out", 1, "old-err", 1));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new-out", .data = "c" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "new-err", .data = "d" });
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expect(try queue.retainPair("new-out", 1, "new-err", 1));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "old-out", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "old-err", .{}));
+    const new_out = try tmp.dir.openFile(std.testing.io, "new-out", .{});
+    new_out.close(std.testing.io);
+    const new_err = try tmp.dir.openFile(std.testing.io, "new-err", .{});
+    new_err.close(std.testing.io);
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+}
+
+test "shared scratch reservations reclaim retained output and fail when none is eligible" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 3 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stderr", .data = "b" });
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
+    const shared = queue.sharedBudget();
+    try std.testing.expect(!shared.charge(3));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expect(shared.allocate(3));
+    try std.testing.expectEqual(@as(u64, 3), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expect(!shared.allocate(1));
+    shared.release(3);
+}
+
+test "already absent retained files release their entries and scratch charge" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stderr", .data = "b" });
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
+    try tmp.dir.deleteFile(std.testing.io, "stdout");
+    try tmp.dir.deleteFile(std.testing.io, "stderr");
+
+    const shared = queue.sharedBudget();
+    try std.testing.expect(shared.allocate(2));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    shared.release(2);
+}
+
+test "unconfirmed retained-file deletion preserves its entry and scratch charge" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var missing_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const missing = try std.fmt.bufPrint(&missing_buffer, "{s}/missing", .{root});
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, missing, budget, &entries);
+
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
+
+    try std.testing.expectEqual(
+        @as(?Pair, null),
+        try queue.reservePair("new-stdout", 0, "new-stderr", 0),
+    );
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expectEqual(State.failed, entries[0].state);
+    try std.testing.expectEqual(State.retained, entries[1].state);
+    const shared = queue.sharedBudget();
+    try std.testing.expect(!shared.allocate(1));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expectEqual(State.failed, entries[0].state);
+    try std.testing.expectEqual(State.failed, entries[1].state);
+}
+
+test "reserved output is not evictable before producer aliases close and publication completes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    var stdout = try tmp.dir.createFile(std.testing.io, "stdout", .{ .read = true });
+    var stderr = try tmp.dir.createFile(std.testing.io, "stderr", .{ .read = true });
+    try std.testing.expect(budget.charge(2));
+    const pair = (try queue.reservePair("stdout", 1, "stderr", 1)).?;
+
+    const Reservation = struct {
+        queue: *Queue,
+        result: *std.atomic.Value(bool),
+
+        fn run(context: @This()) void {
+            context.result.store(context.queue.sharedBudget().allocate(1), .release);
+        }
+    };
+    var reclaimed: std.atomic.Value(bool) = .init(true);
+    var thread = try std.Thread.spawn(.{}, Reservation.run, .{Reservation{
+        .queue = &queue,
+        .result = &reclaimed,
+    }});
+    thread.join();
+    try std.testing.expect(!reclaimed.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+
+    stdout.close(std.testing.io);
+    stderr.close(std.testing.io);
+    try queue.publishPair(pair);
+    reclaimed.store(false, .release);
+    thread = try std.Thread.spawn(.{}, Reservation.run, .{Reservation{
+        .queue = &queue,
+        .result = &reclaimed,
+    }});
+    thread.join();
+    try std.testing.expect(reclaimed.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    queue.sharedBudget().release(1);
+}
+
+test "cancelling a reserved pair releases entry capacity without refunding producer scratch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    // Baseline B = 41 of unrelated usage stays stable; the producer owns
+    // 2 more bytes while its pair reservation is outstanding.
+    var used = std.atomic.Value(u64).init(41);
+    const budget = ScratchBudget{ .used = &used, .limit = 50 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
+    const pair = (try queue.reservePair("stdout", 1, "stderr", 1)).?;
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    // reservePair creates protected entry reservations but acquires no
+    // second scratch charge.
+    try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
+    queue.releaseReservation(pair.stdout);
+    queue.releaseReservation(pair.stderr);
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    // Releasing entry capacity does not release the producer's charge.
+    try std.testing.expectEqual(@as(u64, 43), used.load(.acquire));
+    budget.release(2);
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+}
+
+test "zero-byte retained files occupy entries without occupying scratch bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 2 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-out", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-err", .data = "" });
+    try std.testing.expect(try queue.retainPair("empty-out", 0, "empty-err", 0));
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    // Fill the byte budget with unrelated usage, then require eviction:
+    // evicting zero-byte entries frees entry capacity but no bytes, so the
+    // reservation still fails while occupancy drops.
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    const shared = queue.sharedBudget();
+    try std.testing.expect(!shared.allocate(1));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    shared.release(2);
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "entry capacity evicts zero-byte output while byte capacity remains spare" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 10 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-out", .data = "" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "empty-err", .data = "" });
+    try std.testing.expect(try queue.retainPair("empty-out", 0, "empty-err", 0));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+
+    // A second protected pair needs entries, not bytes. It evicts both old
+    // zero-byte names even though all ten scratch bytes remain available.
+    const replacement = (try queue.reservePair("new-out", 0, "new-err", 0)).?;
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "empty-out", .{}));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.statFile(std.testing.io, "empty-err", .{}));
+    queue.releaseReservation(replacement.stdout);
+    queue.releaseReservation(replacement.stderr);
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "failed eviction retains its charge until the same queue retries successfully" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used = std.atomic.Value(u64).init(0);
+    const budget = ScratchBudget{ .used = &used, .limit = 4 };
+    var entries: [2]Entry = @splat(.{});
+    var gate: std.atomic.Value(bool) = .init(true);
+    var queue = Queue.initializeWithRemoval(std.testing.io, root, budget, &entries, .{ .gated = &gate });
+    defer queue.cleanupAll();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stdout", .data = "a" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "stderr", .data = "b" });
+    try std.testing.expect(budget.charge(2));
+    try std.testing.expect(try queue.retainPair("stdout", 1, "stderr", 1));
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+
+    // New retention cannot evict through the blocked removal: the oldest
+    // entry fails, retains its charge, and the queue stays occupied.
+    try std.testing.expectEqual(
+        @as(?Pair, null),
+        try queue.reservePair("new-out", 0, "new-err", 0),
+    );
+    try std.testing.expectEqual(@as(u64, 2), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 2), queue.occupied());
+
+    // Clearing the fault lets the same queue complete the retained cleanup
+    // and release the charge exactly once.
+    gate.store(false, .release);
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
+}
+
+test "partial retained cleanup keeps only the exact residual owner and charge" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    const baseline: u64 = 41;
+    const blocked_charge: u64 = 3;
+    const removable_charge: u64 = 5;
+    var used = std.atomic.Value(u64).init(baseline);
+    const budget = ScratchBudget{ .used = &used, .limit = 64 };
+    var entries: [2]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, budget, &entries);
+    defer queue.cleanupAll();
+
+    // A directory at one retained pathname makes that removal unconfirmed,
+    // while the sibling is an ordinary file that can be reclaimed.
+    try tmp.dir.createDir(std.testing.io, "blocked", .default_dir);
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "removable", .data = "value" });
+    try std.testing.expect(budget.charge(blocked_charge + removable_charge));
+    try std.testing.expect(try queue.retainPair(
+        "blocked",
+        blocked_charge,
+        "removable",
+        removable_charge,
+    ));
+    try std.testing.expectEqual(
+        baseline + blocked_charge + removable_charge,
+        used.load(.acquire),
+    );
+
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    try std.testing.expectEqual(baseline + blocked_charge, used.load(.acquire));
+    try std.testing.expectEqual(State.failed, entries[0].state);
+    try std.testing.expectEqualStrings("blocked", entries[0].name.slice());
+    try std.testing.expectEqual(blocked_charge, entries[0].charged);
+    try std.testing.expectEqual(State.free, entries[1].state);
+    try std.testing.expectError(
+        error.FileNotFound,
+        tmp.dir.statFile(std.testing.io, "removable", .{}),
+    );
+
+    // Clearing the obstruction lets the same queue observe absence and
+    // release its one residual entry and charge exactly once.
+    try tmp.dir.deleteDir(std.testing.io, "blocked");
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectEqual(baseline, used.load(.acquire));
+    queue.cleanupAll();
+    try std.testing.expectEqual(baseline, used.load(.acquire));
+}
+
+test "retention file write failure keeps partial bytes charged through removal retry" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(41);
+    var entries: [1]Entry = @splat(.{});
+    var queue = Queue.initializeWithRemoval(std.testing.io, root, .{ .used = &used, .limit = 48 }, &entries, .injected_failure);
+    defer queue.cleanupAll();
+    const Write = struct {
+        fn fail(out: *std.Io.Writer, _: void) !void {
+            try out.writeAll("partial");
+            try out.flush();
+            return error.InjectedOutputWriteFailure;
+        }
+    };
+    try std.testing.expect(!queue.writeFile("partial", 7, {}, Write.fail));
+    try std.testing.expectEqual(@as(u64, 48), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    var bytes: [7]u8 = undefined;
+    try std.testing.expectEqualStrings("partial", try tmp.dir.readFile(std.testing.io, "partial", &bytes));
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 48), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), queue.occupied());
+    queue.removal = .native;
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "partial", .{}));
+}
+
+test "retention file reservations protect writers and release failed creation charges" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [protocol.max_store_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
+    var used: std.atomic.Value(u64) = .init(41);
+    var entries: [1]Entry = @splat(.{});
+    var queue = Queue.initialize(std.testing.io, root, .{ .used = &used, .limit = 48 }, &entries);
+    defer queue.cleanupAll();
+    const Write = struct {
+        fn protected(out: *std.Io.Writer, owner: *Queue) !void {
+            try std.testing.expectEqual(@as(u64, 48), owner.budget.used.load(.acquire));
+            try std.testing.expect(!owner.sharedBudget().allocate(1));
+            try std.testing.expectEqual(@as(usize, 1), owner.occupied());
+            try out.writeAll("success");
+        }
+    };
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "collision", .data = "original" });
+    try std.testing.expect(!queue.writeFile("collision", 7, &queue, Write.protected));
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+    var bytes: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("original", try tmp.dir.readFile(std.testing.io, "collision", &bytes));
+    try std.testing.expect(queue.writeFile("written", 7, &queue, Write.protected));
+    queue.cleanupAll();
+    try std.testing.expectEqual(@as(u64, 41), used.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), queue.occupied());
+}

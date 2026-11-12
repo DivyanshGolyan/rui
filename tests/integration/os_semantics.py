@@ -1,0 +1,212 @@
+"""Every way the fixtures' host OS changes what they may assert.
+
+Linux CI predicts Mac CI because each Linux/Darwin difference is named here
+once, with its reason, instead of in a `sys.platform` branch at the call site.
+tests/ci/platform_boundary.py lets no other fixture read the platform, and a
+PR that changes this file runs Mac Selected.
+"""
+import ctypes
+import os
+import pathlib
+import platform
+import socket
+import struct
+import subprocess
+import sys
+import termios
+from unittest import mock
+
+
+def semantics(platform_name):
+    """The fixture facts for `platform_name`, a `sys.platform` value."""
+    DARWIN = platform_name == "darwin"
+
+    # For fixture reports: the kernel, and the kernel with release and machine.
+    SYSTEM = "Darwin" if DARWIN else "Linux"
+    DESCRIPTION = f"{SYSTEM} {platform.release()} {platform.machine()}"
+
+    # Linux exposes per-process descriptors and status under /proc; Darwin has no
+    # procfs, so descriptor and resource censuses are Linux-only evidence.
+    PROC_FS = platform_name.startswith("linux")
+
+    # The dynamic loader variable that injects a fixture's fault or probe library.
+    PRELOAD = "DYLD_INSERT_LIBRARIES" if DARWIN else "LD_PRELOAD"
+
+    # Darwin keeps kernel-owned history flags (PENDIN, FLUSHO) in c_lflag. Rui
+    # restores user configuration, never the kernel's input history.
+    _TERMIOS_HISTORY = (getattr(termios, "PENDIN", 0) | getattr(termios, "FLUSHO", 0)) if DARWIN else 0
+
+    # XNU xnu-11417.140.69 exposes two kernel-only bits through F_GETFL, and
+    # F_SETFL can neither set nor clear either:
+    # - FWASWRITTEN (0x10000): a positive write sets it.
+    # - FMARK (0x1000): the unix-socket garbage collector marks every file in
+    #   flight in an SCM_RIGHTS message when it runs, and the mark stays after
+    #   the file is received. Test PTY leaders receive each slave that way, and
+    #   any socket closed with rights in flight runs the collector. Reproduced
+    #   on macOS 27.2: a slave in flight across a collection reads 0x2, then
+    #   0x1002, and still 0x1002 once received; passed and received before the
+    #   collection, it stays 0x2.
+    FILE_FLAG_HISTORY = 0x00010000 | 0x00001000 if DARWIN else 0
+
+    # Each h2 Client has one waker: an eventfd on Linux, a pipe (two
+    # descriptors) on Darwin. These mirror descriptor_capacity.zig
+    # independently.
+    TRANSPORT_WAKE_DESCRIPTORS = 2 if DARWIN else 1
+    # Lease(2), SQLite(4), listener(1), transport waker and catalog socket(1).
+    HOST_FIXED_DESCRIPTORS = 2 + 4 + 1 + TRANSPORT_WAKE_DESCRIPTORS + 1
+    # Credential parent and lock (2), the refresh Client's waker, one
+    # connection socket and two trust-loading handles.
+    AUTHENTICATION_DESCRIPTORS = 2 + TRANSPORT_WAKE_DESCRIPTORS + 1 + 2
+
+    # Darwin's libmalloc may open one socket before Host ownership begins; it
+    # counts as inherited beside stdio.
+    INHERITED_DESCRIPTORS = {3, 4} if DARWIN else {3}
+
+    # Only Darwin `rui host` re-execs itself with MallocMaxMagazines and
+    # MallocSpaceEfficient defaults (cli.zig configureHostAllocator).
+    HOST_MALLOC_REEXEC = DARWIN
+
+    # Linux enforces a Unix socket's mode bits on connect for unprivileged callers.
+    SOCKET_MODE_ENFORCED = not DARWIN
+
+    # The capture directory-sync fault shim interposes fsync through Linux's
+    # RTLD_NEXT preload; no Darwin adapter exists for it.
+    SYNC_FAULT_PRELOAD = not DARWIN
+
+    # Darwin's /usr/bin/footprint reports a process's physical footprint peak.
+    FOOTPRINT = DARWIN
+
+    # A Host's system trust is OpenSSL's on Linux, which SSL_CERT_FILE extends,
+    # and Apple SecTrust on Darwin, which ignores it (src/h2/tests.zig). So
+    # only Linux can trust a self-signed fixture without --provider-ca-file.
+    SSL_CERT_FILE_TRUST = not DARWIN
+
+    # GNU time (`/usr/bin/time -f`) measures a caller's peak RSS on Linux.
+    GNU_TIME = not DARWIN and pathlib.Path("/usr/bin/time").exists()
+    return {name: value for name, value in locals().items() if name != "platform_name"}
+
+
+# Callers and the helpers below read facts through this module at call time,
+# so simulate() reaches them.
+_module = sys.modules[__name__]
+vars(_module).update(semantics(sys.platform))
+
+
+def simulate(platform_name):
+    """Patch these facts to `platform_name`'s, so Linux tests check Darwin arithmetic."""
+    return mock.patch.multiple(_module, **semantics(platform_name))
+
+
+def unix_stream():
+    """A Unix stream with Darwin-shaped send capacity on Linux (#605, #619)."""
+    stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        if _module.PROC_FS:
+            # Linux doubles SO_SNDBUF. With 4096 set, a nonblocking send with
+            # no reader accepted 8064 bytes on x86-64 Linux in this orb.
+            stream.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+        return stream
+    except BaseException:
+        stream.close()
+        raise
+
+
+TRUST_VARIABLES = ("SSL_CERT_FILE", "SSL_CERT_DIR")
+
+
+def system_trust(certificate):
+    """Environment that adds `certificate` to a child Host's system trust.
+
+    Only Linux's system trust reads it (SSL_CERT_FILE_TRUST); Darwin's SecTrust
+    would ignore it and quietly test the system roots instead, so this refuses
+    there. A fixture that must run on both passes --provider-ca-file or the
+    launch frame's caFile instead.
+    """
+    assert _module.SSL_CERT_FILE_TRUST, "Darwin system trust ignores SSL_CERT_FILE; pass the CA explicitly"
+    return {"SSL_CERT_FILE": str(certificate)}
+
+
+def user_termios(attributes):
+    """A copy of termios attributes without kernel-owned history flags."""
+    copy = list(attributes)
+    copy[3] &= ~_module._TERMIOS_HISTORY
+    return copy
+
+
+def user_file_flags(flags):
+    """F_GETFL flags without kernel-owned write history."""
+    return flags & ~_module.FILE_FLAG_HISTORY
+
+
+def terminal_bash_reads_login_files():
+    """Whether a new terminal starts bash as a login shell, so it reads
+    ~/.bash_profile, ~/.bash_login or ~/.profile instead of ~/.bashrc
+    (Terminal.app does; Linux terminals do not)."""
+    return _module.DARWIN
+
+
+def shared_library_command(source, library):
+    """The compiler command that builds a preloadable fixture library."""
+    darwin = _module.DARWIN
+    return ["cc", "-dynamiclib" if darwin else "-shared", "-fPIC", str(source),
+            *([] if darwin else ["-ldl"]), "-o", str(library)]
+
+
+def processes_executing(executable):
+    """Pids of live processes whose executed image is `executable`, whatever they are called."""
+    image = os.stat(executable)
+    if _module.PROC_FS:
+        pids = set()
+        for entry in pathlib.Path("/proc").iterdir():
+            if entry.name.isdigit():
+                try:
+                    running = os.stat(entry / "exe")
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    continue
+                if (running.st_dev, running.st_ino) == (image.st_dev, image.st_ino):
+                    pids.add(int(entry.name))
+        return pids
+    # Darwin has no procfs; lsof matches the file's text mappings by device and inode.
+    mapped = subprocess.run(["/usr/sbin/lsof", "-w", "-n", "-P", "-a", "-d", "txt", "-Fp", "--", str(executable)],
+                            capture_output=True, text=True, timeout=10)
+    # lsof exits 1 both when no process maps the file and when it fails. With
+    # warnings off (-w), only a failure writes to stderr.
+    assert mapped.returncode == 0 or (mapped.returncode == 1 and not mapped.stderr), mapped
+    return {int(field[1:]) for field in mapped.stdout.splitlines() if field.startswith("p")}
+
+
+def native_release_target():
+    """The native release asset spelling, or None for unsupported machines."""
+    return {("Darwin", "arm64"): "darwin-arm64",
+            ("Linux", "x86_64"): "linux-x86_64"}.get((_module.SYSTEM, platform.machine()))
+
+
+def socket_peer_pid(connection):
+    """Kernel-owned PID of this connected local stream's server process."""
+    if _module.DARWIN:
+        return connection.getsockopt(0, 2)  # SOL_LOCAL, LOCAL_PEERPID
+    credentials = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    pid, uid, _ = struct.unpack("3i", credentials)
+    assert uid == os.geteuid(), "Unix peer belongs to a different user"
+    return pid
+
+
+def process_executable(pid):
+    """Executed image of one live process, independent of its argv spelling."""
+    if _module.PROC_FS:
+        return pathlib.Path(f"/proc/{pid}/exe").resolve(strict=True)
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    buffer = ctypes.create_string_buffer(4096)
+    count = library.proc_pidpath(pid, buffer, len(buffer))
+    assert count > 0, "native process path unavailable"
+    return pathlib.Path(os.fsdecode(buffer.value))
+
+
+def process_environment(pid, *, env):
+    """Private fixture launch evidence. Callers must never log these bytes."""
+    if _module.PROC_FS:
+        return pathlib.Path(f"/proc/{pid}/environ").read_bytes().decode()
+    # BSD ps owns Darwin's process argument/environment observation. Only
+    # fixture processes with wholly synthetic private values call this helper.
+    return subprocess.check_output(["ps", "eww", "-p", str(pid), "-o", "command="],
+                                   env=env, text=True, timeout=5)

@@ -1,0 +1,13 @@
+{"case": "bounded_loopback_h1", "capacity": 8, "rounds": 2, "requests": 16, "tcp_connections": 16, "maximum_simultaneous_requests": 1, "held_host_cpu_seconds_in_3s": 0.0, "held_fds": 34, "completed_idle_fds": [11, 11]}
+{"capacity": 1, "rounds": 2, "alpn": "h2", "tcp_connections": 1, "streams": 2, "request_bytes": 1604, "completed_idle_fds": [12, 12]}
+{"capacity": 100, "rounds": 2, "alpn": "h2", "tcp_connections": 1, "streams": 200, "request_bytes": 571390, "completed_idle_fds": [12, 12]}
+{"case": "stalled_local_capture", "phase": "before-first-write", "live_streams": 100, "connections": 1, "control_before_release": true, "capture_written_before_gate": 0, "stalled_host_rss_kib": 15144, "completed_idle_host_rss_kib": 14428}
+{"case": "stalled_local_capture", "phase": "after-progress", "live_streams": 100, "connections": 1, "control_before_release": true, "capture_written_before_gate": 15121, "stalled_host_rss_kib": 15220, "completed_idle_host_rss_kib": 14580}
+{"case": "refused_headers", "attempts": 1, "observed_streams": 2, "connections": 2}
+{"case": "refused_upload", "attempts": 1, "observed_streams": 2, "connections": 2}
+{"case": "dead_reuse", "attempts_for_dead": 2, "observed_streams": 3, "connections": 2}
+{"case": "sibling_header_failure", "streams": 2, "connections": 1}
+{"case": "sibling_cancel", "streams": 2, "connections": 1, "target_resets": 1, "sibling": "completed"}
+{"case": "sibling_capture", "streams": 2, "connections": 1, "target_resets": 1, "sibling": "completed"}
+{"case": "connection_failure", "streams": 4, "attempts_per_operation": 2}
+{"case": "non_h2_https", "result": "provider_http2_required", "posts": 0, "attempts": 1}

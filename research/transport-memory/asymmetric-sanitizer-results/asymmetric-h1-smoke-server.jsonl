@@ -1,0 +1,35 @@
+{"ready": true, "ssl": "OpenSSL 3.6.3 9 Jun 2026", "h2_connection_receive_window": 16777216, "h2_stream_receive_window": 65535}
+{"connection": 1, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 2, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 3, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 4, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 5, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 6, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 7, "resumed": false, "tls_version": "TLSv1.3"}
+{"connection": 8, "resumed": false, "tls_version": "TLSv1.3"}
+{"headers_admitted_burst": 0, "count": 8, "monotonic_ns": 1146159954424000}
+{"request_complete": 1, "burst": 0, "bytes": 16384, "monotonic_ns": 1146159957401000}
+{"request_complete": 3, "burst": 0, "bytes": 16384, "monotonic_ns": 1146159961575000}
+{"request_complete": 5, "burst": 0, "bytes": 16384, "monotonic_ns": 1146159966721000}
+{"request_complete": 7, "burst": 0, "bytes": 16384, "monotonic_ns": 1146159969327000}
+{"first_sse": 1, "burst": 0, "monotonic_ns": 1146160207958000}
+{"first_sse": 3, "burst": 0, "monotonic_ns": 1146160213049000}
+{"first_sse": 5, "burst": 0, "monotonic_ns": 1146160218573000}
+{"first_sse": 7, "burst": 0, "monotonic_ns": 1146160220674000}
+{"request_complete": 0, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146160915118000}
+{"request_complete": 4, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146160930869000}
+{"request_complete": 2, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146160935488000}
+{"request_complete": 6, "burst": 0, "bytes": 1048576, "monotonic_ns": 1146160940799000}
+{"first_sse": 0, "burst": 0, "monotonic_ns": 1146161166461000}
+{"first_sse": 4, "burst": 0, "monotonic_ns": 1146161183142000}
+{"first_sse": 2, "burst": 0, "monotonic_ns": 1146161189743000}
+{"first_sse": 6, "burst": 0, "monotonic_ns": 1146161192449000}
+{"response_complete": 1, "burst": 0, "monotonic_ns": 1146163159830000}
+{"response_complete": 3, "burst": 0, "monotonic_ns": 1146163165111000}
+{"response_complete": 5, "burst": 0, "monotonic_ns": 1146163167777000}
+{"response_complete": 7, "burst": 0, "monotonic_ns": 1146163172814000}
+{"response_complete": 0, "burst": 0, "monotonic_ns": 1146164118346000}
+{"response_complete": 4, "burst": 0, "monotonic_ns": 1146164134619000}
+{"response_complete": 2, "burst": 0, "monotonic_ns": 1146164139678000}
+{"response_complete": 6, "burst": 0, "monotonic_ns": 1146164142872000}
+{"requests_per_burst": [8], "headers_per_burst": [8], "connections": 8, "resumed_connections": 0, "full_handshakes": 8, "streams_max": 0, "max_inflight": 8, "request_bytes": 4259840, "response_bytes": 75944}

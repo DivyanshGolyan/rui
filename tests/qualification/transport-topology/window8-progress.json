@@ -1,0 +1,112 @@
+{
+  "connections": 1,
+  "custody": {
+    "custody_occupied": "0",
+    "dispatch_fenced": false,
+    "scratch_used_bytes": "0",
+    "status": "partial",
+    "unavailable": [
+      "structured_output"
+    ]
+  },
+  "gate_event": {
+    "rui_test_phase": "capture_write_gate_entered",
+    "written_bytes": 10647
+  },
+  "gated": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 317,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 313,
+    "phase": "gated",
+    "phys_footprint": 18777792,
+    "phys_footprint_peak": 18925248,
+    "pid": 7039,
+    "requested_allocation": {
+      "curl_live": 3217387,
+      "curl_peak": 3217387,
+      "gate_held": true,
+      "openssl_live": 671196,
+      "openssl_peak": 708151,
+      "paused_current": 100,
+      "paused_peak": 100,
+      "queue_bytes": 101119,
+      "queue_entries": 16,
+      "rui_test_phase": "transport_allocation_snapshot"
+    },
+    "rss_exit": 0,
+    "rss_kib": 23376,
+    "timestamp_unix": 1790140832.199035
+  },
+  "live": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 316,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 312,
+    "phase": "live",
+    "phys_footprint": 17630912,
+    "phys_footprint_peak": 17778368,
+    "pid": 7039,
+    "requested_allocation": {
+      "curl_live": 2152190,
+      "curl_peak": 2153524,
+      "gate_held": false,
+      "openssl_live": 671196,
+      "openssl_peak": 708151,
+      "paused_current": 0,
+      "paused_peak": 0,
+      "queue_bytes": 0,
+      "queue_entries": 0,
+      "rui_test_phase": "transport_allocation_snapshot"
+    },
+    "rss_exit": 0,
+    "rss_kib": 22176,
+    "timestamp_unix": 1790140831.96727
+  },
+  "mode": "after-progress",
+  "request_count": 100,
+  "requests_sha256": "7f015e978ea3cd9081b560d94a7858637ce23bb3b461849f3216ba24400e8d78",
+  "response_sha256": "b236e81cac1600f145ca1e82b74472e1357344b7a0b7de43ffcc6d7e3acb9671",
+  "serviced_idle": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 16,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 12,
+    "phase": "serviced-idle",
+    "phys_footprint": 21612224,
+    "phys_footprint_peak": 21792448,
+    "pid": 7039,
+    "requested_allocation": {
+      "curl_live": 106797,
+      "curl_peak": 3217387,
+      "gate_held": false,
+      "openssl_live": 671196,
+      "openssl_peak": 708151,
+      "paused_current": 0,
+      "paused_peak": 100,
+      "queue_bytes": 0,
+      "queue_entries": 0,
+      "rui_test_phase": "transport_allocation_snapshot"
+    },
+    "rss_exit": 0,
+    "rss_kib": 26480,
+    "timestamp_unix": 1790140839.02413
+  },
+  "streams": 100,
+  "timing": {
+    "all_durable_observed_ns": 362480040549125,
+    "all_ms": 3714.876209,
+    "first_durable_observed_ns": 362478005946750,
+    "first_ms": 1680.273834,
+    "observation": "model_settlement_committed host stderr trace",
+    "release_monotonic_ns": 362476325672916
+  },
+  "topology": "h2",
+  "upload_bytes": 16384
+}

@@ -1,0 +1,8 @@
+{
+  "Thread-local signal-stack storage": 589824,
+  "SQLite": 407264,
+  "OpenSSL": 144256,
+  "curl": 27760,
+  "Zig allocator call sites": 23968,
+  "Other / unattributed": 122896
+}

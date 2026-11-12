@@ -1,0 +1,111 @@
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Running breadth-first search Model-Checking with fp 0 and seed 1 with 1 worker on 10 cores with 455MB heap and 64MB offheap memory [pid: 33208] (Mac OS X 15.7.7 aarch64, Homebrew 17.0.19 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-session-tlc-a44fscyn/SessionReplay.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Naturals.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/Sequences.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/FiniteSets.tla
+Parsing file /private/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/TLC.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module SessionReplay
+Starting... (2026-09-05 13:18:27)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-09-05 13:18:27.
+Error: Invariant UniqueWorkflowAdmission is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ phase = "idle"
+/\ observations = {}
+/\ active = 0
+/\ externalSent = FALSE
+/\ settled = {}
+/\ target = 0
+/\ crashes = 0
+/\ processed = {}
+/\ up = TRUE
+/\ turnCount = 0
+/\ snapshot = {}
+/\ entries = <<>>
+/\ wpc = "submit"
+
+State 2: <SubmitWorkflow line 45, col 5 to line 57, col 47 of module SessionReplay>
+/\ phase = "idle"
+/\ observations = {}
+/\ active = 1
+/\ externalSent = FALSE
+/\ settled = {}
+/\ target = 1
+/\ crashes = 0
+/\ processed = {}
+/\ up = TRUE
+/\ turnCount = 1
+/\ snapshot = {}
+/\ entries = <<[caller |-> "W", turn |-> 1]>>
+/\ wpc = "ack"
+
+State 3: <Crash line 126, col 5 to line 131, col 47 of module SessionReplay>
+/\ phase = "idle"
+/\ observations = {}
+/\ active = 1
+/\ externalSent = FALSE
+/\ settled = {}
+/\ target = 0
+/\ crashes = 1
+/\ processed = {}
+/\ up = FALSE
+/\ turnCount = 1
+/\ snapshot = {}
+/\ entries = <<[caller |-> "W", turn |-> 1]>>
+/\ wpc = "paused"
+
+State 4: <RestartServer line 134, col 5 to line 137, col 33 of module SessionReplay>
+/\ phase = "idle"
+/\ observations = {}
+/\ active = 1
+/\ externalSent = FALSE
+/\ settled = {}
+/\ target = 0
+/\ crashes = 1
+/\ processed = {}
+/\ up = TRUE
+/\ turnCount = 1
+/\ snapshot = {}
+/\ entries = <<[caller |-> "W", turn |-> 1]>>
+/\ wpc = "paused"
+
+State 5: <ResumeWorkflow line 142, col 5 to line 145, col 33 of module SessionReplay>
+/\ phase = "idle"
+/\ observations = {}
+/\ active = 1
+/\ externalSent = FALSE
+/\ settled = {}
+/\ target = 0
+/\ crashes = 1
+/\ processed = {}
+/\ up = TRUE
+/\ turnCount = 1
+/\ snapshot = {}
+/\ entries = <<[caller |-> "W", turn |-> 1]>>
+/\ wpc = "submit"
+
+State 6: <SubmitWorkflow line 45, col 5 to line 57, col 47 of module SessionReplay>
+/\ phase = "idle"
+/\ observations = {}
+/\ active = 1
+/\ externalSent = FALSE
+/\ settled = {}
+/\ target = 2
+/\ crashes = 1
+/\ processed = {}
+/\ up = TRUE
+/\ turnCount = 1
+/\ snapshot = {}
+/\ entries = <<[caller |-> "W", turn |-> 1], [caller |-> "W", turn |-> 1]>>
+/\ wpc = "ack"
+
+57 states generated, 34 distinct states found, 9 states left on queue.
+The depth of the complete state graph search is 6.
+The average outdegree of the complete state graph is 1 (minimum is 1, the maximum 4 and the 95th percentile is 2).
+Finished in 00s at (2026-09-05 13:18:27)

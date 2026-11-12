@@ -1,0 +1,1 @@
+Assertion failed: ((size_t)upload == t->request_bytes), function finish_handle, file asymmetric.c, line 336.

@@ -1,0 +1,51 @@
+/private/tmp/latifa-pr-qualification-20260916/src/admission_integration.sh: line 643: 18537 Killed: 9               "$latifa" serve --store "$store" "$@" > "$ready" 2> "$server_log"
+control integration: stalled_ingress=10 controls=25 p95_ms=56.8 control_first_p95_ms=52.7 real_settlement_p95_ms=45.1 overlap_controls=2 blocked_result_control_ms=50.8 exact_ack_ms=13.9
+/private/tmp/latifa-pr-qualification-20260916/src/admission_integration.sh: line 643: 19487 Killed: 9               "$latifa" serve --store "$store" "$@" > "$ready" 2> "$server_log"
+exhausted recovery ordinary inspections (diagnostic only): samples=14 p95_ms=257.0 max_ms=257.0
+Build Summary: 17/17 steps succeeded; 97/97 tests passed
+check success
++- run /opt/homebrew/Cellar/zig/0.16.0_1/bin/zig success 88ms
++- run test 97 pass (97 total) 1m MaxRSS:11M
+|  +- compile test ReleaseSafe native success 56s MaxRSS:783M
+|     +- run sh (pinned-transport-aarch64-macos) success 3m
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- options cached
++- run sh success 4s
+|  +- compile exe latifa-release-safe-check ReleaseSafe native success 54s MaxRSS:702M
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- options success
++- run python3 success 1m
+|  +- compile exe latifa-release-safe-check ReleaseSafe native (+8 more reused dependencies)
++- run python3 success 1m
+|  +- compile exe latifa-release-safe-check ReleaseSafe native (+8 more reused dependencies)
++- run sh success 13s
+|  +- compile exe latifa-debug-check Debug native success 14s MaxRSS:534M
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- run sh (pinned-transport-aarch64-macos) (reused)
+|     +- options cached
++- run python3 success 936ms
++- compile exe latifa-release-small-check ReleaseSmall native success 21s MaxRSS:281M
+   +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- run sh (pinned-transport-aarch64-macos) (reused)
+   +- options cached

@@ -1,0 +1,228 @@
+//! TLS for h2 connections. Internal. One `SSL_CTX` per Client, built by its
+//! first `https://` endpoint; each connection's `SSL` comes from it.
+//!
+//! Verification is never off: there is no option or code path that sets
+//! SSL_VERIFY_NONE. The handshake verifies the chain against the trust
+//! store and the host name or IP literal against the leaf, except for
+//! system trust on macOS, where Apple SecTrust verifies both after the
+//! handshake and before any application byte (`sec_trust.zig`).
+//!
+//! OpenSSL reaches the socket through a BIO of ours, so each send carries
+//! MSG_NOSIGNAL (SO_NOSIGPIPE on Darwin): a peer that went away is
+//! an error for one connection, never a SIGPIPE for the process.
+const std = @import("std");
+const builtin = @import("builtin");
+const tls_client = @import("tls_client");
+const c = tls_client.c;
+const h2 = @import("h2.zig");
+const sec_trust = @import("sec_trust.zig");
+
+const alpn_h2 = "\x02h2";
+
+pub const HostKind = tls_client.HostKind;
+
+/// For a socket send that must not raise SIGPIPE.
+pub const send_flags: c_int = if (builtin.os.tag == .linux) std.c.MSG.NOSIGNAL else 0;
+
+pub const Context = struct {
+    ctx: *c.SSL_CTX,
+    bio_method: *c.BIO_METHOD,
+    /// Sessions are verified by SecTrust after their handshake.
+    deferred: bool,
+
+    /// TLS 1.2 or later, with only the AEAD suites HTTP/2 allows on 1.2 and
+    /// no renegotiation (RFC 9113 9.2), so no certificate arrives after the
+    /// verified one; ALPN `h2` only; no session cache, so every
+    /// connection verifies the peer afresh; RELEASE_BUFFERS, so an idle
+    /// connection holds no OpenSSL record buffers; partial writes from a
+    /// moving buffer, for nghttp2's frame buffer.
+    pub fn init(trust: h2.Trust) h2.EndpointError!Context {
+        const ctx = tls_client.newContext() orelse return error.OutOfMemory;
+        errdefer c.SSL_CTX_free(ctx);
+        // Inverted convention: 0 is success.
+        if (c.SSL_CTX_set_alpn_protos(ctx, alpn_h2, alpn_h2.len) != 0) return error.OutOfMemory;
+        const bio_method = newBioMethod() orelse return error.OutOfMemory;
+        errdefer c.BIO_meth_free(bio_method);
+        const deferred = sec_trust.enabled and trust == .system;
+        if (deferred) sec_trust.deferVerification(ctx) else try tls_client.loadTrust(ctx, trust);
+        return .{ .ctx = ctx, .bio_method = bio_method, .deferred = deferred };
+    }
+
+    pub fn deinit(self: *Context) void {
+        c.SSL_CTX_free(self.ctx);
+        c.BIO_meth_free(self.bio_method);
+        self.* = undefined;
+    }
+
+    /// A client session on `fd`, verifying `host` (`Url.server_name`): SNI
+    /// and the name check for a DNS name, the IP check (and no SNI) for an
+    /// IP literal.
+    pub fn newSession(self: *const Context, fd: std.posix.fd_t, host: []const u8, kind: HostKind) ?*c.SSL {
+        var host_z: [h2.max_host_bytes + 1]u8 = undefined;
+        @memcpy(host_z[0..host.len], host);
+        host_z[host.len] = 0;
+        const ssl = c.SSL_new(self.ctx) orelse return null;
+        if (!attachSocket(ssl, self.bio_method, fd)) {
+            c.SSL_free(ssl);
+            return null;
+        }
+        const named = tls_client.nameHost(ssl, host_z[0..host.len :0], kind, self.deferred);
+        if (!named) {
+            c.SSL_free(ssl);
+            return null;
+        }
+        c.SSL_set_connect_state(ssl);
+        return ssl;
+    }
+};
+
+// ------------------------------------------------------------ handshake
+
+pub const Progress = union(enum) {
+    done,
+    want_read,
+    want_write,
+    failed: @import("policy.zig").Cause,
+};
+
+/// One nonblocking handshake step. Done means verified, unless SecTrust
+/// verifies the session after it; whether the peer chose h2 is asked
+/// with `choseH2` once it is trusted, so a peer that is neither is
+/// untrusted on every platform.
+pub fn handshake(ssl: *c.SSL) Progress {
+    c.ERR_clear_error();
+    const result = c.SSL_do_handshake(ssl);
+    if (result == 1) return .done;
+    return switch (c.SSL_get_error(ssl, result)) {
+        c.SSL_ERROR_WANT_READ => .want_read,
+        c.SSL_ERROR_WANT_WRITE => .want_write,
+        else => .{ .failed = if (c.SSL_get_verify_result(ssl) != c.X509_V_OK) .untrusted_peer else .tls_failed },
+    };
+}
+
+/// Whether ALPN chose `h2`, after a done handshake.
+pub fn choseH2(ssl: *c.SSL) bool {
+    var selected: [*c]const u8 = null;
+    var selected_len: c_uint = 0;
+    c.SSL_get0_alpn_selected(ssl, &selected, &selected_len);
+    return selected_len == 2 and std.mem.eql(u8, selected[0..2], "h2");
+}
+
+pub const Transfer = union(enum) {
+    bytes: usize,
+    want_read,
+    want_write,
+    closed,
+};
+
+pub fn read(ssl: *c.SSL, buffer: []u8) Transfer {
+    c.ERR_clear_error();
+    var count: usize = 0;
+    if (c.SSL_read_ex(ssl, buffer.ptr, buffer.len, &count) == 1) return .{ .bytes = count };
+    return status(ssl);
+}
+
+pub fn write(ssl: *c.SSL, bytes: []const u8) Transfer {
+    c.ERR_clear_error();
+    var count: usize = 0;
+    if (c.SSL_write_ex(ssl, bytes.ptr, bytes.len, &count) == 1) return .{ .bytes = count };
+    return status(ssl);
+}
+
+/// After a failed SSL_read_ex or SSL_write_ex, which return 0.
+fn status(ssl: *c.SSL) Transfer {
+    return switch (c.SSL_get_error(ssl, 0)) {
+        c.SSL_ERROR_WANT_READ => .want_read,
+        c.SSL_ERROR_WANT_WRITE => .want_write,
+        else => .closed,
+    };
+}
+
+// ------------------------------------------------------------ socket BIO
+
+/// A source/sink BIO over a nonblocking socket. Also used by the test peer.
+pub fn newBioMethod() ?*c.BIO_METHOD {
+    const method = c.BIO_meth_new(c.BIO_get_new_index() | c.BIO_TYPE_SOURCE_SINK, "h2 socket") orelse return null;
+    if (c.BIO_meth_set_write(method, bioWrite) != 1 or
+        c.BIO_meth_set_read(method, bioRead) != 1 or
+        c.BIO_meth_set_ctrl(method, bioCtrl) != 1 or
+        c.BIO_meth_set_create(method, bioCreate) != 1)
+    {
+        c.BIO_meth_free(method);
+        return null;
+    }
+    return method;
+}
+
+/// The SSL owns the BIO from here; it never closes `fd`.
+pub fn attachSocket(ssl: *c.SSL, method: *c.BIO_METHOD, fd: std.posix.fd_t) bool {
+    const bio = c.BIO_new(method) orelse return false;
+    c.BIO_set_data(bio, @ptrFromInt(@as(usize, @intCast(fd)) + 1));
+    // One BIO for both directions consumes one reference.
+    c.SSL_set_bio(ssl, bio, bio);
+    return true;
+}
+
+fn socketOf(bio: ?*c.BIO) std.posix.fd_t {
+    return @intCast(@intFromPtr(c.BIO_get_data(bio)) - 1);
+}
+
+fn bioWrite(bio: ?*c.BIO, data: [*c]const u8, length: c_int) callconv(.c) c_int {
+    c.BIO_clear_flags(bio, c.BIO_FLAGS_RWS | c.BIO_FLAGS_SHOULD_RETRY);
+    while (true) {
+        const sent = std.c.send(socketOf(bio), data, @intCast(length), send_flags);
+        if (sent >= 0) return @intCast(sent);
+        switch (std.posix.errno(sent)) {
+            .INTR => continue,
+            .AGAIN => c.BIO_set_flags(bio, c.BIO_FLAGS_WRITE | c.BIO_FLAGS_SHOULD_RETRY),
+            else => {},
+        }
+        return -1;
+    }
+}
+
+fn bioRead(bio: ?*c.BIO, buffer: [*c]u8, length: c_int) callconv(.c) c_int {
+    c.BIO_clear_flags(bio, c.BIO_FLAGS_RWS | c.BIO_FLAGS_SHOULD_RETRY);
+    while (true) {
+        const received = std.c.recv(socketOf(bio), buffer, @intCast(length), 0);
+        if (received >= 0) return @intCast(received);
+        switch (std.posix.errno(received)) {
+            .INTR => continue,
+            .AGAIN => c.BIO_set_flags(bio, c.BIO_FLAGS_READ | c.BIO_FLAGS_SHOULD_RETRY),
+            else => {},
+        }
+        return -1;
+    }
+}
+
+fn bioCtrl(_: ?*c.BIO, command: c_int, _: c_long, _: ?*anyopaque) callconv(.c) c_long {
+    return @intFromBool(command == c.BIO_CTRL_FLUSH);
+}
+
+fn bioCreate(bio: ?*c.BIO) callconv(.c) c_int {
+    c.BIO_set_init(bio, 1);
+    return 1;
+}
+
+test "contexts offer only AEAD suites on TLS 1.2 and refuse renegotiation" {
+    var context = try Context.init(.system);
+    defer context.deinit();
+    try std.testing.expect(c.SSL_CTX_get_options(context.ctx) & tls_client.no_renegotiation != 0);
+    const ciphers = c.SSL_CTX_get_ciphers(context.ctx).?;
+    const count: usize = @intCast(c.OPENSSL_sk_num(@ptrCast(ciphers)));
+    try std.testing.expect(count > 0);
+    for (0..count) |index| {
+        const cipher: *const c.SSL_CIPHER = @ptrCast(c.OPENSSL_sk_value(@ptrCast(ciphers), @intCast(index)).?);
+        try std.testing.expect(c.SSL_CIPHER_is_aead(cipher) == 1);
+    }
+}
+
+test "sessions checked by OpenSSL refuse partial-label wildcards" {
+    var context = try Context.init(.system);
+    defer context.deinit();
+    if (context.deferred) return error.SkipZigTest;
+    // The descriptor is never used: no handshake runs.
+    const ssl = context.newSession(0, "example.com", .dns_name).?;
+    defer c.SSL_free(ssl);
+    try std.testing.expectEqual(@as(c_uint, c.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS), c.X509_VERIFY_PARAM_get_hostflags(c.SSL_get0_param(ssl)));
+}

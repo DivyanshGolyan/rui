@@ -1,0 +1,1152 @@
+const std = @import("std");
+
+pub const retained_cleanup_retry_ms = 100;
+pub const retry_poll_interval_ns: u64 = std.time.ns_per_s;
+
+pub const Admission = enum { no_work, retry_later, admitted };
+const Kind = enum { bash, retry, message, tool_continuation };
+
+pub const Allowance = struct {
+    bytes: usize,
+    items: usize,
+};
+
+pub const Wait = enum { transport, bash, idle };
+
+pub const Outcome = union(enum) {
+    continue_immediately,
+    wait: Wait,
+    terminate,
+};
+
+/// The Bash, message and tool-continuation scans read Store rows, which move
+/// the commit generation, and execution slots (free count, open shared
+/// preparations), which move the slot change count; the message scan also
+/// reads whether new Turns are held, which a resume moves.
+const AdmissionKey = struct { generation: u64, slot_changes: u64, paused: bool };
+
+/// Which commit-driven scans would find work, as one Store round read it
+/// (`Store.dispatchWork`). A hint: each scan still selects for itself.
+pub const Work = struct {
+    /// An owed stop, an owed ending, a feed hop or a core tool call.
+    core: bool = true,
+    mcp: bool = true,
+    bash: bool = true,
+    message: bool = true,
+    tool_continuation: bool = true,
+    /// An Attempt the retry scans read exists.
+    retry: bool = true,
+};
+
+/// `Work` reads only Store rows, which a commit moves, and whether new
+/// Turns are held, which picks the message selection.
+const WorkKey = struct { generation: u64, paused: bool };
+
+/// The retry scans read Store rows, which a commit moves, and skip the
+/// Operations execution slots hold, which a slot change moves. A scheduled
+/// retry also falls due by time alone (`State.next_retry_unix_ms`).
+const RetryKey = struct { generation: u64, slot_changes: u64 };
+
+/// What the last retry admission scan learned of scheduled retries.
+pub const ScheduledRetry = union(enum) {
+    /// No scan ran, so nothing is known.
+    unknown,
+    /// None is scheduled.
+    none,
+    /// The Unix millisecond the earliest one falls due, as the Store dates
+    /// it: the Store admits by the wall clock, so a clock step moves when
+    /// that is.
+    at_unix_ms: u64,
+};
+
+pub const State = struct {
+    preference: [4]Kind = .{ .bash, .retry, .message, .tool_continuation },
+    retry_admission_due: bool = true,
+    last_retry_poll: ?std.Io.Clock.Timestamp = null,
+    /// Retry facts before the last exhausted-retry scan that found nothing.
+    idle_exhausted: ?RetryKey = null,
+    /// Retry facts before the last retry admission scan that found nothing.
+    /// While both keys stand and no scheduled retry has fallen due, the
+    /// retry scans have nothing new to read, so an idle Host sends none.
+    idle_retry: ?RetryKey = null,
+    /// The Unix millisecond the earliest scheduled retry falls due, as that
+    /// scan read it.
+    next_retry_unix_ms: ?u64 = null,
+    /// Control generation read before the last reconciliation.
+    reconciled_controls: u64 = 0,
+    /// An Action loses custody unsettled only once dispatch is fenced or the
+    /// Host shuts down, so uncertain Actions come only from an earlier Host.
+    uncertain_action_scan_exhausted: bool = false,
+    /// Admission facts before the last pass whose Bash, message and
+    /// tool-continuation scans all found nothing. Those scans read only
+    /// Store rows and slots, so they rerun only once a commit or slot change
+    /// moves the key. The retry scans keep keys of their own (`idle_retry`).
+    idle_admission: ?AdmissionKey = null,
+    /// The commit generation of the last slot-free core work scan that found nothing.
+    idle_core_generation: ?u64 = null,
+    /// The last work read and the facts before it. It stands until a
+    /// commit or a pause moves the key, so slot changes reuse it.
+    work: ?struct { key: WorkKey, found: Work } = null,
+    retained_cleanup_at: ?std.Io.Clock.Timestamp = null,
+    capacity_was_full: bool = false,
+};
+
+pub fn serviceLifecycle(state: *State, context: anytype) bool {
+    context.noteLifecycleOpportunity();
+    const now = context.now();
+    const hint = context.consumeControlHint();
+    var made_progress = false;
+    // The Store advances the control generation after each accepted
+    // control commits, so a lost hint is found at the next service, and
+    // the loop's own commits read no controls.
+    const controls = context.controlGeneration();
+    if (hint or state.reconciled_controls != controls) {
+        context.reconcileControls();
+        state.reconciled_controls = controls;
+        made_progress = hint;
+    }
+    if (context.advanceBashPreparation()) made_progress = true;
+    if (context.advanceLiveBash()) made_progress = true;
+    if (state.retained_cleanup_at == null) state.retained_cleanup_at = now;
+    if (context.advanceRetainedCleanup(now, &state.retained_cleanup_at.?)) made_progress = true;
+    return made_progress;
+}
+
+/// Noinline: the stack-frame gate names the engine thread by it.
+noinline fn admitWork(state: *State, context: anytype, now: std.Io.Clock.Timestamp) error{Fence}!bool {
+    var made_progress = false;
+    const capacity_released = state.capacity_was_full and context.freeSlots() != 0;
+    const retry_poll_due = if (state.last_retry_poll) |last|
+        last.durationTo(now).raw.nanoseconds >= retry_poll_interval_ns
+    else
+        true;
+    if (!state.uncertain_action_scan_exhausted) {
+        if (try context.recoverUncertainAction()) made_progress = true else state.uncertain_action_scan_exhausted = true;
+    }
+    // Read before every scan below, so a change after a scan read its rows
+    // moves the key the scan's empty result is kept under.
+    const admission_key: AdmissionKey = .{
+        .generation = context.commitGeneration(),
+        .slot_changes = context.slotChanges(),
+        .paused = context.turnsPaused(),
+    };
+    const retry_key: RetryKey = .{ .generation = admission_key.generation, .slot_changes = admission_key.slot_changes };
+    const scanned = if (state.idle_admission) |previous| std.meta.eql(previous, admission_key) else false;
+    const core_due = state.idle_core_generation != admission_key.generation;
+    // One round says which of the scans below would find work, so a commit
+    // costs that round rather than an empty scan of each kind.
+    const work_key: WorkKey = .{ .generation = admission_key.generation, .paused = admission_key.paused };
+    const work_stands = if (state.work) |kept| std.meta.eql(kept.key, work_key) else false;
+    if (!work_stands and (core_due or !scanned)) {
+        state.work = null;
+        state.work = .{ .key = work_key, .found = try context.scanWork(admission_key.paused) };
+    }
+    const work: Work = if (state.work) |kept| kept.found else .{};
+    // No commit since that round read no Attempt for the retry scans, so
+    // neither would find one, whatever the slots hold or the clock says.
+    const retries_absent = !work.retry and std.meta.eql(state.work.?.key, work_key);
+    const retries_idle = keyIs(state.idle_exhausted, retry_key) and keyIs(state.idle_retry, retry_key);
+    // The poll interval bounds how often moving facts rescan; standing
+    // facts rescan only when a scheduled retry falls due by the wall clock,
+    // or that clock cannot be read.
+    const maintain_retries = context.providerConfigured() and !retries_absent and
+        (capacity_released or (retry_poll_due and (!retries_idle or retryFellDue(state.next_retry_unix_ms, context))));
+    if (maintain_retries) {
+        state.retry_admission_due = true;
+        if (try context.recoverExhaustedRetry()) {
+            made_progress = true;
+            state.last_retry_poll = null;
+            state.idle_exhausted = null;
+        } else {
+            state.last_retry_poll = now;
+            state.idle_exhausted = retry_key;
+        }
+    }
+    var found_nothing = true;
+    // Core calls, owed stops and MCP admission take no execution slot.
+    // Their shared empty scan reruns only once a commit moves the generation.
+    if (core_due) {
+        if (!work.core and !work.mcp) {
+            state.idle_core_generation = admission_key.generation;
+        } else switch (context.runCoreAction()) {
+            .admitted => {
+                state.idle_core_generation = null;
+                state.idle_admission = null;
+                return true;
+            },
+            .retry_later => state.idle_core_generation = null,
+            .no_work => state.idle_core_generation = admission_key.generation,
+        }
+    }
+    for (state.preference, 0..) |kind, index| {
+        if (context.dispatchFenced() or context.freeSlots() == 0) {
+            found_nothing = false;
+            break;
+        }
+        if (scanned and kind != .retry) continue;
+        switch (kind) {
+            .bash => if (!work.bash) continue,
+            .message => if (!work.message) continue,
+            .tool_continuation => if (!work.tool_continuation) continue,
+            .retry => {},
+        }
+        const admission = switch (kind) {
+            .bash => if (context.bashPreparationOpen()) context.admitBash() else continue,
+            .retry, .message, .tool_continuation => blk: {
+                if (!context.providerConfigured() or !context.modelPreparationOpen()) continue;
+                break :blk switch (kind) {
+                    .retry => if (state.retry_admission_due and !retries_absent) context.admitRetry() else continue,
+                    .message => context.admitNewModel(admission_key.paused),
+                    .tool_continuation => context.admitToolContinuation(),
+                    .bash => unreachable,
+                };
+            },
+        };
+        if (kind == .retry) {
+            state.retry_admission_due = admission != .no_work;
+            state.idle_retry = null;
+            if (admission == .no_work) switch (context.scheduledRetry()) {
+                .unknown => {},
+                .none => {
+                    state.idle_retry = retry_key;
+                    state.next_retry_unix_ms = null;
+                },
+                .at_unix_ms => |due| {
+                    state.idle_retry = retry_key;
+                    state.next_retry_unix_ms = due;
+                },
+            };
+        }
+        if (kind != .retry and admission != .no_work) found_nothing = false;
+        if (admission == .admitted) {
+            // Only a committed winner moves. Skipped kinds keep their place,
+            // including while their shared preparation owner is occupied.
+            std.mem.copyForwards(Kind, state.preference[index .. state.preference.len - 1], state.preference[index + 1 ..]);
+            state.preference[state.preference.len - 1] = kind;
+            state.idle_admission = null;
+            return true;
+        }
+    }
+    state.idle_admission = if (found_nothing) admission_key else null;
+    return made_progress;
+}
+
+/// The Store admits a retry once the wall clock reaches its due time, so the
+/// same clock says when a scan would find it: a clock step forward makes it
+/// due at once, and one backward makes it wait.
+fn retryFellDue(due_unix_ms: ?u64, context: anytype) bool {
+    const due = due_unix_ms orelse return false;
+    const now = context.unixMilliseconds() orelse return true;
+    return now >= due;
+}
+
+fn keyIs(kept: ?RetryKey, key: RetryKey) bool {
+    return if (kept) |previous| std.meta.eql(previous, key) else false;
+}
+
+pub fn run(state: *State, context: anytype) Outcome {
+    var made_progress = serviceLifecycle(state, context);
+    const now = context.now();
+    if (!context.dispatchFenced()) {
+        const admitted = admitWork(state, context, now) catch return .terminate;
+        if (admitted) made_progress = true;
+    }
+    if (serviceLifecycle(state, context)) made_progress = true;
+    state.capacity_was_full = context.freeSlots() == 0;
+    if (context.hasTransport()) {
+        context.driveTransport() catch return .terminate;
+    }
+    if (context.serviceOneCompletion()) made_progress = true;
+    if (serviceLifecycle(state, context)) made_progress = true;
+    const allowance = context.modelPreparationAllowance();
+    if (context.advanceModelPreparation(allowance.bytes, allowance.items)) made_progress = true;
+    if (made_progress) return .continue_immediately;
+    if (context.hasTransport()) return .{ .wait = .transport };
+    if (context.hasBash()) return .{ .wait = .bash };
+    return .{ .wait = .idle };
+}
+
+const Phase = enum {
+    lifecycle,
+    recover_action,
+    run_core,
+    admit_bash,
+    recover_retry,
+    admit_retry,
+    admit_new,
+    admit_continuation,
+    drive,
+    completion,
+    bash_preparation,
+    live_bash,
+    retained_cleanup,
+    reconcile,
+    model_preparation,
+};
+
+fn timestamp(ns: i96) std.Io.Clock.Timestamp {
+    return std.Io.Timestamp.fromNanoseconds(ns).withClock(.awake);
+}
+
+const SlotFacts = struct { free: usize, bash_open: bool, model_open: bool };
+
+const Recording = struct {
+    now_ns: i96 = 0,
+    auto_advance: i96 = 1,
+    hint: bool = false,
+    // Each read observes a new commit unless a test holds the Store still.
+    generation: u64 = 0,
+    generation_advance: u64 = 1,
+    fenced: bool = false,
+    provider: bool = true,
+    free: usize = 1,
+    bash_prep_open: bool = true,
+    model_prep_open: bool = true,
+    slot_changes: u64 = 0,
+    paused: bool = false,
+    /// Flips the pause right after the run reads it, as a racing listener can.
+    flip_pause_after_read: bool = false,
+    admitted_paused: ?bool = null,
+    observed_slots: ?SlotFacts = null,
+    transport: bool = false,
+    bash: bool = false,
+    mcp_available: bool = false,
+    mcp_runs: usize = 0,
+    recover_action: bool = false,
+    recover_retry: bool = false,
+    recover_action_fence: bool = false,
+    recover_retry_fence: bool = false,
+    drive_fence: bool = false,
+    bash_admission: Admission = .no_work,
+    core_admission: Admission = .no_work,
+    retry_admission: Admission = .no_work,
+    scheduled_retry: ScheduledRetry = .none,
+    unix_ms: ?u64 = 1_000_000,
+    work: Work = .{},
+    work_fence: bool = false,
+    work_scans: usize = 0,
+    work_paused: ?bool = null,
+    new_admission: Admission = .no_work,
+    continuation_admission: Admission = .no_work,
+    completions_available: usize = 0,
+    completions_consumed: usize = 0,
+    model_advances: usize = 0,
+    model_prep_progress: bool = false,
+    bash_prep_advance: i96 = 0,
+    last_allowance: Allowance = .{ .bytes = 0, .items = 0 },
+    configured_allowance: Allowance = .{ .bytes = 16 * 1024, .items = 64 },
+    lifecycle_count: usize = 0,
+    reconcile_count: usize = 0,
+    controls: u64 = 0,
+    live_bash_count: usize = 0,
+    bash_prep_count: usize = 0,
+    retained_cleanup_count: usize = 0,
+    drive_count: usize = 0,
+    now_samples: [128]i96 = undefined,
+    now_count: usize = 0,
+    order: [512]Phase = undefined,
+    order_len: usize = 0,
+    lifecycle_now: [64]i96 = undefined,
+    live_bash_now: [64]i96 = undefined,
+
+    fn record(self: *Recording, phase: Phase) void {
+        self.order[self.order_len] = phase;
+        self.order_len += 1;
+    }
+
+    fn now(self: *Recording) std.Io.Clock.Timestamp {
+        const sample = self.now_ns;
+        self.now_samples[self.now_count] = sample;
+        self.now_count += 1;
+        self.now_ns += self.auto_advance;
+        return timestamp(sample);
+    }
+
+    fn noteLifecycleOpportunity(self: *Recording) void {
+        self.lifecycle_now[self.lifecycle_count] = self.now_ns;
+        self.lifecycle_count += 1;
+        self.record(.lifecycle);
+    }
+
+    fn consumeControlHint(self: *Recording) bool {
+        const value = self.hint;
+        self.hint = false;
+        return value;
+    }
+
+    fn commitGeneration(self: *Recording) u64 {
+        self.generation += self.generation_advance;
+        return self.generation;
+    }
+
+    fn controlGeneration(self: *Recording) u64 {
+        return self.controls;
+    }
+
+    fn reconcileControls(self: *Recording) void {
+        self.record(.reconcile);
+        self.reconcile_count += 1;
+    }
+
+    fn advanceBashPreparation(self: *Recording) bool {
+        self.record(.bash_preparation);
+        self.bash_prep_count += 1;
+        self.now_ns += self.bash_prep_advance;
+        return false;
+    }
+
+    fn advanceLiveBash(self: *Recording) bool {
+        self.record(.live_bash);
+        self.live_bash_now[self.live_bash_count] = self.now_ns;
+        self.live_bash_count += 1;
+        return false;
+    }
+
+    fn advanceRetainedCleanup(self: *Recording, observed: std.Io.Clock.Timestamp, retry_at: *std.Io.Clock.Timestamp) bool {
+        _ = observed;
+        _ = retry_at;
+        self.record(.retained_cleanup);
+        self.retained_cleanup_count += 1;
+        return false;
+    }
+
+    fn dispatchFenced(self: *const Recording) bool {
+        return self.fenced;
+    }
+
+    fn providerConfigured(self: *const Recording) bool {
+        return self.provider;
+    }
+
+    /// Like the production setSlot, any change to the modelled slot facts
+    /// counts as a slot change; a test may also count one that leaves them.
+    fn slotChanges(self: *Recording) u64 {
+        const facts: SlotFacts = .{ .free = self.free, .bash_open = self.bash_prep_open, .model_open = self.model_prep_open };
+        if (self.observed_slots) |observed| {
+            if (!std.meta.eql(facts, observed)) self.slot_changes += 1;
+        }
+        self.observed_slots = facts;
+        return self.slot_changes;
+    }
+
+    fn freeSlots(self: *const Recording) usize {
+        return self.free;
+    }
+
+    fn bashPreparationOpen(self: *const Recording) bool {
+        return self.bash_prep_open;
+    }
+
+    fn modelPreparationOpen(self: *const Recording) bool {
+        return self.model_prep_open;
+    }
+
+    fn hasTransport(self: *const Recording) bool {
+        return self.transport;
+    }
+
+    fn hasBash(self: *const Recording) bool {
+        return self.bash;
+    }
+
+    fn recoverUncertainAction(self: *Recording) error{Fence}!bool {
+        self.record(.recover_action);
+        if (self.recover_action_fence) return error.Fence;
+        return self.recover_action;
+    }
+
+    fn recoverExhaustedRetry(self: *Recording) error{Fence}!bool {
+        self.record(.recover_retry);
+        if (self.recover_retry_fence) return error.Fence;
+        return self.recover_retry;
+    }
+
+    fn runCoreAction(self: *Recording) Admission {
+        if (self.mcp_available) {
+            self.mcp_available = false;
+            self.mcp_runs += 1;
+            return .admitted;
+        }
+        self.record(.run_core);
+        return self.core_admission;
+    }
+
+    fn admitBash(self: *Recording) Admission {
+        self.record(.admit_bash);
+        return self.bash_admission;
+    }
+
+    fn admitRetry(self: *Recording) Admission {
+        self.record(.admit_retry);
+        return self.retry_admission;
+    }
+
+    fn scanWork(self: *Recording, paused: bool) error{Fence}!Work {
+        self.work_scans += 1;
+        self.work_paused = paused;
+        if (self.work_fence) return error.Fence;
+        return self.work;
+    }
+
+    fn scheduledRetry(self: *const Recording) ScheduledRetry {
+        return self.scheduled_retry;
+    }
+
+    fn unixMilliseconds(self: *const Recording) ?u64 {
+        return self.unix_ms;
+    }
+
+    fn turnsPaused(self: *Recording) bool {
+        const paused = self.paused;
+        if (self.flip_pause_after_read) self.paused = !paused;
+        return paused;
+    }
+
+    fn admitNewModel(self: *Recording, paused: bool) Admission {
+        self.record(.admit_new);
+        self.admitted_paused = paused;
+        return self.new_admission;
+    }
+
+    fn admitToolContinuation(self: *Recording) Admission {
+        self.record(.admit_continuation);
+        return self.continuation_admission;
+    }
+
+    fn driveTransport(self: *Recording) error{Fence}!void {
+        self.record(.drive);
+        self.drive_count += 1;
+        if (self.drive_fence) return error.Fence;
+    }
+
+    fn serviceOneCompletion(self: *Recording) bool {
+        self.record(.completion);
+        if (self.completions_available == 0) return false;
+        self.completions_available -= 1;
+        self.completions_consumed += 1;
+        return true;
+    }
+
+    fn modelPreparationAllowance(self: *const Recording) Allowance {
+        return self.configured_allowance;
+    }
+
+    fn advanceModelPreparation(self: *Recording, bytes: usize, items: usize) bool {
+        self.record(.model_preparation);
+        self.last_allowance = .{ .bytes = bytes, .items = items };
+        self.model_advances += 1;
+        return self.model_prep_progress;
+    }
+
+    fn count(self: *const Recording, phase: Phase) usize {
+        var total: usize = 0;
+        for (self.order[0..self.order_len]) |entry| {
+            if (entry == phase) total += 1;
+        }
+        return total;
+    }
+
+    fn indexOf(self: *const Recording, phase: Phase, occurrence: usize) usize {
+        var seen: usize = 0;
+        for (self.order[0..self.order_len], 0..) |entry, index| {
+            if (entry != phase) continue;
+            if (seen == occurrence) return index;
+            seen += 1;
+        }
+        unreachable;
+    }
+};
+
+fn idle() Recording {
+    return .{
+        .provider = false,
+        .free = 1,
+        .bash_prep_open = false,
+        .model_prep_open = true,
+    };
+}
+
+test "one production turn removes at most one provider completion" {
+    var context = idle();
+    context.completions_available = 3;
+    var state: State = .{};
+    const outcome = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.completions_consumed);
+    try std.testing.expectEqual(@as(usize, 2), context.completions_available);
+    try std.testing.expectEqual(Outcome.continue_immediately, outcome);
+}
+
+test "a remaining completion burst drains across later turns with lifecycle between removals" {
+    var context = idle();
+    context.completions_available = 3;
+    var state: State = .{};
+    var turns: usize = 0;
+    while (context.completions_available != 0) : (turns += 1) {
+        try std.testing.expect(turns < 8);
+        const before = context.completions_available;
+        const lifecycle_before = context.lifecycle_count;
+        try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+        try std.testing.expectEqual(before - 1, context.completions_available);
+        try std.testing.expectEqual(lifecycle_before + 3, context.lifecycle_count);
+    }
+    try std.testing.expectEqual(@as(usize, 3), turns);
+    try std.testing.expectEqual(@as(usize, 3), context.completions_consumed);
+}
+
+test "one production turn advances model preparation once with the configured allowance" {
+    var context = idle();
+    context.model_prep_open = false;
+    context.configured_allowance = .{ .bytes = 32, .items = 4 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.model_advances);
+    try std.testing.expectEqual(@as(usize, 32), context.last_allowance.bytes);
+    try std.testing.expectEqual(@as(usize, 4), context.last_allowance.items);
+}
+
+test "large preparation requires a later turn rather than draining inside one turn" {
+    var context = idle();
+    context.model_prep_open = false;
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.model_advances);
+    try std.testing.expectEqual(@as(usize, 6), context.lifecycle_count);
+}
+
+test "lifecycle service still runs when admission, completion, and preparation all make progress" {
+    var context = Recording{
+        .provider = true,
+        .free = 1,
+        .completions_available = 2,
+        .new_admission = .admitted,
+        .configured_allowance = .{ .bytes = 8, .items = 1 },
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.lifecycle_count);
+    try std.testing.expect(context.indexOf(.lifecycle, 0) < context.indexOf(.admit_new, 0));
+    try std.testing.expect(context.indexOf(.lifecycle, 1) < context.indexOf(.completion, 0));
+    try std.testing.expect(context.indexOf(.lifecycle, 2) < context.indexOf(.model_preparation, 0));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.completion));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.model_preparation));
+}
+
+test "progress from an earlier phase cannot skip a later lifecycle service" {
+    var context = Recording{
+        .provider = true,
+        .free = 1,
+        .new_admission = .admitted,
+        .completions_available = 1,
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.live_bash));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.retained_cleanup));
+}
+
+test "immediate runnable work selects continuation rather than an idle wait" {
+    var context = idle();
+    context.completions_available = 1;
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+
+    context = idle();
+    context.model_prep_open = false;
+    context.model_prep_progress = true;
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+}
+
+test "true idle work selects a wait rather than spinning" {
+    var context = idle();
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome{ .wait = .idle }, run(&state, &context));
+    context.bash = true;
+    try std.testing.expectEqual(Outcome{ .wait = .bash }, run(&state, &context));
+    context.transport = true;
+    try std.testing.expectEqual(Outcome{ .wait = .transport }, run(&state, &context));
+}
+
+test "controls reconcile on a hint or a moved control generation only" {
+    var context = idle();
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 0), context.reconcile_count);
+    // The loop's own commits and time read no controls.
+    context.generation += 5;
+    context.now_ns += std.time.ns_per_s;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 0), context.reconcile_count);
+    context.hint = true;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.reconcile_count);
+    // A control whose hint was lost is found at the next service.
+    context.controls += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.reconcile_count);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.reconcile_count);
+}
+
+test "uncertain Action recovery scans until one scan finds none" {
+    var context = idle();
+    context.recover_action = true;
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.recover_action));
+    context.recover_action = false;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.recover_action));
+    // Commits and released slots cannot create another uncertain Action.
+    context.free = 2;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.recover_action));
+}
+
+test "live Bash observes a later clock than Bash preparation in the same lifecycle service" {
+    var context = idle();
+    context.now_ns = 100;
+    context.auto_advance = 0;
+    context.bash_prep_advance = 5;
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(i96, 105), context.live_bash_now[0]);
+    try std.testing.expectEqual(@as(i96, 110), context.live_bash_now[1]);
+    try std.testing.expectEqual(@as(i96, 115), context.live_bash_now[2]);
+}
+
+test "each lifecycle service observes a later clock than earlier bounded work" {
+    var context = Recording{
+        .now_ns = 99,
+        .auto_advance = 2,
+        .provider = true,
+        .free = 1,
+        .new_admission = .admitted,
+        .completions_available = 1,
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expect(context.lifecycle_now[1] > context.lifecycle_now[0]);
+    try std.testing.expect(context.lifecycle_now[2] > context.lifecycle_now[1]);
+    try std.testing.expect(context.indexOf(.live_bash, 1) > context.indexOf(.admit_new, 0));
+    try std.testing.expect(context.indexOf(.live_bash, 2) > context.indexOf(.completion, 0));
+}
+
+test "sustained messages cannot starve a tool continuation after preparation reopens" {
+    var state: State = .{};
+    var first = Recording{ .new_admission = .admitted, .continuation_admission = .admitted };
+    _ = run(&state, &first);
+    try std.testing.expectEqual(@as(usize, 1), first.count(.admit_new));
+
+    var closed = Recording{ .model_prep_open = false, .bash_admission = .admitted };
+    _ = run(&state, &closed);
+    var reopened = Recording{ .new_admission = .admitted, .continuation_admission = .admitted };
+    _ = run(&state, &reopened);
+    try std.testing.expectEqual(@as(usize, 1), reopened.count(.admit_continuation));
+    try std.testing.expectEqual(@as(usize, 0), reopened.count(.admit_new));
+}
+
+test "rolled back retry admission does not suppress other kinds or lose preference" {
+    var context = Recording{
+        .provider = true,
+        .free = 1,
+        .retry_admission = .retry_later,
+        .new_admission = .admitted,
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+
+    context.retry_admission = .admitted;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+}
+
+test "capacity release after a full turn schedules retry maintenance" {
+    var context = Recording{
+        .now_ns = std.time.ns_per_s,
+        .provider = true,
+        .free = 0,
+        .retry_admission = .admitted,
+        .new_admission = .admitted,
+    };
+    var state: State = .{ .capacity_was_full = false, .last_retry_poll = timestamp(0) };
+    _ = run(&state, &context);
+    try std.testing.expect(state.capacity_was_full);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_retry));
+
+    context.free = 1;
+    context.order_len = 0;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+}
+
+test "occupied model preparation skips retry and new-model admission" {
+    var context = Recording{
+        .provider = true,
+        .free = 1,
+        .model_prep_open = false,
+        .retry_admission = .admitted,
+        .new_admission = .admitted,
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_retry));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+}
+
+test "Bash admission uses a free slot without sharing the model-preparation quota" {
+    var context = Recording{
+        .provider = true,
+        .free = 1,
+        .model_prep_open = false,
+        .bash_admission = .admitted,
+        .new_admission = .admitted,
+    };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.bash_preparation));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.model_preparation));
+}
+
+test "a core tool call runs with no free slot, and its scan waits for a commit" {
+    var context = Recording{ .free = 0, .core_admission = .admitted, .generation_advance = 0 };
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome.continue_immediately, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
+    context.core_admission = .no_work;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.run_core));
+    // Nothing committed since the scan that found nothing.
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.run_core));
+}
+
+test "a fenced recover does not launch later work in the same turn" {
+    var context = Recording{
+        .provider = true,
+        .free = 1,
+        .recover_action_fence = true,
+        .new_admission = .admitted,
+        .completions_available = 2,
+        .transport = true,
+    };
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome.terminate, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.completion));
+    try std.testing.expectEqual(@as(usize, 0), context.drive_count);
+    try std.testing.expectEqual(@as(usize, 1), context.lifecycle_count);
+}
+
+test "admission scans rerun only after a commit, a released slot or a reopened preparation" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_continuation));
+    context.generation += 1;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.free = 2;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+    // A shared preparation owner reopening needs no commit.
+    context.model_prep_open = false;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+    context.model_prep_open = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_continuation));
+    try std.testing.expectEqual(@as(usize, 5), context.count(.admit_bash));
+    context.bash_prep_open = false;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 5), context.count(.admit_new));
+    context.bash_prep_open = true;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 6), context.count(.admit_bash));
+}
+
+test "admission rescans after any slot change or commit and skips while both stand still" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    // A slot moved between states that keep the free count and both
+    // preparations open, such as a retained cleanup changing hands.
+    context.slot_changes += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_continuation));
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.generation += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_continuation));
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+}
+
+test "a pause or resume reruns the message scan with no commit" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    // A resume commits nothing, yet held Messages may now start Turns.
+    context.paused = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.paused = false;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_new));
+}
+
+test "the message scan and its cache key use one pause snapshot" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .flip_pause_after_read = true };
+    var state: State = .{};
+    _ = run(&state, &context);
+    // The listener paused after the key read `false`; the scan still ran as
+    // unpaused, so caching its empty result under `false` is truthful.
+    try std.testing.expectEqual(@as(?bool, false), context.admitted_paused);
+    try std.testing.expect(context.paused);
+}
+
+test "an admission that must retry later keeps scanning without a commit" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .continuation_admission = .retry_later };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_continuation));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    context.continuation_admission = .no_work;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_continuation));
+}
+
+test "retry scans wait while the work survey read no Attempt for them" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0, .work = .{ .retry = false } };
+    var state: State = .{};
+    // Neither a commit, a released slot nor the poll interval runs them.
+    _ = run(&state, &context);
+    context.generation += 1;
+    context.slot_changes += 1;
+    context.now_ns += 10 * retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_retry));
+    // A commit after which the survey reads one does.
+    context.work.retry = true;
+    context.generation += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+}
+
+test "retry scans that found nothing rerun only after a commit, a slot change or a scheduled retry falling due" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    // Time alone makes nothing due: an idle Host stops asking.
+    context.now_ns += 10 * retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    // A commit may have scheduled or orphaned an Attempt.
+    context.generation += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
+    // A slot change may have released one, but within the poll interval
+    // the scans wait.
+    context.slot_changes += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_retry));
+    // The scan read a retry scheduled ahead on the wall clock.
+    context.scheduled_retry = .{ .at_unix_ms = context.unix_ms.? + 5_000 };
+    context.generation += 1;
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_retry));
+    // Awake time alone does not make it due.
+    context.now_ns += 10 * retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_retry));
+    // A wall clock stepped backward keeps it waiting.
+    context.unix_ms.? -= 60_000;
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 4), context.count(.admit_retry));
+    // One stepped forward past the due time makes it due at once.
+    context.unix_ms.? += 65_000;
+    context.now_ns += retry_poll_interval_ns;
+    context.retry_admission = .admitted;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 5), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 5), context.count(.admit_retry));
+}
+
+test "a scheduled retry rescans when the wall clock cannot be read, and a moved key rescans whatever the clock says" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0 };
+    context.scheduled_retry = .{ .at_unix_ms = context.unix_ms.? + 5_000 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    // An unreadable clock cannot say the retry still waits.
+    const readable = context.unix_ms;
+    context.unix_ms = null;
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
+    // A commit rescans with the clock stepped backward, far from due.
+    context.unix_ms = readable.? - 60_000;
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
+    context.generation += 1;
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.count(.admit_retry));
+}
+
+test "a retry admission that ran no scan keeps the retry scans due" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .auto_advance = 0, .scheduled_retry = .unknown };
+    var state: State = .{};
+    _ = run(&state, &context);
+    context.now_ns += retry_poll_interval_ns;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.recover_retry));
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_retry));
+}
+
+test "one work read per commit or pause says which scans run" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0, .work = .{ .core = false, .mcp = false, .bash = false, .message = false, .tool_continuation = false } };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    // Nothing to find: the read replaces every commit-driven scan.
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_continuation));
+    // The retry scans read what slots hold, so they keep their own rule.
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_retry));
+    // A slot change moves no Store row: the read stands.
+    context.slot_changes += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+    // A commit moves it, and only the kinds it names scan.
+    context.generation += 1;
+    context.work.message = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 2), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_bash));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+    // A pause picks another message selection, with no commit.
+    context.paused = true;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 3), context.work_scans);
+    try std.testing.expectEqual(@as(?bool, true), context.work_paused);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+    // Core work or an MCP call alone runs the slot-free scan.
+    context.generation += 1;
+    context.work = .{ .core = false, .mcp = true, .bash = false, .message = false, .tool_continuation = false };
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+}
+
+test "a kind that stays named keeps its own empty-scan rule within one work read" {
+    var context = Recording{ .provider = true, .free = 1, .generation_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.admit_new));
+    // The slot change rescans the named kinds without reading work again.
+    context.slot_changes += 1;
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.work_scans);
+    try std.testing.expectEqual(@as(usize, 2), context.count(.admit_new));
+}
+
+test "a work read that fails ends the turn before any scan" {
+    var context = Recording{ .provider = true, .free = 1, .work_fence = true, .new_admission = .admitted };
+    var state: State = .{};
+    try std.testing.expectEqual(Outcome.terminate, run(&state, &context));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.count(.admit_new));
+}
+
+test "MCP resolution runs before execution slot admission even at capacity" {
+    var state: State = .{};
+    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true };
+    const outcome = run(&state, &context);
+    try std.testing.expect(outcome == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+}
+
+test "MCP and core calls both run at capacity through shared core work" {
+    var state: State = .{};
+    var context: Recording = .{ .free = 0, .provider = false, .mcp_available = true, .core_admission = .admitted };
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+}
+
+test "an empty MCP core work scan waits for a commit before admission resumes" {
+    var context = Recording{ .free = 0, .provider = false, .generation_advance = 0, .auto_advance = 0 };
+    var state: State = .{};
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+    context.mcp_available = true;
+    _ = run(&state, &context);
+    _ = run(&state, &context);
+    try std.testing.expectEqual(@as(usize, 1), context.count(.run_core));
+    try std.testing.expectEqual(@as(usize, 0), context.mcp_runs);
+    context.generation += 1;
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 1), context.mcp_runs);
+    // Success does not retain the empty-scan gate, even at this generation.
+    context.mcp_available = true;
+    try std.testing.expect(run(&state, &context) == .continue_immediately);
+    try std.testing.expectEqual(@as(usize, 2), context.mcp_runs);
+}

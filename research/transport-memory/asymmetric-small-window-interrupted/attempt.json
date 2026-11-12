@@ -1,0 +1,6 @@
+{
+  "status": "interrupted",
+  "reason": "Default server H2 connection receive credit 65535 plus delayed relay constrained upload far below configured link. Stopped explicitly before timeout; not a completed or qualified result.",
+  "runner_exit": 130,
+  "server_connection_window": 65535
+}

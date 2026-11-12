@@ -1,0 +1,268 @@
+{
+  "revision": "b1d25138f70e6a7b4c1d27523d5b051f6de34d7a",
+  "matrix_closed_cells": 30,
+  "derived": [
+    {
+      "kind": "model",
+      "variant": "baseline",
+      "count": 1,
+      "payload_bytes": 4096,
+      "active_application_increment": 64,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "model",
+      "variant": "early",
+      "count": 1,
+      "payload_bytes": 4096,
+      "active_application_increment": 64,
+      "curl_released_before_validation": 69371
+    },
+    {
+      "kind": "model",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 4096,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "model",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 4096,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 6937100
+    },
+    {
+      "kind": "model",
+      "variant": "baseline",
+      "count": 1000,
+      "payload_bytes": 4096,
+      "active_application_increment": 64000,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "model",
+      "variant": "early",
+      "count": 1000,
+      "payload_bytes": 4096,
+      "active_application_increment": 64000,
+      "curl_released_before_validation": 69371000
+    },
+    {
+      "kind": "model",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 1024,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "model",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 1024,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 6937100
+    },
+    {
+      "kind": "model",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 1048576,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "model",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 1048576,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 6937400
+    },
+    {
+      "kind": "bash",
+      "variant": "baseline",
+      "count": 1,
+      "payload_bytes": 4096,
+      "active_application_increment": 16448,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "early",
+      "count": 1,
+      "payload_bytes": 4096,
+      "active_application_increment": 64,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 4096,
+      "active_application_increment": 1644800,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 4096,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "baseline",
+      "count": 1000,
+      "payload_bytes": 4096,
+      "active_application_increment": 16448000,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "early",
+      "count": 1000,
+      "payload_bytes": 4096,
+      "active_application_increment": 64000,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 1024,
+      "active_application_increment": 1644800,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 1024,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 1048576,
+      "active_application_increment": 1644800,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "bash",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 1048576,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "baseline",
+      "count": 1,
+      "payload_bytes": 4096,
+      "active_application_increment": 16448,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "early",
+      "count": 1,
+      "payload_bytes": 4096,
+      "active_application_increment": 64,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 4096,
+      "active_application_increment": 1644800,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 4096,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "baseline",
+      "count": 1000,
+      "payload_bytes": 4096,
+      "active_application_increment": 16448000,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "early",
+      "count": 1000,
+      "payload_bytes": 4096,
+      "active_application_increment": 64000,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 1024,
+      "active_application_increment": 1644800,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 1024,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "baseline",
+      "count": 100,
+      "payload_bytes": 1048576,
+      "active_application_increment": 1644800,
+      "curl_released_before_validation": 0
+    },
+    {
+      "kind": "edit",
+      "variant": "early",
+      "count": 100,
+      "payload_bytes": 1048576,
+      "active_application_increment": 6400,
+      "curl_released_before_validation": 0
+    }
+  ],
+  "sources": {
+    "run.py": "fdd0257a31e00133f2a8cde46e74b20ede2276e5b9d036f3b63d2e2c2c0570ed",
+    "tracking.zig": "d2fd8cab60d95b0038c43749adb2e4cece0bcadcb93eb0c6e3018694b2c223db",
+    "check.py": "c1c3ae91a1c0f40bca9827d9f14f49a620355d0b3e6f60f81a3a42437e98451b",
+    "failures.c": "a569fb2ae6937e69f52e5c13871cd9b24ff9a7495b9a1d3cff812b19d48fcc6e",
+    "summarize.py": "11d9df7fa9c5f44bb30637ceced1615ec21308391519f54214c9c32b1018e770",
+    "production_bash.zig": "80bd502b2ff9cdcac336369d22a6a023485ddb988ab694214149eddf789c5c49",
+    "production_capture.zig": "737920dfe75a8714c7ae44ee8b63ed3910d8e8271f3476785ea81ca5b7466032",
+    "probe.c": "f5810f33f72ba5ead5a9baa7da459d3b285498d6cc7933614a83a290f7f984c2",
+    "prepare.py": "451cc1d120404bdc3fcaec2c49237ee3ad9b4e55503b5a6bb9def2c50d9c5cbc"
+  },
+  "raw_hashes": {
+    "results.json": "0e6ef1fd5fe0653af8e344ae88927fa1933f6dbd1a2825ec6561e10e4260864f",
+    "checks.json": "758d040970040e017d9768a0d82a6eb35b40eb20b9b7a024d73862b4b3422a4e"
+  },
+  "machine": "hw.model: MacBookPro18,1\nhw.memsize: 17179869184\nmachdep.cpu.brand_string: Apple M1 Pro\n",
+  "scratch_volume": "Filesystem   512-blocks      Used Available Capacity iused      ifree %iused  Mounted on\n/dev/disk3s5  965595304 670691608 234208816    75% 6017490 1171044080    1%   /System/Volumes/Data\n",
+  "unavailable": [
+    "per-file cache and dirty/writeback RAM",
+    "socket/pipe kernel bytes",
+    "Linux runtime measurements"
+  ]
+}

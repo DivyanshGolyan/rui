@@ -1,0 +1,250 @@
+//! Model capability derived only from supplied sorted facts, independent of
+//! transport, credentials, client defaults and account entitlement.
+const std = @import("std");
+const catalog = @import("model_catalog.zig");
+const product_defaults = @import("product_defaults.zig");
+const provider_name = @import("provider_name.zig");
+const provider_selection = @import("provider_selection.zig");
+
+pub const max_model_bytes = catalog.max_model_bytes;
+pub const ReasoningEffort = catalog.ReasoningEffort;
+pub const validModelSyntax = catalog.validModelSyntax;
+
+pub const CompactionPolicy = struct {
+    compaction_trigger: u64,
+    output_reservation: u64,
+};
+
+/// Exact catalog membership, without aliases, prefixes or family inference.
+pub fn supportsModel(facts: []const catalog.Entry, model: []const u8) bool {
+    return catalog.find(facts, model) != null;
+}
+
+/// The OpenAI-listed IDs in the supplied facts, in catalog order.
+pub fn writeModelHelp(out: *std.Io.Writer, facts: []const catalog.Entry) !void {
+    try out.writeAll("Supported model IDs: ");
+    var first = true;
+    for (facts) |row| if (row.openai_listed) {
+        if (!first) try out.writeAll(", ");
+        first = false;
+        try out.writeAll(row.id);
+    };
+    try out.writeByte('\n');
+}
+
+/// The OpenAI-listed IDs without `max`, comma separated.
+pub fn writeEffortExceptions(out: *std.Io.Writer, facts: []const catalog.Entry) !void {
+    var first = true;
+    for (facts) |row| if (row.openai_listed and !row.efforts.contains(.max)) {
+        if (!first) try out.writeAll(", ");
+        first = false;
+        try out.writeAll(row.id);
+    };
+}
+
+/// Offline help renders through the same writers as operation-scoped facts.
+pub const model_help: []const u8 = &rendered_model_help;
+pub const ids_without_max_effort: []const u8 = &rendered_effort_exceptions;
+
+const offline_help_bytes = blk: {
+    @setEvalBranchQuota(20000);
+    var bytes: usize = "Supported model IDs: \n".len;
+    for (catalog.shipped) |row| if (row.openai_listed) {
+        bytes += row.id.len + ", ".len;
+    };
+    break :blk bytes;
+};
+const rendered_model_help = blk: {
+    @setEvalBranchQuota(20000);
+    var bytes: [offline_help_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    writeModelHelp(&out, catalog.shipped) catch unreachable;
+    break :blk bytes[0..out.buffered().len].*;
+};
+const rendered_effort_exceptions = blk: {
+    @setEvalBranchQuota(20000);
+    var bytes: [offline_help_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    writeEffortExceptions(&out, catalog.shipped) catch unreachable;
+    break :blk bytes[0..out.buffered().len].*;
+};
+
+/// Listed models accept exactly their advertised efforts. D229: unlisted
+/// models pass Rui's closed grammar through; the provider decides support.
+/// Null is unspecified: listed models allow it only without effort levels.
+/// Frozen Operations do not consult this again.
+pub fn supportsReasoningEffort(facts: []const catalog.Entry, model: []const u8, effort: ?ReasoningEffort) bool {
+    const row = catalog.find(facts, model) orelse return true;
+    return if (effort) |value| row.efforts.contains(value) else row.efforts.count() == 0;
+}
+
+/// The effort a new Session on `model` starts at from the saved one: the
+/// saved one when the catalog allows it or the model is unlisted, else none.
+/// Client product defaults apply separately.
+pub fn startEffort(facts: []const catalog.Entry, saved: ?ReasoningEffort, model: []const u8) ?ReasoningEffort {
+    const effort = saved orelse return null;
+    return if (supportsReasoningEffort(facts, model, effort)) effort else null;
+}
+
+/// A model's context window: its row's, else the product's unlisted default.
+pub fn contextWindow(facts: []const catalog.Entry, model: []const u8) u64 {
+    const row = catalog.find(facts, model) orelse return product_defaults.unlisted_context_window;
+    return row.context_window orelse product_defaults.unlisted_context_window;
+}
+
+/// No alias inference, account entitlement or live qualification is implied.
+/// Reservation is extra heuristic headroom, never a provider output limit.
+pub fn compactionPolicy(model: []const u8, trigger_override: ?u64, reservation_override: ?u64) CompactionPolicy {
+    // D111: a stored null setting has fixed headroom, not a catalog default.
+    // New specs always save their explicit token count.
+    _ = model;
+    return .{
+        .compaction_trigger = trigger_override orelse product_defaults.unlisted_context_window * product_defaults.compaction_trigger_percent / 100,
+        .output_reservation = reservation_override orelse product_defaults.output_reservation,
+    };
+}
+
+const provider_count = @typeInfo(provider_name.Provider).@"enum".field_names.len;
+
+/// Every built-in provider, in declaration order. They share one catalog.
+/// Selection of a Session binding or saved pin admits any exact ID with valid
+/// syntax, including IDs this release does not list, which run with default
+/// limits.
+pub fn capabilities(readiness: *const provider_selection.Readinesses) [provider_count]provider_selection.Capability {
+    var out: [provider_count]provider_selection.Capability = undefined;
+    for (&out, std.enums.values(provider_name.Provider)) |*entry, provider|
+        entry.* = .{ .name = @tagName(provider), .recommended_model = product_defaults.recommended_model, .admits_model = validModelSyntax, .readiness = readiness.get(provider) };
+    return out;
+}
+
+test "compaction policy never infers a spec from the model catalog" {
+    for (catalog.shipped) |row| {
+        const policy = compactionPolicy(row.id, null, null);
+        const expected: u64 = 115200;
+        try std.testing.expectEqual(expected, policy.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 0), policy.output_reservation);
+        const overridden = compactionPolicy(row.id, 7, 3);
+        try std.testing.expectEqual(@as(u64, 7), overridden.compaction_trigger);
+        try std.testing.expectEqual(@as(u64, 3), overridden.output_reservation);
+    }
+    for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |other| {
+        // D111: stored null values use the same fixed threshold on every model.
+        try std.testing.expectEqual(@as(u64, 115200), compactionPolicy(other, null, null).compaction_trigger);
+        try std.testing.expect(!supportsModel(catalog.shipped, other));
+    }
+    try std.testing.expectEqual(@as(u64, 11), compactionPolicy("model-a", 11, null).compaction_trigger);
+}
+
+test "reasoning effort checks listed models and passes grammar values for unlisted models" {
+    for (catalog.shipped) |row| {
+        try std.testing.expect(supportsModel(catalog.shipped, row.id));
+        try std.testing.expectEqual(row.efforts.count() == 0, supportsReasoningEffort(catalog.shipped, row.id, null));
+        try std.testing.expectEqual(@as(u64, row.context_window orelse product_defaults.unlisted_context_window), contextWindow(catalog.shipped, row.id));
+        inline for (std.meta.tags(ReasoningEffort)) |effort|
+            try std.testing.expectEqual(row.efforts.contains(effort), supportsReasoningEffort(catalog.shipped, row.id, effort));
+    }
+    try std.testing.expectEqual(@as(u64, 1050000), contextWindow(catalog.shipped, "gpt-6.1-sol"));
+    for ([_]ReasoningEffort{ .low, .medium, .high, .xhigh, .max }) |effort|
+        try std.testing.expect(supportsReasoningEffort(catalog.shipped, "gpt-6.1-sol", effort));
+    try std.testing.expect(!supportsReasoningEffort(catalog.shipped, "gpt-6.1-sol", .none));
+    try std.testing.expect(supportsReasoningEffort(catalog.shipped, "gpt-6.1-terra", .none));
+    try std.testing.expect(!supportsReasoningEffort(catalog.shipped, "gpt-5.5", .max));
+    for ([_][]const u8{ "model-a", "gpt-6-luna-alias", "GPT-6-LUNA", "gpt-6-lun" }) |unknown| {
+        try std.testing.expect(!supportsModel(catalog.shipped, unknown));
+        try std.testing.expect(supportsReasoningEffort(catalog.shipped, unknown, null));
+        try std.testing.expectEqual(product_defaults.unlisted_context_window, contextWindow(catalog.shipped, unknown));
+        inline for (std.meta.tags(ReasoningEffort)) |effort|
+            try std.testing.expect(supportsReasoningEffort(catalog.shipped, unknown, effort));
+    }
+    try std.testing.expect(std.meta.stringToEnum(ReasoningEffort, "ultra") == null);
+}
+
+test "model help lists only OpenAI catalog ids in catalog order" {
+    var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer help.deinit();
+    var exceptions: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer exceptions.deinit();
+    try help.writer.writeAll("Supported model IDs: ");
+    var count: usize = 0;
+    var without_max: usize = 0;
+    for (catalog.shipped) |row| if (row.openai_listed) {
+        try help.writer.print("{s}{s}", .{ if (count == 0) "" else ", ", row.id });
+        try std.testing.expectEqualStrings(row.id, catalog.openai_ids[count]);
+        count += 1;
+        if (!row.efforts.contains(.max)) {
+            try exceptions.writer.print("{s}{s}", .{ if (without_max == 0) "" else ", ", row.id });
+            without_max += 1;
+        }
+    };
+    try help.writer.writeByte('\n');
+    try std.testing.expectEqual(count, catalog.openai_ids.len);
+    try std.testing.expectEqualStrings(help.written(), model_help);
+    try std.testing.expectEqualStrings(exceptions.written(), ids_without_max_effort);
+}
+
+test "a new Session keeps saved effort unless its listed model excludes it" {
+    try std.testing.expectEqual(@as(?ReasoningEffort, .max), startEffort(catalog.shipped, .max, "gpt-6-luna"));
+    try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(catalog.shipped, .max, "gpt-5.5"));
+    try std.testing.expectEqual(@as(?ReasoningEffort, .max), startEffort(catalog.shipped, .max, "unlisted-model"));
+    try std.testing.expectEqual(@as(?ReasoningEffort, null), startEffort(catalog.shipped, null, "gpt-6-luna"));
+}
+
+test "selection admits any ID with valid syntax, listed or not" {
+    var readiness: provider_selection.Readinesses = .initFill(.missing);
+    readiness.set(.codex, .configured);
+    const selectable = capabilities(&readiness);
+    try std.testing.expectEqualStrings("family=variant", (try provider_selection.resolve(&selectable, null, "family=variant", null, null)).selected.model);
+    try std.testing.expectEqualStrings("stale-pin", (try provider_selection.resolve(&selectable, null, null, "codex", "stale-pin")).selected.model);
+    try std.testing.expectEqualStrings(product_defaults.recommended_model, (try provider_selection.resolve(&selectable, null, null, null, null)).selected.model);
+    try std.testing.expectError(error.UnsupportedSelectionModel, provider_selection.resolve(&selectable, null, "bad model", null, null));
+}
+
+test "every built-in provider is selectable by its label, and two ready ones ask for a choice" {
+    var readiness: provider_selection.Readinesses = .initFill(.configured);
+    const both = capabilities(&readiness);
+    try std.testing.expectEqual(provider_selection.Selection.chooser, try provider_selection.resolve(&both, null, null, null, null));
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&both, "openai", null, null, null)).selected.provider);
+    readiness.set(.codex, .missing);
+    const one = capabilities(&readiness);
+    try std.testing.expectEqualStrings("openai", (try provider_selection.resolve(&one, null, null, null, null)).selected.provider);
+}
+
+test "selected facts alone own capability effort context and help" {
+    const facts: []const catalog.Entry = &.{
+        .{ .id = "a-saved", .context_window = 321, .efforts = .init(.{ .high = true }), .openai_listed = true },
+        .{ .id = "gpt-6-luna", .context_window = 123, .efforts = .{}, .openai_listed = false },
+        .{ .id = "z-saved", .context_window = null, .efforts = .init(.{ .max = true }), .openai_listed = true },
+    };
+    for (facts) |row| {
+        try std.testing.expect(supportsModel(facts, row.id));
+        try std.testing.expectEqual(row.efforts.count() == 0, supportsReasoningEffort(facts, row.id, null));
+        try std.testing.expectEqual(@as(u64, row.context_window orelse product_defaults.unlisted_context_window), contextWindow(facts, row.id));
+        inline for (std.meta.tags(ReasoningEffort)) |effort| {
+            try std.testing.expectEqual(row.efforts.contains(effort), supportsReasoningEffort(facts, row.id, effort));
+            try std.testing.expectEqual(if (row.efforts.contains(effort)) @as(?ReasoningEffort, effort) else null, startEffort(facts, effort, row.id));
+        }
+    }
+    for ([_][]const catalog.Entry{ facts, &.{} }) |selected| {
+        // A shipped row absent from the selected facts is unlisted, not merged.
+        try std.testing.expect(!supportsModel(selected, "gpt-5.5"));
+        try std.testing.expect(supportsReasoningEffort(selected, "gpt-5.5", null));
+        try std.testing.expectEqual(product_defaults.unlisted_context_window, contextWindow(selected, "gpt-5.5"));
+        inline for (std.meta.tags(ReasoningEffort)) |effort| {
+            try std.testing.expect(supportsReasoningEffort(selected, "gpt-5.5", effort));
+            try std.testing.expectEqual(@as(?ReasoningEffort, effort), startEffort(selected, effort, "gpt-5.5"));
+        }
+    }
+    var help: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer help.deinit();
+    try writeModelHelp(&help.writer, facts);
+    try std.testing.expectEqualStrings("Supported model IDs: a-saved, z-saved\n", help.written());
+    help.clearRetainingCapacity();
+    try writeEffortExceptions(&help.writer, facts);
+    try std.testing.expectEqualStrings("a-saved", help.written());
+    help.clearRetainingCapacity();
+    try writeModelHelp(&help.writer, &.{});
+    try std.testing.expectEqualStrings("Supported model IDs: \n", help.written());
+    help.clearRetainingCapacity();
+    try writeEffortExceptions(&help.writer, &.{});
+    try std.testing.expectEqualStrings("", help.written());
+}

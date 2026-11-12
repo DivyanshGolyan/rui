@@ -1,0 +1,39 @@
+{
+  "passed": [
+    "ordinary chat independent expected request",
+    "opaque objects and unknown fields match existing independent golden",
+    "tool completion order differs from provider call order",
+    "late tool result cannot enter earlier view",
+    "fresh process preserves historical settings and inputs after later writes",
+    "intentional adapter rule change changes request without changing history",
+    "explicit synthetic reset retains host input; not Codex wire qualification",
+    "compaction retains host inputs, anchored output including trailing items, and later suffix",
+    "later compaction cannot rewrite old view",
+    "generic reader cannot open provider output",
+    "foreign and expired handles reject",
+    "corruption fails without visible-text fallback",
+    "missing private payload fails without older-base or text fallback",
+    "large payload transfer bounded to 4096-byte chunks with complete digest",
+    "overlapping readers and fixture decode exhaustion release resources",
+    "negative controls detect admission-order leakage and latest-settings lookup"
+  ],
+  "count": 16,
+  "python": "3.14.6",
+  "sqlite": "3.53.4",
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "source_sha256": {
+    "adapter.py": "8e1eafdfc792d1a855b885a5f8e016eae61566d2e1cbf41c826e26f2d4aa986c",
+    "core.py": "63e0b51c4b45ad879d6addd1fc42ee5bdc0d973ab53cfd0de55f5f9881ccb232",
+    "stream_probe.py": "08f4bc27df7ccdc7eec74935970f3a4465186b0ee9a231cd4d44e3bf313e1c00",
+    "probe.py": "6bd606c54c4bb075b8222945d1cac8002b571f19332f9db0245d2f47223560cf",
+    "streaming.py": "84a79e7f007690723922d2d28c7c6019bbfb0b8995d5a98b9eec1cfe82733014"
+  },
+  "limits": [
+    "Synthetic one-Session schema; no production integration or live provider calls.",
+    "Fresh process reopen is not abrupt-crash or power-loss qualification.",
+    "Core chunk transfer tested; JSON adapter limits each decoded object to 64 KiB and accumulates small expected requests.",
+    "Provider validation, pending input applicability, full compaction lineage and permission settlement assumed upstream.",
+    "Python privacy and handle checks model API discipline, not adversarial isolation.",
+    "Explicit reset is a synthetic policy and establishes no Codex reset compatibility."
+  ]
+}

@@ -1,0 +1,192 @@
+{
+  "revision": "b6c976112307d26849347170b8c1acb9c972d563",
+  "started_utc": "2026-09-16T08:36:56.424932+00:00",
+  "working_tree_dirty": false,
+  "cache_conditions": "New dependency and compiler caches; no preexisting zig-pkg directory; serial pinned OpenSSL bootstrap hash assertion then complete graph fetch",
+  "environment": {
+    "zig version": "0.16.0",
+    "go version": "go version go1.27.1 darwin/arm64",
+    "python3 --version": "Python 3.14.7",
+    "sw_vers": "ProductName:\t\tmacOS\nProductVersion:\t\t15.7.7\nBuildVersion:\t\t24G720",
+    "uname -m": "arm64"
+  },
+  "status": "passed",
+  "cache_scope": "Pinned package fetch and native canonical check used new Zig dependency/compiler caches. Cross-compilation reused that graph cache; Linux transport child zig cc invocations used the normal shared compiler cache. Go module/compiler and system clang caches were not purged.",
+  "gates": [
+    {
+      "name": "fetch-openssl",
+      "command": [
+        "zig",
+        "fetch",
+        "--global-cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/global-cache",
+        "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz"
+      ],
+      "exit_code": 0,
+      "seconds": 11.14
+    },
+    {
+      "name": "fetch-all",
+      "command": [
+        "zig",
+        "build",
+        "--fetch=all",
+        "--cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache",
+        "--global-cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/global-cache"
+      ],
+      "exit_code": 0,
+      "seconds": 4.35
+    },
+    {
+      "name": "check",
+      "command": [
+        "zig",
+        "build",
+        "check",
+        "--summary",
+        "all",
+        "--cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache",
+        "--global-cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/global-cache"
+      ],
+      "exit_code": 0,
+      "seconds": 404.87
+    },
+    {
+      "name": "cross-check",
+      "command": [
+        "zig",
+        "build",
+        "cross-check",
+        "--summary",
+        "all",
+        "--cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache",
+        "--global-cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/global-cache"
+      ],
+      "exit_code": 0,
+      "seconds": 368.97
+    },
+    {
+      "name": "go-download",
+      "command": [
+        "go",
+        "-C",
+        "research",
+        "mod",
+        "download"
+      ],
+      "exit_code": 0,
+      "seconds": 0.07
+    },
+    {
+      "name": "measurement-check",
+      "command": [
+        "zig",
+        "build",
+        "measurement-check",
+        "--summary",
+        "all",
+        "--cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache",
+        "--global-cache-dir",
+        "/private/tmp/latifa-pr-evidence-20260916/global-cache"
+      ],
+      "exit_code": 0,
+      "seconds": 10.02
+    }
+  ],
+  "measurements": [
+    {
+      "name": "capacity-1",
+      "command": [
+        "go",
+        "run",
+        "-mod=readonly",
+        "./model-output",
+        "--capacity",
+        "1",
+        "--output",
+        "/private/tmp/latifa-pr-evidence-20260916/capacity-1.json",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache/o/672aaefa7f5899cbc7d0890bb0e4a599/latifa-release-small-check"
+      ],
+      "exit_code": 0,
+      "seconds": 124.85
+    },
+    {
+      "name": "capacity-100",
+      "command": [
+        "go",
+        "run",
+        "-mod=readonly",
+        "./model-output",
+        "--capacity",
+        "100",
+        "--output",
+        "/private/tmp/latifa-pr-evidence-20260916/capacity-100.json",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache/o/672aaefa7f5899cbc7d0890bb0e4a599/latifa-release-small-check"
+      ],
+      "exit_code": 0,
+      "seconds": 155.94
+    },
+    {
+      "name": "controls-100",
+      "command": [
+        "go",
+        "run",
+        "-mod=readonly",
+        "./model-control",
+        "--output",
+        "/private/tmp/latifa-pr-evidence-20260916/controls-100.json",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache/o/672aaefa7f5899cbc7d0890bb0e4a599/latifa-release-small-check"
+      ],
+      "exit_code": 0,
+      "seconds": 96.85
+    },
+    {
+      "name": "growth",
+      "command": [
+        "go",
+        "run",
+        "-mod=readonly",
+        "./model-output",
+        "--growth-only",
+        "--output",
+        "/private/tmp/latifa-pr-evidence-20260916/growth.json",
+        "/private/tmp/latifa-pr-evidence-20260916/local-cache/o/672aaefa7f5899cbc7d0890bb0e4a599/latifa-release-small-check"
+      ],
+      "exit_code": 0,
+      "seconds": 4.05
+    }
+  ],
+  "evidence": {
+    "capacity-1": "research/model-output/2026-09-16-clean-capacity-1.json",
+    "capacity-100": "research/model-output/2026-09-16-clean-capacity-100.json",
+    "growth": "research/model-output/2026-09-16-clean-growth.json",
+    "controls-100": "research/model-control/2026-09-16-clean-controls-100.json",
+    "check": "research/model-output/2026-09-16-clean-check.log",
+    "cross-check": "research/model-output/2026-09-16-clean-cross-check.log",
+    "measurement-check": "research/model-output/2026-09-16-clean-measurement-check.log"
+  },
+  "source_sha256": {
+    "ARCHITECTURE.md": "fceb7c434da6c06edbd955b4573a35c3dd25be1e6f7588903d47e057363e118b",
+    "VERIFICATION.md": "4a2f63fb00e6c352ae0f668ad895473e22b28d8cf1df3925ac2f117b7d3818ed",
+    "research/README.md": "189d5929696aeb5cd5b2dfff038204eb07c861ea94eae3ee5bd8b37ed7eaf2ae",
+    "research/model-control/main.go": "8672fc32a6f85679f1ee3a0dd203089d6de86bbb73bf0c9d80207079e9cc507f",
+    "research/model-output/main.go": "78dafa01fcebbea5b3235907a58047b26d5f7d96416ef53e6887eee0ce43cb77",
+    "research/model-output/main_test.go": "fb19fcff27c266aa5b63bed6f1669e134426c9ed6192db0b793e7dd9540902ce",
+    "research/model-output/provider/main.go": "d5bb76437cd1734a6d5b8eab681f1ea06bcae964765e4cd8e639c616be9f863b",
+    "research/model-output/provider/provider_test.go": "2c6938a5dca01ba094c6356e53c78ad511ffc8bf94a1d56cd12f2a150d96f921",
+    "src/dispatch_integration.py": "b8bf10eecd7a8dbdb0eefb7aba0bbe210592411782a200a83cdfbe4a466e8e70"
+  },
+  "limits": [
+    "macOS ARM64 runtime; four-target cross-compilation is not Linux runtime qualification",
+    "Output-load and heartbeat-control workloads are separate",
+    "No live-provider, TLS, power-loss, maximum-throughput or 1000-operation finished-product qualification"
+  ],
+  "review": "Independent read-only closure review found capacity-1 baseline missing; the clean two-round rerun now passes. Earlier capacity-8/16 strict passes and slice functional evidence remain applicable because production code is unchanged."
+}

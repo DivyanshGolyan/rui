@@ -1,0 +1,57 @@
+{
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "machine": "arm64",
+  "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin\n",
+  "command": [
+    "cc",
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-O2",
+    "-MMD",
+    "-MF",
+    "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-credit-probe-1vwhzgco/probe.d",
+    "-I/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-credit-probe-1vwhzgco/include",
+    "/Users/divyanshgolyan/.codex/worktrees/ebf3/onepage/research/transport-client-alternatives/credit_probe.c",
+    "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-credit-probe-1vwhzgco/libnghttp2.a",
+    "-o",
+    "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-credit-probe-1vwhzgco/probe"
+  ],
+  "source_sha256": "f840c0b562a61cbabcc15cd6a22e0cab284413973f0ddb317748ca0f6fd805f9",
+  "library_prefix_path": "/private/tmp/onepage-transport-memory-build/ng/lib/libnghttp2.a",
+  "library_sha256": "03f63d807b70ce1a252f6cee76d46466dc06e0f1d21632d189d9b13f80f0e191",
+  "binary_sha256": "fb9edf9952c8133286a8d1687c30b7ed673b3122d93c3179158493d4bd95a3ed",
+  "compiled_headers": {
+    "nghttp2.h": {
+      "prefix_path": "/private/tmp/onepage-transport-memory-build/ng/include/nghttp2/nghttp2.h",
+      "compiled_path": "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-credit-probe-1vwhzgco/include/nghttp2/nghttp2.h",
+      "sha256": "0bd0ee37b1b08fa38f9b773de201fe431846fda2bd0bed44f642c6c332e2e342"
+    },
+    "nghttp2ver.h": {
+      "prefix_path": "/private/tmp/onepage-transport-memory-build/ng/include/nghttp2/nghttp2ver.h",
+      "compiled_path": "/var/folders/k2/5vgjtrv95lx1xk20mk1qx3pc0000gp/T/onepage-credit-probe-1vwhzgco/include/nghttp2/nghttp2ver.h",
+      "sha256": "53b46254a82c2075b28459e0f0cd8da7369afbd5632a71560ab75d6af920c5e1"
+    }
+  },
+  "header_pin": {
+    "version": "1.70.0",
+    "version_num": "0x014600",
+    "template_url": "https://raw.githubusercontent.com/nghttp2/nghttp2/v1.70.0/lib/includes/nghttp2/nghttp2ver.h.in",
+    "template_sha256": "7f92a07886777c4f6c6f0b2f48e5e3347ee1057fd7b7313b232b5e7ea409b350",
+    "generated_header_sha256": "53b46254a82c2075b28459e0f0cd8da7369afbd5632a71560ab75d6af920c5e1"
+  },
+  "api_header_source": {
+    "url": "https://raw.githubusercontent.com/nghttp2/nghttp2/v1.70.0/lib/includes/nghttp2/nghttp2.h",
+    "sha256": "0bd0ee37b1b08fa38f9b773de201fe431846fda2bd0bed44f642c6c332e2e342",
+    "bytes": 242356,
+    "checked_symbols": [
+      "nghttp2_option_set_no_auto_window_update",
+      "nghttp2_session_consume_connection",
+      "nghttp2_session_consume_stream",
+      "nghttp2_session_client_new3"
+    ]
+  },
+  "runtime_version": "1.70.0",
+  "scope": "in-memory HTTP/2 only; no TLS, socket, scratch, memory or latency qualification"
+}

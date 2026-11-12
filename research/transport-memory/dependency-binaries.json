@@ -1,0 +1,12 @@
+{
+  "recorded_at_utc": "2026-09-10T18:42:22.215985+00:00",
+  "files_sha256": {
+    "/tmp/onepage-transport-memory-build/curl-8.22.0/lib/.libs/libcurl.a": "6463876783ebc45d2fc88c92d42bdb37974677493ccd1886f5144f5840e1b2e8",
+    "/tmp/onepage-transport-memory-build/ng/lib/libnghttp2.a": "03f63d807b70ce1a252f6cee76d46466dc06e0f1d21632d189d9b13f80f0e191",
+    "/opt/homebrew/Cellar/openssl@3/3.6.3/lib/libssl.3.dylib": "3032e722b7b34f6bc0469695d715d62475fb2c6eecb00bbf0c07629c73108e08",
+    "/opt/homebrew/Cellar/openssl@3/3.6.3/lib/libcrypto.3.dylib": "8e2010fd46cb85dd6423d68c2b69b355a6ad4dfcb1ce83e6f4071b6a705404a7"
+  },
+  "cpu": "Apple M1 Pro",
+  "sdk": "15.5",
+  "filesystem": "Filesystem      Size    Used   Avail Capacity iused ifree %iused  Mounted on\n/dev/disk3s5   460Gi   320Gi   112Gi    75%    6.0M  1.2G    1%   /System/Volumes/Data\n"
+}

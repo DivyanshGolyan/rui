@@ -1,0 +1,38 @@
+Rui #263 native macOS focused Host-only evidence, 2026-09-23
+Disposable checkout: /Users/divyanshgolyan/code/personal/rui263-mac-16
+Base revision: 415c2c1a63498b5bdd3cd333b02373c2ca99c8ab (origin/issue-263-bounded-http2)
+Source state: dirty base plus copied unpushed feature overlay; not independently proven byte-identical to Linux ddd0d38. origin/main is distinct.
+Platform: macOS Darwin 24.6.0 arm64; Zig 0.16.0; Go 1.27.1 darwin/arm64.
+Scope: Host-only <=25,000,000 physical bytes at up to 100 model operations. CLI cost is diagnostic; H1 sequential fixtures are not H2 qualification.
+
+SHA256 source/build provenance (computed at packaging):
+2fc2640948cb3e20355748d18831142f4c57e1f2ab0bb2f8d2589142d0cde3f2  src/provider.zig
+ad16de62b62fe672c3d667d11ad7a73b91c62c272625a25c2bf3771b1f715b26  src/server.zig
+ff5e958757489084195fae8b736b1a1ada7ee8738db9e84f81394411d1baccd9  src/build_transport.sh
+2764862338adf7913a9157ceb522b3b07e2ac1ef367101afd9101b1a20f378ad  src/cli.zig
+115d2cbe83f986851871f5d45ed0a7d5cce09deafdd8acf498965c5d7b521fa7  src/curl-post-retry.patch (16-KiB pinned curl)
+c66b604d42a291fa4ab8f2ed2786cdba971ab6dccc95af664b13c212b730d3c9  zig-out/bin/rui (ReleaseSmall; model-output/control/dispatch/call-classification)
+ce319e9e1c7e03fe3f2bdc7727b2552ec4424511e8444a2307f43372a7e92979  .zig-cache/o/e14b297f17ae14e0cced0174da91d9e9/rui-release-small-check (model-queue build-step artifact)
+
+Commands and recorded exits:
+zig build check                                      exit 0; canonical-check.log (includes intentional injected-fault warnings)
+zig build -Doptimize=ReleaseSmall                    exit 0; build emitted no output
+zig build measurement-check                          exit 0; measurement-check.log
+GOTOOLCHAIN=local go -C tests/qualification run -mod=readonly ./model-output -capacity N -output "$PWD/evidence/model-output-h2-capN.json" "$PWD/zig-out/bin/rui"  exit 0 for N=8,16,100; capacity1 used evidence/model-output-cap1.json
+zig build measure-model-queue -Dmodel-queue-output="$PWD/evidence/model-queue-all-peaks.json"  exit 0
+GOTOOLCHAIN=local go -C tests/qualification run -mod=readonly ./model-control -output "$PWD/evidence/model-control-final.json" "$PWD/zig-out/bin/rui"  exit 0
+GOTOOLCHAIN=local go -C tests/qualification run -mod=readonly ./model-dispatch "$PWD/zig-out/bin/rui" > evidence/model-dispatch.json 2> evidence/model-dispatch.log  exit 0
+GOTOOLCHAIN=local go -C tests/qualification run -mod=readonly ./call-classification -output "$PWD/evidence/call-classification-fixed.json" "$PWD/zig-out/bin/rui" "$PWD/.zig-cache/o/a61e27949d220d95c232795624e72e3c/rui-qualification-sqlite3"  exit 0
+GOTOOLCHAIN=local go -C tests/qualification test ./model-output/... ./model-control ./model-dispatch ./call-classification ./model-queue  exit 0; final-runner-tests.log
+
+Successful summary JSONs (byte size, SHA256):
+39937   737d5eea6817fb08e356c88db6276e06da5423e910936092922bc346c1f6153a  model-output-cap1.json
+51766   414f3c7d3eb0bbeac075e0e6cbc8267ed85d3c0d7210d120deb0f04a96feef55  model-output-h2-cap8.json
+65083   c9765085ddcd4ec797c5eddedebea05176a193b18ed2a266360993bab3698044  model-output-h2-cap16.json
+205225  ec79ae999f1c978bc538db87f875233361f07289a1051f981005fa94dd81483e  model-output-h2-cap100.json
+17861   08684f85648409a8e128dee8bb0f768577805322b217a7e4dc25f2859903afda  model-control-final.json
+14834   943e32faa4a5a7677868a3ccf9b066466ba67fa1f825c4b5ce29840acb74c4d6  model-dispatch.json
+148203  78fb39b665d6882bed2cb4e76d2901a5d1aaba94a0b30bd3e16ed0482d51bbae  model-queue-all-peaks.json
+198163  6f342089fe32d264317b94a885c6aba753c19df67afbffa76c9076cc01f96ce6  call-classification-fixed.json
+
+All eight summaries report status=passed. Model-output H2 capacities 8/16/100 report one TCP connection and exactly N H2 streams in each of two rounds; capacity1 remains loopback H1. Model-control's four configurations and call-classification's nine cases passed. Queue eligible-1/ineligible-0 are aliases of the baseline. JSON artifact paths refer to local transient directories NOT included in this transfer. No private CA, key, binary, or raw Store is packaged. The original evidence/source-hashes.txt is excluded because it contains an earlier, superseded binary hash.

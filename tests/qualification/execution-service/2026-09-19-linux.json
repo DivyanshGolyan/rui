@@ -1,0 +1,1799 @@
+{
+  "artifacts": "/tmp/rui-execution-service-803165985",
+  "cases": [
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 100100280,
+        "largest_uninterrupted_work_interval_ns": 2876831,
+        "stop_to_effect_ns": [
+          20907458
+        ],
+        "deadline_to_service_ns": [],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9357438910186,
+            "end_ns": 9357441787017,
+            "duration_ns": 2876831
+          }
+        ],
+        "validation_intervals": [],
+        "settlement_intervals": [],
+        "max_native_completions_queued_after_removal": 0,
+        "preparation_advance_count": 1,
+        "preparation_work_bytes_total": 3188,
+        "preparation_work_items_total": 41,
+        "max_preparation_work_bytes_per_advance": 3188,
+        "max_preparation_work_items_per_advance": 41,
+        "final_request_bytes": 1576
+      },
+      "parameters": {
+        "name": "baseline",
+        "ready_completion_burst": 1,
+        "selected_history_bytes": 1024,
+        "selected_history_items": 1,
+        "retained_replay_field_bytes": 64,
+        "discarded_replay_field_bytes": 64,
+        "active_owner_population": 1,
+        "bash_owner": false
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 16,
+        "total_structural_change_bytes": 13840
+      },
+      "trace_events": 18,
+      "trace_sha256": "7ecc41eb554ca6b7293706065c28152d76d9cec3663dba9ad48172b036a5d6b5",
+      "unrelated_bash_owner": {
+        "reason": "this factorial case isolates another input dimension",
+        "status": "not_present"
+      }
+    },
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 101330889,
+        "largest_uninterrupted_work_interval_ns": 2970218,
+        "stop_to_effect_ns": [
+          19989990
+        ],
+        "deadline_to_service_ns": [],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:9",
+            "start_ns": 9358484574376,
+            "end_ns": 9358487422810,
+            "duration_ns": 2848434
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:10",
+            "start_ns": 9358491188898,
+            "end_ns": 9358494146774,
+            "duration_ns": 2957876
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:11",
+            "start_ns": 9358498011170,
+            "end_ns": 9358500874346,
+            "duration_ns": 2863176
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:12",
+            "start_ns": 9358504492470,
+            "end_ns": 9358507433380,
+            "duration_ns": 2940910
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:13",
+            "start_ns": 9358511167128,
+            "end_ns": 9358513965777,
+            "duration_ns": 2798649
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:14",
+            "start_ns": 9358517190808,
+            "end_ns": 9358519655002,
+            "duration_ns": 2464194
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:15",
+            "start_ns": 9358523001496,
+            "end_ns": 9358525971714,
+            "duration_ns": 2970218
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:16",
+            "start_ns": 9358529666355,
+            "end_ns": 9358532152290,
+            "duration_ns": 2485935
+          }
+        ],
+        "validation_intervals": [
+          {
+            "kind": "validation_started",
+            "subject": "operation:10",
+            "start_ns": 9358561564512,
+            "end_ns": 9358562061261,
+            "duration_ns": 496749
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:11",
+            "start_ns": 9358565047630,
+            "end_ns": 9358565658360,
+            "duration_ns": 610730
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:12",
+            "start_ns": 9358568738539,
+            "end_ns": 9358569263506,
+            "duration_ns": 524967
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:13",
+            "start_ns": 9358572450094,
+            "end_ns": 9358573036427,
+            "duration_ns": 586333
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:14",
+            "start_ns": 9358575869636,
+            "end_ns": 9358576561971,
+            "duration_ns": 692335
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:15",
+            "start_ns": 9358579326357,
+            "end_ns": 9358579779330,
+            "duration_ns": 452973
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:16",
+            "start_ns": 9358582520693,
+            "end_ns": 9358583070816,
+            "duration_ns": 550123
+          }
+        ],
+        "settlement_intervals": [
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:10",
+            "start_ns": 9358562067149,
+            "end_ns": 9358563980436,
+            "duration_ns": 1913287
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:11",
+            "start_ns": 9358565664726,
+            "end_ns": 9358567657441,
+            "duration_ns": 1992715
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:12",
+            "start_ns": 9358569269829,
+            "end_ns": 9358571463177,
+            "duration_ns": 2193348
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:13",
+            "start_ns": 9358573041559,
+            "end_ns": 9358574865993,
+            "duration_ns": 1824434
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:14",
+            "start_ns": 9358576568444,
+            "end_ns": 9358578410937,
+            "duration_ns": 1842493
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:15",
+            "start_ns": 9358579784565,
+            "end_ns": 9358581567908,
+            "duration_ns": 1783343
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:16",
+            "start_ns": 9358583081548,
+            "end_ns": 9358585520998,
+            "duration_ns": 2439450
+          }
+        ],
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advance_count": 8,
+        "preparation_work_bytes_total": 25504,
+        "preparation_work_items_total": 328,
+        "max_preparation_work_bytes_per_advance": 3188,
+        "max_preparation_work_items_per_advance": 41,
+        "final_request_bytes": 1576
+      },
+      "parameters": {
+        "name": "completion-burst",
+        "ready_completion_burst": 8,
+        "selected_history_bytes": 1024,
+        "selected_history_items": 1,
+        "retained_replay_field_bytes": 64,
+        "discarded_replay_field_bytes": 64,
+        "active_owner_population": 8,
+        "bash_owner": false
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 128,
+        "total_structural_change_bytes": 13952
+      },
+      "trace_events": 131,
+      "trace_sha256": "73ec049ad8b1367766772d18662fc81e9df2939ede1be7d01d9a49b26e22b572",
+      "unrelated_bash_owner": {
+        "reason": "this factorial case isolates another input dimension",
+        "status": "not_present"
+      }
+    },
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 100094485,
+        "largest_uninterrupted_work_interval_ns": 10814202,
+        "stop_to_effect_ns": [
+          19729819
+        ],
+        "deadline_to_service_ns": [],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359177603715,
+            "end_ns": 9359187536248,
+            "duration_ns": 9932533
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359187622235,
+            "end_ns": 9359197344948,
+            "duration_ns": 9722713
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359197409909,
+            "end_ns": 9359208224111,
+            "duration_ns": 10814202
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359208282724,
+            "end_ns": 9359217838191,
+            "duration_ns": 9555467
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359217922851,
+            "end_ns": 9359227555809,
+            "duration_ns": 9632958
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359227637834,
+            "end_ns": 9359237252946,
+            "duration_ns": 9615112
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359237329684,
+            "end_ns": 9359246966839,
+            "duration_ns": 9637155
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359247041941,
+            "end_ns": 9359256628639,
+            "duration_ns": 9586698
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359256706100,
+            "end_ns": 9359266302814,
+            "duration_ns": 9596714
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359266379137,
+            "end_ns": 9359276215429,
+            "duration_ns": 9836292
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359276279829,
+            "end_ns": 9359285911606,
+            "duration_ns": 9631777
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359285971301,
+            "end_ns": 9359295561441,
+            "duration_ns": 9590140
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359295606896,
+            "end_ns": 9359305206042,
+            "duration_ns": 9599146
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359305251642,
+            "end_ns": 9359314783371,
+            "duration_ns": 9531729
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359314863693,
+            "end_ns": 9359324480644,
+            "duration_ns": 9616951
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359324563562,
+            "end_ns": 9359335325859,
+            "duration_ns": 10762297
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359335390689,
+            "end_ns": 9359345022396,
+            "duration_ns": 9631707
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359345070972,
+            "end_ns": 9359354605353,
+            "duration_ns": 9534381
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359354648968,
+            "end_ns": 9359364238168,
+            "duration_ns": 9589200
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359364282661,
+            "end_ns": 9359373878852,
+            "duration_ns": 9596191
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359373919420,
+            "end_ns": 9359383515778,
+            "duration_ns": 9596358
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359383586704,
+            "end_ns": 9359393257212,
+            "duration_ns": 9670508
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359393306754,
+            "end_ns": 9359403017937,
+            "duration_ns": 9711183
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359403061442,
+            "end_ns": 9359412796605,
+            "duration_ns": 9735163
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359412878262,
+            "end_ns": 9359422477399,
+            "duration_ns": 9599137
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359422556309,
+            "end_ns": 9359432195823,
+            "duration_ns": 9639514
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359432273564,
+            "end_ns": 9359441860529,
+            "duration_ns": 9586965
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359441902680,
+            "end_ns": 9359451878134,
+            "duration_ns": 9975454
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359451991469,
+            "end_ns": 9359461951710,
+            "duration_ns": 9960241
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359462038713,
+            "end_ns": 9359471706379,
+            "duration_ns": 9667666
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359471765483,
+            "end_ns": 9359481407117,
+            "duration_ns": 9641634
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359481453820,
+            "end_ns": 9359491053413,
+            "duration_ns": 9599593
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9359491114972,
+            "end_ns": 9359492586237,
+            "duration_ns": 1471265
+          }
+        ],
+        "validation_intervals": [],
+        "settlement_intervals": [],
+        "max_native_completions_queued_after_removal": 0,
+        "preparation_advance_count": 33,
+        "preparation_work_bytes_total": 525428,
+        "preparation_work_items_total": 41,
+        "max_preparation_work_bytes_per_advance": 16384,
+        "max_preparation_work_items_per_advance": 30,
+        "final_request_bytes": 262696
+      },
+      "parameters": {
+        "name": "history-bytes",
+        "ready_completion_burst": 1,
+        "selected_history_bytes": 262144,
+        "selected_history_items": 1,
+        "retained_replay_field_bytes": 64,
+        "discarded_replay_field_bytes": 64,
+        "active_owner_population": 1,
+        "bash_owner": false
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 16,
+        "total_structural_change_bytes": 13840
+      },
+      "trace_events": 88,
+      "trace_sha256": "df2ebfbb8e377b3d30ec7bbe70c00b8c9ffc55cfd60b98dc26521690c01d1813",
+      "unrelated_bash_owner": {
+        "reason": "this factorial case isolates another input dimension",
+        "status": "not_present"
+      }
+    },
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 100116480,
+        "largest_uninterrupted_work_interval_ns": 10039174,
+        "stop_to_effect_ns": [
+          19653632
+        ],
+        "deadline_to_service_ns": [],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362160245903,
+            "end_ns": 9362170124196,
+            "duration_ns": 9878293
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362170167487,
+            "end_ns": 9362179644429,
+            "duration_ns": 9476942
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362179685974,
+            "end_ns": 9362189231790,
+            "duration_ns": 9545816
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362189272762,
+            "end_ns": 9362198978401,
+            "duration_ns": 9705639
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362199019948,
+            "end_ns": 9362209059122,
+            "duration_ns": 10039174
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362209100971,
+            "end_ns": 9362218759457,
+            "duration_ns": 9658486
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362218812066,
+            "end_ns": 9362228378031,
+            "duration_ns": 9565965
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362228420298,
+            "end_ns": 9362238022782,
+            "duration_ns": 9602484
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9362238064214,
+            "end_ns": 9362247070416,
+            "duration_ns": 9006202
+          }
+        ],
+        "validation_intervals": [],
+        "settlement_intervals": [],
+        "max_native_completions_queued_after_removal": 0,
+        "preparation_advance_count": 9,
+        "preparation_work_bytes_total": 145577,
+        "preparation_work_items_total": 371,
+        "max_preparation_work_bytes_per_advance": 16384,
+        "max_preparation_work_items_per_advance": 52,
+        "final_request_bytes": 70813
+      },
+      "parameters": {
+        "name": "history-items",
+        "ready_completion_burst": 1,
+        "selected_history_bytes": 65536,
+        "selected_history_items": 16,
+        "retained_replay_field_bytes": 64,
+        "discarded_replay_field_bytes": 64,
+        "active_owner_population": 1,
+        "bash_owner": false
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 16,
+        "total_structural_change_bytes": 13840
+      },
+      "trace_events": 65,
+      "trace_sha256": "4b61e101f951fe2ee70ac49e1a3863afc37a86873b00afcbb6a8dd0efc2b75b8",
+      "unrelated_bash_owner": {
+        "reason": "this factorial case isolates another input dimension",
+        "status": "not_present"
+      }
+    },
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 100096475,
+        "largest_uninterrupted_work_interval_ns": 2083331,
+        "stop_to_effect_ns": [
+          20520715
+        ],
+        "deadline_to_service_ns": [],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362529911365,
+            "end_ns": 9362531994696,
+            "duration_ns": 2083331
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362532101026,
+            "end_ns": 9362532257346,
+            "duration_ns": 156320
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362532279231,
+            "end_ns": 9362532432589,
+            "duration_ns": 153358
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362532452837,
+            "end_ns": 9362532606594,
+            "duration_ns": 153757
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362532626405,
+            "end_ns": 9362532780644,
+            "duration_ns": 154239
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362532800348,
+            "end_ns": 9362532975421,
+            "duration_ns": 175073
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362533006499,
+            "end_ns": 9362533213662,
+            "duration_ns": 207163
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362533243530,
+            "end_ns": 9362533404748,
+            "duration_ns": 161218
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362533425591,
+            "end_ns": 9362533580620,
+            "duration_ns": 155029
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362533600474,
+            "end_ns": 9362533760445,
+            "duration_ns": 159971
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362533780289,
+            "end_ns": 9362533954191,
+            "duration_ns": 173902
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362533987086,
+            "end_ns": 9362534149657,
+            "duration_ns": 162571
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362534170948,
+            "end_ns": 9362534373745,
+            "duration_ns": 202797
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362534403594,
+            "end_ns": 9362534564355,
+            "duration_ns": 160761
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362534585070,
+            "end_ns": 9362534744126,
+            "duration_ns": 159056
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362534763808,
+            "end_ns": 9362534921820,
+            "duration_ns": 158012
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362534969531,
+            "end_ns": 9362535021069,
+            "duration_ns": 51538
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535042331,
+            "end_ns": 9362535064522,
+            "duration_ns": 22191
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535090510,
+            "end_ns": 9362535113173,
+            "duration_ns": 22663
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535133315,
+            "end_ns": 9362535155370,
+            "duration_ns": 22055
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535175283,
+            "end_ns": 9362535197115,
+            "duration_ns": 21832
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535217035,
+            "end_ns": 9362535241113,
+            "duration_ns": 24078
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535296037,
+            "end_ns": 9362535322997,
+            "duration_ns": 26960
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535349194,
+            "end_ns": 9362535372483,
+            "duration_ns": 23289
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535392600,
+            "end_ns": 9362535414940,
+            "duration_ns": 22340
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535434980,
+            "end_ns": 9362535457578,
+            "duration_ns": 22598
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535477541,
+            "end_ns": 9362535500448,
+            "duration_ns": 22907
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535520368,
+            "end_ns": 9362535543500,
+            "duration_ns": 23132
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535563493,
+            "end_ns": 9362535587575,
+            "duration_ns": 24082
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535607480,
+            "end_ns": 9362535630829,
+            "duration_ns": 23349
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535650680,
+            "end_ns": 9362535674460,
+            "duration_ns": 23780
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535694563,
+            "end_ns": 9362535717370,
+            "duration_ns": 22807
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535737153,
+            "end_ns": 9362535768100,
+            "duration_ns": 30947
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535788295,
+            "end_ns": 9362535811414,
+            "duration_ns": 23119
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535831375,
+            "end_ns": 9362535855599,
+            "duration_ns": 24224
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535875484,
+            "end_ns": 9362535901430,
+            "duration_ns": 25946
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362535921258,
+            "end_ns": 9362535974622,
+            "duration_ns": 53364
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536035926,
+            "end_ns": 9362536068613,
+            "duration_ns": 32687
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536101082,
+            "end_ns": 9362536127201,
+            "duration_ns": 26119
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536147402,
+            "end_ns": 9362536172194,
+            "duration_ns": 24792
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536192134,
+            "end_ns": 9362536216230,
+            "duration_ns": 24096
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536238412,
+            "end_ns": 9362536264178,
+            "duration_ns": 25766
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536284709,
+            "end_ns": 9362536309098,
+            "duration_ns": 24389
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536329125,
+            "end_ns": 9362536400873,
+            "duration_ns": 71748
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536428138,
+            "end_ns": 9362536454550,
+            "duration_ns": 26412
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536474858,
+            "end_ns": 9362536499765,
+            "duration_ns": 24907
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536519571,
+            "end_ns": 9362536544704,
+            "duration_ns": 25133
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536564617,
+            "end_ns": 9362536590354,
+            "duration_ns": 25737
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362536610312,
+            "end_ns": 9362537764516,
+            "duration_ns": 1154204
+          }
+        ],
+        "validation_intervals": [],
+        "settlement_intervals": [],
+        "max_native_completions_queued_after_removal": 0,
+        "preparation_advance_count": 49,
+        "preparation_work_bytes_total": 789428,
+        "preparation_work_items_total": 41,
+        "max_preparation_work_bytes_per_advance": 16384,
+        "max_preparation_work_items_per_advance": 24,
+        "final_request_bytes": 263656
+      },
+      "parameters": {
+        "name": "retained-field",
+        "ready_completion_burst": 1,
+        "selected_history_bytes": 1024,
+        "selected_history_items": 1,
+        "retained_replay_field_bytes": 262144,
+        "discarded_replay_field_bytes": 64,
+        "active_owner_population": 1,
+        "bash_owner": false
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 16,
+        "total_structural_change_bytes": 13840
+      },
+      "trace_events": 114,
+      "trace_sha256": "30a585d8c9808ccac0cb4c5a11bdc3e5c7d31e3a4391ced4f9e8b579b2a32376",
+      "unrelated_bash_owner": {
+        "reason": "this factorial case isolates another input dimension",
+        "status": "not_present"
+      }
+    },
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 100107916,
+        "largest_uninterrupted_work_interval_ns": 2361311,
+        "stop_to_effect_ns": [
+          19179611
+        ],
+        "deadline_to_service_ns": [],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362815432696,
+            "end_ns": 9362817794007,
+            "duration_ns": 2361311
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362817832817,
+            "end_ns": 9362818031134,
+            "duration_ns": 198317
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362818063291,
+            "end_ns": 9362818276528,
+            "duration_ns": 213237
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362818308730,
+            "end_ns": 9362818470808,
+            "duration_ns": 162078
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362818494170,
+            "end_ns": 9362818655162,
+            "duration_ns": 160992
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362818677310,
+            "end_ns": 9362818851595,
+            "duration_ns": 174285
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362818874279,
+            "end_ns": 9362819069979,
+            "duration_ns": 195700
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362819105985,
+            "end_ns": 9362819307744,
+            "duration_ns": 201759
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362819347034,
+            "end_ns": 9362819509503,
+            "duration_ns": 162469
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362819532046,
+            "end_ns": 9362819696760,
+            "duration_ns": 164714
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362819719872,
+            "end_ns": 9362819980357,
+            "duration_ns": 260485
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362820055647,
+            "end_ns": 9362820229697,
+            "duration_ns": 174050
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362820255350,
+            "end_ns": 9362820453988,
+            "duration_ns": 198638
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362820483801,
+            "end_ns": 9362820646732,
+            "duration_ns": 162931
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362820667542,
+            "end_ns": 9362820868775,
+            "duration_ns": 201233
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362820896976,
+            "end_ns": 9362821104118,
+            "duration_ns": 207142
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9362821137003,
+            "end_ns": 9362822176062,
+            "duration_ns": 1039059
+          }
+        ],
+        "validation_intervals": [],
+        "settlement_intervals": [],
+        "max_native_completions_queued_after_removal": 0,
+        "preparation_advance_count": 17,
+        "preparation_work_bytes_total": 265268,
+        "preparation_work_items_total": 41,
+        "max_preparation_work_bytes_per_advance": 16384,
+        "max_preparation_work_items_per_advance": 25,
+        "final_request_bytes": 1576
+      },
+      "parameters": {
+        "name": "discarded-field",
+        "ready_completion_burst": 1,
+        "selected_history_bytes": 1024,
+        "selected_history_items": 1,
+        "retained_replay_field_bytes": 64,
+        "discarded_replay_field_bytes": 262144,
+        "active_owner_population": 1,
+        "bash_owner": false
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 16,
+        "total_structural_change_bytes": 13840
+      },
+      "trace_events": 50,
+      "trace_sha256": "3db6515ae08e01736a8df31a609ef2b448c59ec253932e201efaf7d5125af2bd",
+      "unrelated_bash_owner": {
+        "reason": "this factorial case isolates another input dimension",
+        "status": "not_present"
+      }
+    },
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 100119723,
+        "largest_uninterrupted_work_interval_ns": 2482244,
+        "stop_to_effect_ns": [
+          20213277
+        ],
+        "deadline_to_service_ns": [],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:9",
+            "start_ns": 9363865474295,
+            "end_ns": 9363867956539,
+            "duration_ns": 2482244
+          }
+        ],
+        "validation_intervals": [],
+        "settlement_intervals": [],
+        "max_native_completions_queued_after_removal": 0,
+        "preparation_advance_count": 1,
+        "preparation_work_bytes_total": 3188,
+        "preparation_work_items_total": 41,
+        "max_preparation_work_bytes_per_advance": 3188,
+        "max_preparation_work_items_per_advance": 41,
+        "final_request_bytes": 1576
+      },
+      "parameters": {
+        "name": "active-owners",
+        "ready_completion_burst": 1,
+        "selected_history_bytes": 1024,
+        "selected_history_items": 1,
+        "retained_replay_field_bytes": 64,
+        "discarded_replay_field_bytes": 64,
+        "active_owner_population": 8,
+        "bash_owner": false
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 128,
+        "total_structural_change_bytes": 13952
+      },
+      "trace_events": 32,
+      "trace_sha256": "05f025821a4308f715d23911bbe657592ecd45e1e6381220f015879b6c36499a",
+      "unrelated_bash_owner": {
+        "reason": "this factorial case isolates another input dimension",
+        "status": "not_present"
+      }
+    },
+    {
+      "metrics": {
+        "status": "passed",
+        "max_lifecycle_service_gap_ns": 100138863,
+        "largest_uninterrupted_work_interval_ns": 13016136,
+        "stop_to_effect_ns": [
+          20742150
+        ],
+        "deadline_to_service_ns": [
+          930704
+        ],
+        "preparation_intervals": [
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:1",
+            "start_ns": 9364012001483,
+            "end_ns": 9364021619722,
+            "duration_ns": 9618239
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:1",
+            "start_ns": 9364021744581,
+            "end_ns": 9364022503529,
+            "duration_ns": 758948
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9364132733719,
+            "end_ns": 9364143034178,
+            "duration_ns": 10300459
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:2",
+            "start_ns": 9364143154040,
+            "end_ns": 9364143948692,
+            "duration_ns": 794652
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:3",
+            "start_ns": 9364251836722,
+            "end_ns": 9364261549532,
+            "duration_ns": 9712810
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:3",
+            "start_ns": 9364261663066,
+            "end_ns": 9364262383074,
+            "duration_ns": 720008
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:4",
+            "start_ns": 9364370885131,
+            "end_ns": 9364382212861,
+            "duration_ns": 11327730
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:4",
+            "start_ns": 9364382352964,
+            "end_ns": 9364383221468,
+            "duration_ns": 868504
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:5",
+            "start_ns": 9364491902091,
+            "end_ns": 9364504918227,
+            "duration_ns": 13016136
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:5",
+            "start_ns": 9364505057875,
+            "end_ns": 9364505752451,
+            "duration_ns": 694576
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:6",
+            "start_ns": 9364614179578,
+            "end_ns": 9364623999721,
+            "duration_ns": 9820143
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:6",
+            "start_ns": 9364624433703,
+            "end_ns": 9364625615870,
+            "duration_ns": 1182167
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:7",
+            "start_ns": 9364734973673,
+            "end_ns": 9364744763759,
+            "duration_ns": 9790086
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:7",
+            "start_ns": 9364744872836,
+            "end_ns": 9364745574244,
+            "duration_ns": 701408
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:8",
+            "start_ns": 9364853470822,
+            "end_ns": 9364863041753,
+            "duration_ns": 9570931
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:8",
+            "start_ns": 9364863164299,
+            "end_ns": 9364863875478,
+            "duration_ns": 711179
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:9",
+            "start_ns": 9364972489321,
+            "end_ns": 9364973663674,
+            "duration_ns": 1174353
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:10",
+            "start_ns": 9365114271238,
+            "end_ns": 9365126573574,
+            "duration_ns": 12302336
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:10",
+            "start_ns": 9365130113752,
+            "end_ns": 9365131326287,
+            "duration_ns": 1212535
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:11",
+            "start_ns": 9365135534339,
+            "end_ns": 9365147752484,
+            "duration_ns": 12218145
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:11",
+            "start_ns": 9365173102615,
+            "end_ns": 9365174573026,
+            "duration_ns": 1470411
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:12",
+            "start_ns": 9365178259658,
+            "end_ns": 9365188584672,
+            "duration_ns": 10325014
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:12",
+            "start_ns": 9365213955617,
+            "end_ns": 9365215411167,
+            "duration_ns": 1455550
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:13",
+            "start_ns": 9365219148928,
+            "end_ns": 9365229601855,
+            "duration_ns": 10452927
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:13",
+            "start_ns": 9365257230569,
+            "end_ns": 9365258586537,
+            "duration_ns": 1355968
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:14",
+            "start_ns": 9365262293422,
+            "end_ns": 9365272514584,
+            "duration_ns": 10221162
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:14",
+            "start_ns": 9365297880034,
+            "end_ns": 9365299263858,
+            "duration_ns": 1383824
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:15",
+            "start_ns": 9365302957068,
+            "end_ns": 9365313196141,
+            "duration_ns": 10239073
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:15",
+            "start_ns": 9365338472478,
+            "end_ns": 9365339948552,
+            "duration_ns": 1476074
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:16",
+            "start_ns": 9365343533930,
+            "end_ns": 9365354098188,
+            "duration_ns": 10564258
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:16",
+            "start_ns": 9365379350969,
+            "end_ns": 9365380885801,
+            "duration_ns": 1534832
+          },
+          {
+            "kind": "preparation_advance_started",
+            "subject": "operation:17",
+            "start_ns": 9365384113322,
+            "end_ns": 9365387053486,
+            "duration_ns": 2940164
+          }
+        ],
+        "validation_intervals": [
+          {
+            "kind": "validation_started",
+            "subject": "operation:1",
+            "start_ns": 9364024039112,
+            "end_ns": 9364024783172,
+            "duration_ns": 744060
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:2",
+            "start_ns": 9364145475021,
+            "end_ns": 9364146046112,
+            "duration_ns": 571091
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:3",
+            "start_ns": 9364263813910,
+            "end_ns": 9364264373971,
+            "duration_ns": 560061
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:4",
+            "start_ns": 9364384853453,
+            "end_ns": 9364385406823,
+            "duration_ns": 553370
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:5",
+            "start_ns": 9364507185779,
+            "end_ns": 9364507688580,
+            "duration_ns": 502801
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:6",
+            "start_ns": 9364627271315,
+            "end_ns": 9364627909294,
+            "duration_ns": 637979
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:7",
+            "start_ns": 9364747004364,
+            "end_ns": 9364747497276,
+            "duration_ns": 492912
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:8",
+            "start_ns": 9364865454761,
+            "end_ns": 9364865980432,
+            "duration_ns": 525671
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:9",
+            "start_ns": 9364975876395,
+            "end_ns": 9364976416471,
+            "duration_ns": 540076
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:11",
+            "start_ns": 9365415825378,
+            "end_ns": 9365416526045,
+            "duration_ns": 700667
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:12",
+            "start_ns": 9365419473589,
+            "end_ns": 9365420102352,
+            "duration_ns": 628763
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:13",
+            "start_ns": 9365422973477,
+            "end_ns": 9365423583155,
+            "duration_ns": 609678
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:14",
+            "start_ns": 9365426749974,
+            "end_ns": 9365427329877,
+            "duration_ns": 579903
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:15",
+            "start_ns": 9365431319988,
+            "end_ns": 9365431885919,
+            "duration_ns": 565931
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:16",
+            "start_ns": 9365434746046,
+            "end_ns": 9365435323629,
+            "duration_ns": 577583
+          },
+          {
+            "kind": "validation_started",
+            "subject": "operation:17",
+            "start_ns": 9365438495042,
+            "end_ns": 9365439146809,
+            "duration_ns": 651767
+          }
+        ],
+        "settlement_intervals": [
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:1",
+            "start_ns": 9364024790418,
+            "end_ns": 9364028520598,
+            "duration_ns": 3730180
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:2",
+            "start_ns": 9364146052266,
+            "end_ns": 9364147855594,
+            "duration_ns": 1803328
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:3",
+            "start_ns": 9364264379210,
+            "end_ns": 9364266191569,
+            "duration_ns": 1812359
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:4",
+            "start_ns": 9364385412865,
+            "end_ns": 9364387667644,
+            "duration_ns": 2254779
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:5",
+            "start_ns": 9364507694953,
+            "end_ns": 9364509534205,
+            "duration_ns": 1839252
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:6",
+            "start_ns": 9364627915556,
+            "end_ns": 9364630974578,
+            "duration_ns": 3059022
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:7",
+            "start_ns": 9364747502988,
+            "end_ns": 9364749351760,
+            "duration_ns": 1848772
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:8",
+            "start_ns": 9364865986378,
+            "end_ns": 9364867821720,
+            "duration_ns": 1835342
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:9",
+            "start_ns": 9364976421791,
+            "end_ns": 9364979572400,
+            "duration_ns": 3150609
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:11",
+            "start_ns": 9365416533365,
+            "end_ns": 9365418466717,
+            "duration_ns": 1933352
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:12",
+            "start_ns": 9365420109078,
+            "end_ns": 9365421921072,
+            "duration_ns": 1811994
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:13",
+            "start_ns": 9365423597808,
+            "end_ns": 9365425749968,
+            "duration_ns": 2152160
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:14",
+            "start_ns": 9365427336109,
+            "end_ns": 9365430107351,
+            "duration_ns": 2771242
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:15",
+            "start_ns": 9365431891281,
+            "end_ns": 9365433776811,
+            "duration_ns": 1885530
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:16",
+            "start_ns": 9365435329544,
+            "end_ns": 9365437495097,
+            "duration_ns": 2165553
+          },
+          {
+            "kind": "settlement_lock_requested",
+            "subject": "operation:17",
+            "start_ns": 9365439153742,
+            "end_ns": 9365441234426,
+            "duration_ns": 2080684
+          }
+        ],
+        "max_native_completions_queued_after_removal": 6,
+        "preparation_advance_count": 32,
+        "preparation_work_bytes_total": 257744,
+        "preparation_work_items_total": 495,
+        "max_preparation_work_bytes_per_advance": 16384,
+        "max_preparation_work_items_per_advance": 37,
+        "final_request_bytes": 8744
+      },
+      "parameters": {
+        "name": "mixed-bash",
+        "ready_completion_burst": 8,
+        "selected_history_bytes": 8192,
+        "selected_history_items": 1,
+        "retained_replay_field_bytes": 64,
+        "discarded_replay_field_bytes": 64,
+        "active_owner_population": 8,
+        "bash_owner": true
+      },
+      "status": "passed",
+      "structural_memory": {
+        "execution_slot_bytes": 1280,
+        "preceding_execution_slot_bytes": 1264,
+        "shared_preparation_workspace_bytes": 13824,
+        "slot_change_times_capacity_bytes": 128,
+        "total_structural_change_bytes": 13952
+      },
+      "trace_events": 297,
+      "trace_sha256": "0cd7a5637a06bca7d474cde9fd8de33a8885e04bff82f63f471e270cd9ae23ec",
+      "unrelated_bash_owner": {
+        "path": "production provider Tool Call, public inspection and permission, native Bash owner, timeout action, and retained cleanup",
+        "status": "present"
+      }
+    }
+  ],
+  "format": "rui-execution-service-v1-go",
+  "limits": [
+    "deterministic loopback HTTP does not qualify a live provider",
+    "unavailable metrics are invalid, never zero or passing",
+    "monotonic Host traces are authority; client scheduling and polling are not",
+    "only the mixed-bash case includes a Bash owner and deadline; factorial cases isolate their named input dimension"
+  ],
+  "provenance": {
+    "binary": "/home/user/workspace/repo/.zig-cache/o/d0e9191a73234daa96577deabed47ee7/rui-release-small-check",
+    "binary_sha256": "de74c7f7e434212cba99e8ba36c66f67939b7f50740baa5b8d20c2e23fb31e8c",
+    "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+    "measurement_runtime": {
+      "go_arch": "amd64",
+      "go_os": "linux",
+      "go_version": "go1.27.1",
+      "gopsutil_version": "v4.26.7",
+      "logical_cpus": 1,
+      "module_path": "rui.local/qualification",
+      "physical_memory_bytes": 2079363072
+    },
+    "platform": "Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Tue Jul 28 15:38:05 UTC 2026 x86_64 GNU/Linux",
+    "tested_revision": "5b46625910cb9111b06767e42a9171d3dcb3c760",
+    "working_tree_dirty": false,
+    "zig": "0.16.0"
+  },
+  "provenance_error": null,
+  "scope": "issues #238/#244/#245 production execution-service qualification",
+  "source_sha256": {
+    "ARCHITECTURE.md": "d99964d12c903b8fc24e39e53155d81aed2abe8c4fb9320b0bb8555b4239df55",
+    "VERIFICATION.md": "38161d6230927856287adb681799af777505f0641d47d63925d59c3839307cd7",
+    "build.zig": "cb7c42528b04819f36c8829f40cf80240a4ac79530886efae6dda3cf0d6c6893",
+    "src/bash.zig": "a1a9c978f71df3ff91cee266784bd5f9be47c76d4e96b700ed579d2e5d584448",
+    "src/cli.zig": "8349fc9ddab547293884e9ef73b185453f6aac4695ca984b5a3543325dad7c35",
+    "src/provider.zig": "81be5e21f9ed6652d8f68f6fd1c643e383277be8d9a7b6f953d2a77d3348da16",
+    "src/provider_output.zig": "6e21ca810c046d154b3b826c242b60bca865f5055855f4510604a972104a2f7f",
+    "src/server.zig": "933fae1a89e76efb3da0e7fb52d9285c59ded57f46b109253393eddec7563e8e",
+    "src/store.zig": "9adc6f88b4635f858d32abc3c566539901b7cc3c9b9b61bec8cbd969df742751",
+    "tests/integration/dispatch_integration.py": "0964583e36b6017dd35aca3e02a6dd150d2a051293aeae2fbd80a5fd202e980f",
+    "tests/qualification/execution-service/main.go": "5aa0e0a3e2240d831d45fa7d831189477241ff8423d19d76a30ce5345b4fbcc6",
+    "tests/qualification/execution-service/main_test.go": "30ca934d29803e46fedffd2223d87312ddf7a40527ef9d56638d5dab180424e5"
+  },
+  "status": "passed",
+  "structural_memory": {
+    "calculation": "(execution slot size - preceding 1264-byte Linux x86-64 slot) * configured capacity + one readiness-reported shared Preparation workspace",
+    "payload_storage": "charged disk-backed scratch; selected history and replay bytes do not create a second resident payload queue",
+    "per_active_slot_preparation_window_bytes": 0,
+    "shared_preparation_owners": 1
+  }
+}

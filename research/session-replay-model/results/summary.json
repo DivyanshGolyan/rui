@@ -1,0 +1,90 @@
+{
+  "jar_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
+  "model_sha256": "42ddafd79f23e8d7aca8f175e9807e2b21a4f235a28a65e528040df818a9ce36",
+  "cases": {
+    "correct": {
+      "expected_violation": null,
+      "actual_violation": null,
+      "exit_code": 0,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        262,
+        141,
+        0
+      ],
+      "config_sha256": "72aa56db8839ee7aab0716accf8b854dfcadc79e9e58ff2cd262c2ee412305e0"
+    },
+    "correct-two-crashes": {
+      "expected_violation": null,
+      "actual_violation": null,
+      "exit_code": 0,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        506,
+        241,
+        0
+      ],
+      "config_sha256": "6905a2a0ae1b2e3f42a896c74cbfc987eb096838b23e8d4a985f19eb19f3a835"
+    },
+    "progress": {
+      "expected_violation": null,
+      "actual_violation": null,
+      "exit_code": 0,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        262,
+        141,
+        0
+      ],
+      "config_sha256": "f57b681501ae0232a7a1077d7f9649e825679af9a0eb483344d1961a765d4322"
+    },
+    "broken-recovery": {
+      "expected_violation": "UniqueWorkflowAdmission",
+      "actual_violation": "UniqueWorkflowAdmission",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        57,
+        34,
+        9
+      ],
+      "config_sha256": "e55d22da8be09718ed2a44b9b3f6e78433b9a251113eff1806ec4cdb985812d6"
+    },
+    "broken-wait": {
+      "expected_violation": "AnswerMatchesAdmission",
+      "actual_violation": "AnswerMatchesAdmission",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        190,
+        106,
+        13
+      ],
+      "config_sha256": "364a78b93350287c1a0cd4b9d1ad8fe94fa31537d4ad8ea4282ad31dc0ca23ad"
+    },
+    "broken-settlement": {
+      "expected_violation": "NoStrandedMessages",
+      "actual_violation": "NoStrandedMessages",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        52,
+        31,
+        8
+      ],
+      "config_sha256": "8242bdc8923b8589482ac54d04b079f85fdb2f1f274e30e06e75e79cd1e3bf61"
+    },
+    "witness-replay": {
+      "expected_violation": "NoReplayWitness",
+      "actual_violation": "NoReplayWitness",
+      "exit_code": 12,
+      "expectation_met": true,
+      "states_generated_distinct_queued": [
+        215,
+        122,
+        13
+      ],
+      "config_sha256": "849248d0d73d991d09817494fb97b5438c6281cea1d238e7c5ff26eca798d716"
+    }
+  }
+}

@@ -1,0 +1,106 @@
+{
+  "sqlite": "3.53.4",
+  "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "unrelated_waiters": 100000,
+  "repeats": 7,
+  "cases": [
+    {
+      "dependents": 0,
+      "samples_ms": {
+        "result_only": [
+          0.413541,
+          0.324375,
+          0.287041,
+          0.399959,
+          0.283666,
+          0.283375,
+          0.273708
+        ],
+        "result_and_ready": [
+          0.298333,
+          0.27575,
+          0.547917,
+          0.292167,
+          0.275292,
+          0.68925,
+          0.376667
+        ],
+        "targeted_first": [
+          0.018584,
+          0.012459,
+          0.013167,
+          0.010917,
+          0.012333,
+          0.008375,
+          0.009292
+        ],
+        "derived_first": [
+          4.428292,
+          4.329375,
+          4.043791,
+          3.962,
+          3.97825,
+          4.649917,
+          4.185417
+        ],
+        "ready_first": [
+          0.022958,
+          0.007708,
+          0.009125,
+          0.006125,
+          0.006334,
+          0.006209,
+          0.006333
+        ]
+      },
+      "plans": {
+        "targeted_first": [
+          "SEARCH dependency USING COVERING INDEX by_work (work_id=?)"
+        ],
+        "derived_first": [
+          "SCAN d",
+          "SEARCH w USING INTEGER PRIMARY KEY (rowid=?)"
+        ],
+        "ready_first": [
+          "SCAN ready"
+        ]
+      },
+      "query_cpu_ms": {
+        "targeted_first": [
+          0.019,
+          0.011,
+          0.012,
+          0.011,
+          0.012,
+          0.009,
+          0.01
+        ],
+        "derived_first": [
+          4.411,
+          4.329,
+          4.007,
+          3.961,
+          3.977,
+          4.637,
+          4.158
+        ],
+        "ready_first": [
+          0.023,
+          0.008,
+          0.009,
+          0.006,
+          0.005,
+          0.006,
+          0.007
+        ]
+      },
+      "median_ms": {
+        "result_only": 0.287,
+        "result_and_ready": 0.2983,
+        "targeted_first": 0.0123,
+        "derived_first": 4.1854,
+        "ready_first": 0.0063
+      }
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+.{
+    .name = .rui,
+    .version = "0.1.0",
+    .fingerprint = 0xce12316328c0bfb1,
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .yaml = .{
+            .url = "https://github.com/yaml/libyaml/archive/refs/tags/0.2.5.tar.gz",
+            .hash = "N-V-__8AAFisCAAMQCHLFuzfjTcHCY_2lOFAyfksvXa7HzDL",
+        },
+        .translate_c = .{
+            .url = "git+https://codeberg.org/ziglang/translate-c#f978dca0f2b2a782d06591989e80aae7c74d0183",
+            .hash = "translate_c-2.0.1-Q_BUWmVOBwDWdxpDb7n6-LpMznKteZvXbL_4r6DxB2_d",
+        },
+        .sqlite = .{
+            .url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip",
+            .hash = "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+        },
+        .nghttp2 = .{
+            .url = "https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz",
+            .hash = "N-V-__8AACay2gDbHrByjNGWvyH8G9Gp30uRgZqobYOF1nhb",
+        },
+        .openssl = .{
+            .url = "https://github.com/openssl/openssl/releases/download/openssl-3.6.3/openssl-3.6.3.tar.gz",
+            .hash = "N-V-__8AAJgLCgiTl2NEdxbc2QusROj0-GIN3jrv7BgQDGwM",
+        },
+        .utf8proc = .{
+            .url = "https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz",
+            .hash = "N-V-__8AACywKABFCj0r_Y-jIWsk9ahy10zlk78hjn6S-39g",
+        },
+        .vaxis = .{
+            .url = "git+https://github.com/DivyanshGolyan/libvaxis#1e71be3a790f8099ac50f7c642be184314c2b269",
+            .hash = "vaxis-0.6.0-BWNV_MpDDgBtC5L3wRzUa12A9XG0vLGs79tSlhlCLO2B",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "build",
+        "install.sh",
+        "release/publish.sh",
+        "src",
+        "tests",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+    },
+}

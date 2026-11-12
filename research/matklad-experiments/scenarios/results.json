@@ -1,0 +1,178 @@
+{
+  "source_commit": "3bdadc8395716e587f3da11f0b85ecdb3b91274a",
+  "zig": "0.16.0",
+  "sqlite_package": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+  "builds": [
+    {
+      "fixture": "effect",
+      "seconds": 11.89,
+      "source_sha256": "a67061e8f2a38788b89d25cf2eac67f87912dda64235628db37acfce2c2928df"
+    },
+    {
+      "fixture": "patch",
+      "seconds": 11.004,
+      "source_sha256": "21ef4a354919b851190b29cd4af70d0586bf93cf3c250fb04b22d20a358b1c60"
+    }
+  ],
+  "cases": [
+    {
+      "name": "candidate-not-published",
+      "passed": true,
+      "elapsed_seconds": 0.631,
+      "events": [
+        {
+          "mode": "crash-prepublication-model",
+          "exit": 86
+        },
+        {
+          "mode": "recover-prepublication-model",
+          "exit": 0,
+          "observed": "finished"
+        }
+      ]
+    },
+    {
+      "name": "transaction-not-committed",
+      "passed": true,
+      "elapsed_seconds": 0.053,
+      "events": [
+        {
+          "mode": "crash-transaction-model",
+          "exit": 88
+        },
+        {
+          "mode": "recover-prepublication-model",
+          "exit": 0,
+          "observed": "finished"
+        }
+      ]
+    },
+    {
+      "name": "completion-published",
+      "passed": true,
+      "elapsed_seconds": 0.035,
+      "events": [
+        {
+          "mode": "crash-published-model",
+          "exit": 87
+        },
+        {
+          "mode": "recover-published-model",
+          "exit": 0,
+          "observed": "finished"
+        }
+      ]
+    },
+    {
+      "name": "uncertain-bash-no-replay",
+      "passed": true,
+      "elapsed_seconds": 0.066,
+      "events": [
+        {
+          "mode": "start-bash",
+          "exit": 0
+        },
+        {
+          "mode": "resume-bash",
+          "exit": 0,
+          "observed": "indeterminate"
+        },
+        {
+          "mode": "resume-bash",
+          "exit": 0,
+          "observed": "indeterminate"
+        }
+      ]
+    },
+    {
+      "name": "authorized-bash-dispatch",
+      "passed": true,
+      "elapsed_seconds": 0.078,
+      "events": [
+        {
+          "mode": "start-authorized-bash",
+          "exit": 0
+        },
+        {
+          "mode": "resume-authorized-bash",
+          "exit": 0,
+          "observed": "finished"
+        }
+      ]
+    },
+    {
+      "name": "patch-postimage-reconciliation",
+      "passed": true,
+      "elapsed_seconds": 0.969,
+      "events": [
+        {
+          "mode": "start-mutation",
+          "exit": 0
+        },
+        {
+          "mode": "resume-applied",
+          "exit": 0,
+          "observed": "finished"
+        },
+        {
+          "mode": "resume-finished",
+          "exit": 0,
+          "observed": "finished"
+        }
+      ]
+    },
+    {
+      "name": "patch-divergence-preserved",
+      "passed": true,
+      "elapsed_seconds": 0.256,
+      "events": [
+        {
+          "mode": "start-attempt",
+          "exit": 0
+        },
+        {
+          "mode": "resume-indeterminate",
+          "exit": 0,
+          "observed": "finished"
+        }
+      ]
+    },
+    {
+      "name": "model-retry-and-late-evidence",
+      "passed": true,
+      "elapsed_seconds": 0.045,
+      "events": [
+        {
+          "mode": "start-model",
+          "exit": 0
+        },
+        {
+          "mode": "finish-model",
+          "exit": 0,
+          "observed": "finished"
+        },
+        {
+          "mode": "late-model",
+          "exit": 0,
+          "observed": "audited"
+        }
+      ]
+    }
+  ],
+  "negative_controls": [
+    {
+      "name": "published-as-unpublished",
+      "caught": true,
+      "exit": 1,
+      "stderr": [
+        "error: PrepublicationCrashGainedCompletionAuthority"
+      ]
+    },
+    {
+      "name": "duplicated-bash-side-effect",
+      "caught": true,
+      "message": "uncertain.txt: expected 'x', observed 'xx'"
+    }
+  ],
+  "scope": "historical production implementation; no relational Session/Turn, disk-first, physical custody, live provider or power-loss certification"
+}

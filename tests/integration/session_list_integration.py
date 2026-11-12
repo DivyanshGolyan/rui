@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Native Host wire proof for configured-only Session discovery (no local records)."""
+
+import json
+import os
+import pathlib
+import os_semantics
+import subprocess
+import sys
+import tempfile
+import time
+
+import host_process
+from host_process import HostDiagnostics, canonical_fixture_root, start_ready_process, stop_process
+from session_list_fixture import assert_empty_full, assert_resources, released_resources
+
+
+def exchange(socket_path, route, request):
+    body = json.dumps(request, ensure_ascii=True, separators=(",", ":")).encode()
+    with os_semantics.unix_stream() as client:
+        client.connect(socket_path)
+        client.sendall(
+            f"POST /v1/{route} HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\nConnection: close\r\nX-Rui-Wire-Version: {host_process.WIRE_VERSION}\r\n\r\n".encode()
+            + body
+        )
+        chunks = []
+        while chunk := client.recv(65536):
+            chunks.append(chunk)
+    head, payload = b"".join(chunks).split(b"\r\n\r\n", 1)
+    assert int(next(line.split(b": ", 1)[1] for line in head.split(b"\r\n") if line.startswith(b"Content-Length: "))) == len(payload)
+    return int(head.split(b" ", 2)[1]), json.loads(payload)
+
+
+def main():
+    binary, client = (pathlib.Path(value).resolve() for value in sys.argv[1:3])
+    with tempfile.TemporaryDirectory(prefix="rui-session-list-") as temporary:
+        root = canonical_fixture_root(temporary)
+        store = root / "store"
+        store.mkdir(mode=0o700)
+        other = root / "other"
+        other.mkdir()
+        home = root / "fresh-home"
+        home.mkdir()
+        original_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(home)
+        process, fields = start_ready_process([binary, "host", "serve", "--store", store, "--active-capacity", "1", "--test-phase-trace"], required_fields={"execution": "unavailable"}, observations="list")
+        diagnostics = HostDiagnostics(process)
+        try:
+            address = fields["socket"]
+            latest_invocation = None
+            def base(kind):
+                return {"version": host_process.WIRE_VERSION, "kind": kind, "store": str(store)}
+
+            def listing(workspace=None, cursor=None):
+                nonlocal latest_invocation
+                cursor = cursor or {"after": "0", "ceiling": "0"}
+                began_ns = time.monotonic_ns()
+                deadline = time.monotonic() + 10
+                result = subprocess.run(
+                    [client, store, workspace if workspace is not None else "-", cursor["after"], cursor["ceiling"]],
+                    capture_output=True, timeout=10,
+                )
+                latest_invocation = (began_ns, time.monotonic_ns(), deadline)
+                assert result.returncode == 0, (result.returncode, result.stderr[-2000:])
+                return 200, json.loads(result.stdout)
+
+            initial = listing()
+            assert initial[0] == 200, initial
+            assert_empty_full(initial[1])
+            baseline = released_resources(process.pid, diagnostics, latest_invocation)
+            # A rejected configuration creates a request fact but no Session.
+            def configure(key, reference, workspace, model="gpt-6-sol", label=None):
+                config = {
+                    "workspace": workspace, "provider": "codex", "model": model,
+                    "tools": ["bash", "web_search"], "permissionMode": "bypass", "compactAt": 100000,
+                    # D111: a model the catalog does not list states no effort.
+                    "effort": "low" if model == "gpt-6-sol" else None,
+                }
+                if label is not None:
+                    config["label"] = label
+                return exchange(address, "configure", {**base("configure"), "key": key, "session": reference, "configuration": config})
+
+            def create(key, workspace, model="gpt-6-sol"):
+                status, result = configure(key, "", workspace, model=model)
+                answer = result["answer"]
+                assert status == 200 and answer["status"] == "accepted" and answer["created"] is True, result
+                reference = answer["session"]
+                assert len(reference) == 6 and all(character in "0123456789abcdefghjkmnpqrstvwxyz" for character in reference), result
+                return reference
+
+            # An empty model is a domain rejection, answered without a Session.
+            assert configure("rejected", "", str(root), model="")[1]["answer"]["status"] == "rejected"
+            # Keep allocation order independently of the random IDs' lexical order.
+            names = [create(f"created-{i}", str(other) if i == 3 else str(root)) for i in range(10)]
+            first_status, first = listing(str(root))
+            assert first_status == 200 and [item["reference"] for item in first["sessions"]] == [names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8)], first
+            assert all(item["workspace"] == str(root) for item in first["sessions"])
+            assert first["next"] and int(first["next"]["ceiling"]) == 10
+            later = create("created-later", str(root))
+            continued = listing(str(root), first["next"])
+            assert continued[0] == 200 and continued[1]["next"] is None and len(continued[1]["sessions"]) == 1, continued
+            row = continued[1]["sessions"][0]
+            assert {name: row[name] for name in ("reference", "workspace", "provider", "model", "tools", "permission_mode")} == {
+                "reference": names[9], "workspace": str(root), "provider": "codex", "model": "gpt-6-sol", "tools": ["bash", "web_search"],
+                "permission_mode": "bypass"}, row
+            # Configured and never messaged: idle since its creation, with no
+            # Label, first Message or person's Message.
+            assert int(row["created_at"]) > 0 and row["label"] is None and row["revision"] == "1" and row["end"] == "0", row
+            assert row["first_message"] is None and row["peers"] == {"from_person_at": None}, row
+            assert row["work"] == {"state": {"kind": "idle", "since": row["created_at"]}, "turn": None, "operation": None,
+                "first_action": None}, row
+            assert [item["reference"] for item in listing(str(other))[1]["sessions"]] == [names[3]]
+            assert listing(str(root) + "-alias")[1]["sessions"] == []
+            assert [item["reference"] for item in listing()[1]["sessions"]] == names[:8]
+            current = subprocess.run([binary, "session", "list", "--store", store],
+                cwd=root, capture_output=True, text=True, timeout=10)
+            assert current.returncode == 0, current.stderr
+            # Every page streams into exactly one JSON value.
+            current_list = json.loads(current.stdout)
+            assert current_list["version"] == host_process.WIRE_VERSION and current_list["type"] == "session_list" and current_list["next"] is None, current_list
+            assert [row["reference"] for row in current_list["sessions"]] == [
+                names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + [later]
+            all_workspaces = subprocess.run([binary, "session", "list", "--store", store, "--all"],
+                cwd=root, capture_output=True, text=True, timeout=10)
+            assert all_workspaces.returncode == 0, all_workspaces.stderr
+            all_list = json.loads(all_workspaces.stdout)
+            assert all_list["next"] is None and len(all_list["sessions"]) == 11, all_list
+            assert "Bash runs without approval" not in all_workspaces.stdout
+            assert [row["permission_mode"] for row in all_list["sessions"]] == ["bypass"] * 11, all_list
+            assert sorted(row["reference"] for row in all_list["sessions"]) == sorted(names + [later]), all_list
+            # --since answers nothing new, only what changed, or everything.
+            assert current_list["delta"] == "full" and all_list["delta"] == "full", all_list
+            def since_listing(token):
+                result = subprocess.run([binary, "session", "list", "--store", store, "--all", "--since", token],
+                    cwd=root, capture_output=True, text=True, timeout=10)
+                assert result.returncode == 0, result.stderr
+                return json.loads(result.stdout)
+            token = all_list["since"]
+            assert since_listing(token) == {"version": host_process.WIRE_VERSION, "type": "session_list", "sessions": [],
+                "delta": "not_modified", "since": token, "next": None}
+            assert configure("since-label", later, str(root), label="Watched")[1]["answer"]["status"] == "accepted"
+            changed = since_listing(token)
+            assert changed["delta"] == "changed" and changed["since"] != token, changed
+            assert [(row["reference"], row["label"]) for row in changed["sessions"]] == [(later, "Watched")], changed
+            assert since_listing(changed["since"])["delta"] == "not_modified"
+            # Another Host's token (this one never issued it) lists everything.
+            everything = since_listing("0" * 32 + "." + token.split(".")[1])
+            assert everything["delta"] == "full" and len(everything["sessions"]) == 11, everything
+            refused = subprocess.run([binary, "session", "list", "--store", store, "--since", "nope"],
+                cwd=root, capture_output=True, text=True, timeout=10)
+            assert refused.returncode != 0 and refused.stdout == "" and "--since" in refused.stderr, refused
+            assert exchange(address, "list-sessions", {**base("list_sessions"), "workspace": None, "after": "12", "ceiling": "11"})[0] == 400
+            # IDs cannot carry controls; retain the escaped-string round trip in
+            # the caller-controlled model, associated with its allocated Session.
+            long_model = "x" * 126 + "\x01\x00"
+            escaped = create("long-model", str(root), model=long_model)
+            dormant = [create(f"dormant-{index}", str(root)) for index in range(88)]
+            after_growth = listing(str(root))
+            assert after_growth[0] == 200 and len(after_growth[1]["sessions"]) == 8
+            # Preserve the pre-archive 4 KiB budget plus added wire fields per row.
+            # The independent archive-state contract's longest value is archiving.
+            archive_field_bytes = len(', "archive_state": "archiving"'.encode())
+            # Each dormant row carries one last_line field in its null form.
+            last_line_field_bytes = len(', "last_line": null'.encode())
+            assert len(json.dumps(after_growth[1]).encode()) < 4096 + 8 * (archive_field_bytes + last_line_field_bytes)
+            safe = subprocess.run([binary, "session", "list", "--store", store, "--all"],
+                cwd=root, capture_output=True, text=True, timeout=10)
+            assert safe.returncode == 0 and "\\u0000" in safe.stdout and "\x00" not in safe.stdout, safe
+            assert [row["model"] for row in json.loads(safe.stdout)["sessions"] if row["reference"] == escaped] == [long_model], safe
+            cursor = after_growth[1]["next"]
+            seen = [item["reference"] for item in after_growth[1]["sessions"]]
+            while cursor:
+                status, page = listing(str(root), cursor)
+                assert status == 200 and len(page["sessions"]) <= 8
+                seen.extend(item["reference"] for item in page["sessions"])
+                cursor = page["next"]
+            assert seen == [names[i] for i in (0, 1, 2, 4, 5, 6, 7, 8, 9)] + [later, escaped] + dormant
+            grown = released_resources(process.pid, diagnostics, latest_invocation)
+            if baseline and grown:
+                assert_resources(baseline, grown)
+            assert list(home.iterdir()) == [], "Host discovery unexpectedly wrote a local request registry"
+            assert list((store / "scratch").iterdir()) == [], "named list capture leaked scratch"
+            print(f"Session list native Host: fresh HOME, exact keyset, 100 dormant, escaped model, idle resources 0→100: {baseline}→{grown}")
+        finally:
+            stop_process(process)
+            if original_home is None:
+                del os.environ["HOME"]
+            else:
+                os.environ["HOME"] = original_home
+
+
+if __name__ == "__main__":
+    host_process.enter()
+    main()
+    from session_list_facts_integration import main as facts_main
+    facts_main()

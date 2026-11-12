@@ -1,0 +1,2719 @@
+{
+  "metadata": {
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "hardware": "MacBookPro18,1",
+    "memory_bytes": 17179869184,
+    "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "baseline": "3bdadc8395716e587f3da11f0b85ecdb3b91274a"
+  },
+  "started_utc": "2026-09-05T17:09:01Z",
+  "load_start": "{ 5.17 5.66 6.35 }",
+  "observations": [
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        5.657,
+        5.391,
+        5.374,
+        9.048
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 18450,
+      "request_after_start_ms": 1.87,
+      "queue_wait_ms": 23.623,
+      "stop_ack_ms": 24.049,
+      "sql_commit_ms": 0.426,
+      "first_interruption_ms": 24.056,
+      "all_interruptions_ms": 24.095,
+      "local_drain_ms": 24.216,
+      "reactor_max_tick_gap_including_warmup_ms": 6.299,
+      "process_cpu_ms": 22.12,
+      "elapsed_ms": 35.031,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1163904,
+      "streamed_bytes": 202806,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        6.632
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.832,
+      "queue_wait_ms": 4.817,
+      "stop_ack_ms": 6.585,
+      "sql_commit_ms": 1.768,
+      "first_interruption_ms": 6.596,
+      "all_interruptions_ms": 6.634,
+      "local_drain_ms": 6.786,
+      "reactor_max_tick_gap_including_warmup_ms": 6.286,
+      "process_cpu_ms": 6.229,
+      "elapsed_ms": 22.158,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1081984,
+      "physical_end": 1131136,
+      "streamed_bytes": 202788,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        6.445
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.774,
+      "queue_wait_ms": 4.687,
+      "stop_ack_ms": 5.265,
+      "sql_commit_ms": 0.578,
+      "first_interruption_ms": 5.278,
+      "all_interruptions_ms": 5.322,
+      "local_drain_ms": 7.319,
+      "reactor_max_tick_gap_including_warmup_ms": 6.274,
+      "process_cpu_ms": 5.829,
+      "elapsed_ms": 9.109,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1131136,
+      "streamed_bytes": 184374,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        6.815,
+        6.005,
+        6.261,
+        5.736
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 18450,
+      "request_after_start_ms": 1.894,
+      "queue_wait_ms": 22.941,
+      "stop_ack_ms": 23.472,
+      "sql_commit_ms": 0.531,
+      "first_interruption_ms": 23.479,
+      "all_interruptions_ms": 23.523,
+      "local_drain_ms": 23.651,
+      "reactor_max_tick_gap_including_warmup_ms": 6.281,
+      "process_cpu_ms": 21.751,
+      "elapsed_ms": 36.345,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1098368,
+      "streamed_bytes": 202806,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        7.328,
+        5.994,
+        6.176,
+        9.018
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 18450,
+      "request_after_start_ms": 1.885,
+      "queue_wait_ms": 26.652,
+      "stop_ack_ms": 27.27,
+      "sql_commit_ms": 0.618,
+      "first_interruption_ms": 27.278,
+      "all_interruptions_ms": 27.321,
+      "local_drain_ms": 27.448,
+      "reactor_max_tick_gap_including_warmup_ms": 6.292,
+      "process_cpu_ms": 22.371,
+      "elapsed_ms": 37.476,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1081984,
+      "physical_end": 1131136,
+      "streamed_bytes": 202806,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        9.387
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 9216,
+      "request_after_start_ms": 2.011,
+      "queue_wait_ms": 7.404,
+      "stop_ack_ms": 8.027,
+      "sql_commit_ms": 0.623,
+      "first_interruption_ms": 8.034,
+      "all_interruptions_ms": 8.074,
+      "local_drain_ms": 8.197,
+      "reactor_max_tick_gap_including_warmup_ms": 6.29,
+      "process_cpu_ms": 6.74,
+      "elapsed_ms": 18.021,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1081984,
+      "physical_end": 1147520,
+      "streamed_bytes": 184356,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        7.639
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 9216,
+      "request_after_start_ms": 1.832,
+      "queue_wait_ms": 5.823,
+      "stop_ack_ms": 6.323,
+      "sql_commit_ms": 0.5,
+      "first_interruption_ms": 6.336,
+      "all_interruptions_ms": 6.374,
+      "local_drain_ms": 6.531,
+      "reactor_max_tick_gap_including_warmup_ms": 6.273,
+      "process_cpu_ms": 5.912,
+      "elapsed_ms": 12.958,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1081984,
+      "physical_end": 1098368,
+      "streamed_bytes": 193572,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        8.979,
+        8.744,
+        7.346,
+        8.168
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 27684,
+      "request_after_start_ms": 1.744,
+      "queue_wait_ms": 31.525,
+      "stop_ack_ms": 32.088,
+      "sql_commit_ms": 0.563,
+      "first_interruption_ms": 32.104,
+      "all_interruptions_ms": 32.155,
+      "local_drain_ms": 32.3,
+      "reactor_max_tick_gap_including_warmup_ms": 6.294,
+      "process_cpu_ms": 25.024,
+      "elapsed_ms": 46.914,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1196672,
+      "streamed_bytes": 212022,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        6.281,
+        8.234,
+        6.323,
+        9.385
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 18468,
+      "request_after_start_ms": 1.963,
+      "queue_wait_ms": 28.302,
+      "stop_ack_ms": 29.175,
+      "sql_commit_ms": 0.873,
+      "first_interruption_ms": 29.189,
+      "all_interruptions_ms": 29.241,
+      "local_drain_ms": 29.389,
+      "reactor_max_tick_gap_including_warmup_ms": 6.29,
+      "process_cpu_ms": 23.818,
+      "elapsed_ms": 37.488,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1081984,
+      "physical_end": 1180416,
+      "streamed_bytes": 212040,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        8.402
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 9216,
+      "request_after_start_ms": 1.869,
+      "queue_wait_ms": 6.556,
+      "stop_ack_ms": 7.118,
+      "sql_commit_ms": 0.562,
+      "first_interruption_ms": 7.126,
+      "all_interruptions_ms": 7.189,
+      "local_drain_ms": 7.343,
+      "reactor_max_tick_gap_including_warmup_ms": 6.273,
+      "process_cpu_ms": 6.573,
+      "elapsed_ms": 20.167,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1131136,
+      "streamed_bytes": 212004,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 0,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 0,
+      "report_bytes": 0,
+      "capture_ms": [],
+      "arrived_during_capture": false,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.655,
+      "queue_wait_ms": 0.039,
+      "stop_ack_ms": 0.624,
+      "sql_commit_ms": 0.585,
+      "first_interruption_ms": 0.64,
+      "all_interruptions_ms": 0.748,
+      "local_drain_ms": 0.876,
+      "reactor_max_tick_gap_including_warmup_ms": 6.327,
+      "process_cpu_ms": 1.352,
+      "elapsed_ms": 12.286,
+      "sqlite_heap_peak": 181536,
+      "physical_start": 1065536,
+      "physical_end": 1049152,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 24576
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 0,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 0,
+      "report_bytes": 0,
+      "capture_ms": [],
+      "arrived_during_capture": false,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.094,
+      "queue_wait_ms": 0.0,
+      "stop_ack_ms": 0.605,
+      "sql_commit_ms": 0.605,
+      "first_interruption_ms": 0.621,
+      "all_interruptions_ms": 0.724,
+      "local_drain_ms": 0.858,
+      "reactor_max_tick_gap_including_warmup_ms": 6.347,
+      "process_cpu_ms": 0.823,
+      "elapsed_ms": 2.118,
+      "sqlite_heap_peak": 181536,
+      "physical_start": 1081984,
+      "physical_end": 1065600,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 24576
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 0,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 0,
+      "report_bytes": 0,
+      "capture_ms": [],
+      "arrived_during_capture": false,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.651,
+      "queue_wait_ms": 0.109,
+      "stop_ack_ms": 0.752,
+      "sql_commit_ms": 0.643,
+      "first_interruption_ms": 0.774,
+      "all_interruptions_ms": 0.889,
+      "local_drain_ms": 1.067,
+      "reactor_max_tick_gap_including_warmup_ms": 6.336,
+      "process_cpu_ms": 0.852,
+      "elapsed_ms": 8.886,
+      "sqlite_heap_peak": 181536,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 1824804,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 24576
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 0,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 0,
+      "report_bytes": 0,
+      "capture_ms": [],
+      "arrived_during_capture": false,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.246,
+      "queue_wait_ms": 0.152,
+      "stop_ack_ms": 1.216,
+      "sql_commit_ms": 1.064,
+      "first_interruption_ms": 1.248,
+      "all_interruptions_ms": 1.374,
+      "local_drain_ms": 1.542,
+      "reactor_max_tick_gap_including_warmup_ms": 6.335,
+      "process_cpu_ms": 1.009,
+      "elapsed_ms": 14.923,
+      "sqlite_heap_peak": 181536,
+      "physical_start": 1065536,
+      "physical_end": 1081920,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 24576
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 0,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 0,
+      "report_bytes": 0,
+      "capture_ms": [],
+      "arrived_during_capture": false,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.232,
+      "queue_wait_ms": 0.153,
+      "stop_ack_ms": 0.856,
+      "sql_commit_ms": 0.703,
+      "first_interruption_ms": 0.876,
+      "all_interruptions_ms": 0.995,
+      "local_drain_ms": 1.181,
+      "reactor_max_tick_gap_including_warmup_ms": 6.324,
+      "process_cpu_ms": 1.433,
+      "elapsed_ms": 15.233,
+      "sqlite_heap_peak": 181536,
+      "physical_start": 1065536,
+      "physical_end": 1098368,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 24576
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 761160,
+      "capture_ms": [
+        1.109,
+        1.069,
+        0.835,
+        1.103
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 101376,
+      "request_after_start_ms": 1.819,
+      "queue_wait_ms": 2.325,
+      "stop_ack_ms": 2.948,
+      "sql_commit_ms": 0.623,
+      "first_interruption_ms": 2.998,
+      "all_interruptions_ms": 3.117,
+      "local_drain_ms": 3.293,
+      "reactor_max_tick_gap_including_warmup_ms": 6.355,
+      "process_cpu_ms": 5.721,
+      "elapsed_ms": 18.369,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1196672,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 2,
+      "report_bytes": 380580,
+      "capture_ms": [
+        1.86,
+        1.202
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 2.401,
+      "queue_wait_ms": 0.685,
+      "stop_ack_ms": 1.343,
+      "sql_commit_ms": 0.658,
+      "first_interruption_ms": 1.394,
+      "all_interruptions_ms": 1.526,
+      "local_drain_ms": 1.685,
+      "reactor_max_tick_gap_including_warmup_ms": 6.348,
+      "process_cpu_ms": 3.516,
+      "elapsed_ms": 11.964,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1196672,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 2,
+      "report_bytes": 380580,
+      "capture_ms": [
+        1.426,
+        1.264
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.672,
+      "queue_wait_ms": 1.103,
+      "stop_ack_ms": 1.881,
+      "sql_commit_ms": 0.778,
+      "first_interruption_ms": 1.918,
+      "all_interruptions_ms": 2.038,
+      "local_drain_ms": 2.214,
+      "reactor_max_tick_gap_including_warmup_ms": 11.3,
+      "process_cpu_ms": 3.1,
+      "elapsed_ms": 7.814,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 761160,
+      "capture_ms": [
+        0.925,
+        0.93,
+        0.747,
+        0.89
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.481,
+      "queue_wait_ms": 2.038,
+      "stop_ack_ms": 2.528,
+      "sql_commit_ms": 0.49,
+      "first_interruption_ms": 2.543,
+      "all_interruptions_ms": 2.661,
+      "local_drain_ms": 2.782,
+      "reactor_max_tick_gap_including_warmup_ms": 6.343,
+      "process_cpu_ms": 3.973,
+      "elapsed_ms": 6.045,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1131136,
+      "streamed_bytes": 1824804,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 761160,
+      "capture_ms": [
+        1.291,
+        0.816,
+        0.821,
+        0.696
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 18,
+      "request_after_start_ms": 1.738,
+      "queue_wait_ms": 1.903,
+      "stop_ack_ms": 2.312,
+      "sql_commit_ms": 0.409,
+      "first_interruption_ms": 2.334,
+      "all_interruptions_ms": 2.423,
+      "local_drain_ms": 2.555,
+      "reactor_max_tick_gap_including_warmup_ms": 6.302,
+      "process_cpu_ms": 3.58,
+      "elapsed_ms": 13.258,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1131136,
+      "streamed_bytes": 1926180,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 2,
+      "report_bytes": 380580,
+      "capture_ms": [
+        1.315,
+        0.981
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 62464,
+      "request_after_start_ms": 1.765,
+      "queue_wait_ms": 0.546,
+      "stop_ack_ms": 1.037,
+      "sql_commit_ms": 0.491,
+      "first_interruption_ms": 1.053,
+      "all_interruptions_ms": 1.171,
+      "local_drain_ms": 1.284,
+      "reactor_max_tick_gap_including_warmup_ms": 6.337,
+      "process_cpu_ms": 2.991,
+      "elapsed_ms": 13.504,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1114688,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 2,
+      "report_bytes": 380580,
+      "capture_ms": [
+        1.34,
+        0.882
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.852,
+      "queue_wait_ms": 0.389,
+      "stop_ack_ms": 0.916,
+      "sql_commit_ms": 0.527,
+      "first_interruption_ms": 0.939,
+      "all_interruptions_ms": 1.059,
+      "local_drain_ms": 1.177,
+      "reactor_max_tick_gap_including_warmup_ms": 6.336,
+      "process_cpu_ms": 2.448,
+      "elapsed_ms": 14.871,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1163904,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 761160,
+      "capture_ms": [
+        1.488,
+        0.952,
+        0.821,
+        0.889
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.838,
+      "queue_wait_ms": 2.335,
+      "stop_ack_ms": 2.793,
+      "sql_commit_ms": 0.458,
+      "first_interruption_ms": 2.808,
+      "all_interruptions_ms": 2.914,
+      "local_drain_ms": 3.038,
+      "reactor_max_tick_gap_including_warmup_ms": 6.348,
+      "process_cpu_ms": 4.111,
+      "elapsed_ms": 11.443,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1131136,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 761160,
+      "capture_ms": [
+        1.29,
+        0.8,
+        0.893,
+        0.958
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 18,
+      "request_after_start_ms": 1.834,
+      "queue_wait_ms": 2.124,
+      "stop_ack_ms": 2.657,
+      "sql_commit_ms": 0.533,
+      "first_interruption_ms": 2.672,
+      "all_interruptions_ms": 2.767,
+      "local_drain_ms": 2.874,
+      "reactor_max_tick_gap_including_warmup_ms": 6.288,
+      "process_cpu_ms": 4.052,
+      "elapsed_ms": 10.301,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1196672,
+      "streamed_bytes": 2128950,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 2,
+      "report_bytes": 380580,
+      "capture_ms": [
+        1.342,
+        0.886
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 0,
+      "request_after_start_ms": 1.858,
+      "queue_wait_ms": 0.388,
+      "stop_ack_ms": 0.995,
+      "sql_commit_ms": 0.607,
+      "first_interruption_ms": 1.013,
+      "all_interruptions_ms": 1.113,
+      "local_drain_ms": 1.222,
+      "reactor_max_tick_gap_including_warmup_ms": 6.301,
+      "process_cpu_ms": 2.365,
+      "elapsed_ms": 7.376,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1163904,
+      "streamed_bytes": 2027556,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 208896
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        5.903,
+        5.898,
+        6.31,
+        6.718
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 202770,
+      "request_after_start_ms": 1.851,
+      "queue_wait_ms": 23.021,
+      "stop_ack_ms": 23.561,
+      "sql_commit_ms": 0.54,
+      "first_interruption_ms": 23.585,
+      "all_interruptions_ms": 23.693,
+      "local_drain_ms": 23.828,
+      "reactor_max_tick_gap_including_warmup_ms": 6.325,
+      "process_cpu_ms": 23.704,
+      "elapsed_ms": 30.874,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1131136,
+      "streamed_bytes": 2331702,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        6.335
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 101394,
+      "request_after_start_ms": 1.833,
+      "queue_wait_ms": 4.522,
+      "stop_ack_ms": 5.071,
+      "sql_commit_ms": 0.549,
+      "first_interruption_ms": 5.105,
+      "all_interruptions_ms": 5.216,
+      "local_drain_ms": 5.35,
+      "reactor_max_tick_gap_including_warmup_ms": 6.331,
+      "process_cpu_ms": 6.581,
+      "elapsed_ms": 15.435,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1163904,
+      "streamed_bytes": 1926180,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        6.267
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 28690,
+      "request_after_start_ms": 1.814,
+      "queue_wait_ms": 4.476,
+      "stop_ack_ms": 4.999,
+      "sql_commit_ms": 0.523,
+      "first_interruption_ms": 5.137,
+      "all_interruptions_ms": 5.259,
+      "local_drain_ms": 5.389,
+      "reactor_max_tick_gap_including_warmup_ms": 6.284,
+      "process_cpu_ms": 7.528,
+      "elapsed_ms": 21.082,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1147456,
+      "streamed_bytes": 2128950,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        7.001,
+        6.27,
+        8.06,
+        5.935
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 159762,
+      "request_after_start_ms": 1.898,
+      "queue_wait_ms": 25.39,
+      "stop_ack_ms": 26.112,
+      "sql_commit_ms": 0.722,
+      "first_interruption_ms": 26.13,
+      "all_interruptions_ms": 26.241,
+      "local_drain_ms": 26.369,
+      "reactor_max_tick_gap_including_warmup_ms": 6.307,
+      "process_cpu_ms": 23.574,
+      "elapsed_ms": 40.198,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1180416,
+      "physical_end": 1229568,
+      "streamed_bytes": 2331702,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        7.217,
+        6.253,
+        6.272,
+        5.91
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 202770,
+      "request_after_start_ms": 1.839,
+      "queue_wait_ms": 23.831,
+      "stop_ack_ms": 24.329,
+      "sql_commit_ms": 0.498,
+      "first_interruption_ms": 24.343,
+      "all_interruptions_ms": 24.444,
+      "local_drain_ms": 24.564,
+      "reactor_max_tick_gap_including_warmup_ms": 6.34,
+      "process_cpu_ms": 23.247,
+      "elapsed_ms": 39.328,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1163904,
+      "streamed_bytes": 2331702,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        7.141
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 101376,
+      "request_after_start_ms": 1.79,
+      "queue_wait_ms": 5.371,
+      "stop_ack_ms": 5.99,
+      "sql_commit_ms": 0.619,
+      "first_interruption_ms": 6.011,
+      "all_interruptions_ms": 6.106,
+      "local_drain_ms": 6.266,
+      "reactor_max_tick_gap_including_warmup_ms": 6.293,
+      "process_cpu_ms": 6.53,
+      "elapsed_ms": 14.194,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1114688,
+      "streamed_bytes": 2230308,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        8.888
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 101376,
+      "request_after_start_ms": 1.896,
+      "queue_wait_ms": 7.01,
+      "stop_ack_ms": 7.654,
+      "sql_commit_ms": 0.644,
+      "first_interruption_ms": 7.674,
+      "all_interruptions_ms": 7.79,
+      "local_drain_ms": 7.978,
+      "reactor_max_tick_gap_including_warmup_ms": 6.421,
+      "process_cpu_ms": 7.503,
+      "elapsed_ms": 15.19,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1163904,
+      "streamed_bytes": 2128932,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        6.908,
+        9.195,
+        8.005,
+        9.169
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 202770,
+      "request_after_start_ms": 1.794,
+      "queue_wait_ms": 31.505,
+      "stop_ack_ms": 32.042,
+      "sql_commit_ms": 0.537,
+      "first_interruption_ms": 32.059,
+      "all_interruptions_ms": 32.177,
+      "local_drain_ms": 32.303,
+      "reactor_max_tick_gap_including_warmup_ms": 6.342,
+      "process_cpu_ms": 23.505,
+      "elapsed_ms": 38.411,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1081920,
+      "streamed_bytes": 2128950,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        6.39,
+        6.184,
+        7.52,
+        9.332
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 304146,
+      "request_after_start_ms": 1.827,
+      "queue_wait_ms": 27.621,
+      "stop_ack_ms": 28.276,
+      "sql_commit_ms": 0.655,
+      "first_interruption_ms": 28.321,
+      "all_interruptions_ms": 28.46,
+      "local_drain_ms": 28.609,
+      "reactor_max_tick_gap_including_warmup_ms": 6.355,
+      "process_cpu_ms": 24.966,
+      "elapsed_ms": 40.604,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 2230326,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        6.332
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 78848,
+      "request_after_start_ms": 1.836,
+      "queue_wait_ms": 4.515,
+      "stop_ack_ms": 5.286,
+      "sql_commit_ms": 0.771,
+      "first_interruption_ms": 5.306,
+      "all_interruptions_ms": 5.416,
+      "local_drain_ms": 5.565,
+      "reactor_max_tick_gap_including_warmup_ms": 6.297,
+      "process_cpu_ms": 6.516,
+      "elapsed_ms": 12.167,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1098368,
+      "streamed_bytes": 2128932,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 77711176,
+      "capture_ms": [
+        77.861,
+        68.311,
+        76.7,
+        71.414
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 2027754,
+      "request_after_start_ms": 1.841,
+      "queue_wait_ms": 292.467,
+      "stop_ack_ms": 293.17,
+      "sql_commit_ms": 0.703,
+      "first_interruption_ms": 293.185,
+      "all_interruptions_ms": 293.299,
+      "local_drain_ms": 293.427,
+      "reactor_max_tick_gap_including_warmup_ms": 6.828,
+      "process_cpu_ms": 220.682,
+      "elapsed_ms": 308.522,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 4055310,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 19427794,
+      "capture_ms": [
+        73.081
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 506934,
+      "request_after_start_ms": 1.92,
+      "queue_wait_ms": 71.18,
+      "stop_ack_ms": 71.8,
+      "sql_commit_ms": 0.62,
+      "first_interruption_ms": 71.817,
+      "all_interruptions_ms": 71.93,
+      "local_drain_ms": 72.052,
+      "reactor_max_tick_gap_including_warmup_ms": 6.344,
+      "process_cpu_ms": 54.716,
+      "elapsed_ms": 74.574,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1131136,
+      "streamed_bytes": 2635866,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 19427794,
+      "capture_ms": [
+        73.76
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 546870,
+      "request_after_start_ms": 1.817,
+      "queue_wait_ms": 71.959,
+      "stop_ack_ms": 72.82,
+      "sql_commit_ms": 0.861,
+      "first_interruption_ms": 72.86,
+      "all_interruptions_ms": 72.997,
+      "local_drain_ms": 73.159,
+      "reactor_max_tick_gap_including_warmup_ms": 6.658,
+      "process_cpu_ms": 59.44,
+      "elapsed_ms": 84.394,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 2534490,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 77711176,
+      "capture_ms": [
+        107.256,
+        52.891,
+        52.266,
+        54.431
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 2027736,
+      "request_after_start_ms": 1.812,
+      "queue_wait_ms": 265.06,
+      "stop_ack_ms": 265.735,
+      "sql_commit_ms": 0.675,
+      "first_interruption_ms": 265.769,
+      "all_interruptions_ms": 265.889,
+      "local_drain_ms": 266.042,
+      "reactor_max_tick_gap_including_warmup_ms": 15.73,
+      "process_cpu_ms": 236.122,
+      "elapsed_ms": 280.243,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1147456,
+      "streamed_bytes": 3953916,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 77711176,
+      "capture_ms": [
+        50.095,
+        51.095,
+        52.726,
+        56.187
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 1520820,
+      "request_after_start_ms": 1.857,
+      "queue_wait_ms": 208.27,
+      "stop_ack_ms": 209.017,
+      "sql_commit_ms": 0.747,
+      "first_interruption_ms": 209.057,
+      "all_interruptions_ms": 209.178,
+      "local_drain_ms": 209.325,
+      "reactor_max_tick_gap_including_warmup_ms": 6.36,
+      "process_cpu_ms": 222.362,
+      "elapsed_ms": 218.95,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1098368,
+      "streamed_bytes": 3649752,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 19427794,
+      "capture_ms": [
+        51.599
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 405558,
+      "request_after_start_ms": 1.853,
+      "queue_wait_ms": 49.768,
+      "stop_ack_ms": 50.49,
+      "sql_commit_ms": 0.722,
+      "first_interruption_ms": 50.532,
+      "all_interruptions_ms": 50.655,
+      "local_drain_ms": 50.808,
+      "reactor_max_tick_gap_including_warmup_ms": 6.361,
+      "process_cpu_ms": 55.196,
+      "elapsed_ms": 58.406,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1081920,
+      "streamed_bytes": 2534490,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 19427794,
+      "capture_ms": [
+        53.303
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 402468,
+      "request_after_start_ms": 1.856,
+      "queue_wait_ms": 51.465,
+      "stop_ack_ms": 52.224,
+      "sql_commit_ms": 0.759,
+      "first_interruption_ms": 52.247,
+      "all_interruptions_ms": 52.373,
+      "local_drain_ms": 52.523,
+      "reactor_max_tick_gap_including_warmup_ms": 6.385,
+      "process_cpu_ms": 57.598,
+      "elapsed_ms": 68.456,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1131136,
+      "streamed_bytes": 2433096,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 77711176,
+      "capture_ms": [
+        51.372,
+        71.169,
+        55.321,
+        50.503
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 1590452,
+      "request_after_start_ms": 1.831,
+      "queue_wait_ms": 226.55,
+      "stop_ack_ms": 227.239,
+      "sql_commit_ms": 0.689,
+      "first_interruption_ms": 227.254,
+      "all_interruptions_ms": 227.375,
+      "local_drain_ms": 227.496,
+      "reactor_max_tick_gap_including_warmup_ms": 6.327,
+      "process_cpu_ms": 220.045,
+      "elapsed_ms": 242.688,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1147456,
+      "streamed_bytes": 3649770,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 77711176,
+      "capture_ms": [
+        55.454,
+        52.291,
+        51.953,
+        53.024
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 1520820,
+      "request_after_start_ms": 1.994,
+      "queue_wait_ms": 210.75,
+      "stop_ack_ms": 211.589,
+      "sql_commit_ms": 0.839,
+      "first_interruption_ms": 211.603,
+      "all_interruptions_ms": 211.718,
+      "local_drain_ms": 211.911,
+      "reactor_max_tick_gap_including_warmup_ms": 6.703,
+      "process_cpu_ms": 226.161,
+      "elapsed_ms": 228.665,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1131072,
+      "physical_end": 1196672,
+      "streamed_bytes": 3759320,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 19427794,
+      "capture_ms": [
+        51.612
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 405540,
+      "request_after_start_ms": 1.826,
+      "queue_wait_ms": 49.808,
+      "stop_ack_ms": 50.349,
+      "sql_commit_ms": 0.541,
+      "first_interruption_ms": 50.408,
+      "all_interruptions_ms": 50.528,
+      "local_drain_ms": 50.688,
+      "reactor_max_tick_gap_including_warmup_ms": 6.357,
+      "process_cpu_ms": 54.617,
+      "elapsed_ms": 65.233,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1081984,
+      "physical_end": 1131136,
+      "streamed_bytes": 2331720,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 18386944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 436111176,
+      "capture_ms": [
+        398.327,
+        353.76,
+        350.683,
+        556.728
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 11659554,
+      "request_after_start_ms": 1.813,
+      "queue_wait_ms": 1657.71,
+      "stop_ack_ms": 1658.516,
+      "sql_commit_ms": 0.806,
+      "first_interruption_ms": 1658.568,
+      "all_interruptions_ms": 1658.7,
+      "local_drain_ms": 1658.863,
+      "reactor_max_tick_gap_including_warmup_ms": 41.737,
+      "process_cpu_ms": 1356.314,
+      "elapsed_ms": 1671.56,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1065536,
+      "physical_end": 1671936,
+      "streamed_bytes": 13788486,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 109027794,
+      "capture_ms": [
+        347.82
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 2534706,
+      "request_after_start_ms": 1.937,
+      "queue_wait_ms": 345.906,
+      "stop_ack_ms": 346.522,
+      "sql_commit_ms": 0.616,
+      "first_interruption_ms": 346.535,
+      "all_interruptions_ms": 346.648,
+      "local_drain_ms": 346.799,
+      "reactor_max_tick_gap_including_warmup_ms": 6.47,
+      "process_cpu_ms": 293.338,
+      "elapsed_ms": 356.681,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1147520,
+      "physical_end": 1524480,
+      "streamed_bytes": 4359510,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 109027794,
+      "capture_ms": [
+        303.026
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 2129130,
+      "request_after_start_ms": 1.858,
+      "queue_wait_ms": 301.189,
+      "stop_ack_ms": 301.948,
+      "sql_commit_ms": 0.759,
+      "first_interruption_ms": 301.983,
+      "all_interruptions_ms": 302.102,
+      "local_drain_ms": 302.287,
+      "reactor_max_tick_gap_including_warmup_ms": 6.368,
+      "process_cpu_ms": 281.822,
+      "elapsed_ms": 312.268,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1147520,
+      "physical_end": 1442496,
+      "streamed_bytes": 4258062,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 436111176,
+      "capture_ms": [
+        330.798,
+        320.645,
+        320.343,
+        346.084
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 9530406,
+      "request_after_start_ms": 1.789,
+      "queue_wait_ms": 1316.101,
+      "stop_ack_ms": 1316.653,
+      "sql_commit_ms": 0.552,
+      "first_interruption_ms": 1316.67,
+      "all_interruptions_ms": 1316.788,
+      "local_drain_ms": 1316.909,
+      "reactor_max_tick_gap_including_warmup_ms": 6.388,
+      "process_cpu_ms": 1144.009,
+      "elapsed_ms": 1328.672,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1081984,
+      "physical_end": 1311424,
+      "streamed_bytes": 11456586,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 436111176,
+      "capture_ms": [
+        275.5,
+        280.921,
+        287.981,
+        301.955
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 8516520,
+      "request_after_start_ms": 1.844,
+      "queue_wait_ms": 1144.534,
+      "stop_ack_ms": 1145.271,
+      "sql_commit_ms": 0.737,
+      "first_interruption_ms": 1145.305,
+      "all_interruptions_ms": 1145.44,
+      "local_drain_ms": 1145.614,
+      "reactor_max_tick_gap_including_warmup_ms": 7.767,
+      "process_cpu_ms": 1179.576,
+      "elapsed_ms": 1157.258,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1147520,
+      "physical_end": 1524480,
+      "streamed_bytes": 10442700,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 109027794,
+      "capture_ms": [
+        316.369
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 2331900,
+      "request_after_start_ms": 1.837,
+      "queue_wait_ms": 314.556,
+      "stop_ack_ms": 315.381,
+      "sql_commit_ms": 0.825,
+      "first_interruption_ms": 315.441,
+      "all_interruptions_ms": 315.573,
+      "local_drain_ms": 315.767,
+      "reactor_max_tick_gap_including_warmup_ms": 6.406,
+      "process_cpu_ms": 334.501,
+      "elapsed_ms": 323.66,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1131072,
+      "physical_end": 1508032,
+      "streamed_bytes": 4359456,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 109027794,
+      "capture_ms": [
+        362.403
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 2737458,
+      "request_after_start_ms": 1.83,
+      "queue_wait_ms": 360.603,
+      "stop_ack_ms": 361.412,
+      "sql_commit_ms": 0.809,
+      "first_interruption_ms": 361.469,
+      "all_interruptions_ms": 361.595,
+      "local_drain_ms": 361.792,
+      "reactor_max_tick_gap_including_warmup_ms": 6.465,
+      "process_cpu_ms": 378.367,
+      "elapsed_ms": 375.639,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1213056,
+      "physical_end": 1508032,
+      "streamed_bytes": 4866390,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 436111176,
+      "capture_ms": [
+        359.452,
+        350.586,
+        374.791,
+        334.97
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 10544310,
+      "request_after_start_ms": 1.851,
+      "queue_wait_ms": 1417.981,
+      "stop_ack_ms": 1418.693,
+      "sql_commit_ms": 0.712,
+      "first_interruption_ms": 1418.724,
+      "all_interruptions_ms": 1418.853,
+      "local_drain_ms": 1419.027,
+      "reactor_max_tick_gap_including_warmup_ms": 6.497,
+      "process_cpu_ms": 1279.435,
+      "elapsed_ms": 1426.952,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1065536,
+      "physical_end": 1508032,
+      "streamed_bytes": 12470490,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 436111176,
+      "capture_ms": [
+        341.006,
+        307.217,
+        305.74,
+        336.644
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 9429066,
+      "request_after_start_ms": 1.961,
+      "queue_wait_ms": 1288.677,
+      "stop_ack_ms": 1289.324,
+      "sql_commit_ms": 0.647,
+      "first_interruption_ms": 1289.359,
+      "all_interruptions_ms": 1289.478,
+      "local_drain_ms": 1289.673,
+      "reactor_max_tick_gap_including_warmup_ms": 6.89,
+      "process_cpu_ms": 1328.935,
+      "elapsed_ms": 1295.155,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1131072,
+      "physical_end": 1508032,
+      "streamed_bytes": 11355246,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 109027794,
+      "capture_ms": [
+        356.884
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 2748740,
+      "request_after_start_ms": 1.91,
+      "queue_wait_ms": 355.002,
+      "stop_ack_ms": 355.626,
+      "sql_commit_ms": 0.624,
+      "first_interruption_ms": 355.666,
+      "all_interruptions_ms": 355.792,
+      "local_drain_ms": 356.002,
+      "reactor_max_tick_gap_including_warmup_ms": 6.525,
+      "process_cpu_ms": 353.791,
+      "elapsed_ms": 362.788,
+      "sqlite_heap_peak": 182000,
+      "physical_start": 1180416,
+      "physical_end": 1540928,
+      "streamed_bytes": 4765032,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 470089728
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 1,
+      "report_bytes": 196277796,
+      "capture_ms": [
+        826.198
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 6387408,
+      "request_after_start_ms": 1.961,
+      "queue_wait_ms": 824.317,
+      "stop_ack_ms": 824.991,
+      "sql_commit_ms": 0.674,
+      "first_interruption_ms": 825.032,
+      "all_interruptions_ms": 825.159,
+      "local_drain_ms": 825.351,
+      "reactor_max_tick_gap_including_warmup_ms": 6.415,
+      "process_cpu_ms": 616.893,
+      "elapsed_ms": 830.093,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 8313588,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 183762944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 1,
+      "report_bytes": 196277796,
+      "capture_ms": [
+        538.937
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 3954114,
+      "request_after_start_ms": 1.858,
+      "queue_wait_ms": 537.107,
+      "stop_ack_ms": 537.796,
+      "sql_commit_ms": 0.689,
+      "first_interruption_ms": 537.84,
+      "all_interruptions_ms": 537.957,
+      "local_drain_ms": 538.122,
+      "reactor_max_tick_gap_including_warmup_ms": 6.384,
+      "process_cpu_ms": 576.83,
+      "elapsed_ms": 546.498,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1131136,
+      "streamed_bytes": 5981670,
+      "shell_escalated": 0,
+      "repeat": 1,
+      "database_bytes": 183762944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 1,
+      "report_bytes": 196277796,
+      "capture_ms": [
+        565.21
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 4258278,
+      "request_after_start_ms": 2.036,
+      "queue_wait_ms": 563.21,
+      "stop_ack_ms": 563.914,
+      "sql_commit_ms": 0.704,
+      "first_interruption_ms": 563.965,
+      "all_interruptions_ms": 564.099,
+      "local_drain_ms": 564.259,
+      "reactor_max_tick_gap_including_warmup_ms": 6.362,
+      "process_cpu_ms": 597.363,
+      "elapsed_ms": 576.923,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 6285816,
+      "shell_escalated": 0,
+      "repeat": 2,
+      "database_bytes": 183762944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 1,
+      "report_bytes": 196277796,
+      "capture_ms": [
+        592.783
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 4258278,
+      "request_after_start_ms": 1.836,
+      "queue_wait_ms": 590.98,
+      "stop_ack_ms": 598.598,
+      "sql_commit_ms": 7.618,
+      "first_interruption_ms": 598.618,
+      "all_interruptions_ms": 598.753,
+      "local_drain_ms": 598.906,
+      "reactor_max_tick_gap_including_warmup_ms": 7.146,
+      "process_cpu_ms": 584.224,
+      "elapsed_ms": 607.183,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1065536,
+      "physical_end": 1131136,
+      "streamed_bytes": 6285834,
+      "shell_escalated": 0,
+      "repeat": 3,
+      "database_bytes": 183762944
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 1000000,
+      "width": 128,
+      "capacity": 100,
+      "policy": "fifo",
+      "queued_inspections": 1,
+      "completed_before_stop": 1,
+      "report_bytes": 196277796,
+      "capture_ms": [
+        590.902
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 4258278,
+      "request_after_start_ms": 1.898,
+      "queue_wait_ms": 589.034,
+      "stop_ack_ms": 589.85,
+      "sql_commit_ms": 0.816,
+      "first_interruption_ms": 591.661,
+      "all_interruptions_ms": 591.791,
+      "local_drain_ms": 592.003,
+      "reactor_max_tick_gap_including_warmup_ms": 6.387,
+      "process_cpu_ms": 582.05,
+      "elapsed_ms": 606.489,
+      "sqlite_heap_peak": 181552,
+      "physical_start": 1147520,
+      "physical_end": 1163904,
+      "streamed_bytes": 6184440,
+      "shell_escalated": 0,
+      "repeat": 4,
+      "database_bytes": 183762944
+    }
+  ],
+  "build": {
+    "sqlite_package": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+    "sqlite_flags": [
+      "-DSQLITE_THREADSAFE=0",
+      "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
+      "-DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096",
+      "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+      "-DSQLITE_DEFAULT_MMAP_SIZE=0",
+      "-DSQLITE_MAX_MMAP_SIZE=0",
+      "-DSQLITE_DEFAULT_SYNCHRONOUS=3",
+      "-DSQLITE_DQS=0",
+      "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+      "-DSQLITE_OMIT_SHARED_CACHE=1",
+      "-DSQLITE_TEMP_STORE=1",
+      "-DSQLITE_USE_URI=0",
+      "-DSQLITE_ENABLE_API_ARMOR=1"
+    ],
+    "sanitized": false
+  },
+  "cleanup_checks": [
+    {
+      "signal": 6,
+      "owned_group_removed": true
+    },
+    {
+      "signal": 15,
+      "owned_group_removed": true
+    }
+  ],
+  "load_end": "{ 6.63 5.94 6.41 }",
+  "summaries": [
+    {
+      "rows": 0,
+      "width": 128,
+      "capacity": 100,
+      "depth": 1,
+      "policy": "fifo",
+      "samples": 5,
+      "arrivals_during_capture": 0,
+      "queue_wait_ms": {
+        "median": 0.109,
+        "max": 0.153
+      },
+      "stop_ack_ms": {
+        "median": 0.752,
+        "max": 1.216
+      },
+      "sql_commit_ms": {
+        "median": 0.643,
+        "max": 1.064
+      },
+      "all_interruptions_ms": {
+        "median": 0.889,
+        "max": 1.374
+      },
+      "local_drain_ms": {
+        "median": 1.067,
+        "max": 1.542
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.335,
+        "max": 6.347
+      },
+      "process_cpu_ms": {
+        "median": 1.009,
+        "max": 1.433
+      },
+      "elapsed_ms": {
+        "median": 12.286,
+        "max": 15.233
+      },
+      "bytes_drained_during_captures": {
+        "median": 0,
+        "max": 0
+      },
+      "sqlite_heap_peak": {
+        "median": 181536,
+        "max": 181536
+      },
+      "physical_end": {
+        "median": 1081920,
+        "max": 1163904
+      },
+      "completed_before_stop": {
+        "median": 0,
+        "max": 0
+      }
+    },
+    {
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "control_first",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 0.546,
+        "max": 1.103
+      },
+      "stop_ack_ms": {
+        "median": 1.037,
+        "max": 1.881
+      },
+      "sql_commit_ms": {
+        "median": 0.607,
+        "max": 0.778
+      },
+      "all_interruptions_ms": {
+        "median": 1.171,
+        "max": 2.038
+      },
+      "local_drain_ms": {
+        "median": 1.284,
+        "max": 2.214
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.337,
+        "max": 11.3
+      },
+      "process_cpu_ms": {
+        "median": 2.991,
+        "max": 3.516
+      },
+      "elapsed_ms": {
+        "median": 11.964,
+        "max": 14.871
+      },
+      "bytes_drained_during_captures": {
+        "median": 0,
+        "max": 62464
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1163904,
+        "max": 1196672
+      },
+      "completed_before_stop": {
+        "median": 2,
+        "max": 2
+      }
+    },
+    {
+      "rows": 1000,
+      "width": 128,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "fifo",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 2.124,
+        "max": 2.335
+      },
+      "stop_ack_ms": {
+        "median": 2.657,
+        "max": 2.948
+      },
+      "sql_commit_ms": {
+        "median": 0.49,
+        "max": 0.623
+      },
+      "all_interruptions_ms": {
+        "median": 2.767,
+        "max": 3.117
+      },
+      "local_drain_ms": {
+        "median": 2.874,
+        "max": 3.293
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.343,
+        "max": 6.355
+      },
+      "process_cpu_ms": {
+        "median": 4.052,
+        "max": 5.721
+      },
+      "elapsed_ms": {
+        "median": 11.443,
+        "max": 18.369
+      },
+      "bytes_drained_during_captures": {
+        "median": 18,
+        "max": 101376
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1131136,
+        "max": 1196672
+      },
+      "completed_before_stop": {
+        "median": 4,
+        "max": 4
+      }
+    },
+    {
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "depth": 4,
+      "policy": "control_first",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 5.823,
+        "max": 7.404
+      },
+      "stop_ack_ms": {
+        "median": 6.585,
+        "max": 8.027
+      },
+      "sql_commit_ms": {
+        "median": 0.578,
+        "max": 1.768
+      },
+      "all_interruptions_ms": {
+        "median": 6.634,
+        "max": 8.074
+      },
+      "local_drain_ms": {
+        "median": 7.319,
+        "max": 8.197
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.274,
+        "max": 6.29
+      },
+      "process_cpu_ms": {
+        "median": 6.229,
+        "max": 6.74
+      },
+      "elapsed_ms": {
+        "median": 18.021,
+        "max": 22.158
+      },
+      "bytes_drained_during_captures": {
+        "median": 9216,
+        "max": 9216
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1131136,
+        "max": 1147520
+      },
+      "completed_before_stop": {
+        "median": 1,
+        "max": 1
+      }
+    },
+    {
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "depth": 4,
+      "policy": "fifo",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 26.652,
+        "max": 31.525
+      },
+      "stop_ack_ms": {
+        "median": 27.27,
+        "max": 32.088
+      },
+      "sql_commit_ms": {
+        "median": 0.563,
+        "max": 0.873
+      },
+      "all_interruptions_ms": {
+        "median": 27.321,
+        "max": 32.155
+      },
+      "local_drain_ms": {
+        "median": 27.448,
+        "max": 32.3
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.292,
+        "max": 6.299
+      },
+      "process_cpu_ms": {
+        "median": 22.371,
+        "max": 25.024
+      },
+      "elapsed_ms": {
+        "median": 37.476,
+        "max": 46.914
+      },
+      "bytes_drained_during_captures": {
+        "median": 18450,
+        "max": 27684
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1163904,
+        "max": 1196672
+      },
+      "completed_before_stop": {
+        "median": 4,
+        "max": 4
+      }
+    },
+    {
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "control_first",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 4.522,
+        "max": 7.01
+      },
+      "stop_ack_ms": {
+        "median": 5.286,
+        "max": 7.654
+      },
+      "sql_commit_ms": {
+        "median": 0.619,
+        "max": 0.771
+      },
+      "all_interruptions_ms": {
+        "median": 5.416,
+        "max": 7.79
+      },
+      "local_drain_ms": {
+        "median": 5.565,
+        "max": 7.978
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.297,
+        "max": 6.421
+      },
+      "process_cpu_ms": {
+        "median": 6.581,
+        "max": 7.528
+      },
+      "elapsed_ms": {
+        "median": 15.19,
+        "max": 21.082
+      },
+      "bytes_drained_during_captures": {
+        "median": 101376,
+        "max": 101394
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1147456,
+        "max": 1163904
+      },
+      "completed_before_stop": {
+        "median": 1,
+        "max": 1
+      }
+    },
+    {
+      "rows": 10000,
+      "width": 128,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "fifo",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 25.39,
+        "max": 31.505
+      },
+      "stop_ack_ms": {
+        "median": 26.112,
+        "max": 32.042
+      },
+      "sql_commit_ms": {
+        "median": 0.54,
+        "max": 0.722
+      },
+      "all_interruptions_ms": {
+        "median": 26.241,
+        "max": 32.177
+      },
+      "local_drain_ms": {
+        "median": 26.369,
+        "max": 32.303
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.34,
+        "max": 6.355
+      },
+      "process_cpu_ms": {
+        "median": 23.574,
+        "max": 24.966
+      },
+      "elapsed_ms": {
+        "median": 39.328,
+        "max": 40.604
+      },
+      "bytes_drained_during_captures": {
+        "median": 202770,
+        "max": 304146
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1163904,
+        "max": 1229568
+      },
+      "completed_before_stop": {
+        "median": 4,
+        "max": 4
+      }
+    },
+    {
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "control_first",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 51.465,
+        "max": 71.959
+      },
+      "stop_ack_ms": {
+        "median": 52.224,
+        "max": 72.82
+      },
+      "sql_commit_ms": {
+        "median": 0.722,
+        "max": 0.861
+      },
+      "all_interruptions_ms": {
+        "median": 52.373,
+        "max": 72.997
+      },
+      "local_drain_ms": {
+        "median": 52.523,
+        "max": 73.159
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.361,
+        "max": 6.658
+      },
+      "process_cpu_ms": {
+        "median": 55.196,
+        "max": 59.44
+      },
+      "elapsed_ms": {
+        "median": 68.456,
+        "max": 84.394
+      },
+      "bytes_drained_during_captures": {
+        "median": 405558,
+        "max": 546870
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1131136,
+        "max": 1163904
+      },
+      "completed_before_stop": {
+        "median": 1,
+        "max": 1
+      }
+    },
+    {
+      "rows": 100000,
+      "width": 128,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "fifo",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 226.55,
+        "max": 292.467
+      },
+      "stop_ack_ms": {
+        "median": 227.239,
+        "max": 293.17
+      },
+      "sql_commit_ms": {
+        "median": 0.703,
+        "max": 0.839
+      },
+      "all_interruptions_ms": {
+        "median": 227.375,
+        "max": 293.299
+      },
+      "local_drain_ms": {
+        "median": 227.496,
+        "max": 293.427
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.703,
+        "max": 15.73
+      },
+      "process_cpu_ms": {
+        "median": 222.362,
+        "max": 236.122
+      },
+      "elapsed_ms": {
+        "median": 242.688,
+        "max": 308.522
+      },
+      "bytes_drained_during_captures": {
+        "median": 1590452,
+        "max": 2027754
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1147456,
+        "max": 1196672
+      },
+      "completed_before_stop": {
+        "median": 4,
+        "max": 4
+      }
+    },
+    {
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "control_first",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 345.906,
+        "max": 360.603
+      },
+      "stop_ack_ms": {
+        "median": 346.522,
+        "max": 361.412
+      },
+      "sql_commit_ms": {
+        "median": 0.759,
+        "max": 0.825
+      },
+      "all_interruptions_ms": {
+        "median": 346.648,
+        "max": 361.595
+      },
+      "local_drain_ms": {
+        "median": 346.799,
+        "max": 361.792
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.465,
+        "max": 6.525
+      },
+      "process_cpu_ms": {
+        "median": 334.501,
+        "max": 378.367
+      },
+      "elapsed_ms": {
+        "median": 356.681,
+        "max": 375.639
+      },
+      "bytes_drained_during_captures": {
+        "median": 2534706,
+        "max": 2748740
+      },
+      "sqlite_heap_peak": {
+        "median": 182000,
+        "max": 182000
+      },
+      "physical_end": {
+        "median": 1508032,
+        "max": 1540928
+      },
+      "completed_before_stop": {
+        "median": 1,
+        "max": 1
+      }
+    },
+    {
+      "rows": 100000,
+      "width": 1024,
+      "capacity": 100,
+      "depth": 4,
+      "policy": "fifo",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 1316.101,
+        "max": 1657.71
+      },
+      "stop_ack_ms": {
+        "median": 1316.653,
+        "max": 1658.516
+      },
+      "sql_commit_ms": {
+        "median": 0.712,
+        "max": 0.806
+      },
+      "all_interruptions_ms": {
+        "median": 1316.788,
+        "max": 1658.7
+      },
+      "local_drain_ms": {
+        "median": 1316.909,
+        "max": 1658.863
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.89,
+        "max": 41.737
+      },
+      "process_cpu_ms": {
+        "median": 1279.435,
+        "max": 1356.314
+      },
+      "elapsed_ms": {
+        "median": 1328.672,
+        "max": 1671.56
+      },
+      "bytes_drained_during_captures": {
+        "median": 9530406,
+        "max": 11659554
+      },
+      "sqlite_heap_peak": {
+        "median": 182000,
+        "max": 182000
+      },
+      "physical_end": {
+        "median": 1508032,
+        "max": 1671936
+      },
+      "completed_before_stop": {
+        "median": 4,
+        "max": 4
+      }
+    },
+    {
+      "rows": 1000000,
+      "width": 128,
+      "capacity": 100,
+      "depth": 1,
+      "policy": "fifo",
+      "samples": 5,
+      "arrivals_during_capture": 5,
+      "queue_wait_ms": {
+        "median": 589.034,
+        "max": 824.317
+      },
+      "stop_ack_ms": {
+        "median": 589.85,
+        "max": 824.991
+      },
+      "sql_commit_ms": {
+        "median": 0.704,
+        "max": 7.618
+      },
+      "all_interruptions_ms": {
+        "median": 591.791,
+        "max": 825.159
+      },
+      "local_drain_ms": {
+        "median": 592.003,
+        "max": 825.351
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.387,
+        "max": 7.146
+      },
+      "process_cpu_ms": {
+        "median": 584.224,
+        "max": 616.893
+      },
+      "elapsed_ms": {
+        "median": 606.489,
+        "max": 830.093
+      },
+      "bytes_drained_during_captures": {
+        "median": 4258278,
+        "max": 6387408
+      },
+      "sqlite_heap_peak": {
+        "median": 181552,
+        "max": 181552
+      },
+      "physical_end": {
+        "median": 1163904,
+        "max": 1163904
+      },
+      "completed_before_stop": {
+        "median": 1,
+        "max": 1
+      }
+    }
+  ]
+}

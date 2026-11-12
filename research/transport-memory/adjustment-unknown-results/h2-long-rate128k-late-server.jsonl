@@ -1,0 +1,13 @@
+{"ready": true, "ssl": "OpenSSL 3.6.3 9 Jun 2026"}
+{"connection": 1, "resumed": false, "tls_version": "TLSv1.3"}
+{"admitted_burst": 0, "count": 100, "expected": 1000}
+{"admitted_burst": 0, "count": 200, "expected": 1000}
+{"admitted_burst": 0, "count": 300, "expected": 1000}
+{"admitted_burst": 0, "count": 400, "expected": 1000}
+{"admitted_burst": 0, "count": 500, "expected": 1000}
+{"admitted_burst": 0, "count": 600, "expected": 1000}
+{"admitted_burst": 0, "count": 700, "expected": 1000}
+{"admitted_burst": 0, "count": 800, "expected": 1000}
+{"admitted_burst": 0, "count": 900, "expected": 1000}
+{"admitted_burst": 0, "count": 1000, "expected": 1000}
+{"requests_per_burst": [1000], "connections": 1, "resumed_connections": 0, "full_handshakes": 1, "streams_max": 1000}

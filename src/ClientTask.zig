@@ -1,0 +1,129 @@
+//! One joined Client borrower. Its worker writes only its own context; the UI
+//! reads that after join.
+const std = @import("std");
+const client = @import("client.zig");
+const protocol_reply = @import("protocol_reply.zig");
+const signal_stack = @import("signal_stack.zig");
+const Self = @This();
+
+pub const Run = *const fn (*anyopaque, *Self) anyerror!void;
+io: std.Io = undefined,
+context: *anyopaque = undefined,
+run: Run = undefined,
+thread: ?std.Thread = null,
+cancellation: client.Cancellation = .{},
+mutex: std.Io.Mutex = .init,
+/// One joined outcome. Its origin is written only by this worker's borrower;
+/// reset before launch and read by the shell only after join.
+result: struct {
+    outcome: ?anyerror!void = null,
+    failure_origin: client.FailureOrigin = .local,
+} = .{},
+read_failure: ?protocol_reply.ReadFailure = null,
+
+/// All arguments and this owner stay in final storage through join.
+pub fn start(self: *Self, io: std.Io, context: *anyopaque, run: Run) !void {
+    std.debug.assert(self.thread == null);
+    self.io = io;
+    self.context = context;
+    self.run = run;
+    self.cancellation = .{};
+    self.result = .{};
+    self.read_failure = null;
+    self.thread = try signal_stack.spawn(.{}, execute, .{self});
+}
+
+fn execute(self: *Self) void {
+    const result = self.run(self.context, self);
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
+    self.result.outcome = result;
+}
+
+pub fn requests(self: *Self) client.Requests {
+    return self.readContext().requests();
+}
+
+pub fn readContext(self: *Self) client.ReadContext {
+    return .{ .io = self.io, .cancellation = &self.cancellation, .read_failure = &self.read_failure, .origin = &self.result.failure_origin };
+}
+
+pub fn completed(self: *Self) bool {
+    self.mutex.lockUncancelable(self.io);
+    defer self.mutex.unlock(self.io);
+    return self.result.outcome != null;
+}
+
+pub fn cancel(self: *Self) void {
+    if (self.thread == null) return;
+    self.cancellation.requestStop();
+}
+
+/// Reap before exposing completion, closing captures or reusing arguments.
+/// A repeated join does no I/O and cannot report the result twice.
+pub fn join(self: *Self) !void {
+    const thread = self.thread orelse return;
+    thread.join();
+    self.thread = null;
+    try self.result.outcome.?;
+}
+
+test "ClientTask read diagnostic survives join with isolated borrowers and resets on reuse" {
+    const Worker = struct {
+        fn run(raw: *anyopaque, owner: *Self) !void {
+            const code: *[]const u8 = @ptrCast(@alignCast(raw));
+            if (code.*.len == 0) return;
+            var failure: protocol_reply.ReadFailure = .{ .status = 503, .diagnostic = .{ .type = .{}, .code = .{} } };
+            try failure.diagnostic.type.set("busy");
+            try failure.diagnostic.code.set(code.*);
+            const borrower = owner.requests();
+            try std.testing.expectEqual(error.HostInvocationFailed, borrower.failRead(failure));
+            failure.status = 500;
+            try failure.diagnostic.code.set("canonical_store_failure");
+            return borrower.failRead(failure);
+        }
+    };
+    var first: Self = .{};
+    var second: Self = .{};
+    var first_code: []const u8 = "classification_capacity_exhausted";
+    var second_code: []const u8 = "other\x1b\n";
+    try first.start(std.testing.io, @ptrCast(&first_code), Worker.run);
+    try second.start(std.testing.io, @ptrCast(&second_code), Worker.run);
+    try std.testing.expectError(error.CanonicalStoreFailure, first.join());
+    try std.testing.expectError(error.CanonicalStoreFailure, second.join());
+    // Each task keeps its own first failure, not the later canonical one.
+    for ([_]*const Self{ &first, &second }, [_][]const u8{ first_code, second_code }) |task, code| {
+        const failure = task.read_failure.?;
+        try std.testing.expectEqual(@as(u16, 503), failure.status);
+        try std.testing.expectEqualStrings("busy", failure.diagnostic.type.slice());
+        try std.testing.expectEqualStrings(code, failure.diagnostic.code.slice());
+    }
+    first_code = "";
+    try first.start(std.testing.io, @ptrCast(&first_code), Worker.run);
+    try first.join();
+    try std.testing.expect(first.read_failure == null);
+    try std.testing.expectEqualStrings(second_code, second.read_failure.?.diagnostic.code.slice());
+}
+
+test "ClientTask read context binds the joined result and resets origin for each launch" {
+    const Worker = struct {
+        fn failed(_: *anyopaque, task: *Self) !void {
+            const read = task.readContext();
+            const borrower = read.requests();
+            try std.testing.expect(borrower.failure_origin.? == &task.result.failure_origin);
+            read.origin.* = .host_transport;
+            return error.HostStopping;
+        }
+        fn done(_: *anyopaque, task: *Self) !void {
+            try std.testing.expectEqual(client.FailureOrigin.local, task.result.failure_origin);
+        }
+    };
+    var context: u8 = 0;
+    var task: Self = .{};
+    try task.start(std.testing.io, &context, Worker.failed);
+    try std.testing.expectError(error.HostStopping, task.join());
+    try std.testing.expectEqual(client.FailureOrigin.host_transport, task.result.failure_origin);
+    try task.start(std.testing.io, &context, Worker.done);
+    try task.join();
+    try std.testing.expectEqual(client.FailureOrigin.local, task.result.failure_origin);
+}

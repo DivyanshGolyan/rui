@@ -1,0 +1,11 @@
+?   	latifa.local/research/configuration-admission	[no test files]
+ok  	latifa.local/research/measurement	1.238s
+?   	latifa.local/research/message-admission	[no test files]
+ok  	latifa.local/research/model-control	1.348s
+?   	latifa.local/research/model-dispatch	[no test files]
+ok  	latifa.local/research/model-output	1.326s
+ok  	latifa.local/research/model-output/provider	8.224s
+ok  	latifa.local/research/model-retry	1.680s
+Build Summary: 2/2 steps succeeded
+measurement-check success
++- run go success 9s

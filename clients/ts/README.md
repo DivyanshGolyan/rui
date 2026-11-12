@@ -1,0 +1,155 @@
+# ruicode (TypeScript client for Rui)
+
+Starts a Rui Host as a child of your process and talks to it over its local socket.
+
+```ts
+import { Rui } from "ruicode";
+
+const rui = await Rui.connect({
+	database: "/var/lib/myapp/rui-store",
+	provider: { baseUrl: "https://api.openai.com/v1", key: process.env.OPENAI_API_KEY },
+	tools: [{ name: "drift", url: "http://127.0.0.1:3000/mcp", bearerToken: process.env.MCP_TOKEN, callTimeoutMs: 30000 }],
+});
+rui.on("exit", ({ code, signal, restarting }) => console.warn("rui exited", { code, signal, restarting }));
+// ...
+await rui.close();
+```
+
+## Install
+
+Run `npm install ruicode`.
+The `ruicode` package carries the client.
+The `rui` executable comes from the platform package beside it
+(`ruicode-linux-x64`, `ruicode-linux-arm64` or `ruicode-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
+Pass `binary` to `Rui.connect` to name one yourself.
+
+Bundled and custom binaries and their child Host launch are application-owned.
+Standalone client Upgrade does not mutate npm packages or blindly stop an application-owned Host, and reports installation separately from activation.
+There is no HTTP installer endpoint or background update polling; update the application's dependencies and lifecycle explicitly.
+
+`Rui.connect` writes the Store, the provider settings, MCP bearer tokens and a private runtime directory to the child's stdin.
+The optional `provider.caFile` names a PEM file to trust exclusively for that provider instead of system CAs, on macOS as on Linux (for example `provider: { baseUrl: "https://localhost:8443/v1", key: "local-key", caFile: "/path/to/ca.pem" }`).
+It travels in the launch frame, not argv or the environment; do not add `--provider-ca-file` to a launched Host.
+The path must be nonempty, contain no NUL bytes and fit the platform's path limit; relative paths use the Host's working directory, and a file that cannot be loaded or a peer that cannot be verified fails without falling back to system trust.
+`database` accepts a SQLite directory or a `mysql://USER:PASSWORD@HOST[:PORT]/DATABASE` URL.
+For a Unix socket, use its percent-encoded absolute path in place of HOST; TCP verifies TLS.
+For MySQL TCP URLs, the only query option is `ssl-ca=/absolute/path/to/ca.pem` (the path may be percent-encoded), which replaces system trust with that PEM bundle alone; socket URLs and verification-disabling options are refused.
+The MySQL database must already contain the DDL from `rui store schema --engine mysql`.
+The key, tokens and MySQL URL never reach the child's argv, environment or disk.
+Readiness discovers the MySQL Store's stable opaque id, which the client uses on requests instead of the URL.
+MySQL readiness also reports `innodb_doublewrite`, including `OFF`.
+The child gets only `PATH`, `HOME` and `TMPDIR` from your environment.
+Shell commands the agent runs execute as your user; Rui is not a sandbox.
+
+The child lives as long as its stdin stays open, so it stops when your process ends.
+If it exits on its own, the client restarts it, waiting 0.5 s and doubling up to 30 s, and sends calls in flight again once the new Host is ready.
+
+Errors:
+
+- `RuiStartError { code, message }`: Rui refused to open, for example `store_locked` once `lockWaitMs` (default 120 s) has passed.
+- `RuiRequestError { code }`: Rui rejected one request.
+- `RuiUnavailableError`: the child is gone.
+
+For `sessions.create` and `session.update`, `mcp_server_unavailable` means a requested tool is unknown and at least one configured MCP server has no tools, including no saved copies.
+The error's `message` names the unavailable server(s) that may provide the name; it does not assert ownership.
+If every configured server has tools, an unknown name gets `unknown_tool` instead.
+Saved tool copies remain usable in specs even when their server is unreachable; calling such a tool can still fail with `mcp_server_unavailable` as a tool result.
+A creating Message uses the same request rule, and `start_agent` reports it as a tool error naming `spec.tools` rather than starting an agent.
+
+## Session feed
+
+`session.listActivity()` reads to the current end; `{ follow: true }` follows new entries.
+Feed entries are a discriminated union: `switch (entry.kind)` narrows to that wire row's fields.
+A `model_call` entry is one resolved model Operation at its admission position: `model`, nullable `servedModel`, nullable `inputTokens`, `outputTokens`, `cachedTokens`, `latencyMs`, `firstEventMs`, plus `status` and `attempts`.
+Counts and durations remain decimal strings (or null); both timings describe the **final attempt**, and `firstEventMs` measures the first HTTP response event, not the first token.
+The requested model comes from the immutable admitted revision; served model uses stored body evidence before header evidence, never the requested model as fallback.
+A late resolution can reveal this row inside a previously captured end (D219); following from a later cursor does not replay it, so reread that range to observe it.
+Only top-level field names become camelCase (for example `callOrdinal`); nested objects keep their wire spelling (for example `presentation.publication_position`).
+Text-bearing kinds add `text`, or `truncated: true` when the text exceeds 16 KiB; `contentBytes` gives its byte length.
+Use `session.readContent(entry)` or `readContentBytes(entry)` for the whole text.
+
+Following polls with backoff from 250 ms to 2 s only while the Session is busy.
+An empty page in `idle`, `finished`, `failed`, or `stopped` state with nothing queued puts the iterator to sleep **without a timer**.
+It wakes after a successful `send`, `update`, `decide`, `interrupt`, `stop`, `archive`, or `unarchive` through any handle for that Session ID on the same Rui instance, then starts polling again at 250 ms.
+Writes from another process to the same Store are **not noticed while idle** (nor are writes through another Rui instance).
+Pass an AbortSignal as `signal` to end the iterator immediately even while it sleeps.
+
+## Development
+
+`src/wire.ts` is generated from the repository's `openapi.json`, which the Host build emits from its wire types.
+
+```sh
+npm ci
+npm run generate   # after openapi.json changes
+npm run check      # wire.ts is fresh, and the package type-checks
+RUI_BINARY=../../zig-out/bin/rui npm test
+```
+
+`node scripts/pack.mjs <version> <outdir> <platform>=<executable> ...` builds the release tarballs (the compiled client and one package per platform).
+It publishes nothing. `node scripts/publish.mjs <dir>` publishes them, dependencies first, skipping versions npm already has; each release runs it in the `npm_publish` job.
+
+The repository's `zig build ts-client` runs the tests against the Rui it builds.
+The real-Host feed test uses a local HTTPS provider and the `openssl` command to generate its temporary test certificate; no live provider credentials are needed.
+
+## Session settings
+
+`create` needs `model`, `effort`, `compactAt`, `tools` and `permissionMode`, and `workspace` when `tools` includes `bash`, or a `preset` name with optional overrides.
+`provider` may be left out when the Host serves one provider.
+`effort: null` sends no effort, so the provider uses its own; it is accepted only for a model Rui does not list.
+Updates may change the model within the Session's fixed provider; the Workspace also remains fixed.
+An omitted setting stays as it is.
+
+```ts
+const session = await rui.sessions.create({
+	model: "gpt-6.1-sol",
+	effort: "high",
+	compactAt: 244800,
+	tools: ["bash"],
+	permissionMode: "ask",
+	workspace: "/work/project",
+}, { idempotencyKey: "project:1" });
+await session.update({ compactAt: 200000 });
+await session.update({ model: "gpt-5.5" });
+```
+
+`await session.status()` reads the Current report: work `state` and `since`, `turn`, `operation`, `pendingMessages`, `parent`, `label`, `model`, `effort`, `tools`, `permissionMode`, `latestOutcome` and `archiveState`.
+Counts, times and Turn/Operation IDs stay decimal strings; absent targets, parents and outcomes are `null`.
+A separate ending is not in the report, so status does not invent one.
+`interrupt()` uses this status snapshot to select its exact model target.
+
+Presets are complete agent specs passed at connect and kept only in Host memory.
+Creation copies the preset, with every supplied field (including `null`) overriding it.
+
+```ts
+const rui = await Rui.connect({
+	database: "/var/lib/myapp/rui-store",
+	provider: { baseUrl: "https://api.openai.com/v1", key: process.env.OPENAI_API_KEY! },
+	presets: {
+		review: { model: "gpt-6.1-sol", effort: "low", compactAt: 100000, tools: [], permissionMode: "ask" },
+	},
+});
+const review = await rui.sessions.create({ preset: "review", instructions: "Review this patch" }, { idempotencyKey: "review:1" });
+await rui.close();
+```
+
+## Archive and restore
+
+Archive metadata is independent of work state. `archiveState` is `active`, `archiving` or `archived` in Session summaries and status.
+
+```ts
+const result = await session.archive({ idempotencyKey: "archive:1" });
+// result: { archived: true, completion: "pending" | "completed" }
+await session.unarchive({ idempotencyKey: "restore:1" });
+
+await rui.sessions.list();                       // active, including archiving
+await rui.sessions.list({ archive: "archived" }); // archived only
+await rui.sessions.list({ archive: "all" });      // all Sessions
+```
+
+`archive()` submits one durable intent that stops running and queued work, then archives after real settlement.
+An accepted intent can return `completion: "pending"`; acceptance does not mean stopped processes have retired.
+New Messages are rejected with `session_archiving` during settlement, and `unarchive()` is rejected with `archive_pending`.
+A later Message to an archived Session restores it transactionally before admitting new work.
+`unarchive()` restores only organization and never resumes stopped work.
+Replaying an archive request with its original key does not archive again after a later restore.
+Both methods notify local activity followers without submitting a Message or starting work.

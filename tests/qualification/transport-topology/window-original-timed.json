@@ -1,0 +1,83 @@
+{
+  "connections": 1,
+  "custody": {
+    "custody_occupied": "0",
+    "dispatch_fenced": false,
+    "scratch_used_bytes": "0",
+    "status": "partial",
+    "unavailable": [
+      "structured_output"
+    ]
+  },
+  "gate_event": null,
+  "gated": null,
+  "live": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 316,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 312,
+    "phase": "live",
+    "phys_footprint": 16992064,
+    "phys_footprint_peak": 17139520,
+    "pid": 11807,
+    "requested_allocation": {
+      "curl_live": 2152173,
+      "curl_peak": 2153507,
+      "gate_held": false,
+      "openssl_live": 671180,
+      "openssl_peak": 708151,
+      "paused_current": 0,
+      "paused_peak": 0,
+      "queue_bytes": 0,
+      "queue_entries": 0,
+      "rui_test_phase": "transport_allocation_snapshot"
+    },
+    "rss_exit": 0,
+    "rss_kib": 21904,
+    "timestamp_unix": 1790140932.8692968
+  },
+  "mode": "timed",
+  "request_count": 100,
+  "requests_sha256": "7f015e978ea3cd9081b560d94a7858637ce23bb3b461849f3216ba24400e8d78",
+  "response_sha256": "75351890be18969717ccc780f9ec57eda81d93b32951ecce74cd52f6c30b4969",
+  "serviced_idle": {
+    "child_pids": [],
+    "children_exit": 1,
+    "descriptor_rows": 16,
+    "footprint_exit": 0,
+    "lsof_exit": 0,
+    "numbered_fds": 12,
+    "phase": "serviced-idle",
+    "phys_footprint": 18532160,
+    "phys_footprint_peak": 18679616,
+    "pid": 11807,
+    "requested_allocation": {
+      "curl_live": 107030,
+      "curl_peak": 3367821,
+      "gate_held": false,
+      "openssl_live": 671180,
+      "openssl_peak": 708151,
+      "paused_current": 0,
+      "paused_peak": 82,
+      "queue_bytes": 0,
+      "queue_entries": 0,
+      "rui_test_phase": "transport_allocation_snapshot"
+    },
+    "rss_exit": 0,
+    "rss_kib": 23648,
+    "timestamp_unix": 1790140938.384474
+  },
+  "streams": 100,
+  "timing": {
+    "all_durable_observed_ns": 362579451134666,
+    "all_ms": 2234.387708,
+    "first_durable_observed_ns": 362577244283708,
+    "first_ms": 27.53675,
+    "observation": "model_settlement_committed host stderr trace",
+    "release_monotonic_ns": 362577216746958
+  },
+  "topology": "h2",
+  "upload_bytes": 16384
+}

@@ -1,0 +1,629 @@
+{
+  "commit": "d559412ac37dbdc98049f1ad59c36ec013445b8e",
+  "phase": "retained-idle",
+  "run": "logged3",
+  "raw_sha256": "ea56f15e43722fc9501f4dcfdc9ba3ab70ec1f3bf41307cee4a4055335fcef6d",
+  "total_bytes": 1315968,
+  "rows": [
+    {
+      "count": 2,
+      "bytes": 589824,
+      "origin": "calloc in dyld::ThreadLocalVariables::instantiateVariable(dyld::ThreadLocalVariables::Thunk const&)"
+    },
+    {
+      "count": 809,
+      "bytes": 404336,
+      "origin": "malloc in sqlite3Malloc"
+    },
+    {
+      "count": 1,
+      "bytes": 65536,
+      "origin": "malloc in CRYPTO_aligned_alloc"
+    },
+    {
+      "count": 2029,
+      "bytes": 64880,
+      "origin": "malloc in CRYPTO_malloc"
+    },
+    {
+      "count": 209,
+      "bytes": 37728,
+      "origin": "non-object with no stack backtrace"
+    },
+    {
+      "count": 1,
+      "bytes": 16384,
+      "origin": "malloc in Curl_multi_xfer_buf_borrow"
+    },
+    {
+      "count": 208,
+      "bytes": 14240,
+      "origin": "malloc in heap.c_allocator_impl.alloc"
+    },
+    {
+      "count": 436,
+      "bytes": 13952,
+      "origin": "Class.data (class_rw_t)"
+    },
+    {
+      "count": 1,
+      "bytes": 9728,
+      "origin": "memalign in heap.c_allocator_impl.alloc"
+    },
+    {
+      "count": 4,
+      "bytes": 9440,
+      "origin": "_realloc in CRYPTO_realloc"
+    },
+    {
+      "count": 2,
+      "bytes": 9312,
+      "origin": "CFData"
+    },
+    {
+      "count": 20,
+      "bytes": 7440,
+      "origin": "NSMutableDictionary (Storage)"
+    },
+    {
+      "count": 25,
+      "bytes": 5200,
+      "origin": "pthread_rwlock_t"
+    },
+    {
+      "count": 1,
+      "bytes": 4608,
+      "origin": "calloc in __si_module_cache_byname_block_invoke"
+    },
+    {
+      "count": 62,
+      "bytes": 4480,
+      "origin": "Class.methodCache._buckets (bucket_t)"
+    },
+    {
+      "count": 52,
+      "bytes": 4400,
+      "origin": "malloc in CRYPTO_zalloc"
+    },
+    {
+      "count": 2,
+      "bytes": 4224,
+      "origin": "calloc in Curl_ssl_scache_create"
+    },
+    {
+      "count": 1,
+      "bytes": 4096,
+      "origin": "@autoreleasepool content"
+    },
+    {
+      "count": 68,
+      "bytes": 3856,
+      "origin": "CFString"
+    },
+    {
+      "count": 1,
+      "bytes": 3072,
+      "origin": "calloc in Curl_open"
+    },
+    {
+      "count": 18,
+      "bytes": 2928,
+      "origin": "sqlite3MemRealloc in sqlite3Realloc"
+    },
+    {
+      "count": 1,
+      "bytes": 2560,
+      "origin": "calloc in weak_resize(weak_table_t*, unsigned long)"
+    },
+    {
+      "count": 36,
+      "bytes": 2336,
+      "origin": "calloc in cache_t::insert(objc_selector*, void (*)(), objc_object*)"
+    },
+    {
+      "count": 6,
+      "bytes": 2240,
+      "origin": "xpc_string_t (Storage)"
+    },
+    {
+      "count": 20,
+      "bytes": 2208,
+      "origin": "xpc_dictionary_t (Storage)"
+    },
+    {
+      "count": 20,
+      "bytes": 1600,
+      "origin": "Class.data.readonly (class_ro_t)"
+    },
+    {
+      "count": 2,
+      "bytes": 1360,
+      "origin": "calloc in Curl_hash_add2"
+    },
+    {
+      "count": 14,
+      "bytes": 1296,
+      "origin": "Class.data.methods (method_array_t)"
+    },
+    {
+      "count": 14,
+      "bytes": 1280,
+      "origin": "non-object from libsystem_notify.dylib"
+    },
+    {
+      "count": 1,
+      "bytes": 1024,
+      "origin": "calloc in Curl_uint32_tbl_resize"
+    },
+    {
+      "count": 20,
+      "bytes": 960,
+      "origin": "Class.data.extended (class_rw_ext_t)"
+    },
+    {
+      "count": 15,
+      "bytes": 960,
+      "origin": "memalign in id2data(objc_object*, SyncKind, usage)"
+    },
+    {
+      "count": 9,
+      "bytes": 816,
+      "origin": "calloc in _dispatch_calloc_typed"
+    },
+    {
+      "count": 6,
+      "bytes": 768,
+      "origin": "CFPrefsPlistSource"
+    },
+    {
+      "count": 3,
+      "bytes": 768,
+      "origin": "calloc in os_set_32_ptr_init"
+    },
+    {
+      "count": 1,
+      "bytes": 768,
+      "origin": "calloc in Curl_multi_handle"
+    },
+    {
+      "count": 2,
+      "bytes": 752,
+      "origin": "SCDynamicStore"
+    },
+    {
+      "count": 15,
+      "bytes": 736,
+      "origin": "Swift._ContiguousArrayStorage<Swift.UInt8>"
+    },
+    {
+      "count": 22,
+      "bytes": 704,
+      "origin": "NSMutableDictionary"
+    },
+    {
+      "count": 8,
+      "bytes": 608,
+      "origin": "Swift.StringStorage"
+    },
+    {
+      "count": 4,
+      "bytes": 512,
+      "origin": "dispatch_queue_t (serial)"
+    },
+    {
+      "count": 2,
+      "bytes": 512,
+      "origin": "calloc in os_set_64_ptr_init"
+    },
+    {
+      "count": 2,
+      "bytes": 512,
+      "origin": "calloc in os_set_str_ptr_init"
+    },
+    {
+      "count": 1,
+      "bytes": 512,
+      "origin": "calloc in os_map_64_init"
+    },
+    {
+      "count": 1,
+      "bytes": 512,
+      "origin": "malloc in _CFRuntimeRegisterClass"
+    },
+    {
+      "count": 2,
+      "bytes": 480,
+      "origin": "xpc_connection_t"
+    },
+    {
+      "count": 7,
+      "bytes": 464,
+      "origin": "CFArray"
+    },
+    {
+      "count": 1,
+      "bytes": 448,
+      "origin": "calloc in __si_module_static_search_block_invoke"
+    },
+    {
+      "count": 7,
+      "bytes": 432,
+      "origin": "NSMutableArray (Storage)"
+    },
+    {
+      "count": 3,
+      "bytes": 432,
+      "origin": "dispatch_mach_t"
+    },
+    {
+      "count": 3,
+      "bytes": 384,
+      "origin": "CFPrefsManagedSource"
+    },
+    {
+      "count": 3,
+      "bytes": 384,
+      "origin": "dispatch_source_t"
+    },
+    {
+      "count": 2,
+      "bytes": 384,
+      "origin": "Swift._ContiguousArrayStorage<Swift.String>"
+    },
+    {
+      "count": 7,
+      "bytes": 336,
+      "origin": "NSMutableArray"
+    },
+    {
+      "count": 6,
+      "bytes": 288,
+      "origin": "xpc_string_t"
+    },
+    {
+      "count": 4,
+      "bytes": 256,
+      "origin": "OS_os_log"
+    },
+    {
+      "count": 2,
+      "bytes": 256,
+      "origin": "CFPrefsSuiteSearchListSource"
+    },
+    {
+      "count": 1,
+      "bytes": 256,
+      "origin": "calloc in Curl_thrdpool_create"
+    },
+    {
+      "count": 1,
+      "bytes": 256,
+      "origin": "malloc in __CFBasicHashGetPtrIndex_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 240,
+      "origin": "calloc in Curl_thrdq_create"
+    },
+    {
+      "count": 1,
+      "bytes": 224,
+      "origin": "CFBundle"
+    },
+    {
+      "count": 2,
+      "bytes": 192,
+      "origin": "Swift._ContiguousArrayStorage<Swift.Array<Swift.UInt8>>"
+    },
+    {
+      "count": 2,
+      "bytes": 192,
+      "origin": "xpc_dictionary_t"
+    },
+    {
+      "count": 1,
+      "bytes": 192,
+      "origin": "malloc in LI_ils_create"
+    },
+    {
+      "count": 1,
+      "bytes": 176,
+      "origin": "_NSThreadData"
+    },
+    {
+      "count": 2,
+      "bytes": 160,
+      "origin": "xpc_pipe_t"
+    },
+    {
+      "count": 1,
+      "bytes": 160,
+      "origin": "malloc in cli.main"
+    },
+    {
+      "count": 3,
+      "bytes": 144,
+      "origin": "NSMutableCharacterSet"
+    },
+    {
+      "count": 3,
+      "bytes": 144,
+      "origin": "__NSMallocBlock__"
+    },
+    {
+      "count": 1,
+      "bytes": 144,
+      "origin": "calloc in thrdpool_signal"
+    },
+    {
+      "count": 4,
+      "bytes": 128,
+      "origin": "NSDictionary"
+    },
+    {
+      "count": 2,
+      "bytes": 128,
+      "origin": "CFPrefsSource"
+    },
+    {
+      "count": 1,
+      "bytes": 128,
+      "origin": "CFPrefsSearchListSource"
+    },
+    {
+      "count": 1,
+      "bytes": 112,
+      "origin": "Swift.BridgingBufferStorage"
+    },
+    {
+      "count": 1,
+      "bytes": 112,
+      "origin": "malloc in _swift_allocObject_"
+    },
+    {
+      "count": 3,
+      "bytes": 96,
+      "origin": "NSNumber"
+    },
+    {
+      "count": 1,
+      "bytes": 96,
+      "origin": "NSURL"
+    },
+    {
+      "count": 1,
+      "bytes": 96,
+      "origin": "_CFXPreferences"
+    },
+    {
+      "count": 5,
+      "bytes": 80,
+      "origin": "NSMutableDictionary.cow (struct __cow_state_t)"
+    },
+    {
+      "count": 5,
+      "bytes": 80,
+      "origin": "calloc in Curl_uint32_bset_resize"
+    },
+    {
+      "count": 2,
+      "bytes": 80,
+      "origin": "calloc in si_module_config_modules_for_category"
+    },
+    {
+      "count": 1,
+      "bytes": 80,
+      "origin": "Foundation.LockedState<Foundation._NSSwiftProcessInfo.State>.(_Buffer in $18d850180)<>"
+    },
+    {
+      "count": 1,
+      "bytes": 80,
+      "origin": "calloc in __si_module_static_file_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 80,
+      "origin": "calloc in fetch_cache(bool)"
+    },
+    {
+      "count": 1,
+      "bytes": 80,
+      "origin": "malloc in _fetchInitializingClassList(bool)"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "CFDictionary"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "_NSMainThread"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "_NSSwiftProcessInfo"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "calloc in Curl_dnsc_mk_addr2"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "calloc in os_state_add_handler"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "malloc in Curl_getaddrinfo_ex"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "malloc in Curl_hash_add2"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "pthread_mutex_t"
+    },
+    {
+      "count": 1,
+      "bytes": 64,
+      "origin": "xpc_array_t (Storage)"
+    },
+    {
+      "count": 3,
+      "bytes": 48,
+      "origin": "malloc in CFCharacterSetInvert.cold.1"
+    },
+    {
+      "count": 2,
+      "bytes": 48,
+      "origin": "calloc in LI_get_thread_info"
+    },
+    {
+      "count": 2,
+      "bytes": 48,
+      "origin": "calloc in _fetchInitializingClassList(bool)"
+    },
+    {
+      "count": 1,
+      "bytes": 48,
+      "origin": "CFSet"
+    },
+    {
+      "count": 1,
+      "bytes": 48,
+      "origin": "Foundation.LockedState<Foundation._ProcessInfo.State>.(_Buffer in $18d850180)<>"
+    },
+    {
+      "count": 1,
+      "bytes": 48,
+      "origin": "Foundation.LockedState<Swift.Optional<Swift.String>>.(_Buffer in $18d850180)<>"
+    },
+    {
+      "count": 1,
+      "bytes": 48,
+      "origin": "malloc in _swift_getGenericMetadata(swift::MetadataRequest, void const* const*, swift::TargetTypeContextDescriptor<swift::InProcess> const*)"
+    },
+    {
+      "count": 1,
+      "bytes": 48,
+      "origin": "pthread_cond_t"
+    },
+    {
+      "count": 1,
+      "bytes": 48,
+      "origin": "xpc_array_t"
+    },
+    {
+      "count": 2,
+      "bytes": 32,
+      "origin": "NSArray"
+    },
+    {
+      "count": 2,
+      "bytes": 32,
+      "origin": "malloc in LI_get_thread_info"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "CFSet (Value Storage)"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "NSFileManager"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "Swift.SwiftDeferredNSArray"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "_CFXPreferencesHandle"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "_ProcessInfo"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "calloc in swift::ConcurrentReadableHashMap<MallocTypeCacheEntry, swift::LazyMutex>::resize(swift::ConcurrentReadableHashMap<MallocTypeCacheEntry, swift::LazyMutex>::IndexStorage, unsigned char, MallocTypeCacheEntry*)"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "malloc in ConformanceState::cacheResult(swift::TargetMetadata<swift::InProcess> const*, swift::TargetProtocolDescriptor<swift::InProcess> const*, swift::TargetWitnessTable<swift::InProcess> const*, unsigned long)"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "malloc in __SCGetThreadSpecificData"
+    },
+    {
+      "count": 1,
+      "bytes": 32,
+      "origin": "malloc in __si_module_static_darwin_directory_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "_NSFileManagerBridge"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "calloc in __si_module_static_ds_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in Curl_thread_create"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in __si_module_cache_byname_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in __si_module_static_ds_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in __si_module_static_file_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in __si_module_static_mdns_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in __si_module_static_search_block_invoke"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in server.serve"
+    },
+    {
+      "count": 1,
+      "bytes": 16,
+      "origin": "malloc in swift_getSingletonMetadata"
+    }
+  ]
+}

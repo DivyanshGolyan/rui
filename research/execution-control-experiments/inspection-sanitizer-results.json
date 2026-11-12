@@ -1,0 +1,226 @@
+{
+  "metadata": {
+    "platform": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+    "hardware": "MacBookPro18,1",
+    "memory_bytes": 17179869184,
+    "compiler": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Library/Developer/CommandLineTools/usr/bin",
+    "baseline": "3bdadc8395716e587f3da11f0b85ecdb3b91274a"
+  },
+  "started_utc": "2026-09-05T17:06:46Z",
+  "load_start": "{ 4.52 6.37 6.70 }",
+  "observations": [
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "fifo",
+      "queued_inspections": 4,
+      "completed_before_stop": 4,
+      "report_bytes": 7691168,
+      "capture_ms": [
+        14.875,
+        14.553,
+        14.444,
+        14.525
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 36900,
+      "request_after_start_ms": 1.986,
+      "queue_wait_ms": 56.434,
+      "stop_ack_ms": 57.182,
+      "sql_commit_ms": 0.748,
+      "first_interruption_ms": 57.198,
+      "all_interruptions_ms": 57.239,
+      "local_drain_ms": 57.395,
+      "reactor_max_tick_gap_including_warmup_ms": 6.283,
+      "process_cpu_ms": 58.975,
+      "elapsed_ms": 68.498,
+      "sqlite_heap_peak": 152144,
+      "physical_start": 19555712,
+      "physical_end": 19719872,
+      "streamed_bytes": 239688,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 1851392
+    },
+    {
+      "sqlite": "3.53.4",
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "policy": "control_first",
+      "queued_inspections": 4,
+      "completed_before_stop": 1,
+      "report_bytes": 1922792,
+      "capture_ms": [
+        14.661
+      ],
+      "arrived_during_capture": true,
+      "bytes_drained_during_captures": 9234,
+      "request_after_start_ms": 2.055,
+      "queue_wait_ms": 12.632,
+      "stop_ack_ms": 14.097,
+      "sql_commit_ms": 1.465,
+      "first_interruption_ms": 14.107,
+      "all_interruptions_ms": 14.144,
+      "local_drain_ms": 14.256,
+      "reactor_max_tick_gap_including_warmup_ms": 6.29,
+      "process_cpu_ms": 15.34,
+      "elapsed_ms": 19.353,
+      "sqlite_heap_peak": 152144,
+      "physical_start": 19588480,
+      "physical_end": 19785408,
+      "streamed_bytes": 212022,
+      "shell_escalated": 0,
+      "repeat": 0,
+      "database_bytes": 1851392
+    }
+  ],
+  "build": {
+    "sqlite_package": "N-V-__8AAGVtrgCcOcmjrOJnagmnRyMrcKaOo09KbU-vu8w8",
+    "sqlite_flags": [
+      "-DSQLITE_THREADSAFE=0",
+      "-DSQLITE_DEFAULT_PAGE_SIZE=4096",
+      "-DSQLITE_MAX_DEFAULT_PAGE_SIZE=4096",
+      "-DSQLITE_DEFAULT_FOREIGN_KEYS=1",
+      "-DSQLITE_DEFAULT_MMAP_SIZE=0",
+      "-DSQLITE_MAX_MMAP_SIZE=0",
+      "-DSQLITE_DEFAULT_SYNCHRONOUS=3",
+      "-DSQLITE_DQS=0",
+      "-DSQLITE_OMIT_LOAD_EXTENSION=1",
+      "-DSQLITE_OMIT_SHARED_CACHE=1",
+      "-DSQLITE_TEMP_STORE=1",
+      "-DSQLITE_USE_URI=0",
+      "-DSQLITE_ENABLE_API_ARMOR=1"
+    ],
+    "sanitized": true
+  },
+  "cleanup_checks": [
+    {
+      "signal": 6,
+      "owned_group_removed": true
+    },
+    {
+      "signal": 15,
+      "owned_group_removed": true
+    }
+  ],
+  "load_end": "{ 3.75 5.93 6.53 }",
+  "summaries": [
+    {
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "depth": 4,
+      "policy": "control_first",
+      "samples": 1,
+      "arrivals_during_capture": 1,
+      "queue_wait_ms": {
+        "median": 12.632,
+        "max": 12.632
+      },
+      "stop_ack_ms": {
+        "median": 14.097,
+        "max": 14.097
+      },
+      "sql_commit_ms": {
+        "median": 1.465,
+        "max": 1.465
+      },
+      "all_interruptions_ms": {
+        "median": 14.144,
+        "max": 14.144
+      },
+      "local_drain_ms": {
+        "median": 14.256,
+        "max": 14.256
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.29,
+        "max": 6.29
+      },
+      "process_cpu_ms": {
+        "median": 15.34,
+        "max": 15.34
+      },
+      "elapsed_ms": {
+        "median": 19.353,
+        "max": 19.353
+      },
+      "bytes_drained_during_captures": {
+        "median": 9234,
+        "max": 9234
+      },
+      "sqlite_heap_peak": {
+        "median": 152144,
+        "max": 152144
+      },
+      "physical_end": {
+        "median": 19785408,
+        "max": 19785408
+      },
+      "completed_before_stop": {
+        "median": 1,
+        "max": 1
+      }
+    },
+    {
+      "rows": 10000,
+      "width": 128,
+      "capacity": 10,
+      "depth": 4,
+      "policy": "fifo",
+      "samples": 1,
+      "arrivals_during_capture": 1,
+      "queue_wait_ms": {
+        "median": 56.434,
+        "max": 56.434
+      },
+      "stop_ack_ms": {
+        "median": 57.182,
+        "max": 57.182
+      },
+      "sql_commit_ms": {
+        "median": 0.748,
+        "max": 0.748
+      },
+      "all_interruptions_ms": {
+        "median": 57.239,
+        "max": 57.239
+      },
+      "local_drain_ms": {
+        "median": 57.395,
+        "max": 57.395
+      },
+      "reactor_max_tick_gap_including_warmup_ms": {
+        "median": 6.283,
+        "max": 6.283
+      },
+      "process_cpu_ms": {
+        "median": 58.975,
+        "max": 58.975
+      },
+      "elapsed_ms": {
+        "median": 68.498,
+        "max": 68.498
+      },
+      "bytes_drained_during_captures": {
+        "median": 36900,
+        "max": 36900
+      },
+      "sqlite_heap_peak": {
+        "median": 152144,
+        "max": 152144
+      },
+      "physical_end": {
+        "median": 19719872,
+        "max": 19719872
+      },
+      "completed_before_stop": {
+        "median": 4,
+        "max": 4
+      }
+    }
+  ]
+}

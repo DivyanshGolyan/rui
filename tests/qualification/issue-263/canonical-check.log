@@ -1,0 +1,16 @@
+check
++- run sh
+   +- run test w
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+rui: dispatch fenced after Bash preparation cleanup failure: InjectedBashCleanupFailure
+failed command: ./.zig-cache/o/447906cf46b712d6eaccfbd4907fac4e/test --cache-dir=./.zig-cache --seed=0xd32c153e --listen=-
+
+/Users/divyanshgolyan/code/personal/rui263-mac-16/tests/integration/admission_integration.sh: line 730:   253 Killed: 9               "$rui" serve --store "$store" "$@" > "$ready" 2> "$server_log"
+queued capacity-release discovery (diagnostic): 1656.4 ms
+exhausted recovery ordinary inspections (diagnostic only): samples=29 p95_ms=84.0 max_ms=101.5
+{"bash_resource_samples": [{"files": 0, "logical_bytes": 0, "phase": "cold", "process_resources": "unavailable"}, {"accounted_scratch_bytes": 12118, "files": 3, "logical_bytes": 12118, "phase": "retained-output-idle", "process_resources": "unavailable"}, {"accounted_scratch_bytes": 22, "files": 3, "logical_bytes": 22, "phase": "active-descendant-pipes", "process_resources": "unavailable"}, {"accounted_scratch_bytes": 0, "files": 4, "logical_bytes": 0, "phase": "two-sibling-retained-idle", "process_resources": "unavailable"}]}
+{"bash_lifecycle_faults": "passed"}
+{"bash_recovery": "passed"}
+control integration: stalled_ingress=10 controls=25 p95_ms=68.9 control_first_p95_ms=38.4 real_settlement_p95_ms=50.5 overlap_controls=2 blocked_result_control_ms=66.4 exact_ack_ms=15.5
+/Users/divyanshgolyan/code/personal/rui263-mac-16/tests/integration/admission_integration.sh: line 730:  5250 Killed: 9               "$rui" serve --store "$store" "$@" > "$ready" 2> "$server_log"

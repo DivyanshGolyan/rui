@@ -1,0 +1,5906 @@
+{
+  "artifacts": "/tmp/rui-call-classification-3371591155",
+  "binary": "/home/user/workspace/repo/.zig-cache/o/e90fc26faaa0fcff80635f7151f05633/rui-release-small-check",
+  "binary_sha256": "a2e1222faacd5798a3acc2c39c2d2df59b2b5cfee2ea3edb8f907b7be952ae46",
+  "cases": {
+    "mixed-restart": {
+      "classification_admission_ms": 148.696,
+      "database": {
+        "database_allocated_bytes": 192512,
+        "database_logical_bytes": 192512
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7184384,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0.01,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 741376
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 2,
+        "maximum_ms": 10.835,
+        "minimum_ms": 9.746,
+        "p50_ms": 9.746,
+        "p95_ms": 10.835
+      },
+      "denial_replay": {
+        "answer": {
+          "action": "1",
+          "decision": "deny",
+          "replayed": true,
+          "session": "qualification/mixed-restart",
+          "status": "accepted"
+        },
+        "type": "permission_decision_reply",
+        "version": "1"
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 2,
+          "calls": 4,
+          "decisions": 2,
+          "denied": 2,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 1,
+          "pending": 0,
+          "rejections": 2,
+          "unknown": 1
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": null,
+            "action_id": 1,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 1,
+            "item_ordinal": 1,
+            "rejection": null,
+            "action_id": 2,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 2,
+            "item_ordinal": 2,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 3,
+            "item_ordinal": 3,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "mixed-restart",
+        "valid_calls": 2,
+        "rejected_calls": 2,
+        "argument_payload_bytes": 16,
+        "restart_and_replay_denial": true,
+        "change_catalog_while_response_pending": true
+      },
+      "inspection_ms": 5.847,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 390,
+          "succeeded": 390,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7204864,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 14,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 3581,
+      "public_action_content": {
+        "actions_read": 2,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 2,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 28.091,
+      "response_end_to_classification_status": "diagnostic",
+      "restart_exact_content": {
+        "denied_actions_read": 2,
+        "rejected_references_checked": 8,
+        "status": "passed"
+      },
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7184384,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.06,
+          "cpu_system_seconds": 0.03,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 1249280
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6828032,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "payload-100000": {
+      "classification_admission_ms": 140.931,
+      "database": {
+        "database_allocated_bytes": 290816,
+        "database_logical_bytes": 290816
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7208960,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.01,
+          "cpu_system_seconds": 0.01,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 995328
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 1,
+        "maximum_ms": 10.15,
+        "minimum_ms": 10.15,
+        "p50_ms": 10.15,
+        "p95_ms": 10.15
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 1,
+          "calls": 1,
+          "decisions": 1,
+          "denied": 1,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 0,
+          "pending": 0,
+          "rejections": 0,
+          "unknown": 0
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": null,
+            "action_id": 1,
+            "permission": 2,
+            "action_outcome": "denied"
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "payload-100000",
+        "valid_calls": 1,
+        "rejected_calls": 0,
+        "argument_payload_bytes": 100000,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 5.908,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 386,
+          "succeeded": 386,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7229440,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 13,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 201069,
+      "public_action_content": {
+        "actions_read": 1,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 0,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 39.376,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7208960,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.04,
+          "cpu_system_seconds": 0.07,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 11,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 1437696
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6512640,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "payload-4096": {
+      "classification_admission_ms": 122.95,
+      "database": {
+        "database_allocated_bytes": 196608,
+        "database_logical_bytes": 196608
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7188480,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.01,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 704512
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 1,
+        "maximum_ms": 10.821,
+        "minimum_ms": 10.821,
+        "p50_ms": 10.821,
+        "p95_ms": 10.821
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 1,
+          "calls": 1,
+          "decisions": 1,
+          "denied": 1,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 0,
+          "pending": 0,
+          "rejections": 0,
+          "unknown": 0
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": null,
+            "action_id": 1,
+            "permission": 2,
+            "action_outcome": "denied"
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "payload-4096",
+        "valid_calls": 1,
+        "rejected_calls": 0,
+        "argument_payload_bytes": 4096,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 5.475,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 390,
+          "succeeded": 390,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7208960,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 15,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 9245,
+      "public_action_content": {
+        "actions_read": 1,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 0,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 15.477,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7188480,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.06,
+          "cpu_system_seconds": 0.03,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 11,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 1159168
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6557696,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "rejected-1": {
+      "classification_admission_ms": 123.236,
+      "database": {
+        "database_allocated_bytes": 192512,
+        "database_logical_bytes": 192512
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7192576,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.01,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 11,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 679936
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 0
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 0,
+          "calls": 1,
+          "decisions": 0,
+          "denied": 0,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 0,
+          "pending": 0,
+          "rejections": 1,
+          "unknown": 1
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "rejected-1",
+        "valid_calls": 0,
+        "rejected_calls": 1,
+        "argument_payload_bytes": 16,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 3.205,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 406,
+          "succeeded": 406,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7192576,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 15,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 857,
+      "public_action_content": {
+        "actions_read": 0,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 1,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 16.24,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7192576,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.06,
+          "cpu_system_seconds": 0.04,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 1126400
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6836224,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "rejected-256": {
+      "classification_admission_ms": 268.983,
+      "database": {
+        "database_allocated_bytes": 385024,
+        "database_logical_bytes": 385024
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7450624,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.07,
+          "cpu_system_seconds": 0.01,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 1470464
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 0
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 0,
+          "calls": 256,
+          "decisions": 0,
+          "denied": 0,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 128,
+          "pending": 0,
+          "rejections": 256,
+          "unknown": 128
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 1,
+            "item_ordinal": 1,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 2,
+            "item_ordinal": 2,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 3,
+            "item_ordinal": 3,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 4,
+            "item_ordinal": 4,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 5,
+            "item_ordinal": 5,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 6,
+            "item_ordinal": 6,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 7,
+            "item_ordinal": 7,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 8,
+            "item_ordinal": 8,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 9,
+            "item_ordinal": 9,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 10,
+            "item_ordinal": 10,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 11,
+            "item_ordinal": 11,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 12,
+            "item_ordinal": 12,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 13,
+            "item_ordinal": 13,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 14,
+            "item_ordinal": 14,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 15,
+            "item_ordinal": 15,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 16,
+            "item_ordinal": 16,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 17,
+            "item_ordinal": 17,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 18,
+            "item_ordinal": 18,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 19,
+            "item_ordinal": 19,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 20,
+            "item_ordinal": 20,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 21,
+            "item_ordinal": 21,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 22,
+            "item_ordinal": 22,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 23,
+            "item_ordinal": 23,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 24,
+            "item_ordinal": 24,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 25,
+            "item_ordinal": 25,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 26,
+            "item_ordinal": 26,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 27,
+            "item_ordinal": 27,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 28,
+            "item_ordinal": 28,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 29,
+            "item_ordinal": 29,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 30,
+            "item_ordinal": 30,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 31,
+            "item_ordinal": 31,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 32,
+            "item_ordinal": 32,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 33,
+            "item_ordinal": 33,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 34,
+            "item_ordinal": 34,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 35,
+            "item_ordinal": 35,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 36,
+            "item_ordinal": 36,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 37,
+            "item_ordinal": 37,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 38,
+            "item_ordinal": 38,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 39,
+            "item_ordinal": 39,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 40,
+            "item_ordinal": 40,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 41,
+            "item_ordinal": 41,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 42,
+            "item_ordinal": 42,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 43,
+            "item_ordinal": 43,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 44,
+            "item_ordinal": 44,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 45,
+            "item_ordinal": 45,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 46,
+            "item_ordinal": 46,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 47,
+            "item_ordinal": 47,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 48,
+            "item_ordinal": 48,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 49,
+            "item_ordinal": 49,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 50,
+            "item_ordinal": 50,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 51,
+            "item_ordinal": 51,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 52,
+            "item_ordinal": 52,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 53,
+            "item_ordinal": 53,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 54,
+            "item_ordinal": 54,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 55,
+            "item_ordinal": 55,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 56,
+            "item_ordinal": 56,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 57,
+            "item_ordinal": 57,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 58,
+            "item_ordinal": 58,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 59,
+            "item_ordinal": 59,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 60,
+            "item_ordinal": 60,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 61,
+            "item_ordinal": 61,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 62,
+            "item_ordinal": 62,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 63,
+            "item_ordinal": 63,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 64,
+            "item_ordinal": 64,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 65,
+            "item_ordinal": 65,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 66,
+            "item_ordinal": 66,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 67,
+            "item_ordinal": 67,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 68,
+            "item_ordinal": 68,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 69,
+            "item_ordinal": 69,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 70,
+            "item_ordinal": 70,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 71,
+            "item_ordinal": 71,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 72,
+            "item_ordinal": 72,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 73,
+            "item_ordinal": 73,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 74,
+            "item_ordinal": 74,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 75,
+            "item_ordinal": 75,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 76,
+            "item_ordinal": 76,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 77,
+            "item_ordinal": 77,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 78,
+            "item_ordinal": 78,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 79,
+            "item_ordinal": 79,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 80,
+            "item_ordinal": 80,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 81,
+            "item_ordinal": 81,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 82,
+            "item_ordinal": 82,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 83,
+            "item_ordinal": 83,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 84,
+            "item_ordinal": 84,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 85,
+            "item_ordinal": 85,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 86,
+            "item_ordinal": 86,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 87,
+            "item_ordinal": 87,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 88,
+            "item_ordinal": 88,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 89,
+            "item_ordinal": 89,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 90,
+            "item_ordinal": 90,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 91,
+            "item_ordinal": 91,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 92,
+            "item_ordinal": 92,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 93,
+            "item_ordinal": 93,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 94,
+            "item_ordinal": 94,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 95,
+            "item_ordinal": 95,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 96,
+            "item_ordinal": 96,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 97,
+            "item_ordinal": 97,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 98,
+            "item_ordinal": 98,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 99,
+            "item_ordinal": 99,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 100,
+            "item_ordinal": 100,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 101,
+            "item_ordinal": 101,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 102,
+            "item_ordinal": 102,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 103,
+            "item_ordinal": 103,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 104,
+            "item_ordinal": 104,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 105,
+            "item_ordinal": 105,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 106,
+            "item_ordinal": 106,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 107,
+            "item_ordinal": 107,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 108,
+            "item_ordinal": 108,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 109,
+            "item_ordinal": 109,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 110,
+            "item_ordinal": 110,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 111,
+            "item_ordinal": 111,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 112,
+            "item_ordinal": 112,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 113,
+            "item_ordinal": 113,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 114,
+            "item_ordinal": 114,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 115,
+            "item_ordinal": 115,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 116,
+            "item_ordinal": 116,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 117,
+            "item_ordinal": 117,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 118,
+            "item_ordinal": 118,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 119,
+            "item_ordinal": 119,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 120,
+            "item_ordinal": 120,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 121,
+            "item_ordinal": 121,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 122,
+            "item_ordinal": 122,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 123,
+            "item_ordinal": 123,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 124,
+            "item_ordinal": 124,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 125,
+            "item_ordinal": 125,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 126,
+            "item_ordinal": 126,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 127,
+            "item_ordinal": 127,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 128,
+            "item_ordinal": 128,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 129,
+            "item_ordinal": 129,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 130,
+            "item_ordinal": 130,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 131,
+            "item_ordinal": 131,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 132,
+            "item_ordinal": 132,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 133,
+            "item_ordinal": 133,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 134,
+            "item_ordinal": 134,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 135,
+            "item_ordinal": 135,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 136,
+            "item_ordinal": 136,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 137,
+            "item_ordinal": 137,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 138,
+            "item_ordinal": 138,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 139,
+            "item_ordinal": 139,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 140,
+            "item_ordinal": 140,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 141,
+            "item_ordinal": 141,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 142,
+            "item_ordinal": 142,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 143,
+            "item_ordinal": 143,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 144,
+            "item_ordinal": 144,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 145,
+            "item_ordinal": 145,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 146,
+            "item_ordinal": 146,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 147,
+            "item_ordinal": 147,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 148,
+            "item_ordinal": 148,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 149,
+            "item_ordinal": 149,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 150,
+            "item_ordinal": 150,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 151,
+            "item_ordinal": 151,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 152,
+            "item_ordinal": 152,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 153,
+            "item_ordinal": 153,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 154,
+            "item_ordinal": 154,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 155,
+            "item_ordinal": 155,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 156,
+            "item_ordinal": 156,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 157,
+            "item_ordinal": 157,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 158,
+            "item_ordinal": 158,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 159,
+            "item_ordinal": 159,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 160,
+            "item_ordinal": 160,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 161,
+            "item_ordinal": 161,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 162,
+            "item_ordinal": 162,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 163,
+            "item_ordinal": 163,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 164,
+            "item_ordinal": 164,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 165,
+            "item_ordinal": 165,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 166,
+            "item_ordinal": 166,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 167,
+            "item_ordinal": 167,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 168,
+            "item_ordinal": 168,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 169,
+            "item_ordinal": 169,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 170,
+            "item_ordinal": 170,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 171,
+            "item_ordinal": 171,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 172,
+            "item_ordinal": 172,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 173,
+            "item_ordinal": 173,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 174,
+            "item_ordinal": 174,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 175,
+            "item_ordinal": 175,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 176,
+            "item_ordinal": 176,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 177,
+            "item_ordinal": 177,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 178,
+            "item_ordinal": 178,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 179,
+            "item_ordinal": 179,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 180,
+            "item_ordinal": 180,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 181,
+            "item_ordinal": 181,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 182,
+            "item_ordinal": 182,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 183,
+            "item_ordinal": 183,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 184,
+            "item_ordinal": 184,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 185,
+            "item_ordinal": 185,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 186,
+            "item_ordinal": 186,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 187,
+            "item_ordinal": 187,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 188,
+            "item_ordinal": 188,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 189,
+            "item_ordinal": 189,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 190,
+            "item_ordinal": 190,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 191,
+            "item_ordinal": 191,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 192,
+            "item_ordinal": 192,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 193,
+            "item_ordinal": 193,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 194,
+            "item_ordinal": 194,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 195,
+            "item_ordinal": 195,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 196,
+            "item_ordinal": 196,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 197,
+            "item_ordinal": 197,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 198,
+            "item_ordinal": 198,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 199,
+            "item_ordinal": 199,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 200,
+            "item_ordinal": 200,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 201,
+            "item_ordinal": 201,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 202,
+            "item_ordinal": 202,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 203,
+            "item_ordinal": 203,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 204,
+            "item_ordinal": 204,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 205,
+            "item_ordinal": 205,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 206,
+            "item_ordinal": 206,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 207,
+            "item_ordinal": 207,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 208,
+            "item_ordinal": 208,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 209,
+            "item_ordinal": 209,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 210,
+            "item_ordinal": 210,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 211,
+            "item_ordinal": 211,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 212,
+            "item_ordinal": 212,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 213,
+            "item_ordinal": 213,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 214,
+            "item_ordinal": 214,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 215,
+            "item_ordinal": 215,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 216,
+            "item_ordinal": 216,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 217,
+            "item_ordinal": 217,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 218,
+            "item_ordinal": 218,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 219,
+            "item_ordinal": 219,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 220,
+            "item_ordinal": 220,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 221,
+            "item_ordinal": 221,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 222,
+            "item_ordinal": 222,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 223,
+            "item_ordinal": 223,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 224,
+            "item_ordinal": 224,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 225,
+            "item_ordinal": 225,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 226,
+            "item_ordinal": 226,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 227,
+            "item_ordinal": 227,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 228,
+            "item_ordinal": 228,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 229,
+            "item_ordinal": 229,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 230,
+            "item_ordinal": 230,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 231,
+            "item_ordinal": 231,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 232,
+            "item_ordinal": 232,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 233,
+            "item_ordinal": 233,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 234,
+            "item_ordinal": 234,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 235,
+            "item_ordinal": 235,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 236,
+            "item_ordinal": 236,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 237,
+            "item_ordinal": 237,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 238,
+            "item_ordinal": 238,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 239,
+            "item_ordinal": 239,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 240,
+            "item_ordinal": 240,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 241,
+            "item_ordinal": 241,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 242,
+            "item_ordinal": 242,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 243,
+            "item_ordinal": 243,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 244,
+            "item_ordinal": 244,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 245,
+            "item_ordinal": 245,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 246,
+            "item_ordinal": 246,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 247,
+            "item_ordinal": 247,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 248,
+            "item_ordinal": 248,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 249,
+            "item_ordinal": 249,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 250,
+            "item_ordinal": 250,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 251,
+            "item_ordinal": 251,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 252,
+            "item_ordinal": 252,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 253,
+            "item_ordinal": 253,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 254,
+            "item_ordinal": 254,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 255,
+            "item_ordinal": 255,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "rejected-256",
+        "valid_calls": 0,
+        "rejected_calls": 256,
+        "argument_payload_bytes": 16,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 21.775,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 344,
+          "succeeded": 344,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7565312,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 15,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 193980,
+      "public_action_content": {
+        "actions_read": 0,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 256,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 162.016,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7450624,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.15,
+          "cpu_system_seconds": 0.05,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 9547776
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6631424,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 10,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "rejected-32": {
+      "classification_admission_ms": 133.408,
+      "database": {
+        "database_allocated_bytes": 212992,
+        "database_logical_bytes": 212992
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 6971392,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.02,
+          "cpu_system_seconds": 0.01,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 757760
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 0
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 0,
+          "calls": 32,
+          "decisions": 0,
+          "denied": 0,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 16,
+          "pending": 0,
+          "rejections": 32,
+          "unknown": 16
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 1,
+            "item_ordinal": 1,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 2,
+            "item_ordinal": 2,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 3,
+            "item_ordinal": 3,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 4,
+            "item_ordinal": 4,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 5,
+            "item_ordinal": 5,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 6,
+            "item_ordinal": 6,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 7,
+            "item_ordinal": 7,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 8,
+            "item_ordinal": 8,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 9,
+            "item_ordinal": 9,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 10,
+            "item_ordinal": 10,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 11,
+            "item_ordinal": 11,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 12,
+            "item_ordinal": 12,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 13,
+            "item_ordinal": 13,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 14,
+            "item_ordinal": 14,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 15,
+            "item_ordinal": 15,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 16,
+            "item_ordinal": 16,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 17,
+            "item_ordinal": 17,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 18,
+            "item_ordinal": 18,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 19,
+            "item_ordinal": 19,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 20,
+            "item_ordinal": 20,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 21,
+            "item_ordinal": 21,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 22,
+            "item_ordinal": 22,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 23,
+            "item_ordinal": 23,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 24,
+            "item_ordinal": 24,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 25,
+            "item_ordinal": 25,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 26,
+            "item_ordinal": 26,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 27,
+            "item_ordinal": 27,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 28,
+            "item_ordinal": 28,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 29,
+            "item_ordinal": 29,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 30,
+            "item_ordinal": 30,
+            "rejection": "unknown_tool",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          },
+          {
+            "call_ordinal": 31,
+            "item_ordinal": 31,
+            "rejection": "invalid_arguments",
+            "action_id": null,
+            "permission": null,
+            "action_outcome": null
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "rejected-32",
+        "valid_calls": 0,
+        "rejected_calls": 32,
+        "argument_payload_bytes": 16,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 11.653,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 396,
+          "succeeded": 396,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 6971392,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 14,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 24075,
+      "public_action_content": {
+        "actions_read": 0,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 32,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 37.134,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 6971392,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.08,
+          "cpu_system_seconds": 0.04,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 2826240
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6414336,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "valid-1": {
+      "classification_admission_ms": 101.343,
+      "database": {
+        "database_allocated_bytes": 192512,
+        "database_logical_bytes": 192512
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7249920,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.01,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 688128
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 1,
+        "maximum_ms": 10.91,
+        "minimum_ms": 10.91,
+        "p50_ms": 10.91,
+        "p95_ms": 10.91
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 1,
+          "calls": 1,
+          "decisions": 1,
+          "denied": 1,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 0,
+          "pending": 0,
+          "rejections": 0,
+          "unknown": 0
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": null,
+            "action_id": 1,
+            "permission": 2,
+            "action_outcome": "denied"
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "valid-1",
+        "valid_calls": 1,
+        "rejected_calls": 0,
+        "argument_payload_bytes": 16,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 6.614,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 386,
+          "succeeded": 386,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7270400,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 13,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 1045,
+      "public_action_content": {
+        "actions_read": 1,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 0,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 16.028,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7249920,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.07,
+          "cpu_system_seconds": 0.02,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 1155072
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6893568,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "valid-256": {
+      "classification_admission_ms": 360.659,
+      "database": {
+        "database_allocated_bytes": 462848,
+        "database_logical_bytes": 462848
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7507968,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.08,
+          "cpu_system_seconds": 0.03,
+          "threads": 2,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 1490944
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 256,
+        "maximum_ms": 14.255,
+        "minimum_ms": 3.785,
+        "p50_ms": 8.751,
+        "p95_ms": 10.126
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 256,
+          "calls": 256,
+          "decisions": 256,
+          "denied": 256,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 0,
+          "pending": 0,
+          "rejections": 0,
+          "unknown": 0
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": null,
+            "action_id": 1,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 1,
+            "item_ordinal": 1,
+            "rejection": null,
+            "action_id": 2,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 2,
+            "item_ordinal": 2,
+            "rejection": null,
+            "action_id": 3,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 3,
+            "item_ordinal": 3,
+            "rejection": null,
+            "action_id": 4,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 4,
+            "item_ordinal": 4,
+            "rejection": null,
+            "action_id": 5,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 5,
+            "item_ordinal": 5,
+            "rejection": null,
+            "action_id": 6,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 6,
+            "item_ordinal": 6,
+            "rejection": null,
+            "action_id": 7,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 7,
+            "item_ordinal": 7,
+            "rejection": null,
+            "action_id": 8,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 8,
+            "item_ordinal": 8,
+            "rejection": null,
+            "action_id": 9,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 9,
+            "item_ordinal": 9,
+            "rejection": null,
+            "action_id": 10,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 10,
+            "item_ordinal": 10,
+            "rejection": null,
+            "action_id": 11,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 11,
+            "item_ordinal": 11,
+            "rejection": null,
+            "action_id": 12,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 12,
+            "item_ordinal": 12,
+            "rejection": null,
+            "action_id": 13,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 13,
+            "item_ordinal": 13,
+            "rejection": null,
+            "action_id": 14,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 14,
+            "item_ordinal": 14,
+            "rejection": null,
+            "action_id": 15,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 15,
+            "item_ordinal": 15,
+            "rejection": null,
+            "action_id": 16,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 16,
+            "item_ordinal": 16,
+            "rejection": null,
+            "action_id": 17,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 17,
+            "item_ordinal": 17,
+            "rejection": null,
+            "action_id": 18,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 18,
+            "item_ordinal": 18,
+            "rejection": null,
+            "action_id": 19,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 19,
+            "item_ordinal": 19,
+            "rejection": null,
+            "action_id": 20,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 20,
+            "item_ordinal": 20,
+            "rejection": null,
+            "action_id": 21,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 21,
+            "item_ordinal": 21,
+            "rejection": null,
+            "action_id": 22,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 22,
+            "item_ordinal": 22,
+            "rejection": null,
+            "action_id": 23,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 23,
+            "item_ordinal": 23,
+            "rejection": null,
+            "action_id": 24,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 24,
+            "item_ordinal": 24,
+            "rejection": null,
+            "action_id": 25,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 25,
+            "item_ordinal": 25,
+            "rejection": null,
+            "action_id": 26,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 26,
+            "item_ordinal": 26,
+            "rejection": null,
+            "action_id": 27,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 27,
+            "item_ordinal": 27,
+            "rejection": null,
+            "action_id": 28,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 28,
+            "item_ordinal": 28,
+            "rejection": null,
+            "action_id": 29,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 29,
+            "item_ordinal": 29,
+            "rejection": null,
+            "action_id": 30,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 30,
+            "item_ordinal": 30,
+            "rejection": null,
+            "action_id": 31,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 31,
+            "item_ordinal": 31,
+            "rejection": null,
+            "action_id": 32,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 32,
+            "item_ordinal": 32,
+            "rejection": null,
+            "action_id": 33,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 33,
+            "item_ordinal": 33,
+            "rejection": null,
+            "action_id": 34,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 34,
+            "item_ordinal": 34,
+            "rejection": null,
+            "action_id": 35,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 35,
+            "item_ordinal": 35,
+            "rejection": null,
+            "action_id": 36,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 36,
+            "item_ordinal": 36,
+            "rejection": null,
+            "action_id": 37,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 37,
+            "item_ordinal": 37,
+            "rejection": null,
+            "action_id": 38,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 38,
+            "item_ordinal": 38,
+            "rejection": null,
+            "action_id": 39,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 39,
+            "item_ordinal": 39,
+            "rejection": null,
+            "action_id": 40,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 40,
+            "item_ordinal": 40,
+            "rejection": null,
+            "action_id": 41,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 41,
+            "item_ordinal": 41,
+            "rejection": null,
+            "action_id": 42,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 42,
+            "item_ordinal": 42,
+            "rejection": null,
+            "action_id": 43,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 43,
+            "item_ordinal": 43,
+            "rejection": null,
+            "action_id": 44,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 44,
+            "item_ordinal": 44,
+            "rejection": null,
+            "action_id": 45,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 45,
+            "item_ordinal": 45,
+            "rejection": null,
+            "action_id": 46,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 46,
+            "item_ordinal": 46,
+            "rejection": null,
+            "action_id": 47,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 47,
+            "item_ordinal": 47,
+            "rejection": null,
+            "action_id": 48,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 48,
+            "item_ordinal": 48,
+            "rejection": null,
+            "action_id": 49,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 49,
+            "item_ordinal": 49,
+            "rejection": null,
+            "action_id": 50,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 50,
+            "item_ordinal": 50,
+            "rejection": null,
+            "action_id": 51,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 51,
+            "item_ordinal": 51,
+            "rejection": null,
+            "action_id": 52,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 52,
+            "item_ordinal": 52,
+            "rejection": null,
+            "action_id": 53,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 53,
+            "item_ordinal": 53,
+            "rejection": null,
+            "action_id": 54,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 54,
+            "item_ordinal": 54,
+            "rejection": null,
+            "action_id": 55,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 55,
+            "item_ordinal": 55,
+            "rejection": null,
+            "action_id": 56,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 56,
+            "item_ordinal": 56,
+            "rejection": null,
+            "action_id": 57,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 57,
+            "item_ordinal": 57,
+            "rejection": null,
+            "action_id": 58,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 58,
+            "item_ordinal": 58,
+            "rejection": null,
+            "action_id": 59,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 59,
+            "item_ordinal": 59,
+            "rejection": null,
+            "action_id": 60,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 60,
+            "item_ordinal": 60,
+            "rejection": null,
+            "action_id": 61,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 61,
+            "item_ordinal": 61,
+            "rejection": null,
+            "action_id": 62,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 62,
+            "item_ordinal": 62,
+            "rejection": null,
+            "action_id": 63,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 63,
+            "item_ordinal": 63,
+            "rejection": null,
+            "action_id": 64,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 64,
+            "item_ordinal": 64,
+            "rejection": null,
+            "action_id": 65,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 65,
+            "item_ordinal": 65,
+            "rejection": null,
+            "action_id": 66,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 66,
+            "item_ordinal": 66,
+            "rejection": null,
+            "action_id": 67,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 67,
+            "item_ordinal": 67,
+            "rejection": null,
+            "action_id": 68,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 68,
+            "item_ordinal": 68,
+            "rejection": null,
+            "action_id": 69,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 69,
+            "item_ordinal": 69,
+            "rejection": null,
+            "action_id": 70,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 70,
+            "item_ordinal": 70,
+            "rejection": null,
+            "action_id": 71,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 71,
+            "item_ordinal": 71,
+            "rejection": null,
+            "action_id": 72,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 72,
+            "item_ordinal": 72,
+            "rejection": null,
+            "action_id": 73,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 73,
+            "item_ordinal": 73,
+            "rejection": null,
+            "action_id": 74,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 74,
+            "item_ordinal": 74,
+            "rejection": null,
+            "action_id": 75,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 75,
+            "item_ordinal": 75,
+            "rejection": null,
+            "action_id": 76,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 76,
+            "item_ordinal": 76,
+            "rejection": null,
+            "action_id": 77,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 77,
+            "item_ordinal": 77,
+            "rejection": null,
+            "action_id": 78,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 78,
+            "item_ordinal": 78,
+            "rejection": null,
+            "action_id": 79,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 79,
+            "item_ordinal": 79,
+            "rejection": null,
+            "action_id": 80,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 80,
+            "item_ordinal": 80,
+            "rejection": null,
+            "action_id": 81,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 81,
+            "item_ordinal": 81,
+            "rejection": null,
+            "action_id": 82,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 82,
+            "item_ordinal": 82,
+            "rejection": null,
+            "action_id": 83,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 83,
+            "item_ordinal": 83,
+            "rejection": null,
+            "action_id": 84,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 84,
+            "item_ordinal": 84,
+            "rejection": null,
+            "action_id": 85,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 85,
+            "item_ordinal": 85,
+            "rejection": null,
+            "action_id": 86,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 86,
+            "item_ordinal": 86,
+            "rejection": null,
+            "action_id": 87,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 87,
+            "item_ordinal": 87,
+            "rejection": null,
+            "action_id": 88,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 88,
+            "item_ordinal": 88,
+            "rejection": null,
+            "action_id": 89,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 89,
+            "item_ordinal": 89,
+            "rejection": null,
+            "action_id": 90,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 90,
+            "item_ordinal": 90,
+            "rejection": null,
+            "action_id": 91,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 91,
+            "item_ordinal": 91,
+            "rejection": null,
+            "action_id": 92,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 92,
+            "item_ordinal": 92,
+            "rejection": null,
+            "action_id": 93,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 93,
+            "item_ordinal": 93,
+            "rejection": null,
+            "action_id": 94,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 94,
+            "item_ordinal": 94,
+            "rejection": null,
+            "action_id": 95,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 95,
+            "item_ordinal": 95,
+            "rejection": null,
+            "action_id": 96,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 96,
+            "item_ordinal": 96,
+            "rejection": null,
+            "action_id": 97,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 97,
+            "item_ordinal": 97,
+            "rejection": null,
+            "action_id": 98,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 98,
+            "item_ordinal": 98,
+            "rejection": null,
+            "action_id": 99,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 99,
+            "item_ordinal": 99,
+            "rejection": null,
+            "action_id": 100,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 100,
+            "item_ordinal": 100,
+            "rejection": null,
+            "action_id": 101,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 101,
+            "item_ordinal": 101,
+            "rejection": null,
+            "action_id": 102,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 102,
+            "item_ordinal": 102,
+            "rejection": null,
+            "action_id": 103,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 103,
+            "item_ordinal": 103,
+            "rejection": null,
+            "action_id": 104,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 104,
+            "item_ordinal": 104,
+            "rejection": null,
+            "action_id": 105,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 105,
+            "item_ordinal": 105,
+            "rejection": null,
+            "action_id": 106,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 106,
+            "item_ordinal": 106,
+            "rejection": null,
+            "action_id": 107,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 107,
+            "item_ordinal": 107,
+            "rejection": null,
+            "action_id": 108,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 108,
+            "item_ordinal": 108,
+            "rejection": null,
+            "action_id": 109,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 109,
+            "item_ordinal": 109,
+            "rejection": null,
+            "action_id": 110,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 110,
+            "item_ordinal": 110,
+            "rejection": null,
+            "action_id": 111,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 111,
+            "item_ordinal": 111,
+            "rejection": null,
+            "action_id": 112,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 112,
+            "item_ordinal": 112,
+            "rejection": null,
+            "action_id": 113,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 113,
+            "item_ordinal": 113,
+            "rejection": null,
+            "action_id": 114,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 114,
+            "item_ordinal": 114,
+            "rejection": null,
+            "action_id": 115,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 115,
+            "item_ordinal": 115,
+            "rejection": null,
+            "action_id": 116,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 116,
+            "item_ordinal": 116,
+            "rejection": null,
+            "action_id": 117,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 117,
+            "item_ordinal": 117,
+            "rejection": null,
+            "action_id": 118,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 118,
+            "item_ordinal": 118,
+            "rejection": null,
+            "action_id": 119,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 119,
+            "item_ordinal": 119,
+            "rejection": null,
+            "action_id": 120,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 120,
+            "item_ordinal": 120,
+            "rejection": null,
+            "action_id": 121,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 121,
+            "item_ordinal": 121,
+            "rejection": null,
+            "action_id": 122,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 122,
+            "item_ordinal": 122,
+            "rejection": null,
+            "action_id": 123,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 123,
+            "item_ordinal": 123,
+            "rejection": null,
+            "action_id": 124,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 124,
+            "item_ordinal": 124,
+            "rejection": null,
+            "action_id": 125,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 125,
+            "item_ordinal": 125,
+            "rejection": null,
+            "action_id": 126,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 126,
+            "item_ordinal": 126,
+            "rejection": null,
+            "action_id": 127,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 127,
+            "item_ordinal": 127,
+            "rejection": null,
+            "action_id": 128,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 128,
+            "item_ordinal": 128,
+            "rejection": null,
+            "action_id": 129,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 129,
+            "item_ordinal": 129,
+            "rejection": null,
+            "action_id": 130,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 130,
+            "item_ordinal": 130,
+            "rejection": null,
+            "action_id": 131,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 131,
+            "item_ordinal": 131,
+            "rejection": null,
+            "action_id": 132,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 132,
+            "item_ordinal": 132,
+            "rejection": null,
+            "action_id": 133,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 133,
+            "item_ordinal": 133,
+            "rejection": null,
+            "action_id": 134,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 134,
+            "item_ordinal": 134,
+            "rejection": null,
+            "action_id": 135,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 135,
+            "item_ordinal": 135,
+            "rejection": null,
+            "action_id": 136,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 136,
+            "item_ordinal": 136,
+            "rejection": null,
+            "action_id": 137,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 137,
+            "item_ordinal": 137,
+            "rejection": null,
+            "action_id": 138,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 138,
+            "item_ordinal": 138,
+            "rejection": null,
+            "action_id": 139,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 139,
+            "item_ordinal": 139,
+            "rejection": null,
+            "action_id": 140,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 140,
+            "item_ordinal": 140,
+            "rejection": null,
+            "action_id": 141,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 141,
+            "item_ordinal": 141,
+            "rejection": null,
+            "action_id": 142,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 142,
+            "item_ordinal": 142,
+            "rejection": null,
+            "action_id": 143,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 143,
+            "item_ordinal": 143,
+            "rejection": null,
+            "action_id": 144,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 144,
+            "item_ordinal": 144,
+            "rejection": null,
+            "action_id": 145,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 145,
+            "item_ordinal": 145,
+            "rejection": null,
+            "action_id": 146,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 146,
+            "item_ordinal": 146,
+            "rejection": null,
+            "action_id": 147,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 147,
+            "item_ordinal": 147,
+            "rejection": null,
+            "action_id": 148,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 148,
+            "item_ordinal": 148,
+            "rejection": null,
+            "action_id": 149,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 149,
+            "item_ordinal": 149,
+            "rejection": null,
+            "action_id": 150,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 150,
+            "item_ordinal": 150,
+            "rejection": null,
+            "action_id": 151,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 151,
+            "item_ordinal": 151,
+            "rejection": null,
+            "action_id": 152,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 152,
+            "item_ordinal": 152,
+            "rejection": null,
+            "action_id": 153,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 153,
+            "item_ordinal": 153,
+            "rejection": null,
+            "action_id": 154,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 154,
+            "item_ordinal": 154,
+            "rejection": null,
+            "action_id": 155,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 155,
+            "item_ordinal": 155,
+            "rejection": null,
+            "action_id": 156,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 156,
+            "item_ordinal": 156,
+            "rejection": null,
+            "action_id": 157,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 157,
+            "item_ordinal": 157,
+            "rejection": null,
+            "action_id": 158,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 158,
+            "item_ordinal": 158,
+            "rejection": null,
+            "action_id": 159,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 159,
+            "item_ordinal": 159,
+            "rejection": null,
+            "action_id": 160,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 160,
+            "item_ordinal": 160,
+            "rejection": null,
+            "action_id": 161,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 161,
+            "item_ordinal": 161,
+            "rejection": null,
+            "action_id": 162,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 162,
+            "item_ordinal": 162,
+            "rejection": null,
+            "action_id": 163,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 163,
+            "item_ordinal": 163,
+            "rejection": null,
+            "action_id": 164,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 164,
+            "item_ordinal": 164,
+            "rejection": null,
+            "action_id": 165,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 165,
+            "item_ordinal": 165,
+            "rejection": null,
+            "action_id": 166,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 166,
+            "item_ordinal": 166,
+            "rejection": null,
+            "action_id": 167,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 167,
+            "item_ordinal": 167,
+            "rejection": null,
+            "action_id": 168,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 168,
+            "item_ordinal": 168,
+            "rejection": null,
+            "action_id": 169,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 169,
+            "item_ordinal": 169,
+            "rejection": null,
+            "action_id": 170,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 170,
+            "item_ordinal": 170,
+            "rejection": null,
+            "action_id": 171,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 171,
+            "item_ordinal": 171,
+            "rejection": null,
+            "action_id": 172,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 172,
+            "item_ordinal": 172,
+            "rejection": null,
+            "action_id": 173,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 173,
+            "item_ordinal": 173,
+            "rejection": null,
+            "action_id": 174,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 174,
+            "item_ordinal": 174,
+            "rejection": null,
+            "action_id": 175,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 175,
+            "item_ordinal": 175,
+            "rejection": null,
+            "action_id": 176,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 176,
+            "item_ordinal": 176,
+            "rejection": null,
+            "action_id": 177,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 177,
+            "item_ordinal": 177,
+            "rejection": null,
+            "action_id": 178,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 178,
+            "item_ordinal": 178,
+            "rejection": null,
+            "action_id": 179,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 179,
+            "item_ordinal": 179,
+            "rejection": null,
+            "action_id": 180,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 180,
+            "item_ordinal": 180,
+            "rejection": null,
+            "action_id": 181,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 181,
+            "item_ordinal": 181,
+            "rejection": null,
+            "action_id": 182,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 182,
+            "item_ordinal": 182,
+            "rejection": null,
+            "action_id": 183,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 183,
+            "item_ordinal": 183,
+            "rejection": null,
+            "action_id": 184,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 184,
+            "item_ordinal": 184,
+            "rejection": null,
+            "action_id": 185,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 185,
+            "item_ordinal": 185,
+            "rejection": null,
+            "action_id": 186,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 186,
+            "item_ordinal": 186,
+            "rejection": null,
+            "action_id": 187,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 187,
+            "item_ordinal": 187,
+            "rejection": null,
+            "action_id": 188,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 188,
+            "item_ordinal": 188,
+            "rejection": null,
+            "action_id": 189,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 189,
+            "item_ordinal": 189,
+            "rejection": null,
+            "action_id": 190,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 190,
+            "item_ordinal": 190,
+            "rejection": null,
+            "action_id": 191,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 191,
+            "item_ordinal": 191,
+            "rejection": null,
+            "action_id": 192,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 192,
+            "item_ordinal": 192,
+            "rejection": null,
+            "action_id": 193,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 193,
+            "item_ordinal": 193,
+            "rejection": null,
+            "action_id": 194,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 194,
+            "item_ordinal": 194,
+            "rejection": null,
+            "action_id": 195,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 195,
+            "item_ordinal": 195,
+            "rejection": null,
+            "action_id": 196,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 196,
+            "item_ordinal": 196,
+            "rejection": null,
+            "action_id": 197,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 197,
+            "item_ordinal": 197,
+            "rejection": null,
+            "action_id": 198,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 198,
+            "item_ordinal": 198,
+            "rejection": null,
+            "action_id": 199,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 199,
+            "item_ordinal": 199,
+            "rejection": null,
+            "action_id": 200,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 200,
+            "item_ordinal": 200,
+            "rejection": null,
+            "action_id": 201,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 201,
+            "item_ordinal": 201,
+            "rejection": null,
+            "action_id": 202,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 202,
+            "item_ordinal": 202,
+            "rejection": null,
+            "action_id": 203,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 203,
+            "item_ordinal": 203,
+            "rejection": null,
+            "action_id": 204,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 204,
+            "item_ordinal": 204,
+            "rejection": null,
+            "action_id": 205,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 205,
+            "item_ordinal": 205,
+            "rejection": null,
+            "action_id": 206,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 206,
+            "item_ordinal": 206,
+            "rejection": null,
+            "action_id": 207,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 207,
+            "item_ordinal": 207,
+            "rejection": null,
+            "action_id": 208,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 208,
+            "item_ordinal": 208,
+            "rejection": null,
+            "action_id": 209,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 209,
+            "item_ordinal": 209,
+            "rejection": null,
+            "action_id": 210,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 210,
+            "item_ordinal": 210,
+            "rejection": null,
+            "action_id": 211,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 211,
+            "item_ordinal": 211,
+            "rejection": null,
+            "action_id": 212,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 212,
+            "item_ordinal": 212,
+            "rejection": null,
+            "action_id": 213,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 213,
+            "item_ordinal": 213,
+            "rejection": null,
+            "action_id": 214,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 214,
+            "item_ordinal": 214,
+            "rejection": null,
+            "action_id": 215,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 215,
+            "item_ordinal": 215,
+            "rejection": null,
+            "action_id": 216,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 216,
+            "item_ordinal": 216,
+            "rejection": null,
+            "action_id": 217,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 217,
+            "item_ordinal": 217,
+            "rejection": null,
+            "action_id": 218,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 218,
+            "item_ordinal": 218,
+            "rejection": null,
+            "action_id": 219,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 219,
+            "item_ordinal": 219,
+            "rejection": null,
+            "action_id": 220,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 220,
+            "item_ordinal": 220,
+            "rejection": null,
+            "action_id": 221,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 221,
+            "item_ordinal": 221,
+            "rejection": null,
+            "action_id": 222,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 222,
+            "item_ordinal": 222,
+            "rejection": null,
+            "action_id": 223,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 223,
+            "item_ordinal": 223,
+            "rejection": null,
+            "action_id": 224,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 224,
+            "item_ordinal": 224,
+            "rejection": null,
+            "action_id": 225,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 225,
+            "item_ordinal": 225,
+            "rejection": null,
+            "action_id": 226,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 226,
+            "item_ordinal": 226,
+            "rejection": null,
+            "action_id": 227,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 227,
+            "item_ordinal": 227,
+            "rejection": null,
+            "action_id": 228,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 228,
+            "item_ordinal": 228,
+            "rejection": null,
+            "action_id": 229,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 229,
+            "item_ordinal": 229,
+            "rejection": null,
+            "action_id": 230,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 230,
+            "item_ordinal": 230,
+            "rejection": null,
+            "action_id": 231,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 231,
+            "item_ordinal": 231,
+            "rejection": null,
+            "action_id": 232,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 232,
+            "item_ordinal": 232,
+            "rejection": null,
+            "action_id": 233,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 233,
+            "item_ordinal": 233,
+            "rejection": null,
+            "action_id": 234,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 234,
+            "item_ordinal": 234,
+            "rejection": null,
+            "action_id": 235,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 235,
+            "item_ordinal": 235,
+            "rejection": null,
+            "action_id": 236,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 236,
+            "item_ordinal": 236,
+            "rejection": null,
+            "action_id": 237,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 237,
+            "item_ordinal": 237,
+            "rejection": null,
+            "action_id": 238,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 238,
+            "item_ordinal": 238,
+            "rejection": null,
+            "action_id": 239,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 239,
+            "item_ordinal": 239,
+            "rejection": null,
+            "action_id": 240,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 240,
+            "item_ordinal": 240,
+            "rejection": null,
+            "action_id": 241,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 241,
+            "item_ordinal": 241,
+            "rejection": null,
+            "action_id": 242,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 242,
+            "item_ordinal": 242,
+            "rejection": null,
+            "action_id": 243,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 243,
+            "item_ordinal": 243,
+            "rejection": null,
+            "action_id": 244,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 244,
+            "item_ordinal": 244,
+            "rejection": null,
+            "action_id": 245,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 245,
+            "item_ordinal": 245,
+            "rejection": null,
+            "action_id": 246,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 246,
+            "item_ordinal": 246,
+            "rejection": null,
+            "action_id": 247,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 247,
+            "item_ordinal": 247,
+            "rejection": null,
+            "action_id": 248,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 248,
+            "item_ordinal": 248,
+            "rejection": null,
+            "action_id": 249,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 249,
+            "item_ordinal": 249,
+            "rejection": null,
+            "action_id": 250,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 250,
+            "item_ordinal": 250,
+            "rejection": null,
+            "action_id": 251,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 251,
+            "item_ordinal": 251,
+            "rejection": null,
+            "action_id": 252,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 252,
+            "item_ordinal": 252,
+            "rejection": null,
+            "action_id": 253,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 253,
+            "item_ordinal": 253,
+            "rejection": null,
+            "action_id": 254,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 254,
+            "item_ordinal": 254,
+            "rejection": null,
+            "action_id": 255,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 255,
+            "item_ordinal": 255,
+            "rejection": null,
+            "action_id": 256,
+            "permission": 2,
+            "action_outcome": "denied"
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "valid-256",
+        "valid_calls": 256,
+        "rejected_calls": 0,
+        "argument_payload_bytes": 16,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 14.311,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 811,
+          "succeeded": 811,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7614464,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 15,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 244409,
+      "public_action_content": {
+        "actions_read": 256,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 0,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 251.686,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7614464,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.25,
+          "cpu_system_seconds": 0.24,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 11,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 14184448
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6610944,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 10,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    },
+    "valid-32": {
+      "classification_admission_ms": 137.491,
+      "database": {
+        "database_allocated_bytes": 212992,
+        "database_logical_bytes": 212992
+      },
+      "delayed_cleanup_execution": {
+        "custody_occupied": "1",
+        "dispatch_fenced": false,
+        "scratch_used_bytes": "0",
+        "status": "partial",
+        "unavailable": [
+          "structured_output",
+          "allow_once",
+          "bash_execution",
+          "tool_result_publication"
+        ]
+      },
+      "delayed_cleanup_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "delayed_cleanup_sample": {
+        "sample": {
+          "rss_bytes": 7098368,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.02,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 774144
+        },
+        "status": "diagnostic"
+      },
+      "denial_latency": {
+        "count": 32,
+        "maximum_ms": 12.718,
+        "minimum_ms": 4.193,
+        "p50_ms": 9.304,
+        "p95_ms": 11.459
+      },
+      "durable_audit": {
+        "counts": {
+          "actions": 32,
+          "calls": 32,
+          "decisions": 32,
+          "denied": 32,
+          "foreign_key_failures": 0,
+          "invalid_arguments": 0,
+          "pending": 0,
+          "rejections": 0,
+          "unknown": 0
+        },
+        "ordered_calls": [
+          {
+            "call_ordinal": 0,
+            "item_ordinal": 0,
+            "rejection": null,
+            "action_id": 1,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 1,
+            "item_ordinal": 1,
+            "rejection": null,
+            "action_id": 2,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 2,
+            "item_ordinal": 2,
+            "rejection": null,
+            "action_id": 3,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 3,
+            "item_ordinal": 3,
+            "rejection": null,
+            "action_id": 4,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 4,
+            "item_ordinal": 4,
+            "rejection": null,
+            "action_id": 5,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 5,
+            "item_ordinal": 5,
+            "rejection": null,
+            "action_id": 6,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 6,
+            "item_ordinal": 6,
+            "rejection": null,
+            "action_id": 7,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 7,
+            "item_ordinal": 7,
+            "rejection": null,
+            "action_id": 8,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 8,
+            "item_ordinal": 8,
+            "rejection": null,
+            "action_id": 9,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 9,
+            "item_ordinal": 9,
+            "rejection": null,
+            "action_id": 10,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 10,
+            "item_ordinal": 10,
+            "rejection": null,
+            "action_id": 11,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 11,
+            "item_ordinal": 11,
+            "rejection": null,
+            "action_id": 12,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 12,
+            "item_ordinal": 12,
+            "rejection": null,
+            "action_id": 13,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 13,
+            "item_ordinal": 13,
+            "rejection": null,
+            "action_id": 14,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 14,
+            "item_ordinal": 14,
+            "rejection": null,
+            "action_id": 15,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 15,
+            "item_ordinal": 15,
+            "rejection": null,
+            "action_id": 16,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 16,
+            "item_ordinal": 16,
+            "rejection": null,
+            "action_id": 17,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 17,
+            "item_ordinal": 17,
+            "rejection": null,
+            "action_id": 18,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 18,
+            "item_ordinal": 18,
+            "rejection": null,
+            "action_id": 19,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 19,
+            "item_ordinal": 19,
+            "rejection": null,
+            "action_id": 20,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 20,
+            "item_ordinal": 20,
+            "rejection": null,
+            "action_id": 21,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 21,
+            "item_ordinal": 21,
+            "rejection": null,
+            "action_id": 22,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 22,
+            "item_ordinal": 22,
+            "rejection": null,
+            "action_id": 23,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 23,
+            "item_ordinal": 23,
+            "rejection": null,
+            "action_id": 24,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 24,
+            "item_ordinal": 24,
+            "rejection": null,
+            "action_id": 25,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 25,
+            "item_ordinal": 25,
+            "rejection": null,
+            "action_id": 26,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 26,
+            "item_ordinal": 26,
+            "rejection": null,
+            "action_id": 27,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 27,
+            "item_ordinal": 27,
+            "rejection": null,
+            "action_id": 28,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 28,
+            "item_ordinal": 28,
+            "rejection": null,
+            "action_id": 29,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 29,
+            "item_ordinal": 29,
+            "rejection": null,
+            "action_id": 30,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 30,
+            "item_ordinal": 30,
+            "rejection": null,
+            "action_id": 31,
+            "permission": 2,
+            "action_outcome": "denied"
+          },
+          {
+            "call_ordinal": 31,
+            "item_ordinal": 31,
+            "rejection": null,
+            "action_id": 32,
+            "permission": 2,
+            "action_outcome": "denied"
+          }
+        ]
+      },
+      "forbidden_bash_launch_absent": true,
+      "inputs": {
+        "name": "valid-32",
+        "valid_calls": 32,
+        "rejected_calls": 0,
+        "argument_payload_bytes": 16,
+        "restart_and_replay_denial": false,
+        "change_catalog_while_response_pending": false
+      },
+      "inspection_ms": 6.133,
+      "physical_footprint_error": "accepted physical-footprint counter requires macOS /usr/bin/footprint",
+      "physical_footprint_status": "unavailable",
+      "portable_measurement_status": "diagnostic",
+      "portable_observed_peak": {
+        "status": "diagnostic",
+        "validity": {
+          "attempts": 328,
+          "succeeded": 328,
+          "failed": 0
+        },
+        "peak": {
+          "rss_bytes": 7098368,
+          "virtual_bytes": 162717696,
+          "open_descriptors": 15,
+          "threads": 3
+        }
+      },
+      "provider_response_bytes": 30312,
+      "public_action_content": {
+        "actions_read": 32,
+        "fields_per_action": 2,
+        "status": "passed"
+      },
+      "public_rejected_references": {
+        "calls_checked": 0,
+        "references_per_call": 4,
+        "status": "passed"
+      },
+      "response_end_to_classification_ms": 36.454,
+      "response_end_to_classification_status": "diagnostic",
+      "retained_idle_after": {
+        "sample": {
+          "rss_bytes": 7098368,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0.07,
+          "cpu_system_seconds": 0.04,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 9,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 2568192
+        },
+        "status": "diagnostic"
+      },
+      "retained_idle_before": {
+        "sample": {
+          "rss_bytes": 6533120,
+          "virtual_bytes": 162717696,
+          "cpu_user_seconds": 0,
+          "cpu_system_seconds": 0,
+          "threads": 3,
+          "live_descendant_processes": 0,
+          "open_descriptors": 10,
+          "disk_read_bytes": 0,
+          "disk_write_bytes": 282624
+        },
+        "status": "diagnostic"
+      },
+      "retained_named_scratch": {
+        "named_files": 0,
+        "named_logical_bytes": 0
+      },
+      "status": "passed"
+    }
+  },
+  "classification_legend": {
+    "behavior_error": "a provider/Store/server/client invariant failed",
+    "diagnostic": "component or portable RSS, latency, database, named scratch, CPU and descriptor observations have no independent acceptance threshold",
+    "passed": "behavior and required aggregate measurements passed",
+    "target_miss": "the lower bound of a valid macOS lifetime-peak interval exceeded 256 MiB",
+    "unavailable": "a required measurement was absent, its uncertainty interval crossed the target, or aggregate helper accounting was incomplete"
+  },
+  "environment_evidence_status": "passed",
+  "format": "rui-call-classification-v3-go",
+  "limits": [
+    "Linux execution is deterministic production-path development evidence; macOS runtime and physical footprint remain unavailable in this orb",
+    "loopback deterministic provider; no live provider, TLS, filesystem power-loss, or Bash execution qualification",
+    "Bash launch is intentionally forbidden: denial qualification ends before the later execution slice",
+    "population and payload values are workloads, not product quotas",
+    "process-crash and restart evidence does not certify power loss"
+  ],
+  "measurement_go_sum_sha256": "31910b7f5631409740f0a9511460e051e103da4efec5ec90b1dfb1fdb545cefd",
+  "measurement_runtime": {
+    "go_arch": "amd64",
+    "go_os": "linux",
+    "go_version": "go1.27.1",
+    "gopsutil_version": "v4.26.7",
+    "logical_cpus": 1,
+    "module_path": "rui.local/qualification",
+    "physical_memory_bytes": 2079363072
+  },
+  "platform": "Linux e2b.local 6.1.158+ #1 SMP PREEMPT_DYNAMIC Tue Jul 28 15:38:05 UTC 2026 x86_64 GNU/Linux",
+  "scope": "GitHub issue #228 production raw-provider call classification, exact denial, restart recovery, and independent population scaling",
+  "sqlite_binary": "/home/user/workspace/repo/.zig-cache/o/9dcc5a972839325e73ef7dfe86249861/rui-qualification-sqlite3",
+  "sqlite_binary_sha256": "2ae94eed0d43488af48aaa62a06e714c0121292324f94532ecb6ee0349a2fd62",
+  "sqlite_binary_status": "passed",
+  "status": "unavailable",
+  "tested_revision": "c462403a5a64e67ee358a2ac53380bb60a6c3ea8",
+  "working_tree_dirty": false,
+  "zig": "0.16.0"
+}

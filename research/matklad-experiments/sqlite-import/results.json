@@ -1,0 +1,3326 @@
+[
+  {
+    "case": "system-1-0-0--1",
+    "library": "system",
+    "mib": 1,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.4852422500262037,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 1048576,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1638400,
+        "footprint": 1294976,
+        "peak_rss": 1638400,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1638400,
+        "footprint": 1311360,
+        "peak_rss": 1638400,
+        "sqlite_used": 161744,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2768896,
+        "footprint": 2441856,
+        "peak_rss": 2768896,
+        "sqlite_used": 1286992,
+        "sqlite_high": 1286992,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2768896,
+        "footprint": 2441856,
+        "peak_rss": 2768896,
+        "sqlite_used": 1286992,
+        "sqlite_high": 1286992,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2768896,
+        "footprint": 2441856,
+        "peak_rss": 2768896,
+        "sqlite_used": 1286992,
+        "sqlite_high": 1286992,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 2768896,
+        "footprint": 2441856,
+        "peak_rss": 2768896,
+        "sqlite_used": 1289040,
+        "sqlite_high": 1289040,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2031616,
+        "footprint": 1311360,
+        "peak_rss": 2768896,
+        "sqlite_used": 549456,
+        "sqlite_high": 1289040,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 1638400,
+        "footprint": 1311360,
+        "peak_rss": 2768896,
+        "sqlite_used": 0,
+        "sqlite_high": 1289040,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-1-1-0--1",
+    "library": "system",
+    "mib": 1,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.03304558410309255,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 1048576,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1589248,
+        "footprint": 1245824,
+        "peak_rss": 1589248,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1589248,
+        "footprint": 1262208,
+        "peak_rss": 1589248,
+        "sqlite_used": 165840,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2752512,
+        "footprint": 2425472,
+        "peak_rss": 2752512,
+        "sqlite_used": 1308536,
+        "sqlite_high": 1308536,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 2736128,
+        "footprint": 2409088,
+        "peak_rss": 2752512,
+        "sqlite_used": 1291152,
+        "sqlite_high": 1308536,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2736128,
+        "footprint": 2409088,
+        "peak_rss": 2752512,
+        "sqlite_used": 1287056,
+        "sqlite_high": 1308536,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2736128,
+        "footprint": 2409088,
+        "peak_rss": 2752512,
+        "sqlite_used": 1287056,
+        "sqlite_high": 1308536,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 2736128,
+        "footprint": 2409088,
+        "peak_rss": 2752512,
+        "sqlite_used": 1289104,
+        "sqlite_high": 1308536,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 1128448,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 1998848,
+        "footprint": 1278592,
+        "peak_rss": 2752512,
+        "sqlite_used": 549456,
+        "sqlite_high": 1308536,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 1605632,
+        "footprint": 1278592,
+        "peak_rss": 2752512,
+        "sqlite_used": 0,
+        "sqlite_high": 1308536,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-4-0-0--1",
+    "library": "system",
+    "mib": 4,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.03844441706314683,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 4194304,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1589248,
+        "footprint": 1245824,
+        "peak_rss": 1589248,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1589248,
+        "footprint": 1262208,
+        "peak_rss": 1589248,
+        "sqlite_used": 161744,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 6176768,
+        "footprint": 5849728,
+        "peak_rss": 6176768,
+        "sqlite_used": 4671912,
+        "sqlite_high": 4671912,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 6176768,
+        "footprint": 5849728,
+        "peak_rss": 6176768,
+        "sqlite_used": 4671912,
+        "sqlite_high": 4671912,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 6176768,
+        "footprint": 5849728,
+        "peak_rss": 6176768,
+        "sqlite_used": 4671912,
+        "sqlite_high": 4671912,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 6193152,
+        "footprint": 5866112,
+        "peak_rss": 6193152,
+        "sqlite_used": 4680616,
+        "sqlite_high": 4680616,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2097152,
+        "footprint": 1376896,
+        "peak_rss": 6193152,
+        "sqlite_used": 561744,
+        "sqlite_high": 4680616,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 1703936,
+        "footprint": 1376896,
+        "peak_rss": 6193152,
+        "sqlite_used": 0,
+        "sqlite_high": 4680616,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-4-1-0--1",
+    "library": "system",
+    "mib": 4,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.02658841689117253,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 4194304,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 819776,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1572864,
+        "footprint": 1229440,
+        "peak_rss": 1572864,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1572864,
+        "footprint": 1245824,
+        "peak_rss": 1572864,
+        "sqlite_used": 165840,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 6225920,
+        "footprint": 5931776,
+        "peak_rss": 6225920,
+        "sqlite_used": 4693456,
+        "sqlite_high": 4693456,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 6209536,
+        "footprint": 5915392,
+        "peak_rss": 6225920,
+        "sqlite_used": 4676072,
+        "sqlite_high": 4693456,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 6209536,
+        "footprint": 5915392,
+        "peak_rss": 6225920,
+        "sqlite_used": 4671976,
+        "sqlite_high": 4693456,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 6209536,
+        "footprint": 5915392,
+        "peak_rss": 6225920,
+        "sqlite_used": 4671976,
+        "sqlite_high": 4693456,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 6209536,
+        "footprint": 5915392,
+        "peak_rss": 6225920,
+        "sqlite_used": 4680680,
+        "sqlite_high": 4693456,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 4475136,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2113536,
+        "footprint": 1426176,
+        "peak_rss": 6225920,
+        "sqlite_used": 561744,
+        "sqlite_high": 4693456,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 1720320,
+        "footprint": 1426176,
+        "peak_rss": 6225920,
+        "sqlite_used": 0,
+        "sqlite_high": 4693456,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-0-0--1",
+    "library": "system",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.06419954192824662,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1523712,
+        "footprint": 1163840,
+        "peak_rss": 1523712,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1556480,
+        "footprint": 1212992,
+        "peak_rss": 1556480,
+        "sqlite_used": 161744,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 19939328,
+        "footprint": 19612288,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 19939328,
+        "footprint": 19612288,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 19939328,
+        "footprint": 19612288,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 19972096,
+        "footprint": 19645056,
+        "peak_rss": 19972096,
+        "sqlite_used": 18272176,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2441216,
+        "footprint": 1720960,
+        "peak_rss": 19972096,
+        "sqlite_used": 610896,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 2048000,
+        "footprint": 1720960,
+        "peak_rss": 19972096,
+        "sqlite_used": 0,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-0-4--1",
+    "library": "system",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 4,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.06824125000275671,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 4
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 819776,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1572864,
+        "footprint": 1229440,
+        "peak_rss": 1572864,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1572864,
+        "footprint": 1245824,
+        "peak_rss": 1572864,
+        "sqlite_used": 161744,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 19939328,
+        "footprint": 19645184,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 19939328,
+        "footprint": 19645184,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 19939328,
+        "footprint": 19645184,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 19972096,
+        "footprint": 19677952,
+        "peak_rss": 19972096,
+        "sqlite_used": 18272176,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2441216,
+        "footprint": 1737408,
+        "peak_rss": 19972096,
+        "sqlite_used": 610896,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 2048000,
+        "footprint": 1737408,
+        "peak_rss": 19972096,
+        "sqlite_used": 0,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-0-0-1",
+    "library": "system",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": 1,
+    "exit": 0,
+    "seconds": 0.07845287502277642,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1556480,
+        "footprint": 1196608,
+        "peak_rss": 1556480,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1556480,
+        "footprint": 1212992,
+        "peak_rss": 1556480,
+        "sqlite_used": 161744,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 1933312,
+        "footprint": 1589824,
+        "peak_rss": 1933312,
+        "sqlite_used": 548048,
+        "sqlite_high": 548048,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 4012
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 1933312,
+        "footprint": 1589824,
+        "peak_rss": 1933312,
+        "sqlite_used": 548048,
+        "sqlite_high": 548048,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 4012
+      },
+      {
+        "stage": "blob_open",
+        "rss": 1933312,
+        "footprint": 1589824,
+        "peak_rss": 1933312,
+        "sqlite_used": 548048,
+        "sqlite_high": 548048,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 4012
+      },
+      {
+        "stage": "written",
+        "rss": 1998848,
+        "footprint": 1671808,
+        "peak_rss": 1998848,
+        "sqlite_used": 613584,
+        "sqlite_high": 613584,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 8112
+      },
+      {
+        "stage": "committed",
+        "rss": 1998848,
+        "footprint": 1278592,
+        "peak_rss": 1998848,
+        "sqlite_used": 547408,
+        "sqlite_high": 613584,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 8112
+      },
+      {
+        "stage": "closed",
+        "rss": 1605632,
+        "footprint": 1278592,
+        "peak_rss": 1998848,
+        "sqlite_used": 0,
+        "sqlite_high": 613584,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-0-0-0",
+    "library": "system",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": 0,
+    "exit": 0,
+    "seconds": 0.06684704194776714,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1556480,
+        "footprint": 1196608,
+        "peak_rss": 1556480,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1556480,
+        "footprint": 1212992,
+        "peak_rss": 1556480,
+        "sqlite_used": 161744,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 19939328,
+        "footprint": 19612288,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 19939328,
+        "footprint": 19612288,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 19939328,
+        "footprint": 19612288,
+        "peak_rss": 19939328,
+        "sqlite_used": 18206640,
+        "sqlite_high": 18213152,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 19972096,
+        "footprint": 19645056,
+        "peak_rss": 19972096,
+        "sqlite_used": 18272176,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2441216,
+        "footprint": 1720960,
+        "peak_rss": 19972096,
+        "sqlite_used": 610896,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 2048000,
+        "footprint": 1720960,
+        "peak_rss": 19972096,
+        "sqlite_used": 0,
+        "sqlite_high": 18272176,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-1-0--1",
+    "library": "system",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.06053387501742691,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1572864,
+        "footprint": 1229440,
+        "peak_rss": 1572864,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1572864,
+        "footprint": 1245824,
+        "peak_rss": 1572864,
+        "sqlite_used": 165840,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 19972096,
+        "footprint": 19661504,
+        "peak_rss": 19972096,
+        "sqlite_used": 18228184,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18210800,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18206704,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18206704,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 19988480,
+        "footprint": 19677888,
+        "peak_rss": 19988480,
+        "sqlite_used": 18272240,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2457600,
+        "footprint": 1753792,
+        "peak_rss": 19988480,
+        "sqlite_used": 610896,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 2064384,
+        "footprint": 1753792,
+        "peak_rss": 19988480,
+        "sqlite_used": 0,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-1-4--1",
+    "library": "system",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 4,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.0571762080071494,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 4
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 20000
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1572864,
+        "footprint": 1229440,
+        "peak_rss": 1572864,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1572864,
+        "footprint": 1245824,
+        "peak_rss": 1572864,
+        "sqlite_used": 165840,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 19972096,
+        "footprint": 19661504,
+        "peak_rss": 19972096,
+        "sqlite_used": 18228184,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18210800,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18206704,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18206704,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 19988480,
+        "footprint": 19677888,
+        "peak_rss": 19988480,
+        "sqlite_used": 18272240,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2457600,
+        "footprint": 1753792,
+        "peak_rss": 19988480,
+        "sqlite_used": 610896,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 2064384,
+        "footprint": 1753792,
+        "peak_rss": 19988480,
+        "sqlite_used": 0,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-1-0-1",
+    "library": "system",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": 1,
+    "exit": 0,
+    "seconds": 0.06956341699697077,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 819776,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1572864,
+        "footprint": 1229440,
+        "peak_rss": 1572864,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1572864,
+        "footprint": 1245824,
+        "peak_rss": 1572864,
+        "sqlite_used": 165840,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 1982464,
+        "footprint": 1655424,
+        "peak_rss": 1982464,
+        "sqlite_used": 569592,
+        "sqlite_high": 569592,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 4012
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 1966080,
+        "footprint": 1639040,
+        "peak_rss": 1982464,
+        "sqlite_used": 552208,
+        "sqlite_high": 569592,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 4012
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 1966080,
+        "footprint": 1639040,
+        "peak_rss": 1982464,
+        "sqlite_used": 548112,
+        "sqlite_high": 569592,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 4012
+      },
+      {
+        "stage": "blob_open",
+        "rss": 1966080,
+        "footprint": 1639040,
+        "peak_rss": 1982464,
+        "sqlite_used": 548112,
+        "sqlite_high": 569592,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 4012
+      },
+      {
+        "stage": "written",
+        "rss": 2031616,
+        "footprint": 1721024,
+        "peak_rss": 2031616,
+        "sqlite_used": 613648,
+        "sqlite_high": 613648,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 8112
+      },
+      {
+        "stage": "committed",
+        "rss": 2031616,
+        "footprint": 1327808,
+        "peak_rss": 2031616,
+        "sqlite_used": 547408,
+        "sqlite_high": 613648,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 8112
+      },
+      {
+        "stage": "closed",
+        "rss": 1638400,
+        "footprint": 1327808,
+        "peak_rss": 2031616,
+        "sqlite_used": 0,
+        "sqlite_high": 613648,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "system-16-1-0-0",
+    "library": "system",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": 0,
+    "exit": 0,
+    "seconds": 0.05451954202726483,
+    "samples": [
+      {
+        "version": "3.43.2",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1064960,
+        "footprint": 803328,
+        "peak_rss": 1064960,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 1572864,
+        "footprint": 1212992,
+        "peak_rss": 1572864,
+        "sqlite_used": 161728,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 1572864,
+        "footprint": 1229376,
+        "peak_rss": 1572864,
+        "sqlite_used": 165840,
+        "sqlite_high": 168320,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 19972096,
+        "footprint": 19661504,
+        "peak_rss": 19972096,
+        "sqlite_used": 18228184,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18210800,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18206704,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 19955712,
+        "footprint": 19645120,
+        "peak_rss": 19972096,
+        "sqlite_used": 18206704,
+        "sqlite_high": 18234696,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 19988480,
+        "footprint": 19677888,
+        "peak_rss": 19988480,
+        "sqlite_used": 18272240,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 2457600,
+        "footprint": 1737344,
+        "peak_rss": 19988480,
+        "sqlite_used": 610896,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 397312,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 2064384,
+        "footprint": 1737344,
+        "peak_rss": 19988480,
+        "sqlite_used": 0,
+        "sqlite_high": 18272240,
+        "largest_sqlite_alloc": 122400,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-1-0-0--1",
+    "library": "pinned",
+    "mib": 1,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.5204549579648301,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 1048576,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179488,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 204
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 204
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 204
+      },
+      {
+        "stage": "written",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 357152,
+        "sqlite_high": 357152,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 460
+      },
+      {
+        "stage": "committed",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 354592,
+        "sqlite_high": 357152,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 460
+      },
+      {
+        "stage": "closed",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 0,
+        "sqlite_high": 357152,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-1-1-0--1",
+    "library": "pinned",
+    "mib": 1,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.009486457915045321,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 1048576,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2244608,
+        "footprint": 1098304,
+        "peak_rss": 2244608,
+        "sqlite_used": 181024,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 467344,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 204
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 356704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 204
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 204
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 204
+      },
+      {
+        "stage": "written",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 357216,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 460
+      },
+      {
+        "stage": "committed",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 354592,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 460
+      },
+      {
+        "stage": "closed",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 0,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-4-0-0--1",
+    "library": "pinned",
+    "mib": 4,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.019373749964870512,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 4194304,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2211840,
+        "footprint": 1065536,
+        "peak_rss": 2211840,
+        "sqlite_used": 179488,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2424832,
+        "footprint": 1278592,
+        "peak_rss": 2424832,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 973
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2424832,
+        "footprint": 1278592,
+        "peak_rss": 2424832,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 973
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2424832,
+        "footprint": 1278592,
+        "peak_rss": 2424832,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 973
+      },
+      {
+        "stage": "written",
+        "rss": 2424832,
+        "footprint": 1278592,
+        "peak_rss": 2424832,
+        "sqlite_used": 363808,
+        "sqlite_high": 363808,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 1998
+      },
+      {
+        "stage": "committed",
+        "rss": 2424832,
+        "footprint": 1278592,
+        "peak_rss": 2424832,
+        "sqlite_used": 354592,
+        "sqlite_high": 363808,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 1998
+      },
+      {
+        "stage": "closed",
+        "rss": 2424832,
+        "footprint": 1278592,
+        "peak_rss": 2424832,
+        "sqlite_used": 0,
+        "sqlite_high": 363808,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-4-1-0--1",
+    "library": "pinned",
+    "mib": 4,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.0185575409559533,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 4194304,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2244608,
+        "footprint": 1114752,
+        "peak_rss": 2244608,
+        "sqlite_used": 181024,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2572288,
+        "footprint": 1442496,
+        "peak_rss": 2572288,
+        "sqlite_used": 467344,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 973
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 2572288,
+        "footprint": 1442496,
+        "peak_rss": 2572288,
+        "sqlite_used": 356704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 973
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2572288,
+        "footprint": 1442496,
+        "peak_rss": 2572288,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 973
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2572288,
+        "footprint": 1442496,
+        "peak_rss": 2572288,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 973
+      },
+      {
+        "stage": "written",
+        "rss": 2572288,
+        "footprint": 1442496,
+        "peak_rss": 2572288,
+        "sqlite_used": 363872,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 1998
+      },
+      {
+        "stage": "committed",
+        "rss": 2572288,
+        "footprint": 1442496,
+        "peak_rss": 2572288,
+        "sqlite_used": 354592,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 1998
+      },
+      {
+        "stage": "closed",
+        "rss": 2572288,
+        "footprint": 1442496,
+        "peak_rss": 2572288,
+        "sqlite_used": 0,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-0-0--1",
+    "library": "pinned",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.061847458011470735,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179488,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2375680,
+        "footprint": 1212992,
+        "peak_rss": 2375680,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2375680,
+        "footprint": 1212992,
+        "peak_rss": 2375680,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2375680,
+        "footprint": 1212992,
+        "peak_rss": 2375680,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "written",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 420640,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "committed",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 354592,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "closed",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 0,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-0-4--1",
+    "library": "pinned",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 4,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.053896875004284084,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 4
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 4194304
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2211840,
+        "footprint": 1065536,
+        "peak_rss": 2211840,
+        "sqlite_used": 179488,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2424832,
+        "footprint": 1262144,
+        "peak_rss": 2424832,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2424832,
+        "footprint": 1262144,
+        "peak_rss": 2424832,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2424832,
+        "footprint": 1262144,
+        "peak_rss": 2424832,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "written",
+        "rss": 2490368,
+        "footprint": 1344128,
+        "peak_rss": 2490368,
+        "sqlite_used": 420640,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "committed",
+        "rss": 2490368,
+        "footprint": 1344128,
+        "peak_rss": 2490368,
+        "sqlite_used": 354592,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "closed",
+        "rss": 2490368,
+        "footprint": 1344128,
+        "peak_rss": 2490368,
+        "sqlite_used": 0,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-0-0-1",
+    "library": "pinned",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": 1,
+    "exit": 0,
+    "seconds": 0.06419362488668412,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179488,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2408448,
+        "footprint": 1245760,
+        "peak_rss": 2408448,
+        "sqlite_used": 355104,
+        "sqlite_high": 355104,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "written",
+        "rss": 2473984,
+        "footprint": 1327744,
+        "peak_rss": 2473984,
+        "sqlite_used": 420640,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "committed",
+        "rss": 2473984,
+        "footprint": 1327744,
+        "peak_rss": 2473984,
+        "sqlite_used": 354592,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "closed",
+        "rss": 2473984,
+        "footprint": 1327744,
+        "peak_rss": 2473984,
+        "sqlite_used": 0,
+        "sqlite_high": 420640,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-0-0-0",
+    "library": "pinned",
+    "mib": 16,
+    "returning": false,
+    "hard_heap_mib": 0,
+    "spill_mode": 0,
+    "exit": 0,
+    "seconds": 0.05494233302306384,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 0,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 819776,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1049216,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2211840,
+        "footprint": 1081984,
+        "peak_rss": 2211840,
+        "sqlite_used": 179488,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 21266432,
+        "footprint": 20136640,
+        "peak_rss": 21266432,
+        "sqlite_used": 19044128,
+        "sqlite_high": 19049248,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 21266432,
+        "footprint": 20136640,
+        "peak_rss": 21266432,
+        "sqlite_used": 19044128,
+        "sqlite_high": 19049248,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 21266432,
+        "footprint": 20136640,
+        "peak_rss": 21266432,
+        "sqlite_used": 19044128,
+        "sqlite_high": 19049248,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 21299200,
+        "footprint": 20169408,
+        "peak_rss": 21299200,
+        "sqlite_used": 19109664,
+        "sqlite_high": 19109664,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 21315584,
+        "footprint": 3736256,
+        "peak_rss": 21315584,
+        "sqlite_used": 427296,
+        "sqlite_high": 19109664,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 271104,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 21315584,
+        "footprint": 3556032,
+        "peak_rss": 21315584,
+        "sqlite_used": 0,
+        "sqlite_high": 19109664,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-1-0--1",
+    "library": "pinned",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.06500829209107906,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 181024,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 467344,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 356704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "written",
+        "rss": 2523136,
+        "footprint": 1360448,
+        "peak_rss": 2523136,
+        "sqlite_used": 420704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "committed",
+        "rss": 2523136,
+        "footprint": 1360448,
+        "peak_rss": 2523136,
+        "sqlite_used": 354592,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "closed",
+        "rss": 2523136,
+        "footprint": 1360448,
+        "peak_rss": 2523136,
+        "sqlite_used": 0,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-1-4--1",
+    "library": "pinned",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 4,
+    "spill_mode": -1,
+    "exit": 0,
+    "seconds": 0.06605266698170453,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 4
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 4194304
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 181024,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 467344,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 356704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2490368,
+        "footprint": 1327680,
+        "peak_rss": 2490368,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "written",
+        "rss": 2523136,
+        "footprint": 1360448,
+        "peak_rss": 2523136,
+        "sqlite_used": 420704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "committed",
+        "rss": 2523136,
+        "footprint": 1360448,
+        "peak_rss": 2523136,
+        "sqlite_used": 354592,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "closed",
+        "rss": 2523136,
+        "footprint": 1360448,
+        "peak_rss": 2523136,
+        "sqlite_used": 0,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-1-0-1",
+    "library": "pinned",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": 1,
+    "exit": 0,
+    "seconds": 0.07384433294646442,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 61
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2244608,
+        "footprint": 1098304,
+        "peak_rss": 2244608,
+        "sqlite_used": 181024,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 467344,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 356704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "blob_open",
+        "rss": 2572288,
+        "footprint": 1426048,
+        "peak_rss": 2572288,
+        "sqlite_used": 355168,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 4048
+      },
+      {
+        "stage": "written",
+        "rss": 2605056,
+        "footprint": 1458816,
+        "peak_rss": 2605056,
+        "sqlite_used": 420704,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "committed",
+        "rss": 2605056,
+        "footprint": 1458816,
+        "peak_rss": 2605056,
+        "sqlite_used": 354592,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 266752,
+        "cache_spills": 8148
+      },
+      {
+        "stage": "closed",
+        "rss": 2605056,
+        "footprint": 1458816,
+        "peak_rss": 2605056,
+        "sqlite_used": 0,
+        "sqlite_high": 467344,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  },
+  {
+    "case": "pinned-16-1-0-0",
+    "library": "pinned",
+    "mib": 16,
+    "returning": true,
+    "hard_heap_mib": 0,
+    "spill_mode": 0,
+    "exit": 0,
+    "seconds": 0.09533258306328207,
+    "samples": [
+      {
+        "version": "3.53.4",
+        "bytes": 16777216,
+        "returning": 1,
+        "hard_heap_mib": 0
+      },
+      {
+        "stage": "startup",
+        "rss": 1114112,
+        "footprint": 803328,
+        "peak_rss": 1114112,
+        "sqlite_used": 0,
+        "sqlite_high": 0,
+        "largest_sqlite_alloc": 0,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      },
+      {
+        "pragma": "cache_spill",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "pragma": "cache_size",
+        "supported": true,
+        "value": -256
+      },
+      {
+        "pragma": "hard_heap_limit",
+        "supported": true,
+        "value": 0
+      },
+      {
+        "stage": "configured",
+        "rss": 2179072,
+        "footprint": 1032768,
+        "peak_rss": 2179072,
+        "sqlite_used": 179472,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "before_insert",
+        "rss": 2244608,
+        "footprint": 1114752,
+        "peak_rss": 2244608,
+        "sqlite_used": 181024,
+        "sqlite_high": 182480,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 14336,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_step",
+        "rss": 21381120,
+        "footprint": 20284224,
+        "peak_rss": 21381120,
+        "sqlite_used": 19156368,
+        "sqlite_high": 19161488,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_insert_done",
+        "rss": 21381120,
+        "footprint": 20284224,
+        "peak_rss": 21381120,
+        "sqlite_used": 19045728,
+        "sqlite_high": 19161488,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "after_finalize",
+        "rss": 21381120,
+        "footprint": 20284224,
+        "peak_rss": 21381120,
+        "sqlite_used": 19044192,
+        "sqlite_high": 19161488,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "blob_open",
+        "rss": 21381120,
+        "footprint": 20284224,
+        "peak_rss": 21381120,
+        "sqlite_used": 19044192,
+        "sqlite_high": 19161488,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "written",
+        "rss": 21413888,
+        "footprint": 20316992,
+        "peak_rss": 21413888,
+        "sqlite_used": 19109728,
+        "sqlite_high": 19161488,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 17857536,
+        "cache_spills": 0
+      },
+      {
+        "stage": "committed",
+        "rss": 21430272,
+        "footprint": 3900224,
+        "peak_rss": 21430272,
+        "sqlite_used": 427296,
+        "sqlite_high": 19161488,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 271104,
+        "cache_spills": 0
+      },
+      {
+        "stage": "closed",
+        "rss": 21430272,
+        "footprint": 3703616,
+        "peak_rss": 21430272,
+        "sqlite_used": 0,
+        "sqlite_high": 19161488,
+        "largest_sqlite_alloc": 87360,
+        "cache_bytes": 0,
+        "cache_spills": 0
+      }
+    ],
+    "stderr": ""
+  }
+]

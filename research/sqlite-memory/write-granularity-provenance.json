@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-09-10T19:10:27.084087+00:00",
+  "source_revision": "324ff861df9e5dcc55c99a2f9e892b8e8ecba7a8",
+  "machine": "macOS-15.7.7-arm64-arm-64bit-Mach-O",
+  "base_provenance": "write-attribution-provenance.json",
+  "modified_wrapper_sha256": "2345482548186b963d231b707032eea3a0b9f7d9e38d68e56edb6358ed5d8cfb",
+  "compile_stderr": "",
+  "source_sha256": {
+    "write_probe.c": "d68c8c9c5edda3f8b67ae77ca596201d9194b0c5a803612cbcf8913a7bd77c6e",
+    "write_granularity.py": "8d55523f8c9ad9f2b28cd39c6e1fc29e87fe10d2d16d9ab8aeb33faec3e495c6",
+    "granularity.c": "0a49e29ac0dd9815d7728965bc0e4cf8e4c40dd2dc88ec2e566f656da466e31a"
+  },
+  "instrumentation": "Additional 32 KiB static bitmaps record unique system-page-sized units dirtied by successful xWrite calls since last successful xSync, separately per file class. A second predictor clips the last dirty unit at file length rounded to the measured filesystem fragment size. No write coalescing or semantic change. This fixture has at most one open file per class."
+}

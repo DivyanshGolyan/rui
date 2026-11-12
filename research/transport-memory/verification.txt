@@ -1,0 +1,19 @@
+{
+  "passing_runs": 81,
+  "by_group": {
+    "followup-results": 14,
+    "repeat-results": 30,
+    "results": 32,
+    "sanitizer-results": 5
+  }
+}
+h1-cache16 {"curl_peak": {"min": 71150284, "median": 71150285, "max": 71150285}, "physical_peak": {"min": 257017600, "median": 270665344, "max": 274302848}, "transfer_seconds": {"min": 1.518599, "median": 1.9689470000000002, "max": 2.146826}}
+h1-request1048576-items1 {"curl_peak": {"min": 7141680, "median": 7141680, "max": 7141680}, "physical_peak": {"min": 32621824, "median": 33719872, "max": 33965440}, "transfer_seconds": {"min": 0.561271, "median": 0.5642180000000001, "max": 0.8367930000000001}}
+h1-upload16k-large {"curl_peak": {"min": 2226480, "median": 2226480, "max": 2226480}, "physical_peak": {"min": 25134592, "median": 25757056, "max": 25937152}, "transfer_seconds": {"min": 0.554882, "median": 0.577496, "max": 0.5780730000000001}}
+h1-upload16k-small {"curl_peak": {"min": 21998285, "median": 21998286, "max": 21998286}, "physical_peak": {"min": 174983040, "median": 191449088, "max": 201082752}, "transfer_seconds": {"min": 1.510311, "median": 1.571246, "max": 1.839645}}
+h2-cache16 {"curl_peak": {"min": 85822638, "median": 85822655, "max": 85822655}, "physical_peak": {"min": 107529536, "median": 107677056, "max": 107677184}, "transfer_seconds": {"min": 0.6871499999999999, "median": 0.698236, "max": 0.7154290000000001}}
+h2-control-16777216 {"curl_peak": {"min": 649935, "median": 649935, "max": 649952}, "physical_peak": {"min": 4047744, "median": 4293632, "max": 4490432}, "transfer_seconds": {"min": 0.6177199999999999, "median": 0.631019, "max": 0.648997}}
+h2-pause-16777216 {"curl_peak": {"min": 67615630, "median": 67615648, "max": 67615665}, "physical_peak": {"min": 54527296, "median": 54576576, "max": 55231808}, "transfer_seconds": {"min": 0.8581259999999999, "median": 0.8587480000000001, "max": 0.87254}}
+h2-request1048576-items1 {"curl_peak": {"min": 13669370, "median": 13669387, "max": 13669387}, "physical_peak": {"min": 19137664, "median": 19203328, "max": 19268864}, "transfer_seconds": {"min": 0.9094260000000001, "median": 0.928312, "max": 0.9497959999999999}}
+h2-upload16k-large {"curl_peak": {"min": 8655306, "median": 8688154, "max": 8704595}, "physical_peak": {"min": 12485632, "median": 12649600, "max": 12731520}, "transfer_seconds": {"min": 0.8406149999999999, "median": 0.8947780000000001, "max": 0.912998}}
+h2-upload16k-small {"curl_peak": {"min": 36670638, "median": 36670638, "max": 36670655}, "physical_peak": {"min": 42648896, "median": 42730688, "max": 43156928}, "transfer_seconds": {"min": 0.654738, "median": 0.69149, "max": 0.699565}}

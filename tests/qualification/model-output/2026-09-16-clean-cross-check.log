@@ -1,0 +1,32 @@
+Build Summary: 13/13 steps succeeded
+cross-check success
++- compile exe latifa-aarch64-macos ReleaseSmall aarch64-macos success 12s MaxRSS:279M
+|  +- run sh (pinned-transport-aarch64-macos) cached
+|  +- run sh (pinned-transport-aarch64-macos) (reused)
+|  +- run sh (pinned-transport-aarch64-macos) (reused)
+|  +- run sh (pinned-transport-aarch64-macos) (reused)
+|  +- run sh (pinned-transport-aarch64-macos) (reused)
+|  +- run sh (pinned-transport-aarch64-macos) (reused)
+|  +- run sh (pinned-transport-aarch64-macos) (reused)
+|  +- options cached
++- compile exe latifa-x86_64-macos ReleaseSmall x86_64-macos success 17s MaxRSS:180M
+|  +- run sh (pinned-transport-x86_64-macos) success 5m
+|  +- run sh (pinned-transport-x86_64-macos) (reused)
+|  +- run sh (pinned-transport-x86_64-macos) (reused)
+|  +- run sh (pinned-transport-x86_64-macos) (reused)
+|  +- run sh (pinned-transport-x86_64-macos) (reused)
+|  +- run sh (pinned-transport-x86_64-macos) (reused)
+|  +- run sh (pinned-transport-x86_64-macos) (reused)
+|  +- options cached
++- compile exe latifa-aarch64-linux ReleaseSmall aarch64-linux-gnu success 9s MaxRSS:274M
+|  +- run sh (pinned-transport-aarch64-linux) success 5m
+|  +- run sh (pinned-transport-aarch64-linux) (reused)
+|  +- run sh (pinned-transport-aarch64-linux) (reused)
+|  +- run sh (pinned-transport-aarch64-linux) (reused)
+|  +- options cached
++- compile exe latifa-x86_64-linux ReleaseSmall x86_64-linux-gnu success 9s MaxRSS:197M
+   +- run sh (pinned-transport-x86_64-linux) success 5m
+   +- run sh (pinned-transport-x86_64-linux) (reused)
+   +- run sh (pinned-transport-x86_64-linux) (reused)
+   +- run sh (pinned-transport-x86_64-linux) (reused)
+   +- options cached
