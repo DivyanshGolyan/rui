@@ -22,6 +22,7 @@ import termios
 import threading
 import time
 import tty
+import unicodedata
 
 import host_process
 from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
@@ -516,7 +517,7 @@ def status_frame(master, session, command="/status", timeout=15):
     """The /status page for exactly `session` (escaped as /status shows it)."""
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
     def page(frame):
-        rows = [chat_content_row(row) for row in frame.split("\n")]
+        rows = conversation_text(frame).split("\n")
         # App draws the page from the first feed row, with no browsing heading.
         return (rows[0].startswith(" Status · ")
             and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and " Work" in rows)
@@ -527,7 +528,7 @@ def saved_default(master, command, line):
     """The /setup reply that shows `line`. Every such reply opens with the
     same words and stays shown until the next, so the line this command
     changed is what tells its reply from the last one."""
-    return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in frame and shown(line, frame))
+    return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in conversation_text(frame) and shown(line, conversation_text(frame)))
 
 
 def configured_frame(master, command):
@@ -535,9 +536,9 @@ def configured_frame(master, command):
     the /status page, the change leaves the page shown with its reply as a
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
-    frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith("  Status · "):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith("  Status · "), end="")
+    frame = command_frame(master, command, lambda frame: "Configured." in conversation_text(frame).split("\n"))
+    if conversation_text(frame).startswith(" Status · "):
+        command_frame(master, "\x1b", lambda frame: not conversation_text(frame).startswith(" Status · "), end="")
     return frame
 
 
@@ -673,6 +674,51 @@ def command_wait_oracles():
     print("command wait oracles passed: Enter follows the typed frame; the shown page and the typed command are not the reply", flush=True)
 
 
+def conversation_wait_oracles():
+    """The list's answer arrives first; only the conversation ends a wait.
+
+    Queue committed frames, not byte substrings: the same ordering must hold
+    for an already shown frame, a fresh read and a command's ready reply.
+    """
+    marker = "edited 2"
+    for wide in (False, True):
+        def rows(answer, draft="", listed=marker):
+            chat = ["", answer, "⠹ Waiting" if answer != marker else "", "› " + draft]
+            return ([f"{left:20}│ {right}" for left, right in zip(
+                ("+ New Session", listed, "", ""), chat)] if wide else [" " + row for row in chat])
+
+        pending, complete = rows("edited 1"), rows(marker)
+        for mode in ("shown", "fresh", "await"):
+            reader, writer = os.pipe()
+            try:
+                capture = terminal_capture(reader)
+                capture.feed(b"\x1b[?1049h")
+                if mode != "fresh":
+                    capture.feed(terminal_frame(pending))
+                os.write(writer, terminal_frame(complete))
+                if mode == "await":
+                    observed = await_screen(reader, marker)
+                else:
+                    observed = read_terminal(reader, marker, fresh=mode == "fresh",
+                        initial=terminal_frame(pending) if mode == "fresh" else b"")
+                assert "\nedited 2" in conversation_text(observed), (wide, mode, observed)
+            finally:
+                dispose_all(lambda: _captures.pop(reader, None), lambda: os.close(reader), lambda: os.close(writer))
+
+        reader, writer = socket.socketpair()
+        master = reader.fileno()
+        try:
+            # command_frame sees the draft before Enter, then two ready replies.
+            # Its result is the first matching frame, even in one observer read.
+            writer.sendall(terminal_frame(rows("edited 1", "send", listed="edited 1"))
+                + terminal_frame(pending) + terminal_frame(complete))
+            observed = terminal_step(master, "send", marker, composer=True)
+            assert "\nedited 2" in conversation_text(observed), (wide, "command", observed)
+        finally:
+            dispose_all(lambda: _captures.pop(master, None), reader.close, writer.close)
+    print("conversation wait oracles passed: list-only answers cannot finish shown, fresh, await or command waits", flush=True)
+
+
 def terminal_frame(lines, cursor=None):
     """One synchronized full-screen frame as the renderer commits it."""
     row, column = cursor if cursor is not None else (len(lines), len(lines[-1]) + 1 if lines else 1)
@@ -726,12 +772,12 @@ def scroll_until(master, key, marker, *, presses=40):
     """
     seen = []
     for _ in range(presses):
-        if marker in current_screen(master):
+        if marker in conversation_text(current_screen(master)):
             return "\n".join(seen)
         os.write(master, key)
         while (frame := next_frame(master, 1)) is not None:
             seen.append(frame)
-    assert marker in current_screen(master), ("scroll did not reach marker", key, marker, current_screen(master))
+    assert marker in conversation_text(current_screen(master)), ("scroll did not reach marker", key, marker, current_screen(master))
     return "\n".join(seen)
 
 
@@ -1139,7 +1185,7 @@ def wait_for_listed_call(tty):
     # A matching Bash projection supplies the unresolved row's clock. The
     # command stays held until after traversal; a bare heading can precede claim.
     running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
-    tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
+    tty.wait(predicate=lambda: any(running.fullmatch(row) for row in conversation_text(tty.capture.completed).splitlines()), timeout=30)
 
 
 def listed_call_readiness_cases():
@@ -1232,7 +1278,8 @@ def renderer_cases():
             previous = self.capture.listener
             def reached():
                 return ((after is None or self.capture.generation > after) and
-                        (predicate() if predicate is not None else self.capture.reached(marker)))
+                        (predicate() if predicate is not None else
+                         self.capture.reached(marker) and unicodedata.normalize("NFC", marker) in conversation_text(self.capture.completed)))
             def observe(screen, x, y):
                 nonlocal matched
                 if previous is not None:
@@ -1438,6 +1485,15 @@ def renderer_cases():
             assert "REPLY-04399" in tty.capture.completed and tty.capture.listener is listener
         finally:
             dispose_all(lambda: close_pty(master), lambda: os.close(writer) if writer is not None else None)
+        master, writer = os.pipe()
+        try:
+            tty = Terminal(master, None, None)
+            os.write(writer, terminal_frame(["  + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
+                + terminal_frame(["  + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            observed = tty.wait("edited 2", after=0)
+            assert "\nedited 2" in conversation_text(observed), observed
+        finally:
+            dispose_all(lambda: close_pty(master), lambda: os.close(writer))
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         defaults(home, "--store", store)
         geometry = configure()
@@ -1505,7 +1561,8 @@ def renderer_cases():
             before = len(endpoint.requests)
             # Continuation rows align under the draft, inside the composer margin,
             # without a second glyph.
-            tty.send("\x1b[200~" + multiline + "\x1b[201~", "   second 中")
+            tty.send("\x1b[200~" + multiline + "\x1b[201~",
+                predicate=lambda: "   second 中" in tty.capture.completed)
             screen = tty.capture.screen
             assert screen.display[screen.cursor.y - 1].rstrip() == " › first café"
             assert screen.display[screen.cursor.y].rstrip() == "   second 中" and screen.cursor.x == 12
@@ -1527,7 +1584,7 @@ def renderer_cases():
             shown = tty.send("show invisible output\r", "output survived")
             assert all(value in shown for value in escaped), shown
             joined(tty)
-            shown = tty.send("\x0f", "    Bash ")
+            shown = tty.send("\x0f", chat_content_row("    Bash "))
             # Both the saved Tool Result and answer use the same display sink.
             assert all(value in shown for value in escaped), shown
             tty.caller.send_signal(signal.SIGINT)
@@ -1656,7 +1713,7 @@ def renderer_cases():
                 tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
                 generation = tty.capture.generation
                 run(home, "action", decision, "--store", store, "--session", session, "--action", action)
-                shown = tty.wait(predicate=lambda: marker in tty.capture.completed and tty.capture.draft("x", 3), after=generation)
+                shown = tty.wait(predicate=lambda: marker in conversation_text(tty.capture.completed) and tty.capture.draft("x", 3), after=generation)
                 for pending in ("Allow once", "? Decided elsewhere"):
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
@@ -1685,7 +1742,7 @@ def renderer_cases():
                 first, second = [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
                 generation = tty.capture.generation
                 run(home, "action", "deny", "--store", store, "--session", session, "--action", first)
-                tty.wait(predicate=lambda: "? Successor 2" in tty.capture.completed and CHOICE in tty.capture.completed, after=generation)
+                tty.wait(predicate=lambda: "? Successor 2" in conversation_text(tty.capture.completed) and CHOICE in conversation_text(tty.capture.completed), after=generation)
                 tty.ready(ready_read)
                 assert highlighted(tty.capture) == "Allow once", tty.capture.completed
                 # The other client saved its own record in this HOME.
@@ -1752,8 +1809,8 @@ def renderer_cases():
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
             # Only the first PgUp moves a feed this short; the rest draw nothing.
-            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in tty.capture.completed
-                and marker in tty.capture.completed and "↓" in tty.capture.completed)
+            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in conversation_text(tty.capture.completed)
+                and marker in conversation_text(tty.capture.completed) and "↓" in tty.capture.completed)
             assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
             assert shown.index("› fresh start") < shown.index(marker), shown
             assert "Start of conversation" not in shown, shown
@@ -1934,6 +1991,7 @@ def main(selected="all"):
         prove_terminal_process()
         pipe_wait_oracles()
         command_wait_oracles()
+        conversation_wait_oracles()
     if selected == "terminal-waits":
         return
     if selected == "all":
@@ -3052,12 +3110,11 @@ def main(selected="all"):
                     observed = terminal_step(master, "D\x1b[DZ", f"edited {index}")
                 else:
                     observed = terminal_step(master, typed, f"edited {index}")
-                assert f"edited {index}" in observed, observed
+                assert f"edited {index}" in conversation_text(observed), observed
                 if index == 2:
                     assert "\n› line1\n  line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
                     assert "\nedited 2" in conversation_text(observed), observed
-                if "› " not in observed.split(f"edited {index}", 1)[1]:
-                    await_screen(master, "", composer=True)
+                await_screen(master, "", composer=True)
                 body = json.loads(endpoint.requests[-1])
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                     if item.get("role") == "user")
@@ -3072,8 +3129,7 @@ def main(selected="all"):
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                     if item.get("role") == "user")
                 assert actual == "Z", actual
-                if "› " not in observed.split(marker, 1)[1]:
-                    await_screen(master, "", composer=True)
+                await_screen(master, "", composer=True)
             endpoint.responses.append(fixture.sse_answer("paced-answer", "paced-reason",
                 "paced-message", "paced edited")[0])
             os.write(master, b"a" * 100)
@@ -3087,8 +3143,7 @@ def main(selected="all"):
             actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user")
             assert actual == "Z", actual
-            if "› " not in observed.split("paced edited", 1)[1]:
-                await_screen(master, "", composer=True)
+            await_screen(master, "", composer=True)
             endpoint.responses.append(fixture.sse_answer("wrapped-answer", "wrapped-reason",
                 "wrapped-message", "wrapped edit intact")[0])
             accepted = terminal_bulk(master, "a" * 2050 + "\x7f" * 2048, "wrapped edit intact")

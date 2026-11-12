@@ -257,31 +257,31 @@ fn newStage(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
 }
 
 pub fn prepare(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation) !PreparedBuild {
-    return prepareWithReporter(allocator, io, home, candidate, cancellation, .{});
+    return prepareWithReporter(allocator, io, home, candidate, cancellation, .{}, null);
 }
 
-pub fn prepareWithReporter(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter) !PreparedBuild {
-    return prepareWithCleanup(allocator, io, home, candidate, cancellation, reporter, .{});
+pub fn prepareWithReporter(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, diagnostic: ?*process.DownloadDiagnostic) !PreparedBuild {
+    return prepareWithCleanup(allocator, io, home, candidate, cancellation, reporter, .{}, diagnostic);
 }
 
-fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults) !PreparedBuild {
+fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults, diagnostic: ?*process.DownloadDiagnostic) !PreparedBuild {
     try process.check(cancellation);
     var prepared: PreparedBuild = .{ .path = try newStage(allocator, io, home), .version = candidate.version };
-    prepareInto(allocator, io, &prepared, candidate, cancellation) catch |primary| {
+    prepareInto(allocator, io, &prepared, candidate, cancellation, diagnostic) catch |primary| {
         return prepared.disposeResult(allocator, io, primary, reporter, faults).?;
     };
     return prepared;
 }
 
-fn prepareInto(allocator: Allocator, io: std.Io, prepared: *PreparedBuild, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation) !void {
+fn prepareInto(allocator: Allocator, io: std.Io, prepared: *PreparedBuild, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, diagnostic: ?*process.DownloadDiagnostic) !void {
     const archive = try std.fmt.allocPrint(allocator, "{s}/archive.tar.gz", .{prepared.path});
     defer allocator.free(archive);
     const fixture = std.mem.startsWith(u8, candidate.archive_url, "http://");
-    const output = try process.output(allocator, io, &.{
+    const output = try process.downloadOutput(allocator, io, &.{
         "curl",         "--disable",               "--fail",  "--silent",                         "--show-error",  "--location", "--connect-timeout", "10",        "--max-time", "300",
         "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https",     "--max-filesize",    "268435456", "--output",   archive,
         "--",           candidate.archive_url,
-    }, cancellation, 1024);
+    }, cancellation, 1024, diagnostic);
     allocator.free(output);
     try verifyArchive(allocator, io, prepared, candidate, cancellation, archive);
 }
@@ -705,7 +705,7 @@ test "installation archive verifies digest executable notices and traversal befo
     defer selected.deinit(allocator);
     try std.testing.expect(selected == .absent);
     const offline = prepare(allocator, io, home, &candidate, null);
-    try std.testing.expectError(error.UpgradeChildFailed, offline);
+    try std.testing.expectError(error.ReleaseDownloadFailed, offline);
     try Dir.cwd().writeFile(io, .{ .sub_path = archive, .data = bytes });
     var complete: PreparedBuild = .{ .path = try newStage(allocator, io, home), .version = .{ .schema = 56, .patch = 0 } };
     defer complete.dispose(allocator, io) catch @panic("fixture cleanup failed");
@@ -865,9 +865,9 @@ test "installation preparation cleanup failure preserves download cause and reta
     var captured: CleanupCapture = .{ .allocator = allocator, .io = io };
     defer captured.deinit();
     const candidate: releases.ReleaseCandidate = .{ .version = .{ .schema = 56, .patch = 0 }, .tag = "v0.56.0", .archive_name = "rui-0.56.0-darwin-arm64.tar.gz", .archive_url = "http://127.0.0.1:1/archive", .checksum_url = "http://127.0.0.1:1/SHA256SUMS", .sha256 = @splat(0) };
-    try std.testing.expectError(error.UpgradeChildFailed, prepareWithCleanup(allocator, io, home, &candidate, null, captured.reporter(), .{ .remove_tree = error.AccessDenied }));
+    try std.testing.expectError(error.ReleaseDownloadFailed, prepareWithCleanup(allocator, io, home, &candidate, null, captured.reporter(), .{ .remove_tree = error.AccessDenied }, null));
     try std.testing.expectEqual(@as(usize, 1), captured.calls);
-    try std.testing.expectEqual(error.UpgradeChildFailed, captured.primary.?);
+    try std.testing.expectEqual(error.ReleaseDownloadFailed, captured.primary.?);
     try std.testing.expectEqual(error.AccessDenied, captured.secondary.?);
     try std.testing.expect(captured.existed_during_report);
     const retained = captured.retained_path.?;

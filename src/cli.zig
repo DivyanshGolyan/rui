@@ -596,8 +596,11 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     holdStore(store);
     const upgrade = @import("upgrade.zig");
     const allocator = std.heap.c_allocator;
-    var checked = upgrade.check(init, allocator, store, null) catch |err| {
+    var download: upgrade.DownloadDiagnostic = .{};
+    defer download.deinit(allocator);
+    var checked = upgrade.check(init, allocator, store, null, &download) catch |err| {
         stderr.diagnostic("rui: upgrade check failed; no installation or Host was changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        upgradeDownloadDiagnostic(err, &download);
         recordExit(.environment);
         return error.Reported;
     };
@@ -621,8 +624,9 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         };
         written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
     }
-    var result = upgrade.install(init, allocator, &checked, null, null, &cleanup) catch |err| {
+    var result = upgrade.install(init, allocator, &checked, null, null, &cleanup, &download) catch |err| {
         stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        upgradeDownloadDiagnostic(err, &download);
         recordExit(.environment);
         return error.Reported;
     };
@@ -631,10 +635,21 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     try upgrade.writeResult(&writer, &result);
     try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
     switch (result.activation) {
-        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled => recordExit(.environment),
+        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled, .client_incompatible => recordExit(.environment),
         else => {},
     }
     if (exit_status != .done) return error.Reported;
+}
+
+noinline fn upgradeDownloadDiagnostic(err: anyerror, download: *const @import("upgrade.zig").DownloadDiagnostic) void {
+    if (caller_error.of(err) != .upgrade_download_failed) return;
+    const facts = caller_error.facts(.upgrade_download_failed);
+    stderr.diagnostic("{s} {s}\n", .{ facts.says, facts.next });
+    // Terminal escaping can expand the bounded 4096-byte curl capture.
+    var buffer: [32768]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    download.write(&writer) catch return; // Optional guidance, like stderr.diagnostic.
+    stderr.diagnosticBytes(writer.buffered());
 }
 
 fn publishInstall(init: std.process.Init, args: []const []const u8) !void {
@@ -1455,6 +1470,14 @@ fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void
 fn newSession(init: std.process.Init, args: []const []const u8) !void {
     const options = try NewSessionOptions.parse(args) orelse return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     try requireInteractiveTerminal(init, "to open the overview");
+    if (try RelaunchStartup.read(init, options.store)) |restored| {
+        defer restored.handoff.deinit();
+        return openExistingOverview(init, restored.paths.store.slice(), if (restored.handoff.value.open) |id| id[0..protocol.session_id_bytes].* else null, .{
+            .store = restored.paths.store.slice(),
+            .provider = options.provider,
+            .model = options.model,
+        }, &restored.handoff.value);
+    }
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     try prepareOverview(init, options, entry);
@@ -1478,7 +1501,162 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .activate = activateOverview, .ready = overviewProviderReady, .start_host = startOverviewHost });
+    if (try Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .activate = activateOverview, .ready = overviewProviderReady, .start_host = startOverviewHost })) |request| {
+        defer request.deinit(init.gpa);
+        finishRelaunch(init, with_directory, request, .{});
+    }
+}
+
+const RelaunchHooks = struct {
+    replace: *const fn (std.process.Init, []const []const u8) anyerror!void = replaceRui,
+};
+
+fn replaceRui(init: std.process.Init, argv: []const []const u8) !void {
+    return std.process.replace(init.io, .{ .argv = argv, .environ_map = init.environ_map });
+}
+
+/// The CLI alone consumes startup handoffs, before fresh-Session admission.
+/// The parsed value owns its bytes through the synchronous overview run; the
+/// overview only borrows it long enough to copy editor state before startup.
+const RelaunchStartup = struct {
+    paths: platform.Paths,
+    handoff: std.json.Parsed(@import("relaunch_handoff.zig").Payload),
+
+    fn read(init: std.process.Init, explicit_store: ?[]const u8) !?RelaunchStartup {
+        const named = init.environ_map.get("RUI_RELAUNCH") orelse return null;
+        if (named.len == 0) return null;
+        const home = init.environ_map.get("HOME") orelse return null;
+        const handoff = @import("relaunch_handoff.zig");
+        // Relaunch argv always pins its actual canonical Store. An unbound
+        // handoff is still consumed once, never redirected by saved defaults.
+        const destination = explicit_store orelse {
+            if (handoff.read(init, home, "")) |value| value.deinit();
+            return null;
+        };
+        const paths = try platform.resolveClientPaths(init.io, destination);
+        return .{ .paths = paths, .handoff = handoff.read(init, home, paths.store.slice()) orelse return null };
+    }
+};
+
+/// The open chat travels in the handoff, not argv. Store is the old client's
+/// actual destination, not its former implicit default or a mutable spelling.
+fn relaunchArguments(executable: []const u8, store: []const u8, selectors: new_session_selection.Intent, buffer: *[7][]const u8) []const []const u8 {
+    buffer[0] = executable;
+    buffer[1] = "--store";
+    buffer[2] = store;
+    var count: usize = 3;
+    inline for (.{ "provider", "model" }) |name| {
+        if (@field(selectors, name)) |value| {
+            buffer[count] = "--" ++ name;
+            buffer[count + 1] = value;
+            count += 2;
+        }
+    }
+    return buffer[0..count];
+}
+
+fn finishRelaunch(init: std.process.Init, options: Overview.Options, request: Overview.Relaunch, hooks: RelaunchHooks) void {
+    startRelaunch(init, options, request, hooks) catch {
+        request.writeFallback(options.store);
+        stderr.diagnosticBytes("rui: The new Rui could not be started.\n");
+    };
+}
+
+fn startRelaunch(init: std.process.Init, options: Overview.Options, request: Overview.Relaunch, hooks: RelaunchHooks) !void {
+    const handoff = @import("relaunch_handoff.zig");
+    const path = try handoff.writeEncoded(init, options.home, request.handoff);
+    defer init.gpa.free(path);
+    // Successful exec never returns; on failure the old client removes the
+    // unconsumed private handoff and emits its ordinary departure instead.
+    defer handoff.discard(init, path);
+    try init.environ_map.put("RUI_RELAUNCH", path);
+    defer init.environ_map.put("RUI_RELAUNCH", "") catch {};
+    var argv: [7][]const u8 = undefined;
+    try hooks.replace(init, relaunchArguments(request.executable, options.store, options.selectors, &argv));
+}
+
+test "relaunch argv pins the actual Store with every explicit selector subset" {
+    for (0..8) |mask| {
+        const selectors: new_session_selection.Intent = .{
+            .store = if (mask & 1 != 0) "./store as given" else null,
+            .provider = if (mask & 2 != 0) "provider" else null,
+            .model = if (mask & 4 != 0) "model pin" else null,
+        };
+        var buffer: [7][]const u8 = undefined;
+        const args = relaunchArguments("/published/build/bin/rui", "/canonical/original-store", selectors, &buffer);
+        try std.testing.expectEqualStrings("/published/build/bin/rui", args[0]);
+        try std.testing.expectEqualStrings("--store", args[1]);
+        try std.testing.expectEqualStrings("/canonical/original-store", args[2]);
+        var at: usize = 3;
+        inline for (.{ "provider", "model" }) |name| if (@field(selectors, name)) |value| {
+            try std.testing.expectEqualStrings("--" ++ name, args[at]);
+            try std.testing.expectEqualStrings(value, args[at + 1]);
+            at += 2;
+        };
+        try std.testing.expectEqual(at, args.len);
+    }
+}
+
+test "relaunch replacement failure retains departure and deletes the handoff without exec" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var environment = std.process.Environ.Map.init(gpa);
+    defer environment.deinit();
+    var init: std.process.Init = undefined;
+    init.io = io;
+    init.gpa = gpa;
+    init.environ_map = &environment;
+    const Mock = struct {
+        var calls: usize = 0;
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var path_len: usize = 0;
+
+        fn replace(invocation: std.process.Init, argv: []const []const u8) !void {
+            calls += 1;
+            try std.testing.expectEqualStrings("/published/build/bin/rui", argv[0]);
+            try std.testing.expectEqualStrings("--store", argv[1]);
+            try std.testing.expectEqualStrings("/canonical/store", argv[2]);
+            try std.testing.expectEqual(@as(usize, 3), argv.len);
+            const named = invocation.environ_map.get("RUI_RELAUNCH").?;
+            @memcpy(path[0..named.len], named);
+            path_len = named.len;
+            const file = try std.Io.Dir.cwd().openFile(invocation.io, named, .{});
+            defer file.close(invocation.io);
+            try std.testing.expectEqual(@as(u64, 7), (try file.stat(invocation.io)).size);
+            return error.FileNotFound;
+        }
+    };
+    Mock.calls = 0;
+    const request: Overview.Relaunch = .{
+        .executable = "/published/build/bin/rui",
+        .handoff = "handoff",
+        .receipt = "Installed receipt\n",
+        .open = "k7m2qx".*,
+    };
+    const options: Overview.Options = .{ .store = "/canonical/store", .home = home, .directory = "", .workspace = "", .selectors = .{ .store = "./original store" } };
+    const output = try tmp.dir.createFile(io, "departure", .{ .read = true });
+    defer output.close(io);
+    {
+        const saved = std.c.dup(2);
+        if (saved < 0) return error.TestRedirectFailed;
+        defer closeDescriptor(saved);
+        if (std.c.dup2(output.handle, 2) != 2) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved, 2) == 2);
+        finishRelaunch(init, options, request, .{ .replace = Mock.replace });
+    }
+    try std.testing.expectEqual(@as(usize, 1), Mock.calls);
+    try std.testing.expectEqualStrings("", environment.get("RUI_RELAUNCH").?);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(io, Mock.path[0..Mock.path_len], .{}));
+    var bytes: [4096]u8 = undefined;
+    const text = bytes[0..try output.readPositionalAll(io, &bytes, 0)];
+    try std.testing.expect(std.mem.startsWith(u8, text, request.receipt));
+    try std.testing.expect(std.mem.indexOf(u8, text, "Detached. Host work continues.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") != null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "rui: The new Rui could not be started.\n"));
 }
 
 fn captureGate(io: std.Io) !void {
@@ -2236,22 +2414,28 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
+    return openExistingOverview(init, destination, reference[0..protocol.session_id_bytes].*, .{ .store = parsed.get("store") }, null);
+}
+
+/// Reenter saved work, whether through session resume or a valid relaunch.
+/// Reading existing work is not fresh-Session admission: local preferences and
+/// credentials may be unavailable. The Host remains the Session's authority.
+fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?overview_view.Reference, selectors: new_session_selection.Intent, restoration: ?*const @import("relaunch_handoff.zig").Payload) !void {
     try startHostForTerminal(init, destination, true, null, null);
-    const open = reference[0..protocol.session_id_bytes].*;
-    confirmSessionConfigured(init, .{ .io = init.io }, destination, reference) catch |err| {
+    if (open) |reference| confirmSessionConfigured(init, .{ .io = init.io }, destination, &reference) catch |err| {
         if (err == error.SessionNotConfigured) stderr.diagnostic("rui: configure this Session before entering it\n", .{});
-        return Overview.printFailure(err, destination, open, null);
+        return Overview.printFailure(err, destination, reference, null);
     };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
     defer cwd.close(init.io);
     const workspace_buffer = try init.gpa.create([protocol.max_workspace_bytes]u8);
     defer init.gpa.destroy(workspace_buffer);
     const workspace = workspace_buffer[0..try cwd.realPath(init.io, workspace_buffer)];
-    // Esc leads to the overview, whose composer starts Sessions with the
-    // saved defaults. The Host refuses a start that resolves no binding.
+    // Esc leads to the overview. Prospective defaults are best-effort; they
+    // never prevent returning to a draft or admit a new Session here.
     const home = init.environ_map.get("HOME");
     const binding: ?new_session_selection.Binding = blk: {
-        const snapshot: new_session_selection.Snapshot = .{ .intent = .{}, .defaults = preferences.load(home orelse break :blk null) catch break :blk null };
+        const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = if (selectors.needsPreferences()) preferences.load(home orelse break :blk null) catch break :blk null else .{} };
         break :blk snapshot.resolveUnprompted() catch null;
     };
     return openOverview(init, .{
@@ -2262,6 +2446,8 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         .provider = if (binding) |*value| value.provider.slice() else null,
         .model = if (binding) |*value| value.model.slice() else null,
         .open = open,
+        .selectors = selectors,
+        .restoration = restoration,
     });
 }
 

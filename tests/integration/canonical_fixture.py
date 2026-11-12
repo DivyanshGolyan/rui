@@ -35,8 +35,8 @@ def announced(result):
 
 
 class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    """Forward the real request, drain its reply, replace only the selected route."""
-    def __init__(self, host, route, rewrite=None, *, before_forward=None):
+    """Forward requests; count and rewrite only the selected route and record fields."""
+    def __init__(self, host, route, rewrite=None, *, before_forward=None, match_record=None):
         self.path = pathlib.Path(host.rui_ready_fields["socket"])
         # Exchanges connect to the backend name and the proxy binds its
         # staging name, so both are exactly as long as the Host's: wherever
@@ -45,6 +45,7 @@ class ReplyProxy(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
         self.route = route
         self.rewrite = rewrite
         self.before_forward = before_forward
+        self.match_record = match_record
         self.exchanges = []
         self.mutations = []
         # A running client may connect at any moment, so the public path
@@ -121,7 +122,12 @@ class Exchange(socketserver.BaseRequestHandler):
                 if not part:
                     break
                 response += part
-        if route == self.server.route:
+        selected = route == self.server.route
+        if selected and self.server.match_record is not None:
+            requested = json.loads(record)
+            selected = all(requested.get(field) == value
+                for field, value in self.server.match_record.items())
+        if selected:
             self.server.exchanges.append((record, response))
             if self.server.rewrite is not None:
                 response = self.server.rewrite(response)
