@@ -49,7 +49,7 @@ The standalone binary supports Apple Silicon macOS 15+ and x86-64 Linux with gli
 ARM64 Linux and Intel macOS builds are experimental.
 
 ```sh
-curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/install.sh | sh
+curl -fsSL https://ruicode.com/install | sh
 ```
 
 The installer checks SHA-256 and installs in `~/.local/bin`.
