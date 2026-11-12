@@ -4,22 +4,19 @@ Create a Session, send a request, and read its answer with the TypeScript client
 This example enables no tools, so the model can answer but cannot inspect your files or execute commands.
 Provider usage may incur charges.
 
-## Install matching client and binary packages
+## Install the client
 
 Use Node.js 22.6 or newer on a [supported platform](../README.md#install).
-Choose a [GitHub release](https://github.com/DivyanshGolyan/rui/releases) and download its `rui-VERSION.tgz` client tarball and your platform's package tarball.
-Replace `VERSION` below with that release's version.
-For x86-64 Linux, install both downloaded files in your application project:
+In your application project:
 
 ```sh
-npm install --omit=optional ./rui-VERSION.tgz ./rui-linux-x64-VERSION.tgz
+npm install ruicode
 ```
 
-For Apple Silicon macOS, use `rui-darwin-arm64-VERSION.tgz` as the platform package instead.
-The ARM64 Linux package is `rui-linux-arm64-VERSION.tgz`, with experimental platform support.
-The release workflow publishes tarballs, not packages to the npm registry.
+The `ruicode` package installs the matching `rui` executable for your platform as an optional dependency (`ruicode-linux-x64`, `ruicode-darwin-arm64`, or `ruicode-linux-arm64` with experimental platform support).
+Each [GitHub release](https://github.com/DivyanshGolyan/rui/releases) also attaches the same packages as `rui-VERSION.tgz` and `rui-PLATFORM-VERSION.tgz` tarballs for offline installs.
 
-Alternatively, install only the client tarball with `--omit=optional` and put a matching standalone `rui` binary on `PATH`.
+Alternatively, install the client with `--omit=optional` and put a matching standalone `rui` binary on `PATH`.
 The client looks for its platform package first, then `rui` on `PATH`.
 Pass `binary` to `Rui.connect` to choose an executable explicitly.
 Keep the client and binary versions matched.
@@ -44,7 +41,7 @@ Save this example as `example.mts` in your application project:
 
 ```ts
 import { randomUUID } from "node:crypto";
-import { Rui } from "rui";
+import { Rui } from "ruicode";
 
 function required(name: string): string {
 	const value = process.env[name];

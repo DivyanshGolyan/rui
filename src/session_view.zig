@@ -68,7 +68,6 @@ pub fn clock(second: u64, buffer: *[5]u8) ?[]const u8 {
 
 /// A user block's first row up to its body: `›` and the admission time.
 pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
-    try sink.feed("\n");
     try sink.feed(Style.user.code(colour));
     try sink.feed("›");
     try sink.feed(Style.normal.code(colour));
@@ -80,7 +79,7 @@ pub fn userPrefix(sink: anytype, colour: bool, admitted_at: u64) !void {
     try sink.feed(Mark.reset);
 }
 
-test "peer Messages render as one dim line each, named, grouped with tool rows, with time in the margin and never their text" {
+test "peer Messages render as one dim line each, named, with time in the margin and never their text" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,
@@ -110,26 +109,23 @@ test "peer Messages render as one dim line each, named, grouped with tool rows, 
     const R = Mark.reset;
     const L = peerLink;
     var sink: Sink = .{};
-    var compact = false;
-    try peerLine(&sink, .inbound, peer, 1_800_000_000, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "← Received message from " ++ comptime L("9f8e7d", "9f8e7d") ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try peerLine(&sink, .inbound, peer, 1_800_000_000);
+    try std.testing.expectEqualStrings(S ++ "← Received message from " ++ comptime L("9f8e7d", "9f8e7d") ++ N ++ "08:00" ++ R ++ "\n", sink.bytes[0..sink.length]);
     // Without a time the margin stays empty.
     sink = .{};
-    compact = false;
-    try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
+    try peerLine(&sink, .outbound, peer, std.math.maxInt(u64));
+    try std.testing.expectEqualStrings(S ++ "→ Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", sink.bytes[0..sink.length]);
     var failed: Sink = .{};
-    try sendFailed(&failed, peer, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "× Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", failed.bytes[0..failed.length]);
-    try std.testing.expect(!compact);
-    // A named peer shows by its name, escaped as a label is, and rows in a
-    // row share one group with no blank line between them.
+    try sendFailed(&failed, peer);
+    try std.testing.expectEqualStrings(S ++ "× Messaged " ++ comptime L("9f8e7d", "9f8e7d") ++ R ++ "\n", failed.bytes[0..failed.length]);
+    // A named peer shows by its name, escaped as a label is. Each row is its
+    // own line; the feed packs peer rows by adjacency (`tight`).
     var named = peer;
     try named.label.set("Review\x1b[2m the WAL");
     var group: Sink = .{};
-    try peerLine(&group, .outbound, named, 1_800_000_000, &compact);
-    try peerLine(&group, .inbound, named, 1_800_000_000, &compact);
-    try std.testing.expectEqualStrings("\n" ++ S ++ "→ Messaged " ++ comptime L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n" ++
+    try peerLine(&group, .outbound, named, 1_800_000_000);
+    try peerLine(&group, .inbound, named, 1_800_000_000);
+    try std.testing.expectEqualStrings(S ++ "→ Messaged " ++ comptime L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n" ++
         S ++ "← Received message from " ++ L("9f8e7d", "Review\\x1b[2m the WAL") ++ N ++ "08:00" ++ R ++ "\n", group.bytes[0..group.length]);
 }
 
@@ -138,7 +134,7 @@ fn peerLink(comptime id: []const u8, comptime name: []const u8) []const u8 {
     return Text.link_open ++ Text.session_link ++ id ++ Text.link_end ++ "\x1b[4m" ++ name ++ Text.link_close ++ Mark.reset ++ Mark.summary;
 }
 
-test "failed peer Messages distinguish absent targets and reset grouping without changing named output" {
+test "failed peer Messages distinguish absent targets without changing named output" {
     const Sink = struct {
         bytes: [1024]u8 = undefined,
         length: usize = 0,
@@ -157,21 +153,11 @@ test "failed peer Messages distinguish absent targets and reset grouping without
         .{ .target = named, .line = "× Messaged " ++ comptime peerLink("k7m2qx", "Review\\x1b[2m the WAL") },
     };
     for (cases) |case| {
-        for ([_]bool{ false, true }) |grouped| {
-            var sink: Sink = .{};
-            var compact = grouped;
-            try sendFailed(&sink, case.target, &compact);
-            try std.testing.expect(!compact);
-            var expected: [1024]u8 = undefined;
-            const line = try std.fmt.bufPrint(&expected, "\n" ++ Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{case.line});
-            try std.testing.expectEqualStrings(line, sink.bytes[0..sink.length]);
-            // The next ordinary peer row starts a new group, even when the
-            // rejected Message interrupted an existing compact group.
-            const boundary = sink.length;
-            try peerLine(&sink, .outbound, peer, std.math.maxInt(u64), &compact);
-            try std.testing.expect(compact);
-            try std.testing.expectEqualStrings("\n" ++ Mark.summary ++ "→ Messaged " ++ comptime peerLink("k7m2qx", "k7m2qx") ++ Mark.reset ++ "\n", sink.bytes[boundary..sink.length]);
-        }
+        var sink: Sink = .{};
+        try sendFailed(&sink, case.target);
+        var expected: [1024]u8 = undefined;
+        const line = try std.fmt.bufPrint(&expected, Mark.summary ++ "{s}" ++ Mark.reset ++ "\n", .{case.line});
+        try std.testing.expectEqualStrings(line, sink.bytes[0..sink.length]);
     }
 }
 
@@ -179,11 +165,8 @@ test "failed peer Messages distinguish absent targets and reset grouping without
 /// group: `← Received message from NAME` from a peer, `→ Messaged NAME` sent
 /// to one, NAME being its label or, with none, its ID. Its admission time goes
 /// in the right margin. The Message's text never shows; the model reads it.
-/// `compact` is the tool rows' grouping: a row after another one joins it
-/// without a blank line.
-pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64, compact: *bool) !void {
-    if (!compact.*) try sink.feed("\n");
-    compact.* = true;
+/// The row is tight: it packs with tool rows (see `tight`).
+pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: protocol.NamedPeer, admitted_at: u64) !void {
     try sink.feed(Mark.summary);
     try sink.feed(if (direction == .inbound) "← Received message from " else "→ Messaged ");
     try peerName(sink, peer);
@@ -197,9 +180,8 @@ pub fn peerLine(sink: anytype, direction: enum { inbound, outbound }, peer: prot
 
 /// A Message this Session sent that was rejected: set apart, as a failed
 /// tool row is. No target means the attempt named no valid Session reference.
-pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer, compact: *bool) !void {
-    compact.* = false;
-    try sink.feed("\n" ++ Mark.summary);
+pub fn sendFailed(sink: anytype, target: ?protocol.NamedPeer) !void {
+    try sink.feed(Mark.summary);
     if (target) |peer| {
         try sink.feed("× Messaged ");
         try peerName(sink, peer);
@@ -599,7 +581,7 @@ test "list rows share every mark and script with the chat heading table" {
         // Tool headings use Unicode; queued and idle have no Tool outcome.
         if (case.tool) |code| {
             var heading: Sink = .{};
-            try toolHeading(.{ .description = null, .code = code, .publication_position = null }, &heading, false, false);
+            try toolHeading(.{ .description = null, .code = code, .publication_position = null }, &heading, false);
             const end = std.mem.indexOfScalar(u8, heading.bytes[0..heading.length], ' ').?;
             try std.testing.expectEqualStrings(shared.unicode, heading.bytes[0..end]);
         }
@@ -609,14 +591,13 @@ test "list rows share every mark and script with the chat heading table" {
     try std.testing.expect(seen.eql(states));
 }
 
-pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool) !void {
-    return toolHeadingWith(presentation, sink, colour, separate, "", false);
+pub fn toolHeading(presentation: protocol.ToolPresentation, sink: anytype, colour: bool) !void {
+    return toolHeadingWith(presentation, sink, colour, "", false);
 }
 
 /// `exit` is a digits-only exit status, shown only for a failed call.
-fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, separate: bool, exit: []const u8, foldable: bool) !void {
+fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colour: bool, exit: []const u8, foldable: bool) !void {
     const state = toolState(presentation.code);
-    if (separate) try sink.feed("\n");
     if (foldable) try sink.feed(tool_fold.heading_marker);
     try sink.feed(state.style.code(colour));
     try sink.feed(state.glyph);
@@ -1253,14 +1234,12 @@ test "a queued Message is labelled only while work under way holds it" {
 
 /// One Message in full, labelled unless applied: live, in the opening and in
 /// a transcript's listing alike.
-pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool, compact: *bool) !void {
+pub fn message(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, value: protocol.ActivityItem.Message, labels: Labels, sink: anytype, colour: bool) !void {
     if (messageLabel(value.state, labels)) |text| {
-        compact.* = false;
-        try print(sink, "\n{s}{s}{s}", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
+        try print(sink, "{s}{s}{s}\n", .{ Style.quiet.code(colour), text, Style.normal.code(colour) });
     }
-    if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at, compact);
+    if (value.sender) |sender| return peerLine(sink, .inbound, sender, value.admitted_at);
     const block: Collapsed = .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .content = value.content, .row = item.value == .user };
-    compact.* = false;
     try userPrefix(sink, colour, value.admitted_at);
     var body: UserBody(@TypeOf(sink)) = undefined;
     try body.init(sink, value.content.length, false);
@@ -1311,17 +1290,15 @@ pub const ToolHeaderScan = struct {
     }
 };
 
-pub fn toolResult(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, sink: anytype, colour: bool, compact: *bool) !void {
-    return toolResultRow(presentation, facts, false, sink, colour, compact);
+pub fn toolResult(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, sink: anytype, colour: bool) !void {
+    return toolResultRow(presentation, facts, false, sink, colour);
 }
 
 /// `foldable` marks the heading of a row whose saved output can open under it.
-fn toolResultRow(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, foldable: bool, sink: anytype, colour: bool, compact: *bool) !void {
-    const succeeded = presentation.code == .succeeded;
+fn toolResultRow(presentation: protocol.ToolPresentation, facts: ToolHeaderFacts, foldable: bool, sink: anytype, colour: bool) !void {
     var buffer: [3]u8 = undefined;
     const exit = if (facts.exit) |value| try std.fmt.bufPrint(&buffer, "{d}", .{value}) else "";
-    try toolHeadingWith(presentation, sink, colour, !compact.* or !succeeded, exit, foldable);
-    compact.* = succeeded;
+    try toolHeadingWith(presentation, sink, colour, exit, foldable);
 }
 
 test "tool header hides all body lines for every outcome and first-line split" {
@@ -1359,10 +1336,9 @@ test "tool header hides all body lines for every outcome and first-line split" {
                 try scan.feed(body[0..split]);
                 try scan.feed(body[split..]);
                 var sink: Sink = .{};
-                var compact = false;
-                try toolResult(.{ .description = null, .code = case[0], .publication_position = null }, scan.facts(case[0]), &sink, colour, &compact);
+                const presentation: protocol.ToolPresentation = .{ .description = null, .code = case[0], .publication_position = null };
+                try toolResult(presentation, scan.facts(case[0]), &sink, colour);
                 var expected: Sink = .{};
-                try expected.feed("\n");
                 const glyph_end = std.mem.indexOfScalar(u8, case[1], ' ').?;
                 if (colour) try expected.feed(switch (case[0]) {
                     .unresolved => "\x1b[94m",
@@ -1376,7 +1352,8 @@ test "tool header hides all body lines for every outcome and first-line split" {
                 try expected.feed(case[1][glyph_end..]);
                 try expected.feed("\n");
                 try std.testing.expectEqualStrings(expected.bytes[0..expected.length], sink.bytes[0..sink.length]);
-                try std.testing.expectEqual(case[0] == .succeeded, compact);
+                try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .tool_result = .{ .content = .{ .length = 0, .digest = @splat(0) }, .presentation = presentation } }));
+                try std.testing.expectEqual(case[0] == .succeeded, tight(.{ .hosted_call = presentation }));
             }
         }
     }
@@ -1393,9 +1370,9 @@ test "failed tool exit status is named rather than read as a count" {
         var buffer: [128]u8 = undefined;
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
-        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, true, exit, false);
+        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, exit, false);
         var expected: [128]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "\n× Tool call · exit {s}\n", .{exit}), out.buffered());
+        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "× Tool call · exit {s}\n", .{exit}), out.buffered());
     }
 }
 
@@ -1438,7 +1415,6 @@ const Ending = struct {
 fn ending(sink: anytype, end: Ending, colour: bool) !void {
     const mark = marks.marks.get(end.mark);
     const style = Style.fromTone(mark.tone);
-    try sink.feed("\n");
     try sink.feed(style.code(colour));
     try sink.feed(mark.unicode);
     try sink.feed(Style.normal.code(colour));
@@ -1486,7 +1462,7 @@ test "a descendant's ending names the agent without codes or advice" {
     try agentEnded(&sink, "9f8e7d", "provider_http_401", false);
     try agentEnded(&sink, "9f8e7d", "cancelled", false);
     try agentEnded(&sink, "bad\x1b[2J", "malformed_provider_output", false);
-    try std.testing.expectEqualStrings("\n× Agent 9f8e7d · Sign-in expired\n\n■ Agent 9f8e7d stopped\n\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
+    try std.testing.expectEqualStrings("× Agent 9f8e7d · Sign-in expired\n■ Agent 9f8e7d stopped\n× Agent bad\\x1b[2J · Model reply unreadable\n", out.buffered());
 }
 
 test "an ended Turn shows one plain cause line for every failure class" {
@@ -1518,7 +1494,7 @@ test "an ended Turn shows one plain cause line for every failure class" {
         var out = std.Io.Writer.fixed(&buffer);
         var sink: Sink = .{ .out = &out };
         try workEnded(&sink, case[0], false);
-        try std.testing.expectEqualStrings("\n" ++ case[1] ++ "\n", out.buffered());
+        try std.testing.expectEqualStrings(case[1] ++ "\n", out.buffered());
     }
     try std.testing.expect(seen.eql(.full));
 }
@@ -1537,10 +1513,10 @@ test "turn and agent ending marks use their table tones" {
     try workEnded(&sink, "cancelled", true);
     try agentEnded(&sink, "9f8e7d", "malformed_provider_output", true);
     try agentEnded(&sink, "9f8e7d", "cancelled", true);
-    try std.testing.expectEqualStrings("\n\x1b[91m×\x1b[39m Model reply unreadable\n" ++
-        "\n\x1b[39m■\x1b[39m Stopped\n" ++
-        "\n\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
-        "\n\x1b[39m■\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
+    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Model reply unreadable\n" ++
+        "\x1b[39m■\x1b[39m Stopped\n" ++
+        "\x1b[91m×\x1b[39m Agent 9f8e7d · Model reply unreadable\n" ++
+        "\x1b[39m■\x1b[39m Agent 9f8e7d stopped\n", out.buffered());
 }
 
 test "ending tails are quiet and joined in destination then key order" {
@@ -1554,13 +1530,13 @@ test "ending tails are quiet and joined in destination then key order" {
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
     try workEnded(&sink, "provider_http_401", true);
-    try std.testing.expectEqualStrings("\n\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
+    try std.testing.expectEqualStrings("\x1b[91m×\x1b[39m Sign-in expired\x1b[90m · Settings\x1b[39m\n", out.buffered());
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .place = "Place", .key = "Key" }, false);
-    try std.testing.expectEqualStrings("\n× Cause · Place · Key\n", out.buffered());
+    try std.testing.expectEqualStrings("× Cause · Place · Key\n", out.buffered());
     out.end = 0;
     try ending(&sink, .{ .mark = .failed, .words = "Cause", .key = "Key" }, false);
-    try std.testing.expectEqualStrings("\n× Cause · Key\n", out.buffered());
+    try std.testing.expectEqualStrings("× Cause · Key\n", out.buffered());
 }
 
 /// Only the oldest waiting Message echoes in the feed when no work holds it.
@@ -1593,24 +1569,45 @@ test "a waiting Message shows at its Admission only when nothing holds it and no
 /// that can open, or shown under it through the row's own bounded buffer.
 pub const Fold = union(enum) { none, closed, open: *tool_fold.Output };
 
-/// Writes one Activity row, independent of traversal direction and prior reads.
-/// Returns whether its output is provisional and must be replaced when the
-/// current page's queue/work facts change. Settled rows use only Store content.
-pub fn render(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, compact_tools: *bool, home: []const u8, destination: Destination, fold: Fold) !bool {
+/// Whether a row packs with its neighbours: two adjacent tight rows have no
+/// blank line between them, any other adjacent pair has one. Successful tool
+/// rows and peer Messages are tight; a failed or refused tool row, a failed
+/// send and everything else stand apart. Only the row's own kind decides,
+/// so a row's text never depends on its neighbour; whoever lays rows out
+/// draws the gap from `gap` (feed_window.Window.gapAfter).
+pub fn tight(value: protocol.ActivityItem.Value) bool {
+    return switch (value) {
+        .tool_result => |result| result.presentation.code == .succeeded,
+        .hosted_call => |presentation| presentation.code == .succeeded,
+        .sent => true,
+        .admission, .received, .user => |message_| message_.sender != null,
+        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => false,
+    };
+}
+
+/// Whether one blank line separates two adjacent shown rows, by their `tight`.
+pub fn gap(above: bool, below: bool) bool {
+    return !(above and below);
+}
+
+/// Writes one Activity row, independent of traversal direction, prior reads
+/// and its neighbours: never a leading or trailing blank line between rows
+/// (see `tight`). Returns whether its output is provisional and must be
+/// replaced when the current page's queue/work facts change. Settled rows
+/// use only Store content.
+pub fn render(requests: client.Requests, store: []const u8, session: []const u8, item: protocol.ActivityItem, queued: protocol.Queued, held: bool, sink: anytype, colour: bool, home: []const u8, destination: Destination, fold: Fold) !bool {
     switch (item.value) {
         .admission => |value| {
             if (!showsAtAdmission(item.position, value, queued, held)) return false;
-            try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
+            try message(requests, store, session, item, value, .none, sink, colour);
             return true;
         },
-        .received => |value| try message(requests, store, session, item, value, .none, sink, colour, compact_tools),
+        .received => |value| try message(requests, store, session, item, value, .none, sink, colour),
         .user => |value| {
             if (value.sender != null) return false;
-            try message(requests, store, session, item, value, .none, sink, colour, compact_tools);
+            try message(requests, store, session, item, value, .none, sink, colour);
         },
         .assistant => |assistant| {
-            compact_tools.* = false;
-            try sink.feed("\n");
             var answer: Answer(@TypeOf(sink)) = undefined;
             answer.init(sink, home, colour, destination);
             try content(requests, store, session, item, assistant.content, &answer);
@@ -1636,13 +1633,13 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
                     try content(requests, store, session, item, result.content, &both);
                 },
             }
-            try toolResultRow(result.presentation, scan.facts(result.presentation.code), fold != .none, sink, colour, compact_tools);
+            try toolResultRow(result.presentation, scan.facts(result.presentation.code), fold != .none, sink, colour);
             if (fold == .open) try fold.open.finish(sink);
         },
         // A call the provider ran is its line alone, grouped with
         // other tool rows like a result with no output.
         .hosted_call => |presentation| {
-            try toolResult(presentation, .{}, sink, colour, compact_tools);
+            try toolResult(presentation, .{}, sink, colour);
         },
         // Hidden call rows use admission-certified page metadata. Exact
         // proposal and permission inspection authenticate originals instead.
@@ -1650,23 +1647,22 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         .turn_ended => |ended| {
             // A done Turn's answer is its final assistant row, never a second answer.
             if (ended.ending == .done) return false;
-            compact_tools.* = false;
             // The report is deliberately not read: the shared cause owns the words.
             if (!std.mem.eql(u8, ended.session.slice(), session)) {
                 try agentEnded(sink, ended.session.slice(), ended.code.slice(), colour);
             } else try workEnded(sink, ended.code.slice(), colour);
         },
         .stop => |stop| {
-            compact_tools.* = false;
-            try excludedAtStop(requests, store, session, item, sink, colour);
+            const excluded = try excludedAtStop(requests, store, session, item, sink, colour);
             // A selected Turn owns its terminal line, even across page boundaries.
             // Without a Turn, the stop itself is the completed outcome.
-            if (stop.turn == null) try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
+            if (stop.turn == null) {
+                if (excluded) try sink.feed("\n");
+                try ending(sink, .{ .mark = .stopped, .words = "Stopped" }, colour);
+            }
         },
-        .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at, compact_tools),
-        .send_failed => |failed| {
-            try sendFailed(sink, failed.target, compact_tools);
-        },
+        .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
+        .send_failed => |failed| try sendFailed(sink, failed.target),
         // The call's own line and the work status show the wait.
         .approval_requested, .session_changed, .compacted, .model_call => {},
     }
@@ -1677,8 +1673,10 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
 /// At the instant before the stop, these were the queued suffix through its
 /// cutoff. Earlier applied/excluded Messages end the search. Two bounded
 /// passes keep oldest-first output without retaining pages or recursing.
-fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, sink: anytype, colour: bool) !void {
-    if (stop.value.stop.cutoff == 0) return;
+/// Messages within the stop's row stand apart from each other by a blank
+/// line, as separate Message rows do. Returns whether it wrote any.
+fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const u8, stop: protocol.ActivityItem, sink: anytype, colour: bool) !bool {
+    if (stop.value.stop.cutoff == 0) return false;
     var cursor: protocol_reply.ActivityCursor = .{ .end = stop.position - 1, .direction = .backward, .kinds = .initOne(.admission) };
     var first: ?u64 = null;
     search: while (true) {
@@ -1694,8 +1692,9 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
         }
         cursor = page.continuation() orelse break;
     }
-    const lowest = first orelse return;
+    const lowest = first orelse return false;
     sink.excluding(lowest);
+    var wrote = false;
     cursor = .{ .end = stop.position - 1, .position = lowest - 1, .kinds = .initOne(.admission) };
     while (true) {
         const page = switch (try requests.activityPage(store, session, cursor)) {
@@ -1706,10 +1705,11 @@ fn excludedAtStop(requests: client.Requests, store: []const u8, session: []const
             var value = item.value.admission;
             if (value.state != .queued or value.admission > stop.value.stop.cutoff) continue;
             value.state = .excluded;
-            var compact = false;
-            try message(requests, store, session, item, value, .lasting(false), sink, colour, &compact);
+            if (wrote) try sink.feed("\n");
+            wrote = true;
+            try message(requests, store, session, item, value, .lasting(false), sink, colour);
         }
-        cursor = page.continuation() orelse return;
+        cursor = page.continuation() orelse return wrote;
     }
 }
 
@@ -1722,21 +1722,29 @@ test "hosted calls draw as tool rows: successes pack together, a failure stands 
             self.length += bytes.len;
         }
     };
-    var sink: Sink = .{};
-    var compact = false;
-    for ([_]struct { []const u8, protocol.ToolPresentation.Code }{
-        .{ "Search “zig 0.17”", .succeeded },
-        .{ "Open ziglang.org/x", .succeeded },
-        .{ "Find “Io” in ziglang.org/x", .failed },
-        .{ "Search the web", .succeeded },
+    // Each row alone is its line; the rows joined by `gap` read as before.
+    var joined: Sink = .{};
+    var above: ?bool = null;
+    for ([_]struct { []const u8, protocol.ToolPresentation.Code, []const u8 }{
+        .{ "Search “zig 0.17”", .succeeded, "✓ Search “zig 0.17”\n" },
+        .{ "Open ziglang.org/x", .succeeded, "✓ Open ziglang.org/x\n" },
+        .{ "Find “Io” in ziglang.org/x", .failed, "× Find “Io” in ziglang.org/x\n" },
+        .{ "Search the web", .succeeded, "✓ Search the web\n" },
     }) |call| {
         var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
         try description.set(call[0]);
-        try toolResult(.{ .description = description, .code = call[1], .publication_position = 1 }, .{}, &sink, false, &compact);
+        const presentation: protocol.ToolPresentation = .{ .description = description, .code = call[1], .publication_position = 1 };
+        var row: Sink = .{};
+        try toolResult(presentation, .{}, &row, false);
+        try std.testing.expectEqualStrings(call[2], row.bytes[0..row.length]);
+        const below = tight(.{ .hosted_call = presentation });
+        if (above) |value| if (gap(value, below)) try joined.feed("\n");
+        try joined.feed(row.bytes[0..row.length]);
+        above = below;
     }
     try std.testing.expectEqualStrings(
-        "\n✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n× Find “Io” in ziglang.org/x\n\n✓ Search the web\n",
-        sink.bytes[0..sink.length],
+        "✓ Search “zig 0.17”\n✓ Open ziglang.org/x\n\n× Find “Io” in ziglang.org/x\n\n✓ Search the web\n",
+        joined.bytes[0..joined.length],
     );
 }
 
