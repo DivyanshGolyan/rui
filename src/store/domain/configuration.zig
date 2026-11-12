@@ -92,7 +92,11 @@ fn toolsRejection(host_tool_set: *const tool_defs.HostToolSet, provider: provide
 
 /// Rejection codes are durable; this advisory detail describes the current
 /// Host's launch-only MCP configuration, also on replay. No Store read is needed.
-pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, tools: *const command_input.ToolsField) ?tool_defs.HostToolSet.MissingTool {
+pub fn missingToolMessage(host_tool_set: *const tool_defs.HostToolSet, code: anytype, tools: *const command_input.ToolsField) ?tool_defs.HostToolSet.MissingTool {
+    switch (code) {
+        .unknown_tool, .mcp_server_unavailable => {},
+        else => return null,
+    }
     var names = tools.iterator();
     while (names.next()) |name| {
         if (host_tool_set.resolve(name) != .found) return host_tool_set.missingTool(name);
