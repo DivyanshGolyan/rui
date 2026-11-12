@@ -8,6 +8,82 @@ const TerminalText = @import("TerminalText.zig");
 
 pub const Method = session_line.Method;
 
+// --- Footer focus ----------------------------------------------------------
+
+pub const FooterField = enum { model, effort };
+pub const FooterFocus = enum { input, model, effort };
+pub const FooterInput = union(enum) { tab: bool, enter, escape, text, click: ?FooterField, other };
+pub const FooterDecision = struct {
+    focus: FooterFocus,
+    open_choice: ?FooterField = null,
+    forward: bool = false,
+};
+
+/// Drawn clicks carry their identity even if newer facts removed the field.
+pub fn footerInput(focus: FooterFocus, has_effort: bool, input: FooterInput) FooterDecision {
+    return switch (input) {
+        .click => |field| .{ .focus = .input, .open_choice = field, .forward = field == null },
+        .tab => |reverse| .{ .focus = if (reverse) switch (focus) {
+            .input => if (has_effort) .effort else .model,
+            .model => .input,
+            .effort => .model,
+        } else switch (focus) {
+            .input => .model,
+            .model => if (has_effort) .effort else .input,
+            .effort => .input,
+        } },
+        .enter => switch (focus) {
+            .input => .{ .focus = .input, .forward = true },
+            .model => .{ .focus = .input, .open_choice = .model },
+            .effort => .{ .focus = .input, .open_choice = if (has_effort) .effort else null },
+        },
+        .escape => .{ .focus = .input, .forward = focus == .input },
+        .text => .{ .focus = .input, .forward = true },
+        .other => .{ .focus = focus, .forward = true },
+    };
+}
+
+/// Focus and the not-yet-applied open effect belong to the chat's core.
+/// A new interaction supersedes a deferred effect; only a visible choice
+/// is modal. Read completion itself never goes through this transition.
+pub const Footer = struct {
+    focus: FooterFocus = .input,
+    pending: ?FooterField = null,
+
+    pub fn step(self: *Footer, has_effort: bool, input: FooterInput) FooterDecision {
+        const waiting = self.pending != null;
+        var decision = footerInput(self.focus, has_effort, input);
+        self.focus = decision.focus;
+        self.pending = decision.open_choice;
+        if (waiting and input == .escape) decision.forward = false;
+        return decision;
+    }
+};
+
+pub const FooterKeys = struct {
+    text: []const u8,
+    action: enum { info, pick },
+    other_actions: bool,
+};
+
+/// The footer names an action the topmost layer can actually take.
+pub fn footerKeys(choice_open: bool) FooterKeys {
+    return if (choice_open) .{ .text = "enter pick", .action = .pick, .other_actions = false } else .{ .text = "alt+i info", .action = .info, .other_actions = true };
+}
+
+pub const FooterSpan = struct { text: []const u8, field: ?FooterField = null };
+pub const FooterSpans = struct {
+    text: []const u8 = "",
+    spans: [12]FooterSpan = undefined,
+    len: usize = 0,
+
+    fn append(self: *FooterSpans, text: []const u8, field: ?FooterField) void {
+        if (text.len == 0) return;
+        self.spans[self.len] = .{ .text = text, .field = field };
+        self.len += 1;
+    }
+};
+
 // --- Notices --------------------------------------------------------------
 
 /// How long a notice about the person's own last action stays without a key.
@@ -102,50 +178,79 @@ test "a send is progress while in flight, needs the person once unresolved, and 
 /// Bytes `factsRow` writes at most.
 pub const facts_bytes = session_line.capacity + " · ".len + "Stopping and archiving".len;
 
-/// The facts row after `‹ `: the Session's facts in the plan's priority
-/// order (name · model · effort · context, then `asks` in ask mode), else
-/// the Session's name, then the archive badge
-/// while it has one. A standing fact, so it sits here, never in place of a
-/// notice. On a short row the badge stays whole and the facts give way:
-/// whole facts drop from the low-priority end, marked ` · …`, and a name
-/// too long alone ends at a word with `…`.
+/// The footer keeps its editable facts visible before the name and context.
+/// Ask and effort stay whole, then the model fits (with an ellipsis only
+/// when necessary), then whole context, then the name in the remaining room.
+/// Output order remains name · model · effort · context · ask · archive.
 pub fn factsRow(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) []const u8 {
-    const tail = if (badge) |text| session_line.cells(session_line.separator, method) + session_line.cells(text, method) else 0;
+    return factsSpans(buffer, facts, name, badge, width, method).text;
+}
+
+pub fn factsSpans(buffer: *[facts_bytes]u8, facts: ?session_line.Facts, name: []const u8, badge: ?[]const u8, width: usize, method: Method) FooterSpans {
+    var result: FooterSpans = .{};
+    const separator = session_line.cells(session_line.separator, method);
+    const tail = if (badge) |text| separator + session_line.cells(text, method) else 0;
     const room = width -| tail;
-    var out = std.Io.Writer.fixed(buffer);
     var percent: [session_line.left_text.len]u8 = undefined;
-    var parts: [5][]const u8 = undefined;
+    const parts: [5]?[]const u8 = if (facts) |value| .{
+        value.name,
+        value.model,
+        if (value.effort) |effort| @tagName(effort) else null,
+        if (value.left) |left| std.fmt.bufPrint(&percent, "{d}% left", .{left}) catch unreachable else null,
+        if (value.asks) "ask" else null,
+    } else .{ name[0..@min(name.len, session_line.max_name_bytes)], null, null, null, null };
+    var kept: [5]?[]const u8 = @splat(null);
+    var used: usize = 0;
     var count: usize = 0;
-    if (facts) |value| {
-        for ([_]?[]const u8{
-            value.name,
-            value.model,
-            if (value.effort) |effort| @tagName(effort) else null,
-            if (value.left) |left| std.fmt.bufPrint(&percent, "{d}% left", .{left}) catch unreachable else null,
-            if (value.asks) session_line.asks_text else null,
-        }) |part| if (part) |text| {
-            parts[count] = text;
-            count += 1;
-        };
-    } else {
-        parts[0] = name[0..@min(name.len, session_line.max_name_bytes)];
-        count = 1;
-    }
-    const dropped = session_line.separator ++ session_line.ellipsis;
-    var kept = count;
-    while (kept > 0) : (kept -= 1) {
-        var cells: usize = if (kept < count) session_line.cells(dropped, method) else 0;
-        for (parts[0..kept], 0..) |part, index| cells += session_line.cells(part, method) + if (index == 0) 0 else session_line.cells(session_line.separator, method);
-        if (cells > room) continue;
-        for (parts[0..kept], 0..) |part, index| {
-            if (index != 0) out.writeAll(session_line.separator) catch unreachable;
-            out.writeAll(part) catch unreachable;
+    var model_buffer: [facts_bytes]u8 = undefined;
+    var name_buffer: [facts_bytes]u8 = undefined;
+    // Fitting policy lives here, not in the widgets that draw these spans.
+    for ([_]usize{ 4, 2, 1, 3, 0 }) |index| {
+        const text = parts[index] orelse continue;
+        if (text.len == 0) continue;
+        const join = if (count != 0) separator else 0;
+        const available = room -| used -| join;
+        var shown = text;
+        if (session_line.cells(text, method) > available) {
+            if (index == 0) {
+                var out = std.Io.Writer.fixed(&name_buffer);
+                words(&out, text, available, method);
+                shown = out.buffered();
+            } else if (index == 1) {
+                const mark = session_line.cells(session_line.ellipsis, method);
+                if (available < mark) continue;
+                const prefix = text[0..session_line.fit(text, available - mark, method).len];
+                shown = std.fmt.bufPrint(&model_buffer, "{s}{s}", .{ prefix, session_line.ellipsis }) catch unreachable;
+            } else continue;
         }
-        if (kept < count) out.writeAll(dropped) catch unreachable;
-        break;
-    } else words(&out, parts[0], room, method);
-    if (badge) |text| out.print("{s}{s}", .{ session_line.separator, text }) catch unreachable;
-    return out.buffered();
+        if (shown.len == 0) continue;
+        kept[index] = shown;
+        used += join + session_line.cells(shown, method);
+        count += 1;
+    }
+    var out = std.Io.Writer.fixed(buffer);
+    for (kept, 0..) |part, index| if (part) |text| {
+        if (out.end != 0) {
+            const start = out.end;
+            out.writeAll(session_line.separator) catch unreachable;
+            result.append(buffer[start..out.end], null);
+        }
+        const start = out.end;
+        out.writeAll(text) catch unreachable;
+        result.append(buffer[start..out.end], switch (index) {
+            1 => .model,
+            2 => .effort,
+            else => null,
+        });
+    };
+    if (badge) |text| {
+        const start = out.end;
+        if (out.end != 0) out.writeAll(session_line.separator) catch unreachable;
+        out.writeAll(text[0..session_line.fit(text, width -| session_line.cells(out.buffered(), method), method).len]) catch unreachable;
+        result.append(buffer[start..out.end], null);
+    }
+    result.text = out.buffered();
+    return result;
 }
 
 /// `text` within `room` cells, ending at a word with `…` when it is cut.
@@ -175,26 +280,25 @@ test "the facts row ends with the archive badge, which stays when the row is sho
     try std.testing.expect(session_line.cells(short, .unicode) <= 40);
 }
 
-test "a short facts row drops whole facts from the low-priority end, marks it with …, and never cuts a word" {
+test "a short facts row preserves editable words and ask before context and name" {
     var buffer: [facts_bytes]u8 = undefined;
-    const facts: session_line.Facts = .{ .name = "Fix flaky store test that fails on CI under heavy load", .model = "gpt-6-sol", .effort = .low, .left = 100 };
-    // Name · model · effort · context: the context goes first, not the effort.
-    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · gpt-6-sol · low · 100% left", factsRow(&buffer, facts, "k7m2qx", null, 84, .unicode));
-    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · gpt-6-sol · low · …", factsRow(&buffer, facts, "k7m2qx", null, 83, .unicode));
-    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · gpt-6-sol · …", factsRow(&buffer, facts, "k7m2qx", null, 75, .unicode));
-    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load · …", factsRow(&buffer, facts, "k7m2qx", null, 69, .unicode));
-    // The name alone is too long: it ends at a word, never inside one.
-    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI…", factsRow(&buffer, facts, "k7m2qx", null, 38, .unicode));
-    try std.testing.expectEqualStrings("Fix flaky store test that fails on…", factsRow(&buffer, facts, "k7m2qx", null, 37, .unicode));
-    // A name that fits alone is never cut, even with no room to mark the rest.
-    try std.testing.expectEqualStrings("Fix flaky store test that fails on CI under heavy load", factsRow(&buffer, facts, "k7m2qx", null, 55, .unicode));
-    // The badge stays whole; the facts give way before it.
-    try std.testing.expectEqualStrings("Fix flaky store test · … · Archived · /unarchive", factsRow(&buffer, .{ .name = "Fix flaky store test", .model = "gpt-6-sol" }, "k7m2qx", "Archived · /unarchive", 50, .unicode));
-    // One word wider than the row can only be cut inside itself.
-    const xs: [100]u8 = @splat('X');
-    const cut = factsRow(&buffer, .{ .name = &xs, .model = "gpt-6-sol", .effort = .low, .left = 100 }, "k7m2qx", null, 30, .unicode);
-    try std.testing.expectEqualStrings(xs[0..29], cut[0..29]);
-    try std.testing.expectEqualStrings("…", cut[29..]);
+    const facts: session_line.Facts = .{ .name = "Fix retry deadline", .model = "gpt-6.1-sol", .effort = .high, .left = 100, .asks = true };
+    try std.testing.expectEqualStrings("Fix retry deadline · gpt-6.1-sol · high · 100% left · ask", factsRow(&buffer, facts, "ref", null, 140, .unicode));
+    try std.testing.expectEqualStrings("gpt-6.1-sol · high · 100% left · ask", factsRow(&buffer, facts, "ref", null, 36, .unicode));
+    try std.testing.expectEqualStrings("Fix… · gpt-6.1-sol · high · ask", factsRow(&buffer, facts, "ref", null, 34, .unicode));
+    try std.testing.expectEqualStrings("gpt-6… · high · ask", factsRow(&buffer, facts, "ref", null, 19, .unicode));
+    try std.testing.expectEqualStrings("gpt-6… · high · ask · Archived", factsRow(&buffer, facts, "ref", "Archived", 30, .unicode));
+    for (0..141) |width| {
+        const fitted = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        try std.testing.expect(session_line.cells(fitted.text, .unicode) <= width);
+        if (width >= 19) {
+            try std.testing.expect(std.mem.indexOf(u8, fitted.text, "high") != null);
+            try std.testing.expect(std.mem.endsWith(u8, fitted.text, "ask"));
+            var fields: usize = 0;
+            for (fitted.spans[0..fitted.len]) |span| fields += @intFromBool(span.field != null);
+            try std.testing.expectEqual(@as(usize, 2), fields);
+        }
+    }
 }
 
 /// The key that ends what needs the person, which the status bar makes
@@ -444,4 +548,102 @@ fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
     var joined: []const u8 = "";
     for (0..count) |_| joined = joined ++ text;
     return joined;
+}
+
+test "footer focus domain routes navigation opening escape text and drawn click identity" {
+    const Case = struct { input: FooterInput, want: FooterDecision };
+    for ([_]bool{ false, true }) |effort| {
+        for (std.enums.values(FooterFocus)) |focus| {
+            const cases = [_]Case{
+                .{ .input = .{ .tab = false }, .want = .{ .focus = switch (focus) {
+                    .input => .model,
+                    .model => if (effort) .effort else .input,
+                    .effort => .input,
+                } } },
+                .{ .input = .{ .tab = true }, .want = .{ .focus = switch (focus) {
+                    .input => if (effort) .effort else .model,
+                    .model => .input,
+                    .effort => .model,
+                } } },
+                .{ .input = .escape, .want = .{ .focus = .input, .forward = focus == .input } },
+                .{ .input = .text, .want = .{ .focus = .input, .forward = true } },
+                .{ .input = .other, .want = .{ .focus = focus, .forward = true } },
+                .{ .input = .enter, .want = .{ .focus = .input, .open_choice = switch (focus) {
+                    .input => null,
+                    .model => .model,
+                    .effort => if (effort) .effort else null,
+                }, .forward = focus == .input } },
+                .{ .input = .{ .click = .model }, .want = .{ .focus = .input, .open_choice = .model } },
+                .{ .input = .{ .click = .effort }, .want = .{ .focus = .input, .open_choice = .effort } },
+                .{ .input = .{ .click = null }, .want = .{ .focus = .input, .forward = true } },
+            };
+            for (cases) |case| try std.testing.expectEqualDeep(case.want, footerInput(focus, effort, case.input));
+        }
+        var focus: FooterFocus = .input;
+        const cycle: []const FooterFocus = if (effort) &.{ .model, .effort, .input } else &.{ .model, .input };
+        for (cycle) |want| {
+            const next = footerInput(focus, effort, .{ .tab = false });
+            try std.testing.expectEqual(want, next.focus);
+            try std.testing.expectEqual(@as(?FooterField, null), next.open_choice);
+            try std.testing.expect(!next.forward);
+            focus = next.focus;
+        }
+    }
+}
+
+test "footer spans identify only whole model and effort words across widths efforts and permissions" {
+    for ([_]usize{ 140, 46 }) |width| for ([_]?session_line.ReasoningEffort{ null, .low, .xhigh }) |effort| for ([_]bool{ false, true }) |asks| {
+        var buffer: [facts_bytes]u8 = undefined;
+        const facts: session_line.Facts = .{ .name = "Chat", .model = "model", .effort = effort, .left = 62, .asks = asks };
+        const fitted = factsSpans(&buffer, facts, "ref", null, width, .unicode);
+        var expected: [facts_bytes]u8 = undefined;
+        const want = try std.fmt.bufPrint(&expected, "Chat · model{s}{s} · 62% left{s}", .{ if (effort != null) " · " else "", if (effort) |value| @tagName(value) else "", if (asks) " · ask" else "" });
+        try std.testing.expectEqualStrings(want, fitted.text);
+        var offset: usize = 0;
+        var model_count: usize = 0;
+        var effort_count: usize = 0;
+        for (fitted.spans[0..fitted.len]) |span| {
+            try std.testing.expectEqualStrings(fitted.text[offset..][0..span.text.len], span.text);
+            offset += span.text.len;
+            if (span.field) |field| switch (field) {
+                .model => {
+                    model_count += 1;
+                    try std.testing.expectEqualStrings("model", span.text);
+                },
+                .effort => {
+                    effort_count += 1;
+                    try std.testing.expectEqualStrings(@tagName(effort.?), span.text);
+                },
+            };
+        }
+        try std.testing.expectEqual(fitted.text.len, offset);
+        try std.testing.expectEqual(@as(usize, 1), model_count);
+        try std.testing.expectEqual(@as(usize, @intFromBool(effort != null)), effort_count);
+    };
+    // A field omitted by the whole-item fitter has no phantom click span.
+    for (0..40) |width| {
+        var buffer: [facts_bytes]u8 = undefined;
+        const fitted = factsSpans(&buffer, .{ .name = "model · low", .model = "model", .effort = .low, .asks = true }, "ref", null, width, .unicode);
+        for (fitted.spans[0..fitted.len]) |span| if (span.field) |field| {
+            if (field == .effort) try std.testing.expectEqualStrings("low", span.text) else {
+                try std.testing.expect(std.mem.eql(u8, span.text, "model") or std.mem.endsWith(u8, span.text, session_line.ellipsis));
+            }
+        };
+        try std.testing.expect(session_line.cells(fitted.text, .unicode) <= width);
+    }
+}
+
+test "deferred footer effect is superseded by interaction without making invisible content modal" {
+    const inputs: []const FooterInput = &.{ .escape, .text, .other, .{ .tab = false }, .{ .tab = true }, .{ .click = null }, .enter };
+    for (std.enums.values(FooterField)) |field| for (inputs) |input| {
+        var footer: Footer = .{ .pending = field };
+        const decision = footer.step(true, input);
+        try std.testing.expectEqual(@as(?FooterField, null), footer.pending);
+        try std.testing.expectEqual(@as(?FooterField, null), decision.open_choice);
+        try std.testing.expectEqual(input == .text or input == .other or input == .click or input == .enter, decision.forward);
+    };
+    var footer: Footer = .{ .pending = .model };
+    const decision = footer.step(true, .{ .click = .effort });
+    try std.testing.expectEqual(@as(?FooterField, .effort), footer.pending);
+    try std.testing.expectEqual(@as(?FooterField, .effort), decision.open_choice);
 }

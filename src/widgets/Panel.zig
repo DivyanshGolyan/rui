@@ -24,6 +24,8 @@ const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bo
 title: []const u8,
 /// Fit hosted content, including one trailing ground row; full pages fill by default.
 natural_height: bool = false,
+/// Present only this field's existing choice, without page chrome.
+choice_only: ?usize = null,
 unicode: bool = true,
 title_widget: ?vxfw.Widget = null,
 action_gap: u16 = 0,
@@ -70,6 +72,10 @@ fn selectable(self: *const Self, at: usize) bool {
 }
 
 fn move(self: *Self, down: bool) void {
+    if (self.choice_only) |field| if (self.choice == null) {
+        self.selected = field;
+        return;
+    };
     if (self.choice) |*choice| {
         if (down) choice.selected = @min(choice.selected + 1, choice.labels.len - 1) else choice.selected -|= 1;
         return;
@@ -90,7 +96,8 @@ fn activate(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.choice) |choice| {
         self.closeChoice();
         if (self.on_pick) |callback| try callback(self.userdata.?, ctx, choice.field, choice.selected);
-    } else if (self.selectable(self.selected)) {
+    } else if (self.selectable(self.choice_only orelse self.selected)) {
+        self.selected = self.choice_only orelse self.selected;
         if (self.on_activate) |callback| try callback(self.userdata.?, ctx, self.selected);
     }
 }
@@ -177,6 +184,7 @@ fn activeRow(self: *const Self) usize {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.choice_only) |field| return self.drawChoiceOnly(ctx, field);
     const available = ctx.max.size();
     self.targets = &.{};
     self.custom_origin = 0;
@@ -292,6 +300,68 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const hover_targets = try ctx.arena.alloc(Hover.Rect, if (self.custom_choice == null) targets.items.len else 0);
     for (targets.items[0..hover_targets.len], hover_targets) |target, *rect| rect.* = .{ .row = target.row, .col = target.start, .width = target.end - target.start };
     self.hover.targets = hover_targets;
+    return surface;
+}
+
+/// Uses the same choice state and callbacks as the field presentation.
+fn drawChoiceOnly(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allocator.Error!vxfw.Surface {
+    self.targets = &.{};
+    self.hover.targets = &.{};
+    self.custom_origin = 0;
+    self.custom_height = 0;
+    const available = ctx.max.size();
+    if (index >= self.fields.len or available.width == 0 or available.height == 0) return .empty(self.widget());
+    const field = self.fields[index];
+    var children: std.array_list.Managed(vxfw.SubSurface) = .init(ctx.arena);
+    var custom: ?vxfw.Surface = null;
+    const input_rows: u16 = if (self.custom_choice) |choice| @intFromBool(choice.value_widget != null) else 0;
+    if (self.custom_choice) |choice| {
+        custom = try choice.widget.draw(ctx.withConstraints(.{}, .{ .width = available.width, .height = @min(choice.height, available.height -| 1 -| input_rows) }));
+        self.custom_height = custom.?.size.height;
+    }
+    const rows: usize = if (self.choice) |choice| choice.labels.len else if (custom != null) self.custom_height + input_rows else 1;
+    const size: vxfw.Size = .{ .width = available.width, .height = @intCast(@min(available.height, 1 + rows)) };
+    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    @memset(surface.buffer, .{ .style = self.ground });
+    _ = paint(ctx, surface, try displayText(ctx.arena, field.label, self.unicode), 1, 0, self.title_style);
+    if (self.custom_choice) |choice| {
+        if (choice.value_widget) |value| if (size.height > 1) {
+            const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
+            try children.append(.{ .origin = .{ .row = 1, .col = 0 }, .surface = drawn });
+            if (drawn.cursor) |cursor| {
+                surface.cursor = cursor;
+                surface.cursor.?.row += 1;
+            }
+        };
+        self.custom_origin = @min(size.height, 1 + input_rows);
+        if (self.custom_height > 0) try children.append(.{ .origin = .{ .row = self.custom_origin, .col = 0 }, .surface = custom.? });
+    } else if (self.choice) |choice| {
+        const height = size.height -| 1;
+        if (choice.selected < self.scroll) self.scroll = choice.selected;
+        if (choice.selected >= self.scroll + height) self.scroll = choice.selected + 1 -| height;
+        self.scroll = @min(self.scroll, choice.labels.len -| height);
+        const targets = try ctx.arena.alloc(Target, height);
+        const hover_targets = try ctx.arena.alloc(Hover.Rect, height);
+        for (0..height) |offset| {
+            const at = self.scroll + offset;
+            const row: u16 = @intCast(offset + 1);
+            const rect: Hover.Rect = .{ .row = row, .width = size.width };
+            const style = self.look(at == choice.selected, rect);
+            fillRow(surface, row, style);
+            _ = paint(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 1, row, style);
+            _ = paint(ctx, surface, try displayText(ctx.arena, choice.labels[at], self.unicode), 3, row, style);
+            targets[offset] = .{ .row = row, .start = 0, .end = size.width, .index = at, .choice = true };
+            hover_targets[offset] = rect;
+        }
+        self.targets = targets;
+        self.hover.targets = hover_targets;
+    } else if (size.height > 1) {
+        const tail = try displayText(ctx.arena, field.tail orelse "", self.unicode);
+        const limit: u16 = @intCast(size.width -| ctx.stringWidth(tail));
+        const end = paintTo(ctx, surface, try displayText(ctx.arena, field.value, self.unicode), 1, 1, self.ground, limit);
+        _ = paint(ctx, surface, tail, end, 1, self.quiet);
+    }
+    surface.children = children.items;
     return surface;
 }
 
@@ -837,4 +907,71 @@ test "Panel hover highlights fields choices and actions without changing keyboar
     try panel.widget().handleEvent(&events, .mouse_leave);
     _ = try panel.widget().draw(ctx);
     try std.testing.expect(!panel.hover.pointing);
+}
+
+test "Panel choice-only renders title checked rows and bounded natural content without page chrome" {
+    var fixture: Fixture = .{};
+    var panel: Self = .{
+        .title = "Settings must not appear",
+        .fields = &.{ .{ .label = "Hidden", .value = "hidden" }, .{ .label = "Effort", .value = "high" } },
+        .actions = &.{"No action"},
+        .selected = 1,
+        .choice_only = 1,
+        .userdata = &fixture,
+        .on_pick = Fixture.pickRow,
+    };
+    panel.openChoice(&.{ "low", "high", "xhigh" }, 1);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
+    const drawn = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
+    try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
+    try std.testing.expectEqualStrings("✓", drawn.readCell(1, 2).char.grapheme);
+    try std.testing.expectEqualStrings("h", drawn.readCell(3, 2).char.grapheme);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 3, .col = 2 } });
+    try std.testing.expectEqual(@as(?usize, 1), fixture.picked_field);
+    try std.testing.expectEqual(@as(?usize, 2), fixture.picked);
+    for ([_]u16{ 0, 1, 2, 3, 46 }) |width| for (0..8) |height| {
+        panel.openChoice(&.{ "low", "high", "xhigh" }, 1);
+        const tiny = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = @intCast(height) }));
+        try std.testing.expect(tiny.size.height <= height);
+        try std.testing.expect(tiny.size.width <= width);
+        for (tiny.children) |child| {
+            try std.testing.expect(child.origin.row + child.surface.size.height <= tiny.size.height);
+            try std.testing.expect(child.origin.col + child.surface.size.width <= tiny.size.width);
+        }
+    };
+}
+
+test "Panel choice-only outcome navigation never activates hidden fields" {
+    var fixture: Fixture = .{};
+    var panel: Self = .{
+        .title = "Settings",
+        .fields = &.{ .{ .label = "Permissions", .value = "ask" }, .{ .label = "Effort", .value = "high", .tail = " · couldn't save" }, .{ .label = "Notifications", .value = "on" } },
+        .selected = 1,
+        .choice_only = 1,
+        .userdata = &fixture,
+        .on_activate = Fixture.activateRow,
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u21{ vaxis.Key.up, vaxis.Key.down }) |key| {
+        try pressKey(&panel, &ctx, key);
+        try std.testing.expectEqual(@as(usize, 1), panel.selected);
+        try pressKey(&panel, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
+    }
+    for ([_]vaxis.Mouse.Button{ .wheel_up, .wheel_down }) |button| {
+        try panel.widget().handleEvent(&ctx, .{ .mouse = .{ .button = button, .type = .press, .mods = .{}, .row = 1, .col = 0 } });
+        try std.testing.expectEqual(@as(usize, 1), panel.selected);
+        try pressKey(&panel, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
+    }
+    // Even stale field selection cannot grant Enter authority over a hidden field.
+    panel.selected = 2;
+    try pressKey(&panel, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
 }

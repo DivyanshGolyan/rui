@@ -27,6 +27,7 @@ from human_cli_fixture import (
     footer_click,
     assert_model_choice,
     composer_line,
+    conversation_text,
     keyed_frame,
     model_choice_frame,
     model_choice_shown,
@@ -418,11 +419,22 @@ def info_natural_height_case():
             chrome.frame(master, b"", lambda screen: "FEED-24" in screen and "Opening…" not in screen)
             live = chrome.frame(master, b"kept draft", lambda screen:
                                 "FEED-24" in screen and "kept draft" in screen)
-            # Wide identity sections are separate probes of the same transition;
-            # the narrow label and its explicit info hint use the same path.
-            columns = ([live.split("\n")[-2].index(marker) for marker in
-                        ("Natural height", "gpt-6-sol", "low")] if width == 140 else
-                       [live.split("\n")[-2].index(marker) for marker in ("Natural", "alt+i")])
+            # Editable words open only their shared choice at every width;
+            # the fitted model and effort, not a possibly dropped name, locate it.
+            draft_row = next(index for index in range(height)
+                             if composer_line(live, index).rstrip() == " › kept draft")
+            for field, marker in (("Model", "gpt-6-sol"), ("Effort", "low")):
+                choice = chrome.frame(master, footer_click(live, marker=marker),
+                                      lambda screen, field=field: field in conversation_text(screen)
+                                      and "✓" in conversation_text(screen))
+                assert "kept draft" in choice and "FEED-24" in choice, choice
+                assert "Copy last answer" not in choice and "Permissions" not in choice, choice
+                assert composer_line(choice, draft_row) == composer_line(live, draft_row), (live, choice)
+                live = chrome.frame(master, b"\x1b", lambda screen:
+                                    "✓" not in conversation_text(screen) and "FEED-24" in screen and "kept draft" in screen)
+            # Chat info remains available through its actual hint and Alt-I,
+            # rather than treating every identity word as the same action.
+            columns = [live.split("\n")[-2].index("alt+i")]
             opened = None
             for column in columns:
                 opened = chrome.frame(master, footer_click(live, column=column),
@@ -465,7 +477,7 @@ def info_natural_height_case():
                          "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
             chrome.leave(master, caller)
         assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
-    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; footer clicks and Alt-I share one draft-preserving transition", flush=True)
+    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; model/effort clicks keep feed and draft; the info hint and Alt-I share one transition", flush=True)
 
 
 def approval_overflow_case():

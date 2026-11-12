@@ -104,6 +104,7 @@ interrupted: *client.Cancellation = undefined,
 lender: Lender = quiet_overview,
 colour: bool,
 input: Input = undefined,
+footer: session_chrome.Footer = .{},
 submission: Submission = undefined,
 /// What the latest /requests page offers to act on, which its list shows
 /// while the page does.
@@ -462,7 +463,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
-    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .unarchive = chromeClick(.unarchive) });
+    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .unarchive = chromeClick(.unarchive), .pick = chromeClick(.footer_pick), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
     return self.widget();
 }
 
@@ -470,10 +471,51 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
 fn openInfo(self: *Self, _: *vxfw.EventContext) !void {
     if (self.info_open) return;
     self.info_open = true;
+    self.footer.focus = .input;
+    self.footer.pending = null;
+    self.app_info.closeStandaloneChoice();
     if (self.inspection.status != null) self.app_info.refresh();
     self.inspection.status_requested = true;
     self.poll_at = 0;
     self.dirty = true;
+}
+
+/// One reducer decides both drawn clicks and keyboard navigation.
+fn footerEvent(self: *Self, ctx: *vxfw.EventContext, input: session_chrome.FooterInput) !bool {
+    const facts = self.line.facts(&self.hint, self.session);
+    const decision = self.footer.step(if (facts) |value| value.effort != null else false, input);
+    if (decision.open_choice != null) {
+        if (!self.info_open and !self.app_hooks.root.pasting and self.app_info.pending == null) {
+            self.app_info.closeStandaloneChoice();
+            if (self.inspection.status != null) self.app_info.refresh();
+            self.inspection.status_requested = true;
+            self.poll_at = 0;
+            try self.openFooterChoice(ctx);
+        } else self.footer.pending = null;
+    }
+    self.dirty = true;
+    return decision.forward;
+}
+
+fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    const field = self.footer.pending orelse return;
+    if (!self.app_info.ready) return;
+    if (field == .model) if (self.lender.models) |snapshot| {
+        if (!snapshot(self.lender.context).ready) return;
+    };
+    try self.app_info.openStandaloneChoice(ctx, switch (field) {
+        .model => .model,
+        .effort => .effort,
+    });
+    self.footer.pending = null;
+}
+
+/// The permission is the same inspected value exposed by Chat Info. Before
+/// inspection is available the regular current read already carries it.
+fn footerFacts(self: *const Self) ?@import("session_line.zig").Facts {
+    var facts = self.line.facts(&self.hint, self.session) orelse return null;
+    if (self.inspection.status) |index| facts.asks = self.inspection.sessions[index].permission == .ask;
+    return facts;
 }
 
 fn infoBackend(self: *Self) ChatInfo.Backend {
@@ -576,6 +618,8 @@ const Click = union(enum) {
     action: ConversationAction,
     /// The chat's info panel.
     status,
+    footer: session_chrome.FooterField,
+    footer_pick,
     details,
     unarchive,
     /// The key that ends what needs the person: Ctrl-R's retry, or the
@@ -594,6 +638,12 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
             switch (click) {
                 .action => |action| try self.perform(action),
                 .status => try self.openInfo(ctx),
+                .footer => |field| {
+                    _ = try self.footerEvent(ctx, .{ .click = field });
+                },
+                .footer_pick => if (self.app_info.standaloneOpen()) {
+                    try self.app_info.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+                },
                 .details => try self.showSubmissionFailure(),
                 .unarchive => try self.clickCommand("/unarchive"),
                 .needs => if (self.heldOriginal()) |held| if (session_notice.key(held)) |key| switch (key) {
@@ -754,12 +804,16 @@ fn hostFailure(self: *Self) bool {
 /// A modal panel takes keys before a permission card or feed child can act.
 fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (event == .mouse and event.mouse.button == .left and event.mouse.type == .press and !self.info_open and !self.app_info.standaloneOpen()) {
+        _ = try self.footerEvent(ctx, .{ .click = null });
+    }
+    const tabs = event == .key_press and !self.app_hooks.root.pasting and (event.key_press.matchExact(vaxis.Key.tab, .{}) or event.key_press.matchExact(vaxis.Key.tab, .{ .shift = true }));
     const opens = event == .key_press and !self.app_hooks.root.pasting and (event.key_press.matches('i', .{ .alt = true }) or (self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })));
     const input = switch (event) {
         .key_press, .paste_start, .paste_end, .invalid_key => true,
         else => false,
     };
-    if (opens or (self.info_open and input)) {
+    if (tabs or opens or ((self.info_open or self.footer.pending != null or self.app_info.standaloneOpen() or self.footer.focus != .input) and input)) {
         try appEvent(raw, ctx, event);
         ctx.consumeEvent();
     }
@@ -814,6 +868,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
             };
             try self.app_card.widget().handleEvent(ctx, .tick);
             try self.app_info.widget().handleEvent(ctx, .tick);
+            try self.openFooterChoice(ctx);
             if (self.expansion.queued == .after_frame) if (try self.expand()) |peer| try self.follow(ctx, &peer);
             if (self.shown_notice.expire(self.nowMs())) self.dirty = true;
             ctx.redraw = ctx.redraw or self.dirty;
@@ -821,20 +876,37 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
             self.shown_notice.dismiss();
-            if (self.info_open) {
-                if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
+            if (self.info_open or self.app_info.standaloneOpen()) {
+                if (self.info_open and event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
                     self.app_info.cancelChoice();
                     self.info_open = false;
                     try ctx.requestFocus(self.app_input.composer.widget());
                     try self.showSubmissionFailure();
                 } else if (session_keys.panelAction(Editor.selectEvent(conversation_keys, event, pasting))) |action| {
+                    // The same modal policy leaves Session custody and work
+                    // with their owner for full pages and standalone choices.
                     try self.perform(action);
                 } else if (event == .key_press and !pasting and (Editor.named(event.key_press) == .escape or Editor.named(event.key_press) == .ctrl_g)) {
-                    if (self.app_info.hasChoice()) self.app_info.cancelChoice() else {
+                    if (!self.info_open) {
+                        self.footer.pending = null;
+                        self.app_info.closeStandaloneChoice();
+                        self.footer.focus = .input;
+                        try ctx.requestFocus(self.app_input.composer.widget());
+                    } else if (self.app_info.hasChoice()) self.app_info.cancelChoice() else {
                         self.info_open = false;
                         try ctx.requestFocus(self.app_input.composer.widget());
                     }
                 } else try self.app_info.widget().handleEvent(ctx, event);
+                ctx.consumeAndRedraw();
+                try self.afterInput(ctx);
+                return;
+            }
+            var footer_input: session_chrome.FooterInput = .other;
+            if (event == .paste_start) footer_input = .text else if (event == .key_press and !pasting) {
+                const key = event.key_press;
+                if (key.matchExact(vaxis.Key.tab, .{})) footer_input = .{ .tab = false } else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) footer_input = .{ .tab = true } else if (Editor.isEnter(key)) footer_input = .enter else if (Editor.named(key) == .escape or Editor.named(key) == .ctrl_g) footer_input = .escape else if (Editor.selectEvent(conversation_keys, event, false) == .text) footer_input = .text;
+            }
+            if (!try self.footerEvent(ctx, footer_input)) {
                 ctx.consumeAndRedraw();
                 try self.afterInput(ctx);
                 return;
@@ -987,7 +1059,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     };
     const facts_style = style.of(self.app_caps, .{ .colour = .quiet, .background = .bar });
     self.app_screen.style = normal;
-    self.app_input.composer.caret = !self.info_open;
+    self.app_input.composer.caret = !self.info_open and !self.app_info.standaloneOpen() and self.footer.focus == .input;
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.app_caps.width;
@@ -1043,6 +1115,8 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.status.attention = attention;
     chrome.facts.method = self.app_caps.width;
     chrome.facts.style = facts_style;
+    chrome.facts.selected = style.of(self.app_caps, .{ .colour = .normal, .background = .selection });
+    chrome.facts.focus = self.footer.focus;
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
     const held = self.heldOriginal();
@@ -1050,6 +1124,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const list_visible = self.app_hooks.root.listVisible();
     chrome.place(&self.app_screen, .{
         .list_visible = list_visible,
+        .choice_open = self.app_info.standaloneOpen(),
         .browsing = browsing,
         .new_entries = self.new_below,
         .needs = send.needs,
@@ -1058,15 +1133,15 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .progress = if (self.upgradePhase() == .reobserving) session_upgrade.rereading else send.progress,
         .stoppable = said.stoppable,
         .details = held != null and held.?.state != .submitting,
-        .facts = .{ .current = self.line.facts(&self.hint, self.session), .name = self.session, .archive = self.line.archive_state },
+        .facts = .{ .current = self.footerFacts(), .name = self.session, .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
 
-        .overlay = if (self.info_open) self.app_info.bodyWidget() else palette,
+        .overlay = if (self.info_open) self.app_info.bodyWidget() else if (self.app_info.standaloneOpen()) self.app_info.standaloneWidget() else palette,
 
         .width = ctx.max.width.?,
     });
-    self.app_screen.overlay_reserves_space = self.info_open;
+    self.app_screen.overlay_reserves_space = self.info_open or self.app_info.standaloneOpen();
     self.app_info.narrow = !list_visible;
     if (self.info_open) {
         // The panel supplies the one screen footer in the ordinary footer slot.
@@ -1482,6 +1557,7 @@ fn draftSafeToLeave(self: *const Self) bool {
 /// the screen's list was the previous Session's, at revisions this input
 /// counts again.
 fn startInput(self: *Self) void {
+    self.footer = .{};
     self.input.init();
     self.input.complete(.{ .context = self, .add = tabCompletion });
     self.screen.commands = null;
@@ -1823,9 +1899,9 @@ test "a Session lists the skills it saved for the caret's /word, and Tab or Ente
     shown = try held.shown();
     try std.testing.expect(std.mem.indexOf(u8, shown, "/recap") == null);
     try std.testing.expect(std.mem.indexOf(u8, shown, "Review a change") != null);
-    // Mid-draft, Tab replaces the caret's name, adds no space and leaves
+    // Mid-draft, Enter on the drawn row replaces the caret's name, adds no space and leaves
     // the caret after it.
-    try held.keys("\t");
+    try held.keys("\r");
     try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     // At the draft's end, Enter on the drawn row puts the highlighted skill
@@ -3303,7 +3379,7 @@ fn applyStatus(self: *Self) !void {
     if (self.job.result.status) self.inspection.status = @intFromBool(self.job.status_taken == &self.inspection.sessions[1]);
     self.inspection.status_requested = false;
     if (self.info_effect == .refreshing) self.info_effect = .saved;
-    if (self.info_open and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
+    if ((self.info_open or self.footer.pending != null) and !self.app_info.hasChoice() and self.app_info.pending == null) self.app_info.refresh();
     self.dirty = true;
 }
 
@@ -3312,7 +3388,7 @@ fn leaveFor(self: *Self, _: Inspection) !void {
 }
 
 fn statusShown(self: *const Self) bool {
-    return self.info_open or self.info_effect == .refreshing;
+    return self.info_open or self.footer.pending != null or self.info_effect == .refreshing;
 }
 
 /// A frontend attached to App as `rui` attaches it: Root before it, a
@@ -4003,17 +4079,19 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
 }
 
-test "Tab completes from the draft's own list, however many keys arrive before a frame" {
+test "Tab focuses footer without completing a command and Enter still takes drawn command choices" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
     try held.settle();
-    try stepKeys(held, "/ef\t");
-    try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
-    // Two Tabs in one batch: the second completes from the list the first
-    // one's word calls for.
-    try stepKeys(held, "\x15/set\t\t");
-    try std.testing.expectEqualStrings("/setup --model ", self.input.composition().bytes);
+    try stepKeys(held, "/set\t");
+    try std.testing.expectEqualStrings("/set", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try held.keys("\x07");
+    try held.settle();
+    try held.keys("\r");
+    try std.testing.expectEqualStrings("/setup", self.input.takeCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "a key before a new Session's first frame finds no list the previous Session drew" {
@@ -4024,13 +4102,17 @@ test "a key before a new Session's first frame finds no list the previous Sessio
     try stepKeys(held, "/s");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
-    // The next Session's input starts over; no frame of it drew a list, so
-    // Enter runs `/ef` as typed, and Tab still completes.
     self.startInput();
-    try stepKeys(held, "/ef\r");
-    try std.testing.expectEqualStrings("! Unknown command /ef", try barShows(held));
-    try stepKeys(held, "/ef\t");
-    try std.testing.expectEqualStrings("/effort ", self.input.composition().bytes);
+    try stepKeys(held, "/set\r");
+    try std.testing.expectEqualStrings("! Unknown command /set", try barShows(held));
+    try stepKeys(held, "/set\t");
+    try std.testing.expectEqualStrings("/set", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try held.keys("\x07");
+    try held.settle();
+    try held.keys("\r");
+    try std.testing.expectEqualStrings("/setup", self.input.takeCommand().?);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {
@@ -4053,7 +4135,7 @@ test "Esc closes the command list first only when the latest frame drew it" {
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
 }
 
-test "the /requests page lists its rows over an empty draft, and Enter or Tab takes the row's command as typed" {
+test "the /requests page lists its rows over an empty draft, Enter takes a row and Tab focuses the footer" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     const self = &held.self;
@@ -4105,11 +4187,13 @@ test "the /requests page lists its rows over an empty draft, and Enter or Tab ta
     try std.testing.expect(self.submission.retry == null);
     try held.settle();
     try std.testing.expectEqualStrings("/result " ++ original, held.screen.commands.?.list.entries[0].word);
-    // Tab puts the highlighted row's line in the draft, for editing.
+    // Tab leaves the highlighted row and draft intact; Enter retains its action.
     try held.keys("\x1b[B\t");
-    try std.testing.expectEqualStrings("/result " ++ newer, self.input.composition().bytes);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+    try held.keys("\x07\r");
+    try std.testing.expectEqualStrings("/result " ++ newer, self.input.takeCommand().?);
     try held.settle();
-    try std.testing.expect(held.screen.commands == null);
     // Esc closes the rows first, then leaves the page, which takes them.
     try held.keys("\x15");
     try held.settle();
@@ -4122,11 +4206,12 @@ test "the /requests page lists its rows over an empty draft, and Enter or Tab ta
     try held.settle();
     try std.testing.expect(held.screen.view != .inspection);
     try std.testing.expect(held.screen.commands == null);
-    // Enter on an empty draft with no rows does nothing, and Tab is a tab.
+    // Enter on an empty draft with no rows does nothing; Tab focuses the model.
     try held.keys("\r");
     try std.testing.expect(self.input.queuedCommand() == null);
     try held.keys("\t");
-    try std.testing.expectEqualStrings("\t", self.input.composition().bytes);
+    try std.testing.expectEqualStrings("", self.input.composition().bytes);
+    try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
 }
 
 test "a pending decision, or a Message that carries one, has no /recover row, and Enter on the page sends nothing" {
@@ -4486,7 +4571,7 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
     }
 }
 
-test "chat identity click and Alt-I share natural panel opening and Escape restores the feed" {
+test "chat info hint click and Alt-I share natural panel opening and Escape restores the feed" {
     for ([_]u16{ 46, 140 }) |width| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -4498,9 +4583,13 @@ test "chat identity click and Alt-I share natural panel opening and Escape resto
         const ordinary = try held.draw();
         const input = ordinary.children[0].surface.children[1];
         const facts = input.surface.children[1];
-        // The displayed name begins after the gutter/back control; locate it
-        // independently of whether the implementation installed a hit target.
-        const col: i16 = if (held.self.chrome.list_visible) 1 else 3;
+        // The info hint retains its existing page action; model and effort
+        // have their own standalone actions instead of a blanket identity hit.
+        var info_column: ?i16 = null;
+        for (facts.surface.children) |child| if (child.surface.widget.eql(held.self.chrome.info.widget())) {
+            info_column = @intCast(input.origin.col + facts.origin.col + child.origin.col);
+        };
+        const col = info_column orelse return error.TestUnexpectedResult;
         const row: i16 = @intCast(input.origin.row + facts.origin.row);
         var ctx = held.context();
         defer ctx.cmds.deinit(held.arena.allocator());
@@ -5929,13 +6018,14 @@ test "App Session Footer clips identity in terminal cells" {
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    // Identity exceeds the cells left after ` ‹ `; Footer clips it,
-    // without changing the chat name or the original facts.
+    // The name gives way before model and effort within the footer's cell
+    // budget, without changing the original facts.
     self.line = .{ .read = .{ .revision = 1, .end = 1 }, .effort = .low, .left = 100, .label = .{} };
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · …"));
+    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ Port the overview to vxfw and keep… · gpt-6-sol · low · 100% left"));
+    try std.testing.expectEqualStrings("Port the overview to vxfw and keep its key table", self.line.label.?.slice());
     try std.testing.expect(session_line.cells(shown[22], .unicode) <= 80);
 }
 
@@ -8520,14 +8610,19 @@ test "chat info typed configure completion never parses a slash line and retains
     }
 }
 
-test "chat info retains Session detach keys with every topmost choice and preserves the hidden draft" {
-    for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |bytes| for (0..4) |choice| {
+test "chat info retains Session detach keys with full-page and standalone choices and preserves the hidden draft" {
+    for ([_][]const u8{ "\x03", "\x04", "\x1b[99;5u", "\x1b[100;5u" }) |bytes| for (0..6) |choice| {
         const held = try HeldFrontend.create();
         defer held.destroy();
         try captureInfo(held, "Fix retry deadline");
-        try held.keys("kept draft\x1bi");
+        try held.keys("kept draft");
+        if (choice >= 4) {
+            var ctx = held.context();
+            _ = try held.self.footerEvent(&ctx, .{ .click = if (choice == 4) .effort else .model });
+            try std.testing.expect(held.self.app_info.standaloneOpen());
+        } else try held.keys("\x1bi");
         _ = try held.draw();
-        if (choice != 0) {
+        if (choice != 0 and choice < 4) {
             held.self.app_info.panel.selected = switch (choice) {
                 1 => 0,
                 2 => 4,
@@ -8543,8 +8638,8 @@ test "chat info retains Session detach keys with every topmost choice and preser
     };
 }
 
-test "chat info retains Session stop and archive bindings without closing the topmost choice" {
-    for ([_][]const u8{ "\x18", "\x1ba" }) |bytes| {
+test "chat info retains Session stop and archive bindings in full-page and standalone choices" {
+    for ([_][]const u8{ "\x18", "\x1ba" }) |bytes| for ([_]bool{ false, true }) |standalone| {
         const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
         defer held.destroy();
         var overview: ArchiveOverview = .{ .state = undefined };
@@ -8553,15 +8648,23 @@ test "chat info retains Session stop and archive bindings without closing the to
         held.self.lender = overview.lender();
         held.self.live.work.state = .{ .working = .{ .since = 1 } };
         try captureInfo(held, "Fix retry deadline");
-        try held.keys("kept draft\x1bi");
-        _ = try held.draw();
-        try held.keys("\r");
+        try held.keys("kept draft");
+        if (standalone) {
+            var ctx = held.context();
+            _ = try held.self.footerEvent(&ctx, .{ .click = .effort });
+            // Text and marked paste belong to this modal owner, not the draft.
+            try held.keys("ignored\x1b[200~paste\t\r\x1b[201~");
+        } else {
+            try held.keys("\x1bi");
+            _ = try held.draw();
+            try held.keys("\r");
+        }
         try held.keys(bytes);
         try std.testing.expectEqual(@as(usize, 1), overview.stops + overview.archives);
-        try std.testing.expect(held.self.info_open and held.self.app_info.hasChoice());
+        try std.testing.expect((held.self.info_open or held.self.app_info.standaloneOpen()) and held.self.app_info.hasChoice());
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
         try std.testing.expect(held.self.submission.intent == null);
-    }
+    };
 }
 
 test "chat info typed configure supersedes every cancellable read without making cancellation fatal" {
@@ -8891,4 +8994,269 @@ test "App Session palette clicks replace the caret skill without sending or movi
     try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
     try std.testing.expectEqual(null, held.self.input.queuedCommand());
     try std.testing.expectEqual(null, held.self.submission.view());
+}
+
+test "chat footer navigation opens existing standalone choices and preserves draft cursor and paste" {
+    for ([_]?model_capability.ReasoningEffort{ null, .high }) |effort| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("gpt-5.5");
+        self.line.effort = effort;
+        try held.keys("kept draft\x1b[D\x1b[D");
+        const cursor = self.input.composition().cursor;
+        try held.keys("\t");
+        try std.testing.expectEqual(session_chrome.FooterFocus.model, self.footer.focus);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        try held.keys("\x1b[Z");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try held.keys("\x1b[Z");
+        try std.testing.expectEqual(if (effort != null) session_chrome.FooterFocus.effort else .model, self.footer.focus);
+        try held.keys("\x07");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expect(held.left == null);
+        try held.keys("\t\r");
+        try std.testing.expect(!self.info_open and self.app_info.standaloneOpen() and self.app_info.model_choice.active);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try held.keys("\x07");
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        if (effort != null) {
+            try held.keys("\t\t\r");
+            try std.testing.expect(self.app_info.standaloneOpen() and self.app_info.panel.choice != null);
+            try std.testing.expectEqual(@as(usize, 0), self.app_info.panel.choice.?.field);
+            try held.keys("\x07");
+        }
+        // Printable input leaves the focused button and is edited exactly once.
+        try held.keys("\t!");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqualStrings("kept dra!ft", self.input.composition().bytes);
+        // Marked paste keeps literal tabs instead of navigating the footer.
+        try held.keys("\t\x1b[200~\t\x1b[201~");
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqualStrings("kept dra!\tft", self.input.composition().bytes);
+    }
+}
+
+test "chat footer drawn model and effort clicks configure only this Session after confirmation" {
+    inline for ([_]session_chrome.FooterField{ .model, .effort }) |field| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("gpt-5.5");
+        self.line.effort = .high;
+        self.inspection.sessions[self.inspection.status.?].effort_override = true;
+        try held.keys("draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var ctx = held.context();
+        try chromeClick(.{ .footer = field })(self, &ctx);
+        try std.testing.expect(self.app_info.standaloneOpen() and !self.info_open);
+        try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        try std.testing.expect(self.info_edit == null);
+        if (field == .model) {
+            try std.testing.expect(self.app_info.model_choice.active);
+            try held.keys("gpt-5.5\r");
+            try std.testing.expectEqualStrings("gpt-5.5", self.info_edit.?.model);
+        } else {
+            try held.keys("\x1b[A\r");
+            try std.testing.expectEqual(ChatInfo.Edit{ .effort = .medium }, self.info_edit.?);
+        }
+        try std.testing.expectEqual(.configure, self.info_effect);
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqualStrings("gpt-5.5", self.footerFacts().?.model);
+        try std.testing.expectEqual(model_capability.ReasoningEffort.high, self.footerFacts().?.effort.?);
+        // The existing owner retains the field and reports a failed save.
+        self.info_effect = .failed;
+        try self.app_info.widget().handleEvent(&ctx, .tick);
+        try std.testing.expect(self.app_info.standaloneOpen());
+        try std.testing.expect(self.app_info.failures[if (field == .model) @as(usize, 4) else 0] != null);
+        try held.keys("\x07");
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    }
+}
+
+test "chat footer facts use Chat Info permission and applied default or explicit effort at both widths" {
+    for ([_]u16{ 140, 46 }) |width| for ([_]bool{ false, true }) |explicit| for ([_]bool{ false, true }) |ask| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        const inspected = &self.inspection.sessions[self.inspection.status.?];
+        inspected.effort = if (explicit) .low else .high;
+        inspected.effort_override = explicit;
+        inspected.permission = if (ask) .ask else .bypass;
+        self.line.read = .{ .revision = 1, .end = 1 };
+        try self.line.model.set("model");
+        self.line.label = .{ .len = 0 };
+        try self.line.label.?.set("Chat");
+        self.line.effort = inspected.effort;
+        self.line.left = 62;
+        self.line.asks = !ask; // The footer uses exactly the Chat Info inspection.
+        var buffer: [session_chrome.facts_bytes]u8 = undefined;
+        const text = session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode);
+        const want = if (explicit) (if (ask) "Chat · model · low · 62% left · ask" else "Chat · model · low · 62% left") else (if (ask) "Chat · model · high · 62% left · ask" else "Chat · model · high · 62% left");
+        try std.testing.expectEqualStrings(want, text);
+    };
+}
+
+test "chat footer pending save retains the original choice owner when another word is clicked" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try captureInfo(held, "Chat");
+    var ctx = held.context();
+    try chromeClick(.{ .footer = .effort })(self, &ctx);
+    try std.testing.expect(self.app_info.standaloneOpen());
+    try held.keys("\x1b[B\r");
+    try std.testing.expectEqual(@as(?usize, 0), self.app_info.pending);
+    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standalone_row);
+    const edit = self.info_edit.?;
+    try chromeClick(.{ .footer = .model })(self, &ctx);
+    try std.testing.expectEqual(@as(?usize, 0), self.app_info.pending);
+    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standalone_row);
+    try std.testing.expectEqualDeep(edit, self.info_edit.?);
+    self.info_effect = .failed;
+    try self.app_info.widget().handleEvent(&ctx, .tick);
+    try std.testing.expect(self.app_info.standaloneOpen());
+    try std.testing.expect(self.app_info.failures[0] != null);
+    try std.testing.expect(self.app_info.failures[4] == null);
+}
+
+test "chat footer unread choice waits for the existing status read and Escape leaves draft intact" {
+    for ([_]bool{ false, true }) |cancel| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try held.keys("kept draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var ctx = held.context();
+        try chromeClick(.{ .footer = .effort })(self, &ctx);
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, .effort), self.footer.pending);
+        try std.testing.expect(self.inspection.status_requested and !self.info_open);
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        if (cancel) try held.keys("\x07");
+        try captureInfo(held, "Chat");
+        try self.openFooterChoice(&ctx);
+        try std.testing.expectEqual(!cancel, self.app_info.standaloneOpen());
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        try std.testing.expect(held.left == null);
+    }
+}
+
+test "chat footer model waits for the borrowed source readiness and Escape cancels the deferred choice" {
+    const Source = struct {
+        ready: bool = false,
+        fn snapshot(raw: *anyopaque) ModelChoice.Snapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .ready = self.ready, .revision = 1 };
+        }
+    };
+    for ([_]bool{ false, true }) |cancel| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        try held.keys("draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var source: Source = .{};
+        self.lender = quiet_overview;
+        self.lender.context = &source;
+        self.lender.models = Source.snapshot;
+        var ctx = held.context();
+        try chromeClick(.{ .footer = .model })(self, &ctx);
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, .model), self.footer.pending);
+        try std.testing.expect(!self.app_info.standaloneOpen() and !self.app_info.model_choice.active);
+        if (cancel) try held.keys("\x07");
+        source.ready = true;
+        try self.openFooterChoice(&ctx);
+        try std.testing.expectEqual(!cancel, self.app_info.standaloneOpen());
+        try std.testing.expectEqual(!cancel, self.app_info.model_choice.active);
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
+        try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+        try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    }
+    // Effort does not borrow the model menu and need not wait for that read.
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try captureInfo(held, "Chat");
+    var source: Source = .{};
+    held.self.lender = quiet_overview;
+    held.self.lender.context = &source;
+    held.self.lender.models = Source.snapshot;
+    var ctx = held.context();
+    try chromeClick(.{ .footer = .effort })(&held.self, &ctx);
+    try std.testing.expect(held.self.app_info.standaloneOpen());
+    try std.testing.expectEqual(@as(?session_chrome.FooterField, null), held.self.footer.pending);
+}
+
+test "chat footer enter pick hint clicks the existing choice without opening Chat Info" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    try captureInfo(held, "Chat");
+    try held.keys("draft\x1b[D");
+    const cursor = self.input.composition().cursor;
+    var ctx = held.context();
+    try chromeClick(.{ .footer = .effort })(self, &ctx);
+    try held.keys("\x1b[B\x1b[B");
+    try chromeClick(.footer_pick)(self, &ctx);
+    try std.testing.expectEqual(ChatInfo.Edit{ .effort = .low }, self.info_edit.?);
+    try std.testing.expectEqual(.configure, self.info_effect);
+    try std.testing.expect(!self.info_open and !self.app_info.standaloneOpen());
+    try std.testing.expectEqualStrings("draft", self.input.composition().bytes);
+    try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    // A stale drawn hint never opens another page or sends a second edit.
+    try chromeClick(.footer_pick)(self, &ctx);
+    try std.testing.expect(!self.info_open);
+    try std.testing.expectEqual(ChatInfo.Edit{ .effort = .low }, self.info_edit.?);
+}
+
+test "chat footer deferred model choice is cancelled by text paste tab or background click without losing input" {
+    const Source = struct {
+        ready: bool = false,
+        fn snapshot(raw: *anyopaque) ModelChoice.Snapshot {
+            return .{ .ready = @as(*@This(), @ptrCast(@alignCast(raw))).ready };
+        }
+    };
+    for (0..4) |interaction| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        try held.keys("draft");
+        var source: Source = .{};
+        self.lender = quiet_overview;
+        self.lender.context = &source;
+        self.lender.models = Source.snapshot;
+        var ctx = held.context();
+        _ = try self.footerEvent(&ctx, .{ .click = .model });
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, .model), self.footer.pending);
+        switch (interaction) {
+            0 => try held.keys("!"),
+            1 => try held.keys("\x1b[200~!\t\x1b[201~"),
+            2 => try held.keys("\t"),
+            else => try self.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = 0, .button = .left, .type = .press, .mods = .{} } }),
+        }
+        try std.testing.expectEqual(@as(?session_chrome.FooterField, null), self.footer.pending);
+        source.ready = true;
+        try self.openFooterChoice(&ctx);
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expectEqualStrings(switch (interaction) {
+            0 => "draft!",
+            1 => "draft!\t",
+            else => "draft",
+        }, self.input.composition().bytes);
+        try std.testing.expectEqual(if (interaction == 2) session_chrome.FooterFocus.model else .input, self.footer.focus);
+    }
 }

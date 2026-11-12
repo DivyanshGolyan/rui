@@ -16,7 +16,12 @@ const Self = @This();
 
 /// The owner changes revision whenever it replaces or releases a list. A
 /// snapshot is borrowed for this synchronous operation only, never a lease.
-pub const Snapshot = struct { menu: ?*const picker.Menu = null, revision: u64 = 0 };
+pub const Snapshot = struct {
+    menu: ?*const picker.Menu = null,
+    revision: u64 = 0,
+    /// Borrowed owner fact for admission; validation still uses revision identity.
+    ready: bool = true,
+};
 pub const Source = struct {
     context: *anyopaque,
     read: *const fn (*anyopaque) Snapshot,
@@ -31,6 +36,8 @@ const fallback_entries = blk: {
 const fallback: picker.Menu = .{ .entries = &fallback_entries };
 
 unicode: bool = true,
+/// Full page choices may report clipped rows; standalone choices show rows only.
+show_more: bool = true,
 active: bool = false,
 source: ?Source = null,
 revision: u64 = 0,
@@ -244,7 +251,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
     if (size.width == 0 or size.height == 0) return surface;
-    var capacity = size.height - @intFromBool(indices.items.len > size.height and size.height > 1);
+    var capacity = size.height - @intFromBool(self.show_more and indices.items.len > size.height and size.height > 1);
     if (selected_row < self.scroll) self.scroll = selected_row;
     if (selected_row >= self.scroll + capacity) self.scroll = selected_row - capacity + 1;
     self.scroll = @min(self.scroll, indices.items.len -| capacity);
@@ -272,7 +279,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
         paint(ctx, surface, line.text, @intCast(y), @min(3, size.width), size.width, style);
     }
-    if (end < indices.items.len and size.height > 1) {
+    if (self.show_more and end < indices.items.len and size.height > 1) {
         const more = try std.fmt.allocPrint(ctx.arena, "{s} {d} more", .{ if (self.unicode) "↓" else "v", indices.items.len - end });
         paint(ctx, surface, more, size.height - 1, @min(3, size.width), size.width, self.quiet);
     }
@@ -751,4 +758,29 @@ test "Model choice hover and click follow full-width Panel matches without selec
         try std.testing.expectEqualStrings("model-1", fixture.picked.?);
         for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
     }
+}
+
+test "Model choice standalone rows use all bounded space without viewport hints" {
+    const entries = [_]picker.Entry{
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .full },
+        .{ .id = "gpt-5.5", .known = true, .catalogued = true, .providers = .full },
+        .{ .id = "gpt-5.4", .known = true, .catalogued = true, .providers = .full },
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    var choice: Self = .{};
+    choice.open(&menu, .codex, "gpt-6.1-sol");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 2 }, .cell_size = .{} };
+    _ = try choice.widget().draw(ctx);
+    try std.testing.expectEqual(@as(usize, 1), choice.hits.len);
+    choice.show_more = false;
+    for ([_]u16{ 0, 1, 2, 46, 140 }) |width| for (0..5) |height| {
+        const drawn = try choice.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = @intCast(height) }));
+        try std.testing.expect(drawn.size.height <= height);
+        if (width > 0 and height > 0) try std.testing.expectEqual(@min(height, entries.len), choice.hits.len);
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (drawn.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, text.written(), "more") == null);
+    };
 }
