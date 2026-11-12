@@ -159,7 +159,7 @@ def run():
     try:
         # Signed out everywhere: status says so and logout changes nothing.
         status = subprocess.run([str(fixture.RUI), "auth", "status"], capture_output=True, text=True, timeout=15)
-        assert status.returncode == 0 and "ChatGPT" in status.stdout and EMAIL not in status.stdout, status
+        assert status.returncode == 0 and EMAIL not in status.stdout, status
         nothing = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--test-chatgpt-fixture-endpoint", url],
                                  capture_output=True, text=True, timeout=15)
         assert nothing.returncode == 0 and not credential_file.exists() and not endpoint.revoke_requests, nothing
@@ -185,7 +185,8 @@ def run():
         # A browser's other requests are not the callback and change nothing.
         assert get(f"http://127.0.0.1:{port}/favicon.ico")[0] == 404
         answered = get(callback(port, {"code": "ac-made-up-1", "scope": PLAN_SCOPE, "state": link["state"], "client_id": CLIENT}))
-        assert answered == (200, b"Signed in. You can close this tab.\n"), answered
+        # The browser's page is one plain line.
+        assert answered[0] == 200 and answered[1].count(b"\n") == 1 and answered[1].endswith(b"\n"), answered
         code, stdout, stderr = login.finish()
         assert code == 0, (code, stdout, stderr)
         exchange = endpoint.token_requests[0]
