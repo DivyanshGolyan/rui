@@ -500,6 +500,7 @@ app_input: InputArea = undefined,
 /// What can fill the list's place, each its own widget: the screen shows
 /// the one the core names. Only the Sessions hear a press.
 app_sessions: GroupedList = .{},
+app_new_session: OverviewLines.NewSession = undefined,
 session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_panel: GroupedList = .{},
 app_picker: GroupedList = .{},
@@ -939,7 +940,7 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
+        return @intCast(self.state.order.items.len -| (first -| view.firstRowLine(self.state)));
     }
 
     fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
@@ -1090,7 +1091,15 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_screen.content = prepared;
         list = prepared;
         self.app_header.caps = self.caps;
-        self.app_screen.header = self.app_header.widget();
+        if (view.showsNewSession(&self.state)) {
+            self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
+            const header = try ctx.arena.create(@import("widgets/Stack.zig"));
+            header.* = .{ .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
+                .{ .widget = self.app_new_session.widget() },
+                .{ .widget = self.app_header.widget() },
+            }) };
+            self.app_screen.header = header.widget();
+        } else self.app_screen.header = self.app_header.widget();
     }
     if (part != .list) {
         self.app_input.composer.style = normal;
@@ -6047,16 +6056,16 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         " › /",
     });
     try std.testing.expect(std.mem.endsWith(u8, try all.line(23), "enter pick / esc close"));
-    // Ten rows leave five commands and a count of the rest.
+    // The pinned control leaves four commands and a count of the rest.
     var short = try rig.shown(80, 10);
     defer short.deinit();
     try short.expectLines(0, &.{
+        "  + New Session",
         "/archive",
         "/configure",
         "/model",
         "/rename",
-        "/sessions   unarchived · archived · all",
-        "+2 more · type to narrow",
+        "+3 more · type to narrow",
         "────────────────────────────────────────────────────────────────────────────────",
     });
     // Typing narrows it; Esc closes it and keeps the draft.
@@ -7118,5 +7127,77 @@ test "App settings typed queued saves settle on departure and retain failures" {
             try std.testing.expect(overview.defaults_save == .saved);
         }
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    }
+}
+
+test "pinned New Session remains above the end marker and responds to clicks and Enter" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        // End selects Settings; Up selects the last Session, without changing
+        // the pinned control's position or stealing the selection's space.
+        _ = try rig.press("\x1b[F\x1b[A");
+        const selected = rig.overview.state.selected.session;
+        for (0..2) |_| {
+            var shown = try rig.shown(width, 11);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "↑") != null);
+            const span = for (rig.overview.app_sessions.shown_at) |span| {
+                if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, &selected)) break span;
+            } else return error.SelectedSessionMissing;
+            try std.testing.expectEqual(@as(u16, 2), span.height);
+        }
+        try std.testing.expect(try rig.click(3, 0, width, 11) == null);
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        try std.testing.expect(try rig.press("a new pinned task\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("a new pinned task", Seen.now.start.text.slice());
+        try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
+    }
+}
+
+test "chat omits New Session at every width and overview restores its pinned control" {
+    const Chat = struct {
+        const child: vxfw.Text = .{ .text = "Chat transcript" };
+        fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
+            overview.state.conversing = overview.opened;
+            try overview.root.openSession(ctx, child.widget());
+        }
+    };
+    const rig = try openListed();
+    defer rig.close();
+    rig.overview.ops.open = Chat.open;
+    // Exercise the same list instance before opening, beside the chat, and on
+    // return, including a prefix change while the list had scrolled.
+    _ = try rig.press("\x1b[F\x1b[A");
+    var before = try rig.shown(140, 11);
+    defer before.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "+ New Session") != null);
+    const selected = rig.overview.state.selected.session;
+    _ = try rig.press("\r");
+    for ([_]u16{ 140, 46, 140, 46 }) |width| {
+        var shown = try rig.shown(width, 20);
+        defer shown.deinit();
+        const text = try shown.text();
+        try std.testing.expect(std.mem.indexOf(u8, text, "Chat transcript") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") == null);
+        if (width == 140) {
+            const line = rig.overview.app_sessions.selected.?;
+            const target = view.clickOf(&rig.overview.state, view.listItem(&rig.overview.state, line).?).?;
+            try std.testing.expectEqualStrings(&selected, &target.open);
+        }
+    }
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    rig.overview.state.conversing = null;
+    try rig.overview.root.closeSession(&ctx);
+    for ([_]u16{ 46, 140 }) |width| {
+        var shown = try rig.shown(width, 20);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
     }
 }

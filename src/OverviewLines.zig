@@ -1,4 +1,4 @@
-//! The overview provider header and pinned Settings tail.
+//! The overview provider header and pinned New Session and Settings rows.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -20,6 +20,39 @@ pub const Header = struct {
         for (lines, spans) |segment, *span| span.* = .{ .text = segment.text, .style = widget_style.of(self.caps, segment.style) };
         const text: vxfw.RichText = .{ .text = spans, .softwrap = false, .width_basis = .parent };
         var surface = try text.draw(ctx.withConstraints(.{ .width = width }, ctx.max));
+        surface.widget = self.widget();
+        return surface;
+    }
+};
+
+/// A one-line pinned control, using the list owner for row styles and presses.
+pub const NewSession = struct {
+    state: *const overview_view.State,
+    caps: overview_view.Caps = .{},
+    userdata: *anyopaque,
+    on_click: *const fn (*anyopaque, *vxfw.EventContext, overview_view.Click) anyerror!void,
+    row: @import("GroupedList.zig") = .{},
+
+    pub fn widget(self: *NewSession) vxfw.Widget {
+        return .{ .userdata = self, .drawFn = draw, .eventHandler = event };
+    }
+
+    fn event(raw: *anyopaque, ctx: *vxfw.EventContext, value: vxfw.Event) !void {
+        const self: *NewSession = @ptrCast(@alignCast(raw));
+        try self.row.widget().handleEvent(ctx, value);
+    }
+
+    fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *NewSession = @ptrCast(@alignCast(raw));
+        const GroupedList = @import("GroupedList.zig");
+        const built = try overview_view.listSegments(ctx.arena, self.state, .new_session, ctx.max.width.?, self.caps, 0);
+        const rows = try ctx.arena.create([]const GroupedList.Row);
+        rows.* = try ctx.arena.dupe(GroupedList.Row, &.{.{ .segments = built.segments, .target = .new_session }});
+        self.row.rows = .of(rows);
+        self.row.selected = if (built.selected) 0 else null;
+        self.row.caps = self.caps;
+        self.row.on_press = .{ .userdata = self.userdata, .pressed = self.on_click };
+        var surface = try self.row.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = @min(1, ctx.max.height.?) }));
         surface.widget = self.widget();
         return surface;
     }

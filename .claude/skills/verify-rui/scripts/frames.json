@@ -1204,7 +1204,8 @@
         "↑",
         "↓",
         "more",
-        "Settings"
+        "Settings",
+        "+ New Session"
       ],
       "absent": [
         "↑ 0 more",
@@ -1272,11 +1273,62 @@
         "Settings",
         "enter open",
         "↑",
-        "more"
+        "more",
+        "+ New Session"
       ],
       "absent": [
         "↓",
         "↑ 0 more"
+      ]
+    },
+    {
+      "name": "many-sessions-pinned-end",
+      "note": "51c-many-sessions-pinned-end",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Up"
+          ]
+        },
+        {
+          "wait": "Settings"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": [
+        "+ New Session",
+        "↑",
+        "more",
+        "Settings"
+      ],
+      "absent": [
+        "↓",
+        "↑ 0 more"
+      ]
+    },
+    {
+      "name": "chat-no-new-session",
+      "note": "51d-chat-no-new-session",
+      "open": "Batch job 1",
+      "steps": [
+        {
+          "wait": "Complete this batch job."
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": [
+        "Complete this batch job."
+      ],
+      "absent": [
+        "+ New Session"
       ]
     },
     {
