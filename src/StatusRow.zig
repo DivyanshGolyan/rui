@@ -1,5 +1,5 @@
 //! The Session's last row, as `session_chrome.bar` decides it: what needs
-//! the person or a fresh notice on the left, its key clickable where it
+//! the person on the left, its key clickable where it
 //! has one (`ctrl+r retries`), and `ctrl+x stop` at the right while work
 //! can be stopped. Clicking a key runs the same action as pressing it.
 const std = @import("std");
@@ -115,11 +115,11 @@ test "the status row shows what needs the person with its key clickable, and the
     try std.testing.expectEqual(@as(usize, 1), actions.retried);
     try std.testing.expectEqual(@as(usize, 1), actions.stopped);
 
-    // A notice with no key: plain text, no key target.
+    // Notices belong to Footer: the persistent status row stays empty.
     row.bar = chrome.bar(.{ .notice = "Copied 12 lines", .width = 40 });
     const notice = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 1 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 0), notice.children.len);
-    try std.testing.expectEqualStrings("C", notice.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings(" ", notice.readCell(0, 0).char.grapheme);
     try std.testing.expectEqual(vaxis.Color{ .index = 8 }, notice.readCell(0, 0).style.fg);
 
     // Narrow: the left side wins, the stop key drops.
