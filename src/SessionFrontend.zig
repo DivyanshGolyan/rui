@@ -211,8 +211,6 @@ shown_notice: session_chrome.Notice(notice_capacity) = .{},
 /// /status what to do. It needs the person, so it is no notice.
 failure: ?struct { key: [36]u8, state: Submission.State, bar: session_notice.Failure, page: ?[]const u8 = null } = null,
 failure_buffer: [failure_capacity]u8 = undefined,
-/// The `?` shortcuts are open.
-shortcuts_open: bool = false,
 chrome: SessionChrome = undefined,
 /// The Session line's facts from the latest read that took them, the
 /// unlabelled Session's name, and the line as last written.
@@ -260,7 +258,7 @@ test "a read freezes its viewport width method for live and historical answers" 
 /// Fills the reader's job in place; the caller may add to it before launch.
 fn freeze(self: *Self, phase: ReadPhase) *Job {
     std.debug.assert(self.reader.thread == null);
-    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .provider = self.line.provider, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
+    self.job = .{ .init = self.init, .home = self.home, .store = self.store, .session = self.session, .files = self.files, .colour = self.colour, .width_method = self.screen.vx.caps.unicode, .command = self.command, .requests = self.requests, .status = self.status, .phase = phase, .cursor = self.scanCursor(), .opening = self.reading.opening, .queued_line = if (self.live.queued_line) |shown| shown.admission else 0, .inspection_kind = self.inspection.kind, .interrupted = self.interrupted, .line_read = self.line.read, .hint_wanted = self.hint == .unread, .opened = self.screen.feed.opened };
     const job = &self.job;
     job.latest_ending = self.live.latest_ending;
     if (phase == .activity or phase == .permission) {
@@ -505,14 +503,6 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
     }.run;
 }
 
-/// A key that types `?`, as the editor reads text: the codepoint itself or
-/// its text (Shift-/ on some terminals), with no modifier but Shift.
-fn typesQuestion(key: vaxis.Key) bool {
-    const mods = key.mods;
-    if (mods.ctrl or mods.alt or mods.super or mods.hyper or mods.meta) return false;
-    return key.codepoint == '?' or if (key.text) |text| std.mem.eql(u8, text, "?") else false;
-}
-
 /// A command a click runs, admitted as a typed one is (`SessionInput`):
 /// while another command waits its turn, it says so and runs nothing.
 fn clickCommand(self: *Self, text: []const u8) !void {
@@ -705,12 +695,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 }
             };
             self.shown_notice.dismiss();
-            const question = self.app_consent.request == null and event == .key_press and !pasting and typesQuestion(event.key_press);
-            const shortcut = session_chrome.shortcut(self.shortcuts_open, self.input.composition().bytes.len == 0, question);
-            self.shortcuts_open = shortcut == .open;
-            if (shortcut == .open) {
-                // The key types nothing.
-            } else if (self.app_consent.request != null) {
+            if (self.app_consent.request != null) {
                 // Choice classification has no authority over draft editing.
                 // Only Esc and Enter bypass the normal editor on that row.
                 const selected = if (self.app_consent.row == .selector) Editor.selectEvent(conversation_keys, event, pasting) else .none;
@@ -884,8 +869,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     chrome.facts.style = facts_style;
     chrome.marker.method = self.app_caps.width;
     chrome.marker.style = .{ .reverse = true };
-    chrome.shortcuts.method = self.app_caps.width;
-    chrome.shortcuts.style = normal;
     const held = self.heldOriginal();
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
     const list_visible = self.app_hooks.root.listVisible();
@@ -901,7 +884,6 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .facts = .{ .current = self.line.facts(&self.hint, self.session), .name = self.session, .archive = self.line.archive_state },
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
-        .shortcuts = self.shortcuts_open,
         .overlay = palette,
         .width = ctx.max.width.?,
     });
@@ -1481,18 +1463,14 @@ test "frontend exit guidance preserves accepted identity and never substitutes i
 
 /// What each slash command does here.
 const Slash = union(enum) {
-    exit,
     archive,
     unarchive,
     /// Waits for the reader, then shows its page; Host commands included.
     inspection: Inspection,
     /// The Session's model and sign-in, which never change.
     model,
-    upgrade,
     discard,
     recover: []const u8,
-    wait,
-    login,
     misused: slash_commands.Name,
     unknown,
 };
@@ -1504,21 +1482,16 @@ fn parse(text: []const u8) Slash {
         .command => |command| command,
     };
     return switch (command.name) {
-        .exit => .exit,
         .archive => .archive,
         .unarchive => .unarchive,
         .status => .{ .inspection = .status },
         .requests => .{ .inspection = .requests },
-        .help => .{ .inspection = .help },
         // The table's /copy words are `reads.Copy`'s own names.
         .copy => .{ .inspection = .{ .copy = if (command.argument.len == 0) .answer else std.meta.stringToEnum(reads.Copy, command.argument).? } },
-        .@"inspect-action", .setup, .configure, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
+        .setup, .configure, .result, .rename, .effort, .@"reload-skills" => .{ .inspection = .command },
         .recover => .{ .recover = command.argument },
         .discard => .discard,
-        .wait => .wait,
-        .login => .login,
         .model => .model,
-        .upgrade => .upgrade,
     };
 }
 
@@ -1529,7 +1502,7 @@ fn slashCommand(self: *Self, text: []const u8) !void {
     // Lender intents have one admission boundary in converse, shared with
     // shortcuts and confirmation. Other commands retain their own hold policy.
     const admitted_elsewhere = switch (parsed) {
-        .archive, .unarchive, .upgrade, .exit, .model => true,
+        .archive, .unarchive, .model => true,
         else => false,
     };
     if (self.upgradeHeld() and !admitted_elsewhere) {
@@ -1537,10 +1510,8 @@ fn slashCommand(self: *Self, text: []const u8) !void {
         return;
     }
     switch (parsed) {
-        .upgrade => try self.converse(.upgrade),
         .archive => try self.perform(.archive),
         .unarchive => try self.converse(.unarchive),
-        .exit => self.leaving = .detached,
         .inspection => self.input.queueCommand(text),
         .discard => {
             self.submission.discardRejected() catch {
@@ -1553,14 +1524,6 @@ fn slashCommand(self: *Self, text: []const u8) !void {
                 self.notice = "! Recovery key does not match this original submission; nothing sent.";
             };
         } else self.unknownCommand(text),
-        .wait => self.notice = "Work continues.",
-        .login => {
-            // The Session's own provider, else the one that signs in.
-            const provider = self.line.provider orelse comptime protocol.Provider.onlyWith(.sign_in);
-            var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            writer.print("Login uses {s} in your shell.", .{provider.login()}) catch unreachable;
-            self.notice = writer.buffered();
-        },
         .model => self.notice = self.modelFacts(),
         .misused => |name| {
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
@@ -1593,20 +1556,20 @@ test "frontend answers local and unknown commands in place and keeps Host comman
     self.input.init();
     self.submission = .{ .io = std.testing.io, .store = self.store, .session = self.session, .directory = self.directory, .input = &self.input, .environment = .empty };
     const cases = .{
-        .{ "/foo bar", "! Unknown command /foo · /help" },
-        .{ "/\x1b[2J", "! Unknown command · /help" },
+        .{ "/foo bar", "! Unknown command /foo" },
+        .{ "/\x1b[2J", "! Unknown command" },
         .{ "/result", "! Usage: /result KEY" },
         .{ "/rename", "! Usage: /rename NAME" },
         .{ "/rename lane four", "" },
         .{ "/effort", "! Usage: /effort LEVEL" },
         .{ "/effort high", "" },
-        .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover · /help" },
-        .{ "/wait", "Work continues." },
+        .{ "/recover 01234567-89ab-4cde-8012-0123456789ab", "! Unknown command /recover" },
+        .{ "/wait", "! Unknown command /wait" },
         .{ "/model", "The model shows once the Session is read." },
         .{ "/model gpt-5.5", "! Usage: /model" },
         .{ "/configure --permission-mode ask", "" },
         .{ "/result 01234567-89ab-4cde-8012-0123456789ab", "" },
-        .{ "/inspect-action", "" },
+        .{ "/inspect-action", "! Unknown command /inspect-action" },
         .{ "/archive other", "! Usage: /archive" },
         .{ "/unarchive other", "! Usage: /unarchive" },
         .{ "/status", "" },
@@ -1789,7 +1752,7 @@ test "frontend lists the efforts of the Session's model once it is read, the one
     try self.line.model.set("gpt-5.5");
     var shown = self.nextCommands(null).?;
     try std.testing.expectEqualStrings("none", shown.list.shown()[0].word);
-    try std.testing.expectEqualStrings("current", shown.list.shown()[2].description);
+    try std.testing.expectEqualStrings("", shown.list.shown()[2].description);
     // Down moves the highlight, which the next frame keeps and Tab puts in
     // the draft.
     shown.move(true);
@@ -1914,6 +1877,12 @@ fn upgradeHeld(self: *const Self) bool {
     return self.upgradePhase() != .active;
 }
 
+/// A command already admitted by the composer finishes before app settings
+/// can start an Upgrade, just as it did for the former command surface.
+pub fn admitsUpgrade(self: *const Self) bool {
+    return self.input.queuedCommand() == null and !self.inspection.command_running;
+}
+
 /// No Client work of this conversation's is in flight, so an Upgrade's run
 /// may start. A command's read still running is joined before this holds.
 pub fn atRest(self: *const Self) bool {
@@ -1922,7 +1891,7 @@ pub fn atRest(self: *const Self) bool {
 
 /// Settles this conversation's Client work for an Upgrade's run. The
 /// overview starts the run once `atRest` says so. No command waits its
-/// turn here: /upgrade is admitted only while none does, and the run's
+/// turn here: app settings admits a run only while none does, and the run's
 /// hold refuses every command after it, so only a running one is left to
 /// finish.
 fn quiesceUpgrade(self: *Self) !void {
@@ -1953,8 +1922,6 @@ fn startQueuedCommand(self: *Self) !void {
         @memcpy(job.command_text[0..text.len], text);
         job.command_text_length = text.len;
         job.inspection_submission = self.submission.view();
-        const consent = self.screen.consent;
-        job.inspection_action = if (consent) |pending| (if (pending.presentation == .preview) pending.action else null) else null;
         // The newer inspection replaces a /status not yet shown.
         self.inspection.status_requested = false;
         try self.launch(job, switch (kind) {
@@ -1977,7 +1944,7 @@ fn update(self: *Self) !Updated {
         .quiescing => self.quiesceUpgrade() catch |err| {
             if (err == error.CanonicalStoreFailure) return err;
             var writer = std.Io.Writer.fixed(&self.notice_buffer);
-            try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; /upgrade to retry.", .{@errorName(err)});
+            try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; select Version in app settings to retry.", .{@errorName(err)});
             self.notice = writer.buffered();
             self.dirty = true;
             try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
@@ -1991,7 +1958,7 @@ fn update(self: *Self) !Updated {
                 self.settleReader() catch |err| {
                     if (err == error.CanonicalStoreFailure) return err;
                     var writer = std.Io.Writer.fixed(&self.notice_buffer);
-                    try writer.print("! Reattach failed: {s}. Draft and original retained; /upgrade or reopen with selected Rui.", .{@errorName(err)});
+                    try writer.print("! Reattach failed: {s}. Draft and original retained; select Version in app settings or reopen with selected Rui.", .{@errorName(err)});
                     self.notice = writer.buffered();
                     try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
                 };
@@ -2349,7 +2316,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
 fn converse(self: *Self, input: overview_view.ConversationInput) !void {
     // The Upgrade's own inputs are no Host requests, so no hold refuses them.
     const host_intent = switch (input) {
-        .other, .upgrade, .cancel_upgrade, .upgrade_failed => false,
+        .other, .cancel_upgrade, .upgrade_failed => false,
         .stop, .archive, .unarchive => true,
     };
     if (host_intent and self.hostHeld()) return;
@@ -2551,10 +2518,10 @@ fn commandLine(self: *Self) !void {
 }
 
 /// Runs the draft as a command and takes its line. A line a hold refused
-/// stays; /upgrade is the hold's own command, so its line is always taken.
+/// stays until the hold lifts.
 fn runLine(self: *Self) !void {
     const text = self.input.composition().bytes;
-    const takes = parse(text) == .upgrade or !self.upgradeHeld();
+    const takes = !self.upgradeHeld();
     defer if (takes) self.input.clear();
     try self.slashCommand(text);
 }
@@ -2739,7 +2706,7 @@ fn readInspection(self: *const Self) reader_policy.Inspection {
     return switch (self.inspection.kind) {
         .copy => .copy,
         .command => .command,
-        .status, .requests, .help => .other,
+        .status, .requests => .other,
     };
 }
 
@@ -3315,7 +3282,7 @@ const HeldFrontend = struct {
 
     fn destroy(held: *HeldFrontend) void {
         _ = held.self.dropSkills();
-        // As `settle` does: a read a key started, such as /help's page, may
+        // As `settle` does: a read a key started, such as /requests' page, may
         // still be running, and it borrows the frontend freed below.
         held.self.stop();
         _ = held.self.joinReader();
@@ -3514,17 +3481,12 @@ fn sendKeys(frontend: *Self, bytes: []const u8) !void {
     try held.keys(bytes);
 }
 
-test "unbound chat input posts no notice and closing shortcuts redraws" {
-    for ([_]bool{ false, true }) |shortcuts_open| {
+test "unbound chat input posts no notice and redraws" {
+    for ([_][]const u8{ "", "abc" }) |draft| {
         for ([_]bool{ false, true }) |notice_present| {
             const held = try HeldFrontend.create();
             defer held.destroy();
-            if (shortcuts_open) {
-                try held.keys("?");
-                try std.testing.expect(held.self.shortcuts_open);
-            } else {
-                try held.keys("abc");
-            }
+            try held.keys(draft);
             if (notice_present) held.self.shown_notice.show("existing", held.self.nowMs());
             var parser: vaxis.Parser = .{};
             const parsed = try parser.parse("\x1bx", null);
@@ -3532,8 +3494,7 @@ test "unbound chat input posts no notice and closing shortcuts redraws" {
             ctx.redraw = false;
             try held.deliver(&ctx, .{ .key_press = parsed.event.?.key_press });
             try std.testing.expect(ctx.redraw);
-            try std.testing.expect(!held.self.shortcuts_open);
-            try std.testing.expectEqualStrings(if (shortcuts_open) "" else "abc", held.self.input.composition().bytes);
+            try std.testing.expectEqualStrings(draft, held.self.input.composition().bytes);
             try std.testing.expect(held.self.shown_notice.current(held.self.nowMs()) == null);
         }
     }
@@ -3807,7 +3768,7 @@ test "each source admits a slash command while another is active as it always di
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
     // A queued one: every draft command waits, local ones too, and keeps the draft.
-    for ([_][]const u8{ "/wait", "/exit", "/help" }) |text| {
+    for ([_][]const u8{ "/model", "/archive", "/requests" }) |text| {
         self.notice = null;
         self.shown_notice.dismiss();
         try sendKeys(self, text);
@@ -3889,10 +3850,10 @@ test "Up, Down and Enter take a row only from a list the latest frame drew" {
     // highlight never seen, and Enter runs the line as typed.
     try stepKeys(held, "/\x1b[B");
     try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
-    try stepKeys(held, "\x15/he\r");
-    try std.testing.expectEqualStrings("! Unknown command /he · /help", try barShows(held));
-    // Drawn: Enter takes the highlighted /help.
-    try stepKeys(held, "/he");
+    try stepKeys(held, "\x15/st\r");
+    try std.testing.expectEqualStrings("! Unknown command /st", try barShows(held));
+    // Drawn: Enter takes the highlighted /status.
+    try stepKeys(held, "/st");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\r");
@@ -3906,16 +3867,16 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
         defer held.destroy();
         const self = &held.self;
         try held.settle();
-        // The frame drew the list for `/h`; `e` changes the draft before any
-        // frame lists it, and Enter takes /help from `/he`'s list.
-        try stepKeys(held, "/h");
+        // The frame drew the list for `/s`; `t` changes the draft before any
+        // frame lists it, and Enter takes /status from `/st`'s list.
+        try stepKeys(held, "/s");
         try held.settle();
         try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
-        try stepKeys(held, "e\r");
+        try stepKeys(held, "t\r");
         try std.testing.expect(!std.mem.startsWith(u8, try barShows(held), "! Unknown command"));
         try std.testing.expectEqualStrings("", self.input.composition().bytes);
     }
-    // /help owns an asynchronous reader. A separate fixture keeps its late
+    // /status owns an asynchronous reader. A separate fixture keeps its late
     // unavailable-endpoint notice out of these list-only assertions.
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -3940,8 +3901,8 @@ test "Tab completes from the draft's own list, however many keys arrive before a
     defer held.destroy();
     const self = &held.self;
     try held.settle();
-    try stepKeys(held, "/he\t");
-    try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
+    try stepKeys(held, "/st\t");
+    try std.testing.expectEqualStrings("/status", self.input.composition().bytes);
     // Two Tabs in one batch: the second completes from the list the first
     // one's word calls for.
     try stepKeys(held, "\x15/conf\t\t");
@@ -3953,16 +3914,16 @@ test "a key before a new Session's first frame finds no list the previous Sessio
     defer held.destroy();
     const self = &held.self;
     try held.settle();
-    try stepKeys(held, "/h");
+    try stepKeys(held, "/s");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     // The next Session's input starts over; no frame of it drew a list, so
-    // Enter runs `/he` as typed, and Tab still completes.
+    // Enter runs `/st` as typed, and Tab still completes.
     self.startInput();
-    try stepKeys(held, "/he\r");
-    try std.testing.expectEqualStrings("! Unknown command /he · /help", try barShows(held));
-    try stepKeys(held, "/he\t");
-    try std.testing.expectEqualStrings("/help", self.input.composition().bytes);
+    try stepKeys(held, "/st\r");
+    try std.testing.expectEqualStrings("! Unknown command /st", try barShows(held));
+    try stepKeys(held, "/st\t");
+    try std.testing.expectEqualStrings("/status", self.input.composition().bytes);
 }
 
 test "Esc closes the command list first only when the latest frame drew it" {
@@ -4467,7 +4428,7 @@ test "the /status page marks one changeable row, which Up and Down move and Ente
     held.self.dirty = true;
     try held.settle();
     const list = held.screen.commands.?.list;
-    for (list.shown()) |entry| try std.testing.expectEqual(std.mem.eql(u8, entry.word, "high"), std.mem.eql(u8, entry.description, "current"));
+    for (list.shown()) |entry| try std.testing.expectEqualStrings("", entry.description);
     try sendKeys(&held.self, "\x1b[B\r");
     var expected: [64]u8 = undefined;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "/configure --reasoning-effort {s}", .{list.shown()[1].word}), held.self.input.queuedCommand().?);
@@ -4542,7 +4503,7 @@ test "a change run from the /status page replies under the page, which shows the
     }
 }
 
-test "/upgrade starts the overview's run, consumes only its line and keeps the original submission; Esc is the run's" {
+test "app settings starts the overview's run and keeps the original submission; Esc is the run's" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     var overview: ArchiveOverview = .{ .state = undefined };
@@ -4555,18 +4516,18 @@ test "/upgrade starts the overview's run, consumes only its line and keeps the o
     self.submission.state = .unconfirmed;
     self.submission.key = @splat('K');
     self.submission.retry = @splat('K');
-    // Blocked by an earlier run, as free: /upgrade is the hold's own command.
+    // App settings can start a new run after an earlier one blocked requests.
     for ([_]session_upgrade.After{ .open, .blocked }) |after| {
         overview.state.upgrade = .{ .after = after };
-        try sendKeys(self, "/upgrade\r");
+        _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrade.run.? == .checking);
         try std.testing.expectEqualStrings("", self.input.composition().bytes);
         try std.testing.expect(self.input.queuedCommand() == null);
         try std.testing.expectEqual(session_upgrade.Phase.quiescing, self.upgradePhase());
         try std.testing.expectEqualStrings("Checking for updates…", self.lender.line(self.lender.context, .idle).text.?);
-        // Another /upgrade changes nothing, and Esc asks the run to stop
+        // Another Version-row activation changes nothing, and Esc asks the run to stop
         // before it does anything else.
-        try sendKeys(self, "/upgrade\r");
+        _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrade.run.? == .checking);
         try sendKeys(self, "keep\x1b");
         try std.testing.expectEqual(@as(usize, 1), overview.cancels);
@@ -4634,8 +4595,8 @@ test "a conversation is at rest for an Upgrade only with no work running or fini
     try std.testing.expect(self.atRest());
 }
 
-test "no command waits its turn across an Upgrade: /upgrade is refused while one does, and a run's hold refuses every one after" {
-    const lines = [_][]const u8{ "/status", "/requests", "/help", "/copy", "/configure --reasoning-effort low" };
+test "an Upgrade hold refuses commands without losing their drafts" {
+    const lines = [_][]const u8{ "/status", "/requests", "/copy", "/configure --reasoning-effort low" };
     for (lines) |line| {
         errdefer std.debug.print("line={s}\n", .{line});
         const held = try HeldFrontend.create();
@@ -4645,15 +4606,7 @@ test "no command waits its turn across an Upgrade: /upgrade is refused while one
         defer overview.state.deinit();
         held.self.lender = overview.lender();
         const self = &held.self;
-        // Queued, then /upgrade before the conversation's next pass.
-        self.input.queueCommand(line);
-        try sendKeys(self, "/upgrade\r");
-        try std.testing.expect(!overview.state.upgrading());
-        try std.testing.expectEqualStrings("/upgrade", self.input.composition().bytes);
-        try std.testing.expectEqualStrings(line, self.input.queuedCommand().?);
-        // The other order: the run first, then the command.
-        _ = self.input.takeCommand();
-        try sendKeys(self, "\r");
+        _ = try overview_view.step(&overview.state, .start_upgrade);
         try std.testing.expect(overview.state.upgrading());
         try sendKeys(self, line);
         try sendKeys(self, "\r");
@@ -4718,7 +4671,7 @@ const ArchiveOverview = struct {
     fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         switch (input) {
-            .other, .upgrade, .cancel_upgrade, .upgrade_failed => {},
+            .other, .cancel_upgrade, .upgrade_failed => {},
             .stop, .archive, .unarchive => self.host_inputs += 1,
         }
         const effects = try overview_view.step(&self.state, .{ .conversed = .{ .reference = "k7m2qx".*, .work = work, .input = input } });
@@ -5097,7 +5050,7 @@ test "a card taller than the screen stays scrollable without instruction lines" 
 
 test "reader failure provenance keeps transport loss separate from local copy failures, reachable or held" {
     const Probe = struct {
-        const Mode = enum { read_disconnect, copy_disconnect, command_disconnect, inspect_disconnect, inspect_free, inspect_held, inspect_local, temporary, sink, rename };
+        const Mode = enum { read_disconnect, copy_disconnect, command_disconnect, temporary, sink, rename };
         var mode: Mode = undefined;
         var local_effects: usize = 0;
         fn create(userdata: ?*anyopaque, dir: std.Io.Dir, path: []const u8, options: std.Io.Dir.CreateFileOptions) std.Io.File.OpenError!std.Io.File {
@@ -5164,10 +5117,10 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         }
         fn serve(self: *@This()) !void {
             {
-                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else if (self.mode == .inspect_disconnect) "/v1/inspect-session" else "/v1/conversation-page");
+                const page = try self.request(if (self.mode == .read_disconnect or self.mode == .command_disconnect) "/v1/activity-page" else "/v1/conversation-page");
                 defer page.close(std.testing.io);
                 self.pages += 1;
-                if (self.mode == .read_disconnect or self.mode == .command_disconnect or self.mode == .inspect_disconnect) return; // Physical EOF, no response.
+                if (self.mode == .read_disconnect or self.mode == .command_disconnect) return; // Physical EOF, no response.
                 var bytes: [1024]u8 = undefined;
                 var body = std.Io.Writer.fixed(&bytes);
                 const shape = protocol.conversation_page_reply;
@@ -5219,12 +5172,7 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         defer if (lease) |*held| held.release();
         try lease.?.prepareForServing(false);
         const paths = lease.?.paths;
-        const no_listener = mode == .inspect_free or mode == .inspect_held or mode == .inspect_local;
-        if (mode == .inspect_free) {
-            lease.?.release();
-            lease = null;
-        }
-        var listener: ?std.Io.net.Server = if (no_listener) null else try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
+        var listener: ?std.Io.net.Server = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
         defer if (listener) |*server| {
             server.deinit(io);
             std.Io.Dir.cwd().deleteFile(io, paths.socket.slice()) catch @panic("unable to remove fixture socket");
@@ -5243,49 +5191,35 @@ test "reader failure provenance keeps transport loss separate from local copy fa
         if (mode == .rename) vtable.dirRename = Probe.rename;
         self.init.io = .{ .userdata = io.userdata, .vtable = &vtable };
         self.store = root;
-        if (mode == .inspect_local) {
-            var missing: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            try fixture.environ.put("TMPDIR", try std.fmt.bufPrint(&missing, "{s}/missing-local-scratch", .{root}));
-        }
         self.live.scan.cursor = .{ .position = 19 };
         self.reading.opening = mode == .read_disconnect;
         _ = self.input.replace(.{ .start = 0, .end = 0, .text = "kept draft" });
         var discovery: Discovery = .{};
         self.app_hooks.host = .{ .context = &discovery, .held = Discovery.held, .lost = Discovery.lost, .start = Discovery.start, .notice = Discovery.notice };
-        const inspect = mode == .inspect_disconnect or mode == .inspect_free or mode == .inspect_held or mode == .inspect_local;
-        self.command = if (inspect) @import("cli.zig").sessionCommand else Probe.command;
-        self.inspection.kind = if (mode == .command_disconnect or inspect) .command else .{ .copy = if (mode == .temporary or mode == .rename) .file else .answer };
+        self.command = Probe.command;
+        self.inspection.kind = if (mode == .command_disconnect) .command else .{ .copy = if (mode == .temporary or mode == .rename) .file else .answer };
         const job = self.freeze(if (mode == .read_disconnect) .activity else .inspection);
-        if (inspect) {
-            const command = "/inspect-action";
-            @memcpy(job.command_text[0..command.len], command);
-            job.command_text_length = command.len;
-        }
-        try self.launch(job, if (mode == .read_disconnect) reads.scan else if (mode == .command_disconnect or inspect) reads.runCommand else reads.copyAnswer);
+        try self.launch(job, if (mode == .read_disconnect) reads.scan else if (mode == .command_disconnect) reads.runCommand else reads.copyAnswer);
         // An independent discovery change while this job is in flight must
         // not change where its own error came from or suppress a local notice.
         discovery.unavailable = already_unavailable;
-        if (mode == .inspect_local) {
-            // The command already owns rendering, so its local scratch error
-            // keeps the original departure policy, not a Host recovery hold.
-            try std.testing.expectError(error.FileNotFound, self.settleReader());
-        } else try self.settleReader();
+        try self.settleReader();
         if (thread) |worker| worker.join();
         joined = true;
         try peer.result;
-        const transport = mode == .read_disconnect or mode == .copy_disconnect or mode == .command_disconnect or (inspect and mode != .inspect_local);
+        const transport = mode == .read_disconnect or mode == .copy_disconnect or mode == .command_disconnect;
         try std.testing.expectEqual(if (transport) client.FailureOrigin.host_transport else .local, self.reader.result.failure_origin);
-        try std.testing.expectError(if (mode == .inspect_free) error.HostNotServing else if (mode == .inspect_held) error.HostStopping else if (transport) error.TruncatedResponse else if (mode == .sink) error.BrokenPipe else error.FileNotFound, self.reader.result.outcome.?);
+        try std.testing.expectError(if (transport) error.TruncatedResponse else if (mode == .sink) error.BrokenPipe else error.FileNotFound, self.reader.result.outcome.?);
         try std.testing.expectEqual(@as(usize, @intFromBool(transport)), discovery.losses);
         try std.testing.expectEqual(already_unavailable or transport, self.hostHeld());
-        try std.testing.expectEqual(@as(usize, @intFromBool(!transport and !inspect)), Probe.local_effects);
-        try std.testing.expectEqual(@as(usize, @intFromBool(!no_listener)), peer.pages);
-        try std.testing.expectEqual(@as(usize, @intFromBool(mode != .read_disconnect and mode != .command_disconnect and !inspect and mode != .temporary)), peer.contents);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!transport)), Probe.local_effects);
+        try std.testing.expectEqual(@as(usize, 1), peer.pages);
+        try std.testing.expectEqual(@as(usize, @intFromBool(mode != .read_disconnect and mode != .command_disconnect and mode != .temporary)), peer.contents);
         try std.testing.expect(self.reader.thread == null and self.leaving == null);
         try std.testing.expectEqual(mode == .read_disconnect, self.reading.opening);
         try std.testing.expectEqual(@as(u64, 19), self.live.scan.cursor.?.position);
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
-        if (transport or mode == .inspect_local) {
+        if (transport) {
             try std.testing.expect(self.notice == null);
         } else {
             try std.testing.expectEqualStrings("! Copy unavailable; draft retained.", self.notice.?);
@@ -5995,39 +5929,30 @@ test "App Session notice goes after five seconds or at the next key" {
     try std.testing.expectEqualStrings("", self.chrome.status.bar.left);
 }
 
-test "App Session ? on an empty draft shows the shortcuts; the next key closes them; ?? types one" {
+test "App Session question mark encodings append ordinary text to empty and nonempty drafts" {
     var fixture: ChromeFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
     const self = fixture.self;
-    try fixture.press(.{ .codepoint = '?', .text = "?" });
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.overlay.?.eql(self.chrome.shortcuts.widget()));
-    try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try fixture.press(.{ .codepoint = 'a', .text = "a" });
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.overlay == null);
-    try std.testing.expectEqualStrings("a", self.input.composition().bytes);
-    // On a draft with text, ? is a character.
-    try fixture.press(.{ .codepoint = '?', .text = "?" });
-    try std.testing.expectEqualStrings("a?", self.input.composition().bytes);
-    _ = self.input.clear();
-    try fixture.press(.{ .codepoint = '?', .text = "?" });
-    try fixture.press(.{ .codepoint = '?', .text = "?" });
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.overlay == null);
-    try std.testing.expectEqualStrings("?", self.input.composition().bytes);
-    // A terminal that reports ? as Shift-/ with the text ?: the same.
-    _ = self.input.clear();
-    const shifted: vaxis.Key = .{ .codepoint = '/', .text = "?", .mods = .{ .shift = true } };
-    try fixture.press(shifted);
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.overlay.?.eql(self.chrome.shortcuts.widget()));
-    try std.testing.expectEqualStrings("", self.input.composition().bytes);
-    try fixture.press(shifted);
-    _ = try fixture.draw();
-    try std.testing.expect(self.app_screen.overlay == null);
-    try std.testing.expectEqualStrings("?", self.input.composition().bytes);
+    const keys = [_]vaxis.Key{
+        .{ .codepoint = '?', .text = "?" },
+        .{ .codepoint = '/', .text = "?", .mods = .{ .shift = true } },
+        .{ .codepoint = '?', .text = "?", .mods = .{ .shift = true } },
+    };
+    for (keys) |key| {
+        for ([_]bool{ false, true }) |has_draft| {
+            _ = self.input.clear();
+            if (has_draft) try fixture.press(.{ .codepoint = 'a', .text = "a" });
+            try fixture.press(key);
+            _ = try fixture.draw();
+            try std.testing.expect(self.app_screen.overlay == null);
+            try std.testing.expectEqualStrings(if (has_draft) "a?" else "?", self.input.composition().bytes);
+            try fixture.press(key);
+            _ = try fixture.draw();
+            try std.testing.expect(self.app_screen.overlay == null);
+            try std.testing.expectEqualStrings(if (has_draft) "a??" else "??", self.input.composition().bytes);
+        }
+    }
 }
 
 test "App Session drag-copy notices follow the notice rule" {
@@ -6909,7 +6834,7 @@ test "failed reply retry completion revalidates every submission hold" {
             .prepared => self.reading.prepared_action = 7,
             .opening => self.reading.opening = true,
             .command => self.inspection.command_running = true,
-            .queued_command => self.input.queueCommand("/help"),
+            .queued_command => self.input.queueCommand("/requests"),
             .upgrade => held.upgrade = .{ .after = .blocked },
             .working => self.live.work.state = .{ .working = .{ .since = 2 } },
             .queued => self.live.queued.count = 1,
@@ -7677,7 +7602,7 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
             try held.keys("kept éZ\x1b[D\x12");
             const before = self.input.snapshot();
             try self.startRetry(); // The production worker, not a synthesized completion.
-            if (superseded) self.input.queueCommand("/help");
+            if (superseded) self.input.queueCommand("/requests");
             try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &host, Host.pump);
             const loss = app and (fault == .fenced or fault == .truncated);
             if (loss or superseded) {
@@ -7710,37 +7635,36 @@ test "failed reply retry reader keeps every read failure at the shared settlemen
 
 test "failed reply retry settlement lets queued inspections cancel the read and run without sending" {
     const io = std.testing.io;
-    for ([_][]const u8{ "/help", "/requests" }) |command| {
-        const held = try HeldFrontend.create();
-        defer held.destroy();
-        const self = &held.self;
-        const file = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
-        defer file.close(io);
-        self.files.inspection = file;
-        self.requests = RetrySettlementWorker.requests;
-        try seedFeed(held.screen, "× Model reply unreadable\n");
-        self.failedRetryForTest();
-        self.live.latest_ending.?.key = held.screen.feed.high.?;
-        try held.keys("\x12");
-        try self.launchRetrySettlementForTest(RetrySettlementWorker.cancelled);
-        try held.keys(command);
-        try held.keys("\rdraft éZ\x1b[D");
-        const before = self.input.snapshot();
-        try std.testing.expectEqualStrings(command, self.input.queuedCommand().?);
-        try std.testing.expect(self.retryable() == null);
-        // Drive update's actual cancel -> join -> next-command launch sequence.
-        try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, RetrySettlementWorker.settled);
-        try std.testing.expect(self.reader.thread == null and self.job.retry == null and self.retry_fence == null);
-        try std.testing.expect(self.leaving == null and held.left == null);
-        try std.testing.expect(self.submission.intent == null);
-        try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
-        try std.testing.expectEqualDeep(before, self.input.snapshot());
-        try std.testing.expectEqual(@as(@TypeOf(self.screen.view), .inspection), self.screen.view);
-        try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), if (std.mem.eql(u8, command, "/help")) "Marks" else "RETRY-REQUESTS-PAGE") != null);
-        try held.keys("\x07");
-        try std.testing.expect(self.retryable() != null);
-        try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
-    }
+    const command = "/requests";
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const self = &held.self;
+    const file = try held.tmp.dir.createFile(io, "inspection", .{ .read = true });
+    defer file.close(io);
+    self.files.inspection = file;
+    self.requests = RetrySettlementWorker.requests;
+    try seedFeed(held.screen, "× Model reply unreadable\n");
+    self.failedRetryForTest();
+    self.live.latest_ending.?.key = held.screen.feed.high.?;
+    try held.keys("\x12");
+    try self.launchRetrySettlementForTest(RetrySettlementWorker.cancelled);
+    try held.keys(command);
+    try held.keys("\rdraft éZ\x1b[D");
+    const before = self.input.snapshot();
+    try std.testing.expectEqualStrings(command, self.input.queuedCommand().?);
+    try std.testing.expect(self.retryable() == null);
+    // Drive update's actual cancel -> join -> next-command launch sequence.
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), self, RetrySettlementWorker.settled);
+    try std.testing.expect(self.reader.thread == null and self.job.retry == null and self.retry_fence == null);
+    try std.testing.expect(self.leaving == null and held.left == null);
+    try std.testing.expect(self.submission.intent == null);
+    try std.testing.expectEqual(@as(u64, 0), self.admission.sent);
+    try std.testing.expectEqualDeep(before, self.input.snapshot());
+    try std.testing.expectEqual(@as(@TypeOf(self.screen.view), .inspection), self.screen.view);
+    try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), "RETRY-REQUESTS-PAGE") != null);
+    try held.keys("\x07");
+    try std.testing.expect(self.retryable() != null);
+    try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "× Model reply unreadable · ctrl+r retries") != null);
 }
 
 test "failed reply retry settlement accepts upgrade cancellation and returns the tail after reobservation" {
@@ -7791,7 +7715,7 @@ test "failed reply retry settlement preserves fatal Host diagnostics across supe
         try self.launchRetrySettlementForTest(case[0]);
         switch (context) {
             .active => {},
-            .inspection => self.input.queueCommand("/help"),
+            .inspection => self.input.queueCommand("/requests"),
             .upgrade => held.upgrade = .{ .run = .checking },
         }
         try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(10)), &self.reader, RetrySettlementWorker.completed);

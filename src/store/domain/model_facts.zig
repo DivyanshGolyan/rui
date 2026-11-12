@@ -42,7 +42,22 @@ pub const openai_ids = rsql.Read(.{
 // One statement selects the authority and its facts together. The LEFT JOIN
 // deliberately emits a source-only row for an empty generation or absent ID:
 // neither may resurrect a shipped entry. No source emits no rows.
-const selection_sql = "SELECT fact.model_id,fact.context_window,fact.efforts,fact.openai_listed FROM model_catalog_source source LEFT JOIN model_fact fact ON fact.generation=source.generation AND (?1 IS NULL OR fact.model_id=?1) WHERE source.slot=1 ORDER BY fact.model_id";
+fn selectionSql(comptime columns: []const u8, comptime model: ?[]const u8) []const u8 {
+    return "SELECT " ++ columns ++ " FROM model_catalog_source source LEFT JOIN model_fact fact " ++
+        "ON fact.generation=source.generation" ++
+        // Full traversal and a non-null point lookup need different plans.
+        // A nullable OR would scan every fact inside the admission hold.
+        (if (model) |id| " AND fact.model_id=" ++ id else "") ++ " WHERE source.slot=1";
+}
+const selection_columns = "fact.model_id,fact.context_window,fact.efforts,fact.openai_listed";
+
+/// Effective window selected inside an Operation's INSERT, with no extra round.
+/// A source-only row (empty generation, missing model or null window) uses the
+/// unlisted fallback; only no source uses the bound shipped window. Keep that
+/// authority selection shared with Model and the full-catalog reader.
+pub fn contextWindowSql(comptime model: []const u8, comptime shipped: []const u8, comptime unlisted: []const u8) []const u8 {
+    return "coalesce((" ++ selectionSql("coalesce(fact.context_window," ++ unlisted ++ ")", model) ++ ")," ++ shipped ++ ")";
+}
 const SelectionRow = struct {
     model_id: ?Bounded(256),
     context_window: ?u32,
@@ -59,14 +74,14 @@ const SelectionRow = struct {
     }
 };
 const selected = rsql.Read(.{
-    .sql = selection_sql,
-    .Args = struct { id: ?[]const u8 },
+    .sql = selectionSql(selection_columns, null) ++ " ORDER BY fact.model_id",
+    .Args = struct {},
     .Row = SelectionRow,
     .cardinality = .each,
 });
 const selected_model = rsql.Read(.{
-    .sql = selection_sql,
-    .Args = struct { id: ?[]const u8 },
+    .sql = selectionSql(selection_columns, "?1"),
+    .Args = struct { id: []const u8 },
     .Row = SelectionRow,
     .cardinality = .optional,
 });
@@ -125,7 +140,7 @@ const Selection = struct {
 pub fn readSelected(a: anytype, arena: std.mem.Allocator) ![]const catalog.Entry {
     var selection: Selection = .{ .allocator = arena };
     errdefer selection.deinit();
-    a.readEach(selected, .{ .id = null }, std.math.maxInt(u64), &selection);
+    a.readEach(selected, .{}, std.math.maxInt(u64), &selection);
     try a.run();
     if (selection.failed) return error.OutOfMemory;
     if (!selection.saved) return catalog.shipped;

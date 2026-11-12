@@ -873,7 +873,7 @@ def persistent_copy_case():
             assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
             assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
             assert list(here.iterdir()) == [saved], list(here.iterdir())
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert caller.wait(timeout=5) == 0
         completed = True
         print("persistent copy: /copy and /copy code sent exact OSC 52 bytes; /copy file saved the exact answer", flush=True)
@@ -1070,7 +1070,7 @@ int fsync(int fd) {
         listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
         assert handle in listing and failed_notice in listing and f"{stopped} (session_stop)" in listing, listing
         assert invalid not in listing and all(handle not in listing for handle in rejected_handles), listing
-        terminal_step(master, "/exit", "Detached.")
+        terminal_step(master, "\x03", "Detached.")
         assert entered.wait(timeout=5) == 0
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
@@ -1462,7 +1462,7 @@ def renderer_cases():
             assert tty.capture.draft("kept", 2), tty.capture.completed
             # Rejection leaves a usable editor, not a latent fatal redraw.
             tty.send("é", predicate=lambda: tty.capture.draft("ékept", 3))
-            assert os.write(tty.master, b"\x15\x0b/exit\r") == 8
+            assert os.write(tty.master, b"\x03") == 1
             tty.finish()
         env = {**os.environ, "HOME": str(home)}
         rejected = subprocess.run([str(fixture.RUI), "session", "resume", "--store", str(store), geometry],
@@ -1513,7 +1513,7 @@ def renderer_cases():
             tty.send("\r", answer("multiline"))
             submitted(multiline)
             joined(tty)
-            os.write(tty.master, b"/exit\r")
+            os.write(tty.master, b"\x03")
             tty.finish()
         print("renderer: wide5000X resize, long combining cells, tabs, multiline paste and exact submitted bytes passed", flush=True)
 
@@ -1718,7 +1718,7 @@ def renderer_cases():
                 released[index].wait(10)
             return True
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two)
-        with terminal(session) as tty:
+        with terminal(session, columns=140) as tty:
             tty.send("status yields\r", marker)
             frames = tty.every_frame()
             holding.set()
@@ -1728,19 +1728,21 @@ def renderer_cases():
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/help\r")
-            time.sleep(0.3)
+            row, line = next((index, line) for index, line in enumerate(tty.capture.completed.split("\n")) if "Settings" in line)
+            col = line.index("Settings") + 1
+            tty.send(f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m", "Notifications")
+            keys = tty.send("\x1b[B" * 6 + "\r", "earlier message")
+            assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
             released[1].set()
-            tty.wait("shift+↑↓               scroll", timeout=20)
             time.sleep(1.5)
-            assert "shift+↑↓               scroll" in tty.capture.completed, tty.capture.completed
+            assert "earlier message" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a later /help replaces a /status not yet shown", flush=True)
+        print("renderer: Settings > Keys covers a /status not yet shown", flush=True)
 
         # A short fresh feed clamps at its first saved row; scrolling does
         # not add a start label or duplicate the admitted Message and reply.
@@ -2203,7 +2205,7 @@ def main(selected="all"):
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         saved.unlink()
         fallback.parent.mkdir(parents=True)
@@ -2213,7 +2215,7 @@ def main(selected="all"):
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
@@ -2389,7 +2391,7 @@ def main(selected="all"):
                 assert permission_row(status, mode), status
                 assert fixture.command("session", "inspect", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
                 assert mode == "bypass" or "without asking" not in status, status
-                terminal_step(master, "/exit", "Detached.")
+                terminal_step(master, "\x03", "Detached.")
                 assert caller.wait(timeout=5) == 0
         records = preferences_home / ".config/rui/requests"
         before_records = set(records.glob("*.json"))
@@ -2557,21 +2559,31 @@ def main(selected="all"):
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
-            # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
-            help_text = terminal_step(master, "/help", "in your shell.", composer=True)
-            assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/inspect-action", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
-                assert command in help_text, help_text
-            assert "/history" not in help_text and "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
-            assert "without approval" not in help_text, help_text
+            # The wide layout exposes the pinned Settings row without
+            # leaving this conversation or replacing its /status page.
+            terminal_capture(master).resize(140, 50)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 140, 0, 0))
+            wide = keyed_frame(master, b"", lambda screen, x, y: "Settings" in screen and f"Status · {session}" in screen)
+            row, line = next((index, line) for index, line in enumerate(wide.split("\n")) if "Settings" in line)
+            col = line.index("Settings") + 1
+            gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
+            keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
+            for expected in ('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
+                assert expected in keys, (expected, keys)
+            assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
+            settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            assert "earlier message" not in settings, settings
+            keyed_frame(master, b"\x1b", lambda screen, x, y: f"Status · {session}" in screen and "Rui · settings" not in screen)
+            terminal_capture(master).resize(80, 50)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 80, 0, 0))
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command, notice in (("/wait", "Work continues."),
-                                    ("/login", "Login uses rui auth login codex in your shell.")):
+            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit", "/help"):
+                notice = f"! Unknown command {command}"
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
@@ -2621,7 +2633,7 @@ def main(selected="all"):
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
                 assert receipt not in configured, configured
             terminal_step(master, "/status", f" Status · {session}", composer=True)
-            assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
+            assert "Detached. Host work continues." in terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
@@ -2734,7 +2746,7 @@ def main(selected="all"):
             assert "code: provider_http_422" in failed and "successor done" not in failed, failed
             result = terminal_step(master, f"/result {queued_key}", "result: completed", composer=True)
             assert "result: completed\nsuccessor done" in conversation_text(result), result
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
 
         stop_release = threading.Event()
@@ -2918,7 +2930,7 @@ def main(selected="all"):
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {control_session}" in status and shown(folder_row(home, escaped_workspace) + "\n", status), status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
-            farewell = terminal_step(master, "/exit", "Resume: ")
+            farewell = terminal_step(master, "\x03", "Resume: ")
             assert entered.wait(timeout=5) == 0
             resume = farewell.split("Resume: ", 1)[1].split("\n", 1)[0]
             assert "\x1b" not in resume and "\u202e" not in resume, resume
@@ -2937,7 +2949,7 @@ def main(selected="all"):
             read_terminal(master, "› ")
             resumed = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {control_session}" in resumed and shown(folder_row(home, escaped_workspace) + "\n", resumed), resumed
-            terminal_step(master, "/exit", "Resume: ")
+            terminal_step(master, "\x03", "Resume: ")
             assert entered.wait(timeout=5) == 0
             defaults(home, "--store", store)
         unsafe_key = "message\n\x1b[2J\u202e"
@@ -2962,7 +2974,7 @@ def main(selected="all"):
                 read_terminal(master, "› ")
                 status = terminal_step(master, "/status", " Status · ", composer=True)
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
-                assert "Detached." in terminal_step(master, "/exit", "Detached.")
+                assert "Detached." in terminal_step(master, "\x03", "Detached.")
                 assert entered.wait(timeout=5) == 0
         finally:
             unsafe_release.set()
@@ -2977,7 +2989,7 @@ def main(selected="all"):
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {unsafe_session}" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
-            assert "Detached." in terminal_step(master, "/exit", "Detached.")
+            assert "Detached." in terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         empty_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")

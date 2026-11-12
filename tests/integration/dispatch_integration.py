@@ -37,10 +37,10 @@ def seed_future_retries(store, sessions):
         database.execute("PRAGMA foreign_keys=OFF")
         inserted = database.executemany(
             "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,"
-            "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,tool_set_id) "
+            "admission_position,attempt_ordinal,retry_due_at_ms,retry_scheduled_at,output_reservation,tool_set_id,context_window) "
             "SELECT ?,?,session_ref,revision,1,1,1,9223372036854775807,1,0,"
-            "coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?",
-            [(index, index, session) for index, session in enumerate(sessions, 1)],
+            "coalesce(loaded_tool_set_id,tool_set_id),? FROM session WHERE session_ref=?",
+            [(index, index, DEFAULTS.unlisted_context_window, session) for index, session in enumerate(sessions, 1)],
         )
         assert inserted.rowcount == len(sessions), inserted.rowcount
         database.commit()

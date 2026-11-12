@@ -24,7 +24,7 @@ cp "$repo/build.zig" "$scratch/build.zig"
 
 # Anonymous github.com downloads time out when GitHub sheds anonymous load; the
 # API serves the same release asset or archive to a token. CI sets GH_TOKEN;
-# installs without one keep the anonymous URL. The pinned hash checks either.
+# failed API requests fall back to anonymous downloads. The pinned hash checks all sources.
 download() {
     local url=$1 archive=$2 path owner name rest tag
     if [[ -n ${GH_TOKEN:-} && $url == https://github.com/* ]]; then
@@ -34,15 +34,13 @@ download() {
         case "$rest" in
             releases/download/*)
                 tag=${rest#releases/download/}
-                gh release download "${tag%/*}" --repo "$owner/$name" --pattern "${tag##*/}" --output "$archive"
-                return ;;
+                if gh release download "${tag%/*}" --repo "$owner/$name" --pattern "${tag##*/}" --output "$archive"; then return 0; fi ;;
             archive/*.tar.gz)
                 rest=${rest#archive/}
-                url="https://api.github.com/repos/$owner/$name/tarball/${rest%.tar.gz}"
-                curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
+                local api="https://api.github.com/repos/$owner/$name/tarball/${rest%.tar.gz}"
+                if curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
                     --retry 2 --retry-all-errors --retry-max-time 200 \
-                    --header "Authorization: Bearer $GH_TOKEN" "$url" -o "$archive"
-                return ;;
+                    --header "Authorization: Bearer $GH_TOKEN" "$api" -o "$archive"; then return 0; fi ;;
         esac
     fi
     curl --fail --location --show-error --connect-timeout 10 --max-time 90 \
@@ -56,7 +54,7 @@ download() {
 # compiles Zig's build runner, and orb setup overlaps that compile with these downloads.
 prepared=' '
 prepare_dependencies() {
-    local manifest=$1 name url expected archive actual revision remote index
+    local manifest=$1 name url expected archive actual revision remote index git_remote git_revision
     local names fetch_names=() fetch_hashes=() fetch_archives=()
     names=$(sed -n '/^    \.dependencies = /,/^    },/s/^        \.\([[:alnum:]_]*\) = .{/\1/p' "$manifest")
     if [[ -n ${3:-} ]]; then names=$3; fi
@@ -64,6 +62,7 @@ prepare_dependencies() {
         url=$(sed -n "/\.$name = /,/},/s/.*\.url = \"\([^\"]*\)\".*/\1/p" "$manifest")
         expected=$(sed -n "/\.$name = /,/},/s/.*\.hash = \"\([^\"]*\)\".*/\1/p" "$manifest")
         [[ -n $url && -n $expected ]]
+        git_remote= git_revision=
         case "$url" in
             git+https://codeberg.org/*|git+https://github.com/*)
                 revision=${url#*#}
@@ -74,16 +73,29 @@ prepare_dependencies() {
                 remote=${url#git+}
                 remote=${remote%%#*}
                 remote=${remote%%\?*}
+                [[ $remote == https://github.com/* ]] && { git_remote=$remote; git_revision=$revision; }
                 url="${remote%.git}/archive/$revision.tar.gz"
                 ;;
         esac
+        if [[ -z $git_remote && $url == https://github.com/*/archive/refs/tags/*.tar.gz ]]; then
+            git_remote=${url%%/archive/*}
+            git_revision=${url#*/archive/}; git_revision=${git_revision%.tar.gz}
+        fi
         case "$prepared" in *" $expected "*) continue ;; esac
         archive=
         if [[ ! -d "$packages/$expected" ]]; then
             archive="$scratch/$expected/${url##*/}"
             mkdir -p "${archive%/*}"
             printf 'Preparing pinned %s dependency ...\n' "$name"
-            download "$url" "$archive"
+            if ! download "$url" "$archive"; then
+                [[ -n $git_remote ]] || return 1
+                printf "Falling back to git for %s ...\n" "$name"
+                git init -q "$scratch/$expected/repo"
+                git -C "$scratch/$expected/repo" fetch --depth 1 "$git_remote" "$git_revision"
+                archive="$scratch/$expected/export"
+                mkdir -p "$archive"
+                git -C "$scratch/$expected/repo" archive FETCH_HEAD | tar -x -C "$archive"
+            fi
         fi
         fetch_names+=("$name")
         fetch_hashes+=("$expected")
