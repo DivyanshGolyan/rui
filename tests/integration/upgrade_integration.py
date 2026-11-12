@@ -7,7 +7,6 @@ and every install target is the supplied real native executable. Retained-build 
 Host versions, exercise replacement of an already-running native Host.
 """
 import contextlib
-import fcntl
 import hashlib
 import http.server
 import io
@@ -21,8 +20,6 @@ import shutil
 import signal
 import socket
 import stat
-import struct
-import termios
 import subprocess
 import sys
 import tarfile
@@ -34,6 +31,11 @@ import os_semantics
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for
 from terminal_process import COLUMNS, ROWS, answers_to, terminal_process
 from terminal_screen import ScreenCapture, shown
+
+
+# Spawn at the same split-pane size the observer measures. A post-spawn
+# resize can leave the first committed Settings coordinates stale for a click.
+TERMINAL_COLUMNS = max(COLUMNS, 140)
 
 
 class Gate:
@@ -573,9 +575,7 @@ class TerminalScreen:
 
     def __init__(self, master, process):
         self.master, self.process = master, process
-        self.columns = max(COLUMNS, 140)
-        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, self.columns, 0, 0))
-        process.send_signal(signal.SIGWINCH)
+        self.columns = TERMINAL_COLUMNS
         self.capture = ScreenCapture(self.columns, ROWS, reply=answers_to(master))
         self.tail = bytearray()
         self.entries = self.restorations = 0
@@ -931,7 +931,7 @@ def terminal_cases(root, binary, releases, artifacts):
         published = c.root / "after-publication.gate"
         published.touch()
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(published)
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -952,7 +952,7 @@ def terminal_cases(root, binary, releases, artifacts):
             assert screen.entries == screen.restorations == 1, "cancelled Upgrade relaunched"
         # A cancellation's report belongs to its old TUI until departure. A
         # fresh launch has no retained guidance to suppress this installation.
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -1005,7 +1005,7 @@ def conversation_case(root, binary, releases, artifacts):
         published = c.root / "after-publication.gate"
         published.touch()
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(published)
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
@@ -1026,7 +1026,7 @@ def conversation_case(root, binary, releases, artifacts):
             receipt = exit_on_sigint(screen, process, "conversation cancellation report after restoration")
             assert b"Upgrade installation failed:" in receipt, receipt.decode()
             assert screen.entries == screen.restorations == 1, "cancelled Upgrade relaunched"
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
@@ -1069,7 +1069,7 @@ def escape_after_publication(root, binary, releases, artifacts):
         gate = c.root / "after-publication.gate"
         gate.touch()
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -1094,7 +1094,7 @@ def terminal_download_failure(root, binary, releases, artifacts):
         host, previous = c.start_host()
         _, credential = terminal_setup(c)
         releases.status["/releases/latest"] = 403
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -1121,7 +1121,7 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
         old_host, previous = c.start_host()
         terminal_setup(c)
         gate = releases.gate_archive()
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -1152,7 +1152,7 @@ def terminal_path_guidance(root, binary, releases, artifacts):
         _, credential = terminal_setup(c)
         shadow = c.build("shadowing-path", "0.1.0", managed=False) / "bin/rui"
         c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -1209,7 +1209,7 @@ def startup_cases(root, binary, releases, artifacts):
                         c.run("host", "pause", "--store", other_store, "--instance", status["instance"])
 
             try:
-                with terminal_process(arguments, env=c.env, cwd=c.root) as (process, master):
+                with terminal_process(arguments, env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
                     screen = TerminalScreen(master, process)
                     screen.contains(f"│ {session} · gpt-6-luna" if screen_kind == "resume" else session)
                     screen.start_upgrade()
@@ -1267,7 +1267,7 @@ def signal_during_check(root, binary, releases, artifacts):
         host, previous = c.start_host()
         _, credential = terminal_setup(c)
         gate = releases.gates["/releases/latest"] = Gate()
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -1289,7 +1289,7 @@ def signal_after_publication(root, binary, releases, artifacts):
         gate = c.root / "after-publication.gate"
         gate.touch()
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
@@ -1335,7 +1335,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
             finally:
                 os.close(descriptor)
 
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             try:
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
@@ -1391,7 +1391,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
         releases.digest = "0" * 64
         gate = releases.gate_archive()
         try:
-            with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
                 screen.start_upgrade()
