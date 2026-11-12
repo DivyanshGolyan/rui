@@ -3,6 +3,8 @@ const client = @import("client.zig");
 const release = @import("release_candidate.zig");
 const Installation = @import("Installation.zig");
 const HostLifecycle = @import("HostLifecycle.zig");
+const restart_all = @import("host_restart_all.zig");
+const platform = @import("platform.zig");
 const TerminalText = @import("TerminalText.zig");
 const process = @import("upgrade_process.zig");
 const installation_path = @import("installation_path.zig");
@@ -67,7 +69,7 @@ pub const DownloadDiagnostic = process.DownloadDiagnostic;
 pub const Check = struct {
     candidate: release.ReleaseCandidate,
     selected: Installation.Selection,
-    host: HostLifecycle.Observation,
+    hosts: restart_all.Batch = .{},
     home: []const u8,
     store: []const u8,
     /// As `executablePathAlloc` allocates it, so `deinit` frees all of it.
@@ -77,7 +79,7 @@ pub const Check = struct {
     pub fn deinit(self: *Check, allocator: std.mem.Allocator) void {
         self.candidate.deinit(allocator);
         self.selected.deinit(allocator);
-        self.host.deinit(allocator);
+        self.hosts.deinit(allocator);
         self.path.deinit(allocator);
         allocator.free(self.home);
         allocator.free(self.store);
@@ -87,11 +89,16 @@ pub const Check = struct {
 
 pub const Result = struct {
     installation: Installation.InstallationOutcome,
-    activation: HostLifecycle.ActivationOutcome,
+    hosts: restart_all.Batch = .{},
     store: []const u8,
+
+    pub fn selectedActivation(self: *const Result) HostLifecycle.ActivationOutcome {
+        return self.hosts.selectedOutcome(self.store);
+    }
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
         self.installation.deinit(allocator);
+        self.hosts.deinit(allocator);
         allocator.free(self.store);
     }
 };
@@ -104,16 +111,17 @@ pub fn check(init: std.process.Init, allocator: std.mem.Allocator, store: []cons
     errdefer selected.deinit(allocator);
     var candidate = try release.discover(allocator, init.io, endpoint orelse release.default_endpoint, cancellation, diagnostic);
     errdefer candidate.deinit(allocator);
-    var host = try HostLifecycle.observe(allocator, init.io, home, store, cancellation);
-    errdefer host.deinit(allocator);
+    var hosts = try restart_all.discover(init, allocator, home, cancellation);
+    errdefer hosts.deinit(allocator);
     const owned_home = try allocator.dupe(u8, home);
     errdefer allocator.free(owned_home);
-    const owned_store = try allocator.dupe(u8, store);
+    const paths = platform.resolveClientPaths(init.io, store) catch null;
+    const owned_store = try allocator.dupe(u8, if (paths) |value| value.store.slice() else store);
     errdefer allocator.free(owned_store);
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     errdefer allocator.free(executable);
     const path_observation = installation_path.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "") catch installation_path.Observation{ .state = .unavailable };
-    return .{ .candidate = candidate, .selected = selected, .host = host, .home = owned_home, .store = owned_store, .running_executable = executable, .path = path_observation };
+    return .{ .candidate = candidate, .selected = selected, .hosts = hosts, .home = owned_home, .store = owned_store, .running_executable = executable, .path = path_observation };
 }
 
 pub fn canInstall(checked: *const Check) bool {
@@ -163,36 +171,47 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
     errdefer installation.deinit(allocator);
     var activation_progress: ActivationProgress = .{ .progress = progress };
     const receipt = installation.receipt();
-    const activation = activateSelected(init, allocator, checked, receipt.selected_after, cancellation, &activation_progress);
-
+    // Once publication succeeds, every restart failure belongs to the receipt,
+    // never the pre-publication error path. Discover again to include Hosts
+    // started during preparation, and pin the receipt rather than following PATH.
+    // Publication owns both the selected path and its validated identity.
+    // Do not inspect PATH or invent a version from the discovered candidate.
+    var hosts: restart_all.Batch = hosts: {
+        waitAfterPublication(init, cancellation) catch |err| break :hosts .{ .failure = err };
+        // Revalidate availability/identity, not a second selection or forecast.
+        // A vanished target is a restart failure, not an unsupported Host skip.
+        var target = restart_all.Target.init(init, allocator, checked.home, receipt.selected_after, cancellation) catch |err| break :hosts .{ .failure = err };
+        defer target.deinit(allocator);
+        if (target.version.order(receipt.selected_version.?) != .eq) break :hosts .{ .failure = error.ReleaseExecutableVersionMismatch };
+        break :hosts @import("host_coordinator.zig").restart(init, allocator, .{
+            .home = checked.home,
+            .target = &target,
+            .cancellation = cancellation,
+            .progress = .{ .context = &activation_progress, .report = ActivationProgress.report },
+        }) catch |err| .{ .failure = err };
+    };
+    // Even cancellation or a failed coordinator handoff retains the target.
+    hosts.version = receipt.selected_version;
     Progress.send(progress, .finished);
-    return .{ .installation = installation, .activation = activation, .store = store };
+    return .{ .installation = installation, .hosts = hosts, .store = store };
 }
 
-fn activateSelected(init: std.process.Init, allocator: std.mem.Allocator, checked: *const Check, selected: []const u8, cancellation: ?*client.Cancellation, progress: *ActivationProgress) HostLifecycle.ActivationOutcome {
+fn waitAfterPublication(init: std.process.Init, cancellation: ?*const client.Cancellation) !void {
     if (init.environ_map.get("RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE")) |gate| {
         while (true) {
-            process.check(cancellation) catch return .cancelled;
+            try process.check(cancellation);
             const file = std.Io.Dir.cwd().openFile(init.io, gate, .{}) catch |err| {
                 if (err == error.FileNotFound) break;
-                return .{ .unconfirmed = .starting };
+                return err;
             };
             file.close(init.io);
-            std.Io.sleep(init.io, .fromMilliseconds(10), .awake) catch return .{ .unconfirmed = .starting };
+            try std.Io.sleep(init.io, .fromMilliseconds(10), .awake);
         }
     }
-    process.check(cancellation) catch return .cancelled;
-    const binary = std.fmt.allocPrint(allocator, "{s}/bin/rui", .{selected}) catch return .{ .unconfirmed = .verifying };
-    defer allocator.free(binary);
-    const reported = process.output(allocator, init.io, &.{ binary, "--version" }, cancellation, 512) catch return .{ .unconfirmed = .verifying };
-    defer allocator.free(reported);
-    const version = HostLifecycle.releaseVersion(reported) orelse return .{ .unconfirmed = .verifying };
-    if (version.order(checked.candidate.version) != .eq) return .superseded;
-    return @import("host_coordinator.zig").activate(init, allocator, &checked.host, selected, checked.candidate.version, cancellation, .{ .context = progress, .report = ActivationProgress.report }) catch .{ .unconfirmed = .starting };
 }
 
 pub fn compatible(result: *const Result) bool {
-    return switch (result.activation) {
+    return switch (result.selectedActivation()) {
         .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
         else => true,
     };
@@ -217,15 +236,11 @@ pub fn writeCheck(writer: *std.Io.Writer, checked: *const Check) !void {
         .unknown_managed => try writer.writeAll("managed build with unknown release identity (use the standalone release installer to switch)"),
         .ineligible => try writer.writeAll("unsupported or application-owned; use its installer/package manager"),
     }
-    try writer.print("\nLatest published stable: 0.{d}.{d}\nAffected Store: ", .{ checked.candidate.version.schema, checked.candidate.version.patch });
+    try writer.print("\nLatest published stable: 0.{d}.{d}\nClient Store: ", .{ checked.candidate.version.schema, checked.candidate.version.patch });
     try field(writer, checked.store);
     try writer.writeAll("\n");
     try installation_path.write(writer, &checked.path, checked.home);
-    switch (checked.host) {
-        .absent => try writer.writeAll("No Host was running. Upgrade installs only; no Host will be started.\n"),
-        .managed => try writer.writeAll("Install restarts this Store's running Host and interrupts work across ALL Sessions in this Store.\n"),
-        .unsupported => |reason| try writer.print("Host activation unavailable ({s}). Its owner must restart it; Upgrade will not pause it.\n", .{@tagName(reason)}),
-    }
+    try checked.hosts.writeWarning(writer);
     try writer.writeAll("Store compatibility is validated by the target Host at startup; checking/installing never migrates it.\nThe running client and bundled/custom application binaries are not replaced.\n");
     if (!canInstall(checked)) try writer.writeAll("Upgrade cannot replace this destination. Use the existing manual release installer or application owner.\n");
 }
@@ -234,10 +249,7 @@ pub fn writeCheck(writer: *std.Io.Writer, checked: *const Check) !void {
 /// not swallow. Installation and activation are independent: a published Rui
 /// can still leave an unresolved or application-owned Host behind.
 pub fn hasGuidance(result: *const Result) bool {
-    return switch (result.activation) {
-        .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
-        .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
-    };
+    return result.hosts.hasGuidance();
 }
 
 pub fn writeResult(writer: *std.Io.Writer, result: *const Result) !void {
@@ -251,28 +263,9 @@ pub fn writeResult(writer: *std.Io.Writer, result: *const Result) !void {
         try writer.writeAll("\nThis operation prepared/published: ");
         try field(writer, receipt.operation_build);
     }
-    try writer.writeAll("\nActivation: ");
-    switch (result.activation) {
-        .not_needed => try writer.writeAll("not needed; no Host was initially running and none was started."),
-        .superseded => try writer.writeAll("not attempted; a newer release is selected. No downgrade or restart occurred."),
-        .already_ready => try writer.writeAll("already running the selected pinned build; no restart needed."),
-        .ready => try writer.writeAll("ready; the exact launched Host instance, Store and pinned build identity were verified."),
-        .client_incompatible => try writer.writeAll("the exact launched build answered with a different protocol; use the selected Rui client."),
-        .unsupported => |reason| try writer.print("not permitted ({s}); the existing Host was left running. Use its application/launch owner.", .{@tagName(reason)}),
-        .replacement_observed => try writer.writeAll("not confirmed; another Host instance owns this Store. It was not paused or accepted as this launch."),
-        .cancelled => try writer.writeAll("cancelled after installation; publication was not rolled back."),
-        .failed => |stage| try writer.print("failed at {s}; the release remains installed.", .{@tagName(stage)}),
-        .unconfirmed => |stage| try writer.print("unconfirmed at {s}; the release remains installed. Do not retry indeterminate work.", .{@tagName(stage)}),
-    }
-    try writer.writeAll("\nStore: ");
-    try field(writer, result.store);
-    // Unsupported activation already names the application/launch owner
-    // above; every other guided result needs the generic recovery instruction.
-    if (hasGuidance(result) and result.activation != .unsupported) {
-        try writer.writeAll("\nNext: inspect rui host status --store ");
-        try TerminalText.writeShellWord(writer, result.store);
-        try writer.writeAll(". Do not restore/reset the Store or replay uncertain requests.\n");
-    } else try writer.writeAll("\n");
+    try writer.writeAll("\n");
+    try result.hosts.write(writer);
+    if (hasGuidance(result)) try writer.writeAll("Installation was not rolled back. Follow each Host's recovery instructions; do not restore/reset Stores or replay uncertain requests.\n");
 }
 
 test "a check frees exactly the executable path the system gave it" {
@@ -280,25 +273,12 @@ test "a check frees exactly the executable path the system gave it" {
     var checked: Check = .{
         .candidate = .{ .version = .{ .schema = 99, .patch = 0 }, .tag = try allocator.dupe(u8, "v0.99.0"), .archive_name = try allocator.dupe(u8, "fixture"), .archive_url = try allocator.dupe(u8, "fixture"), .checksum_url = try allocator.dupe(u8, "fixture"), .sha256 = @splat(0) },
         .selected = .absent,
-        .host = .absent,
+        .hosts = .{},
         .home = try allocator.dupe(u8, "/synthetic/home"),
         .store = try allocator.dupe(u8, "/synthetic/store"),
         .running_executable = try std.process.executablePathAlloc(std.testing.io, allocator),
     };
     checked.deinit(allocator);
-}
-
-test "upgrade activation and publication are independent result facts" {
-    var installation: Installation.InstallationOutcome = .{ .unchanged = .{ .operation_build = try std.testing.allocator.dupe(u8, "/managed/build"), .selected_after = try std.testing.allocator.dupe(u8, "/managed/build") } };
-    defer installation.deinit(std.testing.allocator);
-    const result: Result = .{ .installation = installation, .activation = .{ .unconfirmed = .verifying }, .store = "/store" };
-    try std.testing.expect(!compatible(&result));
-    var bytes: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&bytes);
-    try writeResult(&writer, &result);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Installation unchanged") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "unconfirmed at verifying") != null);
-    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "Do not restore/reset") != null);
 }
 
 test "upgrade owns cleanup facts by phase after native borrowed paths are reclaimed" {
@@ -320,52 +300,73 @@ test "upgrade owns cleanup facts by phase after native borrowed paths are reclai
     }
 }
 
-test "relaunch guidance preserves every activation result for installed and unchanged selections" {
+test "upgrade restart results cover every activation for selected and other Stores" {
     const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
-    inline for (std.enums.values(std.meta.Tag(HostLifecycle.ActivationOutcome))) |tag| {
-        const activation: HostLifecycle.ActivationOutcome = switch (tag) {
-            .not_needed => .not_needed,
-            .superseded => .superseded,
-            .already_ready => .{ .already_ready = .{ .instance = @splat(1), .pid = 123 } },
-            .ready => .{ .ready = .{ .instance = @splat(1), .pid = 123 } },
-            .client_incompatible => .{ .client_incompatible = 123 },
-            .unsupported => .{ .unsupported = .application_owned },
-            .replacement_observed => .replacement_observed,
-            .cancelled => .cancelled,
-            .failed => .{ .failed = .starting },
-            .unconfirmed => .{ .unconfirmed = .verifying },
-        };
-        const expected = switch (tag) {
-            .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
-            .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
-        };
-        for ([_]bool{ false, true }) |installed| {
-            const result: Result = .{
-                .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
-                .activation = activation,
-                .store = "/store",
-            };
-            try std.testing.expectEqual(expected, hasGuidance(&result));
-            var bytes: [2048]u8 = undefined;
-            var out = std.Io.Writer.fixed(&bytes);
-            try writeResult(&out, &result);
-            const text = out.buffered();
-            if (tag == .unsupported) {
-                try std.testing.expect(std.mem.indexOf(u8, text, "Use its application/launch owner.") != null);
-            } else {
-                try std.testing.expectEqual(expected, std.mem.indexOf(u8, text, "\nNext: inspect rui host status --store ") != null);
+    const info = @typeInfo(HostLifecycle.ActivationOutcome).@"union";
+    inline for (info.field_names, info.field_types) |name, Payload| {
+        const activation = @unionInit(HostLifecycle.ActivationOutcome, name, std.mem.zeroes(Payload));
+        for ([_]bool{ false, true }) |selected| {
+            for ([_]bool{ false, true }) |installed| {
+                var entries = [_]restart_all.Entry{.{ .socket = "/socket", .store = if (selected) "/selected-store" else "/other-store", .state = .{ .outcome = activation } }};
+                const result: Result = .{
+                    .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
+                    .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } },
+                    .store = "/selected-store",
+                };
+                const guided = switch (activation) {
+                    .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
+                    .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
+                };
+                const safe = !selected or switch (activation) {
+                    .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
+                    else => true,
+                };
+                try std.testing.expectEqual(safe, compatible(&result));
+                try std.testing.expectEqual(guided, hasGuidance(&result));
+                try std.testing.expectEqualDeep(if (selected) activation else HostLifecycle.ActivationOutcome.not_needed, result.selectedActivation());
+                var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer output.deinit();
+                try writeResult(&output.writer, &result);
+                var shared: std.Io.Writer.Allocating = .init(std.testing.allocator);
+                defer shared.deinit();
+                try result.hosts.write(&shared.writer);
+                try std.testing.expect(std.mem.indexOf(u8, output.written(), shared.written()) != null);
+                try std.testing.expectEqual(guided, std.mem.indexOf(u8, output.written(), "Installation was not rolled back") != null);
             }
         }
     }
-    // Payloads do not change a result's obligation to retain guidance.
-    inline for (std.enums.values(HostLifecycle.Limitation)) |limitation| {
-        const result: Result = .{ .installation = .{ .installed = receipt }, .activation = .{ .unsupported = limitation }, .store = "/store" };
-        try std.testing.expect(hasGuidance(&result));
-    }
-    inline for (std.enums.values(HostLifecycle.Stage)) |stage| {
-        inline for (.{ HostLifecycle.ActivationOutcome{ .failed = stage }, HostLifecycle.ActivationOutcome{ .unconfirmed = stage } }) |activation| {
-            const result: Result = .{ .installation = .{ .installed = receipt }, .activation = activation, .store = "/store" };
-            try std.testing.expect(hasGuidance(&result));
-        }
-    }
+}
+
+test "upgrade restart results retain unknown failures and other Store guidance without borrowing compatibility" {
+    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
+    var entries = [_]restart_all.Entry{
+        .{ .socket = "/other.sock", .store = "/other", .state = .{ .outcome = .{ .client_incompatible = 123 } } },
+        .{ .socket = "/selected.sock", .store = "/store", .state = .{ .outcome = .{ .ready = .{ .instance = @splat(1), .pid = 42 } } } },
+    };
+    var result: Result = .{ .installation = .{ .installed = receipt }, .store = "/store", .hosts = .{ .entries = &entries, .version = .{ .schema = 99, .patch = 0 } } };
+    try std.testing.expect(compatible(&result));
+    try std.testing.expect(!hasGuidance(&result));
+    try std.testing.expectEqual(@as(usize, 2), result.hosts.totals().restarted);
+    entries[0].state = .{ .outcome = .{ .failed = .starting } };
+    try std.testing.expect(compatible(&result));
+    try std.testing.expect(hasGuidance(&result));
+    try std.testing.expectEqual(@as(usize, 1), result.hosts.totals().failed);
+    // An unidentified socket may belong to this Store; known selected facts
+    // remain usable, but its missing identity can never become an absence.
+    entries[0].store = null;
+    entries[0].state = .{ .failed = .discovery };
+    try std.testing.expect(compatible(&result));
+    result.hosts.entries = entries[0..1];
+    try std.testing.expect(!compatible(&result));
+    try std.testing.expect(hasGuidance(&result));
+    result.hosts = .{ .failure = error.AccessDenied };
+    try std.testing.expect(!compatible(&result));
+    try std.testing.expect(hasGuidance(&result));
+    result.hosts = .{};
+    try std.testing.expect(compatible(&result));
+    try std.testing.expect(!hasGuidance(&result));
+    var bytes: [128]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    try result.hosts.write(&out);
+    try std.testing.expectEqualStrings("No running Hosts.\n", out.buffered());
 }

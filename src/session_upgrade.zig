@@ -123,7 +123,7 @@ test "an Upgrade holds Host requests from its start until the listing is read un
     try std.testing.expect(upgrade.start());
     try std.testing.expect(upgrade.held() and upgrade.takesEscape() and upgrade.phase(false) == .quiescing);
     // The run going on keeps its progress: another start does nothing.
-    upgrade.stand(.{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none }, .step = .publishing } });
+    upgrade.stand(.{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } });
     try std.testing.expect(!upgrade.start() and upgrade.run.? == .installing and !upgrade.takesEscape());
     upgrade.stand(ended_compatible);
     try std.testing.expect(upgrade.held() and !upgrade.going() and upgrade.phase(false) == .reobserving);

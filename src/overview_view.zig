@@ -5956,11 +5956,11 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
     try expectEffects(&.{}, try step(&state, .start_upgrade));
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     // Esc cancels the Upgrade and keeps the draft.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
     // The worker says whether the stop held; until then the line stands.
-    try std.testing.expectEqualStrings("Upgrading to 0.60.0 · no Host running · esc cancels", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
+    try std.testing.expectEqualStrings("Preparing Upgrade · no Hosts running · esc cancels", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     _ = try step(&state, .{ .upgrade = .cancelling });
     // A second Esc is still the Upgrade's while it winds down.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
@@ -5972,7 +5972,7 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
 
     // Past publishing Esc is the draft's, and an incompatible end holds.
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } }, .step = .publishing } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .{ .running = 1 } }, .step = .publishing } } });
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
@@ -5991,13 +5991,13 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .{ .running = 0 } } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } }, .outcome = .compatible } } });
     try std.testing.expect(state.upgrade.after == .reobserving);
 }
 
 test "every place an Upgrade run can stand decides the hold, Esc and another Upgrade from that one value" {
-    const found: upgrade_status.Found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } };
+    const found: upgrade_status.Found = .{ .host = .{ .running = 2 } };
     const Case = struct { run: ?upgrade_status.Run, going: bool, escape: bool };
     const cases = [_]Case{
         .{ .run = null, .going = false, .escape = false },
@@ -6008,7 +6008,7 @@ test "every place an Upgrade run can stand decides the hold, Esc and another Upg
         .{ .run = .cancelling, .going = true, .escape = true },
         .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .going = false, .escape = false },
         .{ .run = .{ .ended = .{ .how = .superseded, .outcome = .unchanged } }, .going = false, .escape = false },
-        .{ .run = .{ .ended = .{ .how = .{ .incompatible = found.version }, .outcome = .incompatible } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .{ .incompatible = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } }, .going = false, .escape = false },
     };
     for (cases) |case| {
         var state = try opened(&.{});
@@ -6034,12 +6034,12 @@ test "another Upgrade while one runs changes nothing: its progress and Esc stay"
     defer state.deinit();
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     const preparing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(preparing);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     try std.testing.expectEqualStrings(preparing, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none }, .step = .publishing } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } } });
     const publishing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(publishing);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
@@ -6058,11 +6058,11 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     _ = try step(&state, .start_upgrade);
     try expectStatus(&state, "Checking for updates…", .normal);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
-    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
+    try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     // A notice never hides the run's line, where Esc is offered.
     state.say(.attention, "! Select a Session first.", .{});
-    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .{}, .next);
     // An ending that is news is a notice: it goes with the next key and
     // the unconfirmed send shows again.
@@ -6072,7 +6072,7 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     // A release this client cannot use stays until another Upgrade.
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try press(&state, .{}, .next);
     try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
@@ -6091,9 +6091,9 @@ test "the status rows above the Footer say the status bar's line" {
     const unconfirmed = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{})).?);
     try std.testing.expect(std.mem.startsWith(u8, unconfirmed, " ! Not confirmed · rui request recover " ++ key));
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     const upgrading = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{ .unicode = false })).?);
-    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
+    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Preparing Upgrade - no Hosts running - esc cancels"));
 }
 
 test "Upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {
@@ -6104,7 +6104,7 @@ test "Upgrade is never refused as a Host request: the status bar shows its run a
     // Enter again while it runs starts nothing and hides nothing.
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
     // A Host request is refused in words; the retry shows its own progress.
@@ -6843,7 +6843,7 @@ test "the Footer names the Enter action submission takes, over every composer st
 test "overview Footer reserves the Upgrade cancellation key before clipping progress" {
     var state = try opened(&.{});
     defer state.deinit();
-    const found: upgrade_status.Found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 20 } };
+    const found: upgrade_status.Found = .{ .host = .{ .running = 20 } };
     const cases = [_]struct { run: upgrade_status.Run, right: []const u8 }{
         .{ .run = .checking, .right = "esc cancels" },
         .{ .run = .{ .installing = .{ .found = found, .step = .preparing } }, .right = "esc cancels" },

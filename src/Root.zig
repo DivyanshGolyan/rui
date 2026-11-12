@@ -529,7 +529,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
             return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
         }
     };
-    const found: upgrade_status.Found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none };
+    const found: upgrade_status.Found = .{ .host = .none };
     const runs = [_]?upgrade_status.Run{
         null,
         .checking,

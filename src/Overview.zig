@@ -824,7 +824,7 @@ fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
     // A failed start finishes the run, which the core is told below.
     if (!job.started and try self.quiesceUpgrade() and self.conversationSettled()) job.begin(self.init, self.options.store) catch {};
     const done = job.started and try job.advance();
-    const stands = job.status(self.state.summary.counts.working);
+    const stands = job.status();
     if (!std.meta.eql(stands, self.state.upgrade.run.?)) {
         try self.appNext(ctx, try self.event(.{ .upgrade = stands }));
         ctx.redraw = true;
@@ -876,7 +876,7 @@ fn keepUpgrade(self: *Self) !void {
     self.relaunch_build = null;
     if (job.relaunchBuild()) |build| {
         self.relaunch_build = try self.init.gpa.dupe(u8, build);
-        const stands = job.status(self.state.summary.counts.working);
+        const stands = job.status();
         const line = upgrade_status.relaunchLine(stands, &self.relaunch_line, if (self.caps.unicode) .unicode else .ascii);
         self.relaunch_line_len = line.len;
     }
@@ -6709,6 +6709,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                     const receipt: @import("Installation.zig").Receipt = .{
                         .operation_build = try a.dupe(u8, "/published/build"),
                         .selected_after = try a.dupe(u8, "/published/build"),
+                        .selected_version = .{ .schema = 60, .patch = 0 },
                     };
                     overview.upgrade_job = .{
                         .allocator = a,
@@ -6727,7 +6728,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                                 .sha256 = @splat(0),
                             },
                             .selected = .absent,
-                            .host = .absent,
+                            .hosts = .{},
                             .home = try a.dupe(u8, "/home"),
                             .store = try a.dupe(u8, "/store"),
                             .running_executable = try a.dupeSentinel(u8, "/old/rui", 0),
@@ -6735,15 +6736,15 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                         },
                         .result = .{
                             .installation = if (outcome == .unchanged) .{ .unchanged = receipt } else .{ .installed = receipt },
-                            .activation = switch (outcome) {
+                            .hosts = .{ .version = .{ .schema = 1, .patch = 2 }, .entries = try a.dupe(@import("host_restart_all.zig").Entry, &.{.{ .socket = try a.dupe(u8, ""), .store = try a.dupe(u8, "/store"), .state = .{ .outcome = switch (outcome) {
                                 .unchanged => .not_needed,
                                 .compatible => .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
                                 .incompatible => .{ .client_incompatible = 42 },
-                            },
+                            } } }}) },
                             .store = try a.dupe(u8, "/store"),
                         },
                     };
-                    overview.state.upgrade.run = overview.upgrade_job.status(0);
+                    overview.state.upgrade.run = overview.upgrade_job.status();
                     try overview.keepUpgrade();
                     try std.testing.expectEqual(guidance, overview.upgrade_guidance);
                     var ending_buffer: [upgrade_status.max_line_bytes]u8 = undefined;
