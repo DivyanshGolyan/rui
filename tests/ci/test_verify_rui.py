@@ -251,7 +251,7 @@ class FramesTest(unittest.TestCase):
         self.assertIn("ctrl+c   leave", states["keys"]["expect"])
         self.assertEqual(len(states["keys"]["expect"]), 11)
         self.assertIn("/help", states["keys"]["absent"])
-        self.assertIn("× Fail with exit 127 · exit 127", states["chat"]["expect"])
+        self.assertIn("× Fail with exit 127 · 127", states["chat"]["expect"])
 
     def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
@@ -273,10 +273,22 @@ class FramesTest(unittest.TestCase):
             {"keys": ["PgDn"] * 3},
         ])
         for text in ("✓ List project files", "    README.md", "    src",
-                     "× Fail with exit 127 · exit 127", "× Fail with an excerpt · exit 1",
+                     "× Fail with exit 127 · 127", "× Fail with an excerpt · 1",
                      "    Bash succeeded. Exit code: 0.", "    stdout tail:", "    Bash failed. Exit code: 1.", "    stderr tail:",
                      "    usage: example", "    unknown option --help"):
             self.assertIn(text, state["expect"])
+
+    def test_status_word_frames_reject_the_old_prose(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name, wanted, old in (
+            ("tool-open-two", "× Fail with exit 127 · 127", " · exit 127"),
+            ("chat-working", "Thinking", "Waiting"),
+            ("copy-no-code", "No code block", "No code block in the last answer."),
+        ):
+            with self.subTest(state=name):
+                self.assertIn(wanted, states[name]["expect"])
+                self.assertIn(old, states[name]["absent"])
 
     def test_stop_frame_owns_work_and_waits_for_the_stable_ending(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
