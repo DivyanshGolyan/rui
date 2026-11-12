@@ -3683,46 +3683,64 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try std.testing.expect(!storage.isFenced());
 }
 
-test "SQLite single Access keeps autocommit on success guard failure and abandon" {
+test "SQLite single commit keeps autocommit on success guard failure and abandon" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    const read = rsql.Read(.{
-        .sql = "SELECT min(content_id) AS id FROM content",
-        .Args = struct {},
-        .Row = struct { id: u64 },
-        .cardinality = .one,
-    });
-    const write = rsql.Write(.{
-        .sql = "UPDATE content SET private=private WHERE content_id=?1",
-        .Args = struct { id: u64 },
-        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
-    });
-    for ([_]enum { success, guard, abandon, no_op }{ .success, .guard, .abandon, .no_op }) |outcome| {
+    const Outcome = enum { success, guard, abandon, no_op };
+    const Single = struct {
+        const read = rsql.Read(.{
+            .sql = "SELECT min(content_id) AS id FROM content",
+            .Args = struct {},
+            .Row = struct { id: u64 },
+            .cardinality = .one,
+        });
+        const write = rsql.Write(.{
+            .sql = "UPDATE content SET private=private WHERE content_id=?1",
+            .Args = struct { id: u64 },
+            .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
+        });
+        pub const rounds = transition.rounds(.{ .read = .{.always} });
+        pub const round_budget = 2;
+        pub const commit: transition.Commit = .single;
+        pub const begin: ?rounds.At = .read;
+        pub const Result = void;
+        pub const Guards = error{TestingGuard};
+        pub const Declined = error{};
+
+        storage: *Store,
+        outcome: Outcome,
+        row: read.Result = undefined,
+        /// Whether a transaction was open once the read ran.
+        read_open: bool = true,
+
+        pub fn step(t: *@This(), r: *transition.Round(@This()), ran: ?rounds.At) !transition.Next(@This()) {
+            if (ran == null) {
+                r.read(read, .{}, &t.row);
+                return .{ .round = .read };
+            }
+            t.read_open = t.storage.engine.inTransaction();
+            if (t.outcome != .no_op) r.write(write, .{ .id = if (t.outcome == .guard) 0 else t.row.id });
+            return if (t.outcome == .no_op or t.outcome == .abandon) .{ .done = {} } else .commit;
+        }
+
+        pub fn committed(_: *const @This()) Result {}
+    };
+    for (std.enums.values(Outcome)) |outcome| {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var a: store_access.Access(.single, error{TestingGuard}) = .open(&entry);
-        defer a.deinit();
         var statements: TestingStatements = .{};
         statements.begin(storage.sqliteDatabase());
         defer statements.end(storage.sqliteDatabase());
-        var row: read.Result = undefined;
-        a.read(read, .{}, &row);
-        try a.run();
-        try std.testing.expect(!storage.engine.inTransaction());
-        if (outcome != .no_op) a.write(write, .{ .id = if (outcome == .guard) 0 else row.id });
-        if (outcome == .no_op or outcome == .abandon) {
-            // Even a rollback fault is irrelevant: no transaction opened,
-            // and a queued, unstepped autocommit write is simply discarded.
-            try a.abandon(.{ .rollback_failure = true });
-        } else if (outcome == .guard) {
-            const result = a.end(.{ .rollback_failure = true }, a.commit());
-            try std.testing.expectError(error.TestingGuard, entry.finishTransaction(error{TestingGuard}, .{}, result));
-        } else {
-            try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, a.commit()));
-        }
+        var single: Single = .{ .storage = &storage, .outcome = outcome };
+        // Even a rollback fault is irrelevant: no transaction opens, and a
+        // queued, unstepped autocommit write is simply discarded.
+        const faults: store_core.Faults = .{ .rollback_failure = outcome != .success };
+        const result = entry.finishTransaction(error{TestingGuard}, .{}, transition.run(&entry, Single, &single, faults));
+        if (outcome == .guard) try std.testing.expectError(error.TestingGuard, result) else try result;
+        try std.testing.expect(!single.read_open);
         try std.testing.expectEqual(@as(u64, if (outcome == .success or outcome == .guard) 2 else 1), statements.count);
         try std.testing.expect(!storage.engine.inTransaction());
         try std.testing.expect(!storage.isFenced());

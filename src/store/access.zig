@@ -37,6 +37,7 @@ pub const Mode = enum {
     /// One domain write: SQLite autocommit under the Entry lock, or an
     /// ownership-fenced transaction on a batching engine. It takes no
     /// identities or positions; `commit` runs exactly one queued write.
+    /// Only the transition runner opens one (`transition.Commit.single`).
     single,
 };
 

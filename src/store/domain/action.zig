@@ -595,17 +595,37 @@ const revoke_sender = rsql.Write(.{
 });
 
 /// Clears the Attempt's sender handle, when `binding` names an attempted
-/// Action; otherwise changes nothing. On a `.single` Access: the read and
-/// the one UPDATE. Access selects SQLite autocommit or an ownership-fenced
-/// network transaction, including the no-work and error exits.
-pub fn revokeActionSender(a: anytype, binding: ActionAttemptBinding) !void {
-    var found: attempt_session.Result = undefined;
-    a.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &found);
-    try a.run();
-    const row = found orelse return a.abandon(.{});
-    a.write(revoke_sender, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .session = row.session });
-    try a.commit();
-}
+/// Action; otherwise changes nothing. Its round reads the Attempt and its
+/// one UPDATE commits as a single write: SQLite autocommit, or an
+/// ownership-fenced network transaction, including the no-work and error
+/// exits.
+pub const RevokeSender = struct {
+    pub const rounds = transition.rounds(.{ .attempt = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .single;
+    pub const begin: ?rounds.At = .attempt;
+    pub const Input = struct { binding: ActionAttemptBinding };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    found: attempt_session.Result = undefined,
+
+    pub fn step(t: *RevokeSender, r: *transition.Round(RevokeSender), ran: ?rounds.At) !transition.Next(RevokeSender) {
+        const binding = t.input.binding;
+        if (ran == null) {
+            r.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &t.found);
+            return .{ .round = .attempt };
+        }
+        const row = t.found orelse return .{ .done = {} };
+        r.write(revoke_sender, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .session = row.session });
+        return .commit;
+    }
+
+    pub fn committed(_: *const RevokeSender) Result {}
+};
 
 /// The first Session stop, in command order, that selected the Turn of the
 /// attempted Action `binding` names, or null.

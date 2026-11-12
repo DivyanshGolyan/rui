@@ -1220,11 +1220,7 @@ pub const Store = struct {
     }
 
     fn revokeActionSenderHeld(self: *Store, binding: ActionAttemptBinding) !void {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.single, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.revokeActionSender(&access, binding)));
+        return transition.apply(self, action_domain.RevokeSender, .{ .binding = binding }, .{});
     }
 
     pub fn actionSupersededByStop(self: *Store, binding: ActionAttemptBinding) !?SupersedingControl {
