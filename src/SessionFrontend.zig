@@ -9505,7 +9505,7 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
                 self.app_info.backend.configure = configure;
             }
             _ = try held.draw();
-            const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+            const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
             const close = for (footer.children) |child| {
                 if (child.surface.widget.eql(self.chrome.close.widget())) break child;
             } else return error.TestExpectedCloseTarget;
@@ -9530,7 +9530,7 @@ test "chat standalone footer close clicks match Escape preserve paste and preser
         }
         try self.app_info.openStandaloneChoice(&ctx, row);
         _ = try held.draw();
-        const stale_footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const stale_footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
         const close = for (stale_footer.children) |child| {
             if (child.surface.widget.eql(self.chrome.close.widget())) break child;
         } else return error.TestExpectedCloseTarget;
@@ -9579,7 +9579,7 @@ test "chat standalone lifetime shared domain closes every phase through real scr
         if (case.phase == .save_failed) self.app_info.backend.configure = Fault.configure;
         try self.app_info.openStandaloneChoice(&ctx, row);
         _ = try held.draw();
-        const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
+        const footer = try self.app_input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
         const close = for (footer.children) |child| {
             if (child.surface.widget.eql(self.chrome.close.widget())) break child;
         } else return error.TestExpectedCloseTarget;
