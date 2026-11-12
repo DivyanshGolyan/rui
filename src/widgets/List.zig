@@ -676,3 +676,26 @@ test "List column actions override row targets and region-only rows clip hover a
     try list.widget().handleEvent(&ctx, .{ .mouse = mouse });
     try std.testing.expect(!list.hover.pointing);
 }
+
+test "Hover leave never reads targets from a frame that may be freed" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    var hover: Hover = .{ .targets = &.{.{ .row = 2, .width = 4 }} };
+    try hover.handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = 2, .button = .none, .mods = .{}, .type = .motion } });
+    try std.testing.expect(hover.pointing);
+    // Stand-in for a reset frame arena: any read of these faults.
+    const freed = @as([*]const Hover.Rect, @ptrFromInt(0x1000))[0..4];
+    for ([_]bool{ true, false }) |was_pointing| {
+        ctx.cmds = .empty;
+        ctx.redraw = false;
+        hover.targets = freed;
+        try hover.handleEvent(&ctx, .mouse_leave);
+        try std.testing.expect(!hover.pointing);
+        try std.testing.expect(hover.point == null);
+        try std.testing.expectEqual(was_pointing, ctx.redraw);
+        // Only leaving a pointer restores the default shape.
+        try std.testing.expectEqual(@as(usize, @intFromBool(was_pointing)), ctx.cmds.items.len);
+        if (was_pointing) try std.testing.expectEqual(vaxis.Mouse.Shape.default, ctx.cmds.items[0].set_mouse_shape);
+    }
+}

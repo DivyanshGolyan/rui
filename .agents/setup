@@ -219,6 +219,7 @@ started=$SECONDS
 # Orbs authenticate gh without exporting GH_TOKEN. With a token, fetch_dependencies.sh
 # downloads GitHub-hosted archives through the API, which anonymous load shedding spares.
 GH_TOKEN="${GH_TOKEN:-$(gh auth token 2>/dev/null || true)}" bash "$repo_root/src/fetch_dependencies.sh"
+bash "$repo_root/src/fetch_screen_dependencies.sh"
 wait "$runner_pid" || true
 trap - EXIT
 printf 'Zig dependency graph ready in %ss.\n' "$((SECONDS - started))"

@@ -1,5 +1,14 @@
 //! Pointer-only row feedback shared by lists and panels. Rectangles are the
 //! latest frame's clipped click regions; hovering never owns selection or focus.
+//!
+//! `targets` borrows the frame arena of this widget's latest draw, so it is
+//! read only while handling a `.mouse` event: vxfw delivers one (or a parent
+//! forwards it from its own hit) only to widgets drawn in the frame it
+//! hit-tested, so that frame's arena is still live. `.mouse_leave` also
+//! reaches widgets from an older hit list whose frame arena may be gone, so it
+//! never reads `targets`; it only forgets the point and restores the default
+//! pointer. The borrow itself stays: a press can follow the leave against the
+//! same frame before any redraw, and callers' click regions are these targets.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -19,7 +28,8 @@ pub const Rect = struct {
 const Point = struct { col: i17, row: i17 };
 point: ?Point = null,
 pointing: bool = false,
-/// Borrowed from the latest frame arena and replaced by its next draw.
+/// Borrowed from the latest frame arena and replaced by its next draw; read
+/// only during `.mouse` (see the file comment).
 targets: []const Rect = &.{},
 
 pub fn contains(self: *const Self, rect: Rect) bool {
@@ -29,16 +39,22 @@ pub fn contains(self: *const Self, rect: Rect) bool {
 
 pub fn handleEvent(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const previous = self.point;
-    switch (input) {
-        .mouse => |mouse| self.point = .{ .col = mouse.col, .row = mouse.row },
-        .mouse_leave => self.point = null,
+    const pointing = switch (input) {
+        .mouse => |mouse| pointing: {
+            self.point = .{ .col = mouse.col, .row = mouse.row };
+            break :pointing for (self.targets) |rect| {
+                if (self.contains(rect)) break true;
+            } else false;
+        },
+        .mouse_leave => leave: {
+            // The frame these targets came from may already be freed.
+            self.point = null;
+            break :leave false;
+        },
         .mouse_enter => return, // The following mouse report supplies coordinates.
         else => return,
-    }
+    };
     if (!std.meta.eql(previous, self.point)) ctx.redraw = true;
-    const pointing = for (self.targets) |rect| {
-        if (self.contains(rect)) break true;
-    } else false;
     if (pointing != self.pointing) {
         self.pointing = pointing;
         try ctx.setMouseShape(if (pointing) .pointer else .default);

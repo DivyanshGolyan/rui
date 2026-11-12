@@ -18,7 +18,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
    ```
 
-   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` in containers that cannot build libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term` and `wait` refuse such builds with one line; direct tmux terminals and `frames` work. A build made before the library existed has none; rebuild it with `--force` to add it.
+   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term` and `wait` refuse such builds with one line; direct tmux terminals and `frames` work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
 2. **New run, one per experiment.**
 
@@ -85,7 +85,9 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 ## Drive
 
-Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait` and `/inspect-action` are ordinary unknown commands. `/help` still shows names and argument shapes.
+Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait`, `/inspect-action` and `/help` are ordinary unknown commands. A typed `?` stays in the draft.
+
+For the full keys-only reference, open the overview and press End then Enter to open the pinned Settings row. Press Down six times to select the last **Keys** row (after Version), then Enter. In a wide conversation, click the pinned Settings row instead, without leaving the chat. The `keys` frame checks this at 140 and 46 columns. Check eleven strong key names with short meanings: aligned row-major pairs at 140 columns, one column at 46, including `ctrl+x` → `stop`; no title, footer, instructions, command list or stale help text. Esc returns to Settings, and another Esc returns to the original screen.
 
 | Action | Command |
 | --- | --- |

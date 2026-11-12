@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
 const Footer = @import("widgets/Footer.zig");
+const keys_panel = @import("keys_panel.zig");
 const preferences = @import("preferences.zig");
 const catalog = @import("model_catalog.zig");
 const capability = @import("model_capability.zig");
@@ -30,11 +31,12 @@ pub const Backend = struct {
 };
 
 /// The page's rows, in drawn order: the Panel's field index of each.
-pub const Row = enum { model, effort, permissions, notifications, sign_in, version };
+pub const Row = enum { model, effort, permissions, notifications, sign_in, version, keys };
 const row_count = std.enums.values(Row).len;
 
 backend: ?Backend = null,
 narrow: bool = false,
+keys_open: bool = false,
 values: preferences.Values = .{},
 read_failed: bool = false,
 panel: Panel = .{ .title = "Rui" },
@@ -115,6 +117,7 @@ fn permissionText(mode: protocol.PermissionMode) []const u8 {
 }
 
 fn value(self: *const Self, row: Row) []const u8 {
+    if (row == .keys) return "";
     if (row == .version) return self.version;
     if (self.read_failed) return "unavailable";
     return switch (row) {
@@ -123,7 +126,7 @@ fn value(self: *const Self, row: Row) []const u8 {
         .permissions => permissionText(self.permissionMode()),
         .notifications => if (self.values.notifications) "on" else "off",
         .sign_in => if (self.provider()) |saved| saved.signIn() else "unavailable",
-        .version => unreachable,
+        .version, .keys => unreachable,
     };
 }
 
@@ -148,6 +151,7 @@ fn bind(self: *Self) void {
             .notifications => "Notifications",
             .sign_in => "Sign-in",
             .version => "Version",
+            .keys => "Keys",
         },
         .value = self.value(row),
         .tail = self.tail(row),
@@ -164,9 +168,14 @@ fn bind(self: *Self) void {
 
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    const row: Row = @fromBackingInt(@intCast(index));
+    if (row == .keys) {
+        self.keys_open = true;
+        ctx.consumeAndRedraw();
+        return;
+    }
     const backend = self.backend orelse return;
     if (self.saving_row != null) return;
-    const row: Row = @fromBackingInt(@intCast(index));
     self.failures.set(row, null);
     switch (row) {
         .version => backend.upgrade(backend.context) catch {
@@ -174,6 +183,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         },
         // Sign-in stays selectable until its screen exists.
         .sign_in => return,
+        .keys => unreachable,
         .model, .effort, .permissions, .notifications => {
             try self.refresh();
             if (self.read_failed) return;
@@ -208,7 +218,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         },
         .permissions => self.panel.openChoice(&.{ "run without asking", "ask first" }, if (self.permissionMode() == .bypass) 0 else 1),
         .notifications => try self.save(ctx, row, .{ .notifications = !self.values.notifications }),
-        .sign_in, .version => {},
+        .sign_in, .version, .keys => {},
     }
     ctx.redraw = true;
 }
@@ -228,7 +238,7 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
         },
         .permissions => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
         // Only Model, Effort and Permissions open a choice.
-        .notifications, .sign_in, .version => unreachable,
+        .notifications, .sign_in, .version, .keys => unreachable,
     });
 }
 
@@ -265,12 +275,20 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         if (was_saving) ctx.redraw = true;
         return;
     }
+    if (self.keys_open) return;
     self.bind();
     try self.panel.widget().handleEvent(ctx, input);
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.keys_open) {
+        var reference = keys_panel.panel(if (self.backend) |backend| backend.caps(backend.context) else .{});
+        var surface = try reference.widget().draw(ctx);
+        // Settings retains focus and input ownership while the reference is drawn.
+        surface.widget = self.widget();
+        return surface;
+    }
     self.bind();
     const size = ctx.max.size();
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
@@ -658,4 +676,35 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         try std.testing.expect(!page.hasChoice());
         try page.widget().handleEvent(&events, .mouse_leave);
     }
+}
+
+test "App settings Keys is last and opens by Enter or click without a backend" {
+    try std.testing.expectEqual(row_count - 1, @as(usize, @backingInt(Row.keys)));
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 140, 46 }) |width| for ([_]bool{ false, true }) |click| {
+        // The reference remains available when preferences cannot be read.
+        var page: Self = .{};
+        try page.refresh();
+        page.bind();
+        try std.testing.expectEqualStrings("Keys", page.fields[@backingInt(Row.keys)].label);
+        try std.testing.expectEqualStrings("", page.fields[@backingInt(Row.keys)].value);
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        if (click) {
+            _ = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .row = 2 + @as(u16, @backingInt(Row.keys)), .col = 4, .mods = .{} } });
+        } else {
+            page.select(.keys);
+            try press(&page, &ctx, vaxis.Key.enter);
+        }
+        try std.testing.expect(page.keys_open);
+        try std.testing.expect(ctx.consume_event);
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        try std.testing.expectEqualStrings("e", drawn.readCell(1, 0).char.grapheme);
+        try std.testing.expect(drawn.widget.eql(page.widget()));
+        // Enter on a reference is inert, not a hidden settings edit.
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.keys_open);
+        try std.testing.expect(page.saving_row == null);
+    };
 }

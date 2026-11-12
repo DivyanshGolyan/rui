@@ -22,6 +22,7 @@ const operation_effort = @import("operation_effort.zig");
 const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
+const model_facts_domain = @import("model_facts.zig");
 const model_attempt = @import("model_attempt.zig");
 const reads_domain = @import("reads.zig");
 const tool_offer = @import("tool_offer.zig");
@@ -674,8 +675,9 @@ const project_instructions = rsql.Write(.{
 
 const insert_operation = rsql.Write(.{
     .sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff," ++
-        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
-        "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?14," ++
+        "admission_position,purpose,compaction_trigger,output_reservation,reasoning_effort,history_floor,history_level,history_dropped,attempt_ordinal,retry_due_at_ms,attempt_at,tool_set_id,context_window,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) " ++
+        "SELECT ?1,?2,selected_revision.session_ref,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,1,0,@now,?17," ++
+        model_facts_domain.contextWindowSql("?14", "?15", "?16") ++ "," ++
         configuration_domain.effortChoiceRevisionSql("selected_revision") ++ "," ++ operation_effort.previousSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ "," ++
         "selected_session.codec='openai-responses/2' AND ?10 IS NOT NULL AND NOT @same(?10," ++ historical_domain.effortBeforeSql("selected_revision.session_ref", "?6", "selected_revision.model", "?11", "?10") ++ ")," ++ operation_effort.previousOverrideSql("selected_revision.session_ref", "?6", "selected_revision.model") ++ " " ++
         "FROM session_revision selected_revision JOIN session selected_session ON selected_session.session_ref=selected_revision.session_ref WHERE selected_revision.session_ref=@session(?3) AND selected_revision.revision=?4",
@@ -693,6 +695,9 @@ const insert_operation = rsql.Write(.{
         history_floor: ?u64,
         history_level: ?u8,
         history_dropped: ?u64,
+        model: []const u8,
+        shipped_context_window: u64,
+        unlisted_context_window: u64,
         tool_set_id: u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
@@ -873,6 +878,9 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .history_floor = floor,
         .history_level = if (room) |choice| choice.level else null,
         .history_dropped = if (room != null) dropped else null,
+        .model = facts.model.slice(),
+        .shipped_context_window = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()),
+        .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
         .tool_set_id = offer,
     });
     // The writes are queued, not run, as in every converted entry point.
