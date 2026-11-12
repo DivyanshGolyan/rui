@@ -39,6 +39,7 @@ const serve_test = &[_]Option{
     hiddenValue("test-models-dev-url"),
     hiddenValue("test-codex-fixture-endpoint"),
     hiddenValue("test-openai-fixture-endpoint"),
+    hiddenValue("test-chatgpt-fixture-endpoint"),
     hiddenNumber("test-bash-scratch-limit-bytes", 0, std.math.maxInt(u64)),
     hiddenNumber("test-retention-entry-capacity", 2, retention_capacity.entries),
     hiddenFlag("test-retention-removal-failure"),
