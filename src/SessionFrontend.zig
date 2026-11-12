@@ -3474,7 +3474,9 @@ const HeldFrontend = struct {
         // No read is due: a test hands the frontend what a read would.
         held.self.poll_at = std.math.maxInt(i96);
         held.self.submission.environment = .empty;
-        _ = held.self.attach(.{ .drafts = drafts, .root = &held.root, .context = held, .leave = onLeave, .copy = onCopy, .on_open = onOpen }, .{ .depth = .none });
+        const child = held.self.attach(.{ .drafts = drafts, .root = &held.root, .context = held, .leave = onLeave, .copy = onCopy, .on_open = onOpen }, .{ .depth = .none });
+        // The Session is the main pane, so Root leaves its keys to it.
+        held.root.session = child;
         return held;
     }
 
