@@ -1009,6 +1009,7 @@ class SelectionTest(unittest.TestCase):
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
+            # The ChatGPT plan sign-in keeps its records in the same custody.
             native = ["chatgpt-login-integration", "chatgpt-plan-integration", "codex-credential-integration",
                       "codex-h2-integration", "codex-integration", "test", "test-logic"]
             self.assertEqual(result["native_targets"], native)

@@ -181,6 +181,8 @@ pub fn rows(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u
     var columns: Columns = .{ .sign_ins = providers.count() > 1 };
     if (needed(buffer, menu, query, defaults, choice, widest, columns, method, unicode, typed_row) > width) columns.context = false;
     if (needed(buffer, menu, query, defaults, choice, widest, columns, method, unicode, typed_row) > width) columns.all_sign_ins = false;
+    // A sign-in's name can be long; the ID it would cut is the choice itself.
+    if (needed(buffer, menu, query, defaults, choice, widest, columns, method, unicode, typed_row) > width) columns.sign_ins = false;
     widest = @min(widest, width -| needed(buffer, menu, query, defaults, choice, 0, columns, method, unicode, typed_row));
     return .{ .menu = menu, .query = query, .defaults = defaults, .choice = choice, .widest = widest, .columns = columns, .method = method, .unicode = unicode, .count = count, .selected = selected, .total = count, .end = count, .typed_row = typed_row };
 }
@@ -461,18 +463,46 @@ test "model picker view drops columns before the ID without prose rows" {
     const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .high };
     const selected = select(&menu, "terra", defaults, null).?;
     const wide = try lines(arena.allocator(), &menu, "terra", defaults, selected, 100);
-    try std.testing.expectEqualStrings("   gpt-6.1-terra  1M     ‹ high ›   [ChatGPT]  API key", wide.rows[0].text);
+    try std.testing.expectEqualStrings("   gpt-6.1-terra  1M     ‹ high ›   [ChatGPT (device code)]  API key", wide.rows[0].text);
     try std.testing.expectEqual(@as(?u32, 0), wide.selected);
-    const no_context = try lines(arena.allocator(), &menu, "terra", defaults, selected, 47);
-    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [ChatGPT]  API key", no_context.rows[0].text);
-    const one_sign_in = try lines(arena.allocator(), &menu, "terra", defaults, selected, 38);
-    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [ChatGPT]", one_sign_in.rows[0].text);
-    const truncated = try lines(arena.allocator(), &menu, "terra", defaults, selected, 31);
-    try std.testing.expectEqualStrings("   gpt-6…  ‹ high ›   [ChatGPT]", truncated.rows[0].text);
+    const no_context = try lines(arena.allocator(), &menu, "terra", defaults, selected, 61);
+    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [ChatGPT (device code)]  API key", no_context.rows[0].text);
+    const one_sign_in = try lines(arena.allocator(), &menu, "terra", defaults, selected, 52);
+    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high ›   [ChatGPT (device code)]", one_sign_in.rows[0].text);
+    const no_sign_in = try lines(arena.allocator(), &menu, "terra", defaults, selected, 51);
+    try std.testing.expectEqualStrings("   gpt-6.1-terra  ‹ high › ", no_sign_in.rows[0].text);
+    const truncated = try lines(arena.allocator(), &menu, "terra", defaults, selected, 20);
+    try std.testing.expectEqualStrings("   gpt-6…  ‹ high › ", truncated.rows[0].text);
     const all = try lines(arena.allocator(), &menu, "custom", defaults, select(&menu, "custom", defaults, null), 100);
     try std.testing.expectEqual(@as(usize, 1), all.rows.len);
     try std.testing.expect(!all.rows[0].heading);
     try std.testing.expect(std.mem.indexOf(u8, all.rows[0].text, "API key") == null);
+}
+
+test "model picker view tells both ChatGPT sign-ins apart, with and without OpenAI" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ false, true }) |with_openai| {
+        const lists = [_]@import("model_list.zig").Entry{
+            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } },
+            .{ .provider = .chatgpt, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } },
+            .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } },
+        };
+        var menu = try picker.testMenu(lists[0..if (with_openai) @as(usize, 3) else 2]);
+        defer menu.deinit(std.testing.allocator);
+        const defaults: picker.Defaults = .{ .model = "gpt-6.1-sol", .provider = .chatgpt, .effort = .high };
+        // The sign-in word names both ChatGPT sign-ins; the saved one stays chosen.
+        var choice = select(&menu, "sol chatgpt", defaults, null);
+        try std.testing.expectEqual(picker.Provider.chatgpt, choice.?.row.provider);
+        const plain = try lines(arena.allocator(), &menu, "sol chatgpt", defaults, choice, 120);
+        try std.testing.expectEqualStrings(if (with_openai) "✓  gpt-6.1-sol  1M     ‹ high ›   ChatGPT (device code)  API key  [ChatGPT]" else "✓  gpt-6.1-sol  1M     ‹ high ›   ChatGPT (device code)  [ChatGPT]", plain.rows[0].text);
+        _ = step(&menu, "sol chatgpt", defaults, &choice, .next_sign_in);
+        try std.testing.expectEqual(picker.Provider.codex, choice.?.row.provider);
+        const device = try lines(arena.allocator(), &menu, "sol chatgpt", defaults, choice, 120);
+        try std.testing.expectEqualStrings(if (with_openai) "✓  gpt-6.1-sol  1M     ‹ high ›   [ChatGPT (device code)]  API key  ChatGPT" else "✓  gpt-6.1-sol  1M     ‹ high ›   [ChatGPT (device code)]  ChatGPT", device.rows[0].text);
+        // The key word names only the key, never a ChatGPT sign-in.
+        try std.testing.expectEqual(with_openai, select(&menu, "sol api", defaults, null) != null and select(&menu, "sol api", defaults, null).?.row.provider == .openai);
+    }
 }
 
 test "model picker view separates the saved mark and highlighted controls" {
@@ -491,7 +521,7 @@ test "model picker view separates the saved mark and highlighted controls" {
     for (shown.rows[0].segments) |segment| {
         if (std.mem.eql(u8, segment.text, "✓")) mark = segment.style.colour == .mark;
         if (std.mem.eql(u8, segment.text, "‹ high ›")) effort = segment.style.bold;
-        if (std.mem.eql(u8, segment.text, "[ChatGPT]")) sign_in = segment.style.bold;
+        if (std.mem.eql(u8, segment.text, "[ChatGPT (device code)]")) sign_in = segment.style.bold;
     }
     try std.testing.expect(mark and effort and sign_in);
 }

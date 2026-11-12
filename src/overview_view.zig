@@ -1737,7 +1737,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                     const next = state.nextBinding().provider;
                     const missing = if (std.mem.eql(u8, code, "model_capability_unavailable")) std.meta.stringToEnum(Provider, next orelse "") else null;
                     if (missing) |provider| {
-                        state.say(.attention, "! {s} sign-in missing · {s}", .{ provider.signIn(), provider.login() });
+                        if (provider.login()) |command|
+                            state.say(.attention, "! {s} sign-in missing · {s}", .{ provider.signIn(), command })
+                        else
+                            state.say(.attention, "! {s} sign-in missing · this terminal cannot sign in to it yet", .{provider.signIn()});
                     } else state.say(.attention, "! Not started: {s}", .{code});
                 },
                 .unconfirmed => |handle| {
@@ -3430,8 +3433,14 @@ fn providerBand(built: *Spans, trouble: Band, now_ms: u64) error{OutOfMemory}![]
     var buffer: [8]u8 = undefined;
     return bandLine(built, switch (trouble.trouble) {
         // Each names the provider of the newest failure it shows.
-        .sign_in => try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{trouble.provider.?.login()}),
-        .api_key => try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ trouble.provider.?.shown(), trouble.provider.?.login() }),
+        .sign_in => if (trouble.provider.?.login()) |command|
+            try std.fmt.allocPrint(built.arena, "Sign-in expired. Run {s}.", .{command})
+        else
+            try std.fmt.allocPrint(built.arena, "{s} sign-in expired. This terminal cannot sign in to it yet.", .{trouble.provider.?.signIn()}),
+        .api_key => if (trouble.provider.?.login()) |command|
+            try std.fmt.allocPrint(built.arena, "{s} API key rejected. Run {s}, then rui host pause.", .{ trouble.provider.?.shown(), command })
+        else
+            try std.fmt.allocPrint(built.arena, "{s} API key rejected. Save a new key, then rui host pause.", .{trouble.provider.?.shown()}),
         .quota => if (trouble.resets_at) |at|
             try std.fmt.allocPrint(built.arena, "Quota used up. Resets in {s}.", .{ageText(&buffer, at -| now_ms / 1000)})
         else
@@ -6366,13 +6375,13 @@ test "the lines that name the next Session's model name the saved effort its sta
             .done => try std.testing.expect(state.notice == null),
             .failed => {
                 const next = if (case.held == null) " · low" else "";
-                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Default not saved (check ~/.config/rui/preferences); new Sessions here still use {s}{s} · ChatGPT", .{ case.model, next }), state.notice.?.text());
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Default not saved (check ~/.config/rui/preferences); new Sessions here still use {s}{s} · ChatGPT (device code)", .{ case.model, next }), state.notice.?.text());
             },
             .unconfirmed => {
                 var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
                 defer departure.deinit();
                 try writeDeparture(&state, case.saved, &departure.writer);
-                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "rui: New Sessions use {s}{s} · ChatGPT; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ case.model, case.later }), departure.written());
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "rui: New Sessions use {s}{s} · ChatGPT (device code); durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ case.model, case.later }), departure.written());
             },
         }
     };
@@ -6467,7 +6476,7 @@ test "with no sign-in served, the picker has no model rows or shell instructions
     defer std.testing.allocator.free(screen);
     for (std.enums.values(Provider)) |provider| {
         try std.testing.expect(state.menu.sources.get(provider) == null);
-        try std.testing.expect(std.mem.indexOf(u8, screen, provider.login()) == null);
+        if (provider.login()) |command| try std.testing.expect(std.mem.indexOf(u8, screen, command) == null);
     }
     try expectEffects(&.{}, try submit(&state, draft));
     try std.testing.expect(state.default == null);
@@ -6501,16 +6510,21 @@ test "the unknown-command notice fits a 40-column screen" {
     try std.testing.expectEqualStrings("! Unknown command /status", state.notice.?.text());
 }
 
-test "a start the Host refuses for want of its sign-in names the sign-in and its login" {
-    var state = try pickerState(Default.of("codex", "gpt-6-luna"));
-    defer state.deinit();
-    const draft = try typeText(&state, "Try");
-    _ = try submit(&state, draft);
-    try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
-    const said = state.notice.?.text();
-    try std.testing.expect(std.mem.indexOf(u8, said, Provider.codex.signIn()) != null);
-    try std.testing.expect(std.mem.indexOf(u8, said, Provider.codex.login()) != null);
-    try std.testing.expect(std.mem.indexOf(u8, said, "model_capability_unavailable") == null);
+test "a start the Host refuses for want of its sign-in names the sign-in and its login, if it has one" {
+    for ([_]Provider{ .codex, .chatgpt }) |provider| {
+        var state = try pickerState(Default.of(@tagName(provider), "gpt-6-luna"));
+        defer state.deinit();
+        const draft = try typeText(&state, "Try");
+        _ = try submit(&state, draft);
+        try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
+        const said = state.notice.?.text();
+        try std.testing.expect(std.mem.indexOf(u8, said, provider.signIn()) != null);
+        if (provider.login()) |command|
+            try std.testing.expect(std.mem.indexOf(u8, said, command) != null)
+        else
+            try std.testing.expect(std.mem.indexOf(u8, said, "cannot sign in to it yet") != null and std.mem.indexOf(u8, said, "rui auth login") == null);
+        try std.testing.expect(std.mem.indexOf(u8, said, "model_capability_unavailable") == null);
+    }
 }
 
 test "a picker survives a tiny screen" {

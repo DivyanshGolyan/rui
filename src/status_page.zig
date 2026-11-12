@@ -521,11 +521,11 @@ test "the page shows the approved rows, `›` on the selected one, then the work
             "   Folder          ~/code/rui\n" ++
             "   Compact at      245,000 tokens · now 31,200" ++ grey ++ "model default" ++ end ++
             "   Headroom        0 tokens" ++ grey ++ "model default" ++ end ++
-            "   Model           gpt-6.1-sol · ChatGPT\n" ++
+            "   Model           gpt-6.1-sol · ChatGPT (device code)\n" ++
             "   Store           ~/.local/share/rui/store" ++ grey ++ "fixed for this Session" ++ end ++
             "   Instructions    set from a shell\n" ++
             " New Sessions\n" ++
-            "   Model           gpt-6.1-sol · ChatGPT" ++ grey ++ "Rui default" ++ end ++
+            "   Model           gpt-6.1-sol · ChatGPT (device code)" ++ grey ++ "Rui default" ++ end ++
             "   Effort          model default\n" ++
             "   Notifications   on\n" ++
             "   Store           ~/.rui/store\n" ++
