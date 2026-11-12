@@ -26,7 +26,13 @@ pub const Selection = union(enum) {
 };
 
 pub const Intent = enum { released_upgrade, released_install, intentional_source };
-pub const Receipt = struct { operation_build: []const u8, selected_after: []const u8 };
+pub const Receipt = struct {
+    operation_build: []const u8,
+    selected_after: []const u8,
+    /// Identity of selected_after, captured under the publication lock.
+    /// Intentional source builds need not have a released version.
+    selected_version: ?releases.Version = null,
+};
 pub const InstallationOutcome = union(enum) {
     installed: Receipt,
     unchanged: Receipt,
@@ -257,31 +263,31 @@ fn newStage(allocator: Allocator, io: std.Io, home: []const u8) ![]u8 {
 }
 
 pub fn prepare(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation) !PreparedBuild {
-    return prepareWithReporter(allocator, io, home, candidate, cancellation, .{});
+    return prepareWithReporter(allocator, io, home, candidate, cancellation, .{}, null);
 }
 
-pub fn prepareWithReporter(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter) !PreparedBuild {
-    return prepareWithCleanup(allocator, io, home, candidate, cancellation, reporter, .{});
+pub fn prepareWithReporter(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, diagnostic: ?*process.DownloadDiagnostic) !PreparedBuild {
+    return prepareWithCleanup(allocator, io, home, candidate, cancellation, reporter, .{}, diagnostic);
 }
 
-fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults) !PreparedBuild {
+fn prepareWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, reporter: CleanupReporter, faults: CleanupFaults, diagnostic: ?*process.DownloadDiagnostic) !PreparedBuild {
     try process.check(cancellation);
     var prepared: PreparedBuild = .{ .path = try newStage(allocator, io, home), .version = candidate.version };
-    prepareInto(allocator, io, &prepared, candidate, cancellation) catch |primary| {
+    prepareInto(allocator, io, &prepared, candidate, cancellation, diagnostic) catch |primary| {
         return prepared.disposeResult(allocator, io, primary, reporter, faults).?;
     };
     return prepared;
 }
 
-fn prepareInto(allocator: Allocator, io: std.Io, prepared: *PreparedBuild, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation) !void {
+fn prepareInto(allocator: Allocator, io: std.Io, prepared: *PreparedBuild, candidate: *const releases.ReleaseCandidate, cancellation: ?*const client.Cancellation, diagnostic: ?*process.DownloadDiagnostic) !void {
     const archive = try std.fmt.allocPrint(allocator, "{s}/archive.tar.gz", .{prepared.path});
     defer allocator.free(archive);
     const fixture = std.mem.startsWith(u8, candidate.archive_url, "http://");
-    const output = try process.output(allocator, io, &.{
+    const output = try process.downloadOutput(allocator, io, &.{
         "curl",         "--disable",               "--fail",  "--silent",                         "--show-error",  "--location", "--connect-timeout", "10",        "--max-time", "300",
         "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https",     "--max-filesize",    "268435456", "--output",   archive,
         "--",           candidate.archive_url,
-    }, cancellation, 1024);
+    }, cancellation, 1024, diagnostic);
     allocator.free(output);
     try verifyArchive(allocator, io, prepared, candidate, cancellation, archive);
 }
@@ -482,7 +488,7 @@ fn publishWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, prepar
                 if (std.mem.eql(u8, complete, selected.build)) prepared.published = true;
                 const operation = try allocator.dupe(u8, complete);
                 errdefer allocator.free(operation);
-                return .{ .unchanged = .{ .operation_build = operation, .selected_after = try allocator.dupe(u8, selected.build) } };
+                return .{ .unchanged = .{ .operation_build = operation, .selected_after = try allocator.dupe(u8, selected.build), .selected_version = selected.version } };
             },
         }
     }
@@ -508,7 +514,7 @@ fn publishWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, prepar
         return primary;
     };
     prepared.published = true;
-    return .{ .installed = .{ .operation_build = operation, .selected_after = selected } };
+    return .{ .installed = .{ .operation_build = operation, .selected_after = selected, .selected_version = if (candidate == .released) candidate.released.version else null } };
 }
 
 test "release archive entries cannot leave their single root" {
@@ -545,20 +551,47 @@ test "installation native owner serializes release no-downgrade and intentional 
     var first = try publishExisting(allocator, io, home, newer, .released_install, null);
     defer first.deinit(allocator);
     try std.testing.expect(first == .installed);
+    try std.testing.expectEqualDeep(releases.Version{ .schema = 56, .patch = 10 }, first.receipt().selected_version.?);
     var second = try publishExisting(allocator, io, home, older, .released_upgrade, null);
     defer second.deinit(allocator);
     try std.testing.expect(second == .unchanged);
     try std.testing.expectEqualStrings(older, second.receipt().operation_build);
     try std.testing.expectEqualStrings(newer, second.receipt().selected_after);
+    try std.testing.expectEqualDeep(first.receipt().selected_version, second.receipt().selected_version);
     var equal = try publishExisting(allocator, io, home, newer, .released_upgrade, null);
     defer equal.deinit(allocator);
     try std.testing.expect(equal == .unchanged);
+    try std.testing.expectEqualDeep(first.receipt().selected_version, equal.receipt().selected_version);
     const source = try testBuild(allocator, io, home, "source", "unreleased");
     defer allocator.free(source);
     var explicit = try publishExisting(allocator, io, home, source, .intentional_source, null);
     defer explicit.deinit(allocator);
     try std.testing.expect(explicit == .installed);
     try std.testing.expectError(error.IneligibleInstallation, publishExisting(allocator, io, home, newer, .released_upgrade, null));
+}
+
+test "installation receipt keeps the selected version after its executable disappears" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(home);
+    const newer = try testBuild(allocator, io, home, "winner", "0.56.10");
+    defer allocator.free(newer);
+    const older = try testBuild(allocator, io, home, "loser", "0.56.2");
+    defer allocator.free(older);
+    var installed = try publishExisting(allocator, io, home, newer, .released_install, null);
+    defer installed.deinit(allocator);
+    var unchanged = try publishExisting(allocator, io, home, older, .released_upgrade, null);
+    defer unchanged.deinit(allocator);
+    const executable = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{newer});
+    defer allocator.free(executable);
+    try Dir.cwd().deleteFile(io, executable);
+    for ([_]InstallationOutcome{ installed, unchanged }) |outcome| {
+        try std.testing.expectEqualStrings(newer, outcome.receipt().selected_after);
+        try std.testing.expectEqualDeep(releases.Version{ .schema = 56, .patch = 10 }, outcome.receipt().selected_version.?);
+    }
 }
 
 test "installation publication rechecks broken unmanaged and absent selections" {
@@ -705,7 +738,7 @@ test "installation archive verifies digest executable notices and traversal befo
     defer selected.deinit(allocator);
     try std.testing.expect(selected == .absent);
     const offline = prepare(allocator, io, home, &candidate, null);
-    try std.testing.expectError(error.UpgradeChildFailed, offline);
+    try std.testing.expectError(error.ReleaseDownloadFailed, offline);
     try Dir.cwd().writeFile(io, .{ .sub_path = archive, .data = bytes });
     var complete: PreparedBuild = .{ .path = try newStage(allocator, io, home), .version = .{ .schema = 56, .patch = 0 } };
     defer complete.dispose(allocator, io) catch @panic("fixture cleanup failed");
@@ -865,9 +898,9 @@ test "installation preparation cleanup failure preserves download cause and reta
     var captured: CleanupCapture = .{ .allocator = allocator, .io = io };
     defer captured.deinit();
     const candidate: releases.ReleaseCandidate = .{ .version = .{ .schema = 56, .patch = 0 }, .tag = "v0.56.0", .archive_name = "rui-0.56.0-darwin-arm64.tar.gz", .archive_url = "http://127.0.0.1:1/archive", .checksum_url = "http://127.0.0.1:1/SHA256SUMS", .sha256 = @splat(0) };
-    try std.testing.expectError(error.UpgradeChildFailed, prepareWithCleanup(allocator, io, home, &candidate, null, captured.reporter(), .{ .remove_tree = error.AccessDenied }));
+    try std.testing.expectError(error.ReleaseDownloadFailed, prepareWithCleanup(allocator, io, home, &candidate, null, captured.reporter(), .{ .remove_tree = error.AccessDenied }, null));
     try std.testing.expectEqual(@as(usize, 1), captured.calls);
-    try std.testing.expectEqual(error.UpgradeChildFailed, captured.primary.?);
+    try std.testing.expectEqual(error.ReleaseDownloadFailed, captured.primary.?);
     try std.testing.expectEqual(error.AccessDenied, captured.secondary.?);
     try std.testing.expect(captured.existed_during_report);
     const retained = captured.retained_path.?;

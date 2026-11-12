@@ -204,32 +204,72 @@ pub fn inheritedFloor(a: anytype, session: []const u8, boundary: u64, model: []c
 /// about as many units as fit that target, however long the history.
 /// A failed step is `CorruptStore`.
 pub fn deeperFloor(a: anytype, operation: u64) !?Room {
-    var facts: floor_facts.Row = undefined;
-    a.read(floor_facts, .{ .operation = operation }, &facts);
+    var search: FloorSearch = .{ .operation = operation };
+    search.start(a);
     try store_access.runAs(a, error.CorruptStore);
-    const from: u8 = facts.history_level orelse 0;
-    if (from >= levels) return null;
-    const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
-    const base_floor: u64 = if (compatible) (if (facts.base_floor) |floor| floor.get() else 0) else 0;
-    const previous: u64 = if (facts.history_floor) |floor| floor.get() else base_floor;
-    // Both callers walk the failed Operation's admission-time window, never
-    // today's catalog or its successor's window. A refresh cannot move this floor.
-    var walk: Walk = .init(facts.context_window, facts.output_reservation, facts.admission_position.get());
-    while (!walk.done()) {
+    while (search.next(a)) try store_access.runAs(a, error.CorruptStore);
+    return search.room();
+}
+
+/// `deeperFloor` as rounds its caller runs: `start` queues the facts read
+/// for the first; after each round, `next` queues a page and answers true,
+/// or answers false once the walk is over, when `room` is the answer.
+pub const FloorSearch = struct {
+    operation: u64,
+    /// The facts round's row, then the walk `next` starts from it: the
+    /// pages need none of the row's model names.
+    read: union { facts: floor_facts.Row, walk: Walk } = undefined,
+    /// The level the walk deepens from, or `levels` while none is deeper.
+    from: u8 = levels,
+    /// Whether a page round ran.
+    paged: bool = false,
+    /// What `next` keeps from the facts for the pages and the answer.
+    base_floor: u64 = 0,
+    previous: u64 = 0,
+    first_message: u64 = 0,
+    frontier: u64 = 0,
+
+    pub fn start(search: *FloorSearch, a: anytype) void {
+        search.read = .{ .facts = undefined };
+        a.read(floor_facts, .{ .operation = search.operation }, &search.read.facts);
+    }
+
+    pub fn next(search: *FloorSearch, a: anytype) bool {
+        if (!search.paged) {
+            const facts = &search.read.facts;
+            const from: u8 = facts.history_level orelse 0;
+            if (from >= levels) return false;
+            const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
+            search.from = from;
+            search.base_floor = if (compatible) (if (facts.base_floor) |floor| floor.get() else 0) else 0;
+            search.previous = if (facts.history_floor) |floor| floor.get() else search.base_floor;
+            search.first_message = facts.first_message;
+            search.frontier = if (compatible) facts.frontier else 0;
+            // Both callers walk the failed Operation's admission-time window, never
+            // today's catalog or its successor's window. A refresh cannot move this floor.
+            const walk: Walk = .init(facts.context_window, facts.output_reservation, facts.admission_position.get());
+            search.read = .{ .walk = walk };
+        } else if (search.read.walk.page_rows < page_rows) return false;
+        const walk = &search.read.walk;
+        if (walk.done()) return false;
         walk.page_rows = 0;
         a.readEach(units, .{
-            .operation = operation,
+            .operation = search.operation,
             .below = walk.cursor,
-            .above = base_floor,
-            .first_message = facts.first_message,
-            .frontier = if (compatible) facts.frontier else 0,
-        }, page_rows, &walk);
-        try store_access.runAs(a, error.CorruptStore);
-        if (walk.page_rows < page_rows) break;
+            .above = search.base_floor,
+            .first_message = search.first_message,
+            .frontier = search.frontier,
+        }, page_rows, walk);
+        search.paged = true;
+        return true;
     }
-    const choice = walk.deeper(from, previous) orelse return null;
-    return .{ .choice = choice, .previous = previous, .first_message = facts.first_message };
-}
+
+    pub fn room(search: *const FloorSearch) ?Room {
+        if (search.from >= levels) return null;
+        const choice = search.read.walk.deeper(search.from, search.previous) orelse return null;
+        return .{ .choice = choice, .previous = search.previous, .first_message = search.first_message };
+    }
+};
 
 /// The conversation entries of Operation ?1's Session above ?2 and at or
 /// below ?3, but instructions and the first Message (?4) with its skills: what a floor

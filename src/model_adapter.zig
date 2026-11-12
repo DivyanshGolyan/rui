@@ -78,6 +78,7 @@ test "HTTP 429 quota codes are permanent rather than retryable rate limits" {
         .{ "usage_limit_reached", "provider_quota" },
         .{ "insufficient_quota", "provider_quota" },
         .{ "credit_balance_exhausted", "provider_quota" },
+        .{ "subscription_sharing_usage_limit_exceeded", "provider_quota" },
         .{ "usage_not_included", "provider_plan" },
     };
     for (cases) |case| {
@@ -312,6 +313,8 @@ test "provider interpretation keeps quota and policy stream failures permanent" 
         .{ "organization_spend_limit_exceeded", "provider_quota" },
         .{ "project_spend_limit_exceeded", "provider_quota" },
         .{ "usage_limit_reached", "provider_quota" },
+        .{ "subscription_sharing_usage_limit_exceeded", "provider_quota" },
+        .{ "subscription_sharing_usage_unavailable", "provider_quota" },
         .{ "usage_not_included", "provider_plan" },
         .{ "cyber_policy", "provider_policy" },
         .{ "bio_policy", "provider_policy" },

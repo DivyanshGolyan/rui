@@ -48,7 +48,7 @@ pub fn Write(comptime spec: Spec) type {
     return struct {
         pub const sql = query.sql;
         pub fn queue(a: anytype, args: spec.Args) void {
-            const timings = a.store.modelTimingSource().snapshot(args.operation_id, a.store.io);
+            const timings = a.attemptTimings(args.operation_id);
             var values: Args = undefined;
             inline for (original.field_names) |name| @field(values, name) = @field(args, name);
             values.latency_ms = timings.latency_ms;

@@ -20,9 +20,17 @@ import model_fixture as fixture
 from host_process import dispose_all, screen_fixture_root, stop_process
 from human_cli_fixture import (
     admit,
+    assert_chat_info_layout,
     chat_content_row,
+    chat_info_open,
+    chat_info_geometry,
+    footer_click,
+    assert_model_choice,
     composer_line,
+    conversation_text,
     keyed_frame,
+    model_choice_frame,
+    model_choice_shown,
     run,
     settle_screen,
     terminal_capture,
@@ -329,9 +337,10 @@ def scroll_marker_case():
 
 
 def pages_case():
-    """/status opens as a Transcript page with no heading over it;
+    """Chat info opens above the input and returns to the saved feed;
     the `↓` marker says more is below; Esc returns to the latest. A page
-    opened while work runs keeps the stop key on the last row."""
+    opened while work runs substitutes its own footer; Esc restores the live
+    stop hint without changing work."""
     release = threading.Event()
     with Chrome("rui-chrome-pages.", []) as chrome:
         session = chrome.session()
@@ -343,23 +352,139 @@ def pages_case():
         chrome.answered(session, "seed")
         master, caller, _ = chrome.open(session, lambda screen: "SEED-ANSWER" in screen)
         try:
-            status = chrome.frame(master, b"/status\r", lambda screen: transcript_rows(screen)[0].strip() == f"Status · {session}")
-            assert marker(status) == "↓" and composing(status, ""), status
+            chrome.frame(master, b"kept draft", lambda screen: composing(screen, "kept draft"))
+            status = chat_info_open(master)
+            assert "Folder" in status and "Model" in status, status
             assert not any(row.startswith("Browsing") for row in transcript_rows(status)), status
-            chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER"))
+            # Folder is read-only: three Downs reach Model, not Folder.
+            choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
+            assert "kept draft" in choice, choice
+            assert_chat_info_layout(choice, context=True)
+            chrome.frame(master, b"\x1b", lambda screen: not model_choice_shown(screen) and "Copy last answer" in screen)
+            # Context, when present, is read-only: the next selectable row is Rename.
+            chrome.frame(master, b"\x1b[B\rCANCELLED-NAME", lambda screen: "CANCELLED-NAME" in screen)
+            chrome.frame(master, b"\x1b", lambda screen: "CANCELLED-NAME" not in screen and "Copy last answer" in screen)
+            # Refused paste retains usable name bytes, then the same editor
+            # recovers and submits without closing/reopening the Rename field.
+            before_name = json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                                         "--session", session))["session"]["label"]
+            chrome.frame(master, b"\rkept-name", lambda screen: "kept-name" in screen)
+            refused = chrome.frame(master, b"\x1b[200~\xff\x1b[201~\r",
+                                   lambda screen: "text couldn't be entered" in screen)
+            assert "kept-name" in refused and "kept draft" in refused, refused
+            assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                                  "--session", session))["session"]["label"] == before_name
+            chrome.frame(master, b"\x01\x0bRecovered rename\r", lambda screen:
+                         "Recovered rename" in screen and "saving" not in screen
+                         and "text couldn't be entered" not in screen)
+            assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
+                                  "--session", session))["session"]["label"] == "Recovered rename"
+            # Feed and draft facts can already be visible behind natural-height
+            # info. Wait for its close, not a tick before lone Esc is decoded.
+            returned = chrome.frame(master, b"\x1b", lambda screen:
+                                    latest(screen, "SEED-ANSWER") and composing(screen, "kept draft")
+                                    and "Copy last answer" not in screen and "esc close" not in screen)
+            assert "Copy last answer" not in returned and not model_choice_shown(returned), returned
+            assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
+            chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
+            chrome.frame(master, b"", lambda screen: latest(screen, "SEED-ANSWER"))
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
-            working = chrome.frame(master, b"/status\r", lambda screen: transcript_rows(screen)[0].strip() == f"Status · {session}")
-            assert rows(working)[FOOTER].endswith("ctrl+x stop"), working
-            chrome.frame(master, b"\x1b", lambda screen: "⠹ Held call · " in screen and marker(screen) is None)
+            working = chat_info_open(master)
+            assert rows(working)[-1].endswith("esc close"), working
+            returned = chrome.frame(master, b"\x1b", lambda screen:
+                                    "⠹ Held call · " in screen and marker(screen) is None
+                                    and rows(screen)[FOOTER].endswith("ctrl+x stop")
+                                    and "esc close" not in screen)
+            assert rows(returned)[FOOTER].endswith("ctrl+x stop"), returned
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "PAGES-DONE"), timeout=30)
             chrome.leave(master, caller)
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: /status opens as a page with the return marker and no extra heading, Esc returns; a page during work keeps ctrl+x stop", flush=True)
+    print("session chrome: chat info has one substituted footer; Esc returns its draft and the live work stop hint; Settings > Keys owns the shortcuts", flush=True)
+
+
+
+def info_natural_height_case():
+    """The actual feed donates only the rows the open info body needs."""
+    answer = "\n".join(f"FEED-{index:02d}" for index in range(1, 25))
+    with Chrome("rui-chrome-info-height.", [fixture.sse_answer("feed", "r", "m", answer)[0]]) as chrome:
+        session = chrome.session()
+        run(chrome.home, "session", "configure", "--store", chrome.store, "--session", session,
+            "--label", "Natural height")
+        chrome.answered(session, "Show the saved feed")
+        for width, height in ((140, 40), (46, 30), (46, 18)):
+            master, slave = open_pty(width, height)
+            chrome.descriptors += [master, slave]
+            caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
+                env={**os.environ, "HOME": str(chrome.home)}, cwd=str(chrome.workspace),
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            chrome.callers.append(caller)
+            chrome.frame(master, b"", lambda screen: "FEED-24" in screen and "Opening…" not in screen)
+            live = chrome.frame(master, b"kept draft", lambda screen:
+                                "FEED-24" in screen and "kept draft" in screen)
+            # Editable words open only their shared choice at every width;
+            # the fitted model and effort, not a possibly dropped name, locate it.
+            draft_row = next(index for index in range(height)
+                             if composer_line(live, index).rstrip() == " › kept draft")
+            for field, marker in (("Model", "gpt-6-sol"), ("Effort", "low")):
+                choice = chrome.frame(master, footer_click(live, marker=marker),
+                                      lambda screen, field=field: field in conversation_text(screen)
+                                      and "✓" in conversation_text(screen))
+                assert "kept draft" in choice and "FEED-24" in choice, choice
+                assert "Copy last answer" not in choice and "Permissions" not in choice, choice
+                assert composer_line(choice, draft_row) == composer_line(live, draft_row), (live, choice)
+                live = chrome.frame(master, b"\x1b", lambda screen:
+                                    "✓" not in conversation_text(screen) and "FEED-24" in screen and "kept draft" in screen)
+            # Chat info remains available through its actual hint and Alt-I,
+            # rather than treating every identity word as the same action.
+            columns = [live.split("\n")[-2].index("alt+i")]
+            opened = None
+            for column in columns:
+                opened = chrome.frame(master, footer_click(live, column=column),
+                                      lambda screen: "Copy last answer" in screen and " · info" in screen and "unavailable" not in screen)
+                assert_chat_info_layout(opened, context=True)
+                base = chat_info_geometry(opened)
+                if height >= 30:
+                    assert base["top"] > 0 and any("FEED-" in row for row in base["feed"]), opened
+                # A click on the substituted footer is safe and idempotent.
+                chrome.frame(master, footer_click(opened, marker=" · info", info=True) + b"\x1b[B\r",
+                             lambda screen: "ask first" in screen and "run without asking" in screen)
+                clicked = chrome.frame(master, b"\x1b",
+                                       lambda screen: "ask first" not in screen and "Copy last answer" in screen)
+                chrome.frame(master, b"\x1b[A", lambda screen: "Copy last answer" in screen)
+                assert chat_info_geometry(clicked) == base, clicked
+                live = chrome.frame(master, b"\x1b", lambda screen:
+                                    "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
+            alt = chat_info_open(master)
+            assert chat_info_geometry(alt) == base, (opened, alt)
+            choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
+            grown = assert_model_choice(choice, query="")
+            if height >= 30:
+                expanded = chat_info_geometry(choice)
+                growth = len(grown["matches"]) + (grown["more"] is not None)
+                assert base["top"] - expanded["top"] == growth, (alt, choice)
+                assert expanded["input"] == base["input"] and expanded["footer"] == base["footer"], choice
+                assert any("FEED-" in row for row in expanded["feed"]), choice
+                filtered = model_choice_frame(master, b"luna", query="luna", more=False)
+                shrunk = assert_model_choice(filtered, query="luna", more=False)
+                short = chat_info_geometry(filtered)
+                assert len(shrunk["matches"]) == 2, filtered
+                assert short["top"] - expanded["top"] == growth - 2, (choice, filtered)
+                assert short["input"] == base["input"], filtered
+            else:
+                assert "kept draft" in choice and rows(choice)[-1].endswith("esc close"), choice
+            closed = chrome.frame(master, b"\x1b", lambda screen:
+                                  not model_choice_shown(screen) and "Copy last answer" in screen)
+            assert chat_info_geometry(closed) == base, closed
+            chrome.frame(master, b"\x1b", lambda screen:
+                         "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
+            chrome.leave(master, caller)
+        assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
+    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; model/effort clicks keep feed and draft; the info hint and Alt-I share one transition", flush=True)
 
 
 def approval_overflow_case():
@@ -476,23 +601,51 @@ def keys_case():
                 gesture = b"\x1b[F\r"
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
-            for index, expected in enumerate(('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave')):
-                assert expected in keys, (width, expected, keys)
-                if width == 46:
-                    assert rows(keys)[index].rstrip() == " " + expected, (index, keys)
-            if width == 140:
-                assert " enter    send              esc      back" in rows(keys)[0], keys
+            expected = (
+                ("enter", "send"), ("esc", "back"), ("⇧enter", "new line"),
+                ("tab", "next footer field"), ("⇧tab", "previous footer field"),
+                ("ctrl+x", "stop"), ("↑↓", "scroll"), ("ctrl+o", "tool output"),
+                ("ctrl+p", "earlier message"), ("ctrl+r", "retry"),
+                ("/", "skills"), ("alt+a", "archive"), ("ctrl+c", "leave"),
+            )
+            # Judge actual row-major content independently of padding. The
+            # shared KeyList aligns each column after its widest key; a longer
+            # meaning (such as previous footer field) expands the left column.
+            columns = 2 if width == 140 else 1
+            key_widths = [max(len(key) for key, _ in expected[column::columns])
+                          for column in range(columns)]
+            pane_rows = conversation_text(keys).split("\n")
+            positions = [[] for _ in range(columns)]
+            for start in range(0, len(expected), columns):
+                entries = expected[start:start + columns]
+                line = pane_rows[start // columns]
+                assert line.split() == [word for key, meaning in entries
+                                        for word in (key + " " + meaning).split()], (width, start, keys)
+                after = 0
+                for column, (key, meaning) in enumerate(entries):
+                    label = line.index(key, after)
+                    value = line.index(meaning, label + len(key))
+                    positions[column].append((label, value))
+                    assert value - label == key_widths[column] + 3, (width, key, keys)
+                    after = value + len(meaning)
+            for column in positions:
+                assert len(set(column)) == 1, (width, positions, keys)
+            assert positions[0][0][0] == 0, keys
+            used_rows = (len(expected) + columns - 1) // columns
+            assert all(not line.strip() for line in pane_rows[used_rows:]), keys
             for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
             # Enter and typing do not edit a setting or the hidden draft.
             settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
             if width == 140:
-                chrome.frame(master, b"\x1b", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, ""))
+                chrome.frame(master, b"\x1b", lambda screen:
+                             latest(screen, "KEYS-ANSWER") and composing(screen, "")
+                             and "Rui · settings" not in screen)
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys has eleven aligned entries, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys has thirteen aligned entries including Tab and Shift+Tab, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
 
 
 def notice_case():
@@ -520,6 +673,7 @@ def main():
     activity_case()
     scroll_marker_case()
     pages_case()
+    info_natural_height_case()
     approval_overflow_case()
     opening_case()
     notice_case()

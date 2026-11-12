@@ -37,6 +37,7 @@ pub const Mode = enum {
     /// One domain write: SQLite autocommit under the Entry lock, or an
     /// ownership-fenced transaction on a batching engine. It takes no
     /// identities or positions; `commit` runs exactly one queued write.
+    /// Only the transition runner opens one (`transition.Commit.single`).
     single,
 };
 
@@ -465,6 +466,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             if (a.inserted_count == a.inserted.len) @panic("an Access inserts at most max_inserted content rows");
             a.inserted[a.inserted_count] = .{ .digest = digest.*, .length = length, .private = private, .content_id = content_id };
             a.inserted_count += 1;
+        }
+
+        /// The live timings of Operation `operation`'s Attempt, sampled
+        /// when the write that ends the Attempt is queued.
+        pub fn attemptTimings(a: *const Self, operation: u64) @import("../model_timing.zig").Values {
+            comptime std.debug.assert(!reads_only);
+            return a.store.modelTimingSource().snapshot(operation, a.store.io);
         }
 
         /// The next value of `column`, inside this transaction.

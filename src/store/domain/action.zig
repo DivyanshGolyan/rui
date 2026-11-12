@@ -18,6 +18,7 @@ const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
 const sqlite = @import("../sqlite.zig");
 const store_access = @import("../access.zig");
+const transition = @import("../transition.zig");
 const turn_domain = @import("turn.zig");
 const forward_domain = @import("forward.zig");
 const ContentReference = content_domain.ContentReference;
@@ -450,38 +451,54 @@ pub fn actionContent(a: anytype, session_ref: []const u8, action_id: u64, field:
     return .{ .length = reference.length, .digest = reference.digest };
 }
 
-/// The read Access `candidate` finds the next Action outside any
+/// Admits the next Bash Action: its round finds it outside any
 /// transaction, so a poll that finds none costs one statement. The Store
-/// runs no other entry point meanwhile, so the candidate is still
-/// current when the write Access `a` attempts it.
-pub fn admitNextActionAttempt(
-    candidate: anytype,
-    a: anytype,
-    io: std.Io,
-    timeout_ms: u64,
-    faults: Faults,
-) !?ActionAttemptAdmission {
-    var next: next_action_attempt.Result = undefined;
-    queueNextActionAttempt(candidate, &next);
-    try candidate.run();
-    const found = next orelse return null;
-    var random: [16]u8 = undefined;
-    try std.Io.randomSecure(io, &random);
-    const sender_handle = std.fmt.bytesToHex(random, .lower);
-    a.write(attempt_action, .{
-        .action_id = found.action_id.get(),
-        .timeout_ms = if (found.bash_timeout_override_ms) |override| override.get() else timeout_ms,
-        .sender_handle = &sender_handle,
-        .session = found.session,
-    });
-    if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try a.commit();
-    return .{ .permit = .{ .binding = .{
-        .turn_id = found.turn_id.get(),
-        .parent_operation_id = found.parent_operation_id.get(),
-        .action_id = found.action_id.get(),
-    } } };
-}
+/// runs no other entry point meanwhile, so the candidate is still current
+/// when the commit attempts it.
+pub const AdmitNextAttempt = struct {
+    pub const rounds = transition.rounds(.{ .candidate = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { io: std.Io, timeout_ms: u64 };
+    pub const Result = ?ActionAttemptAdmission;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{ActionSelectionChanged};
+    pub const Declined = error{};
+
+    input: Input,
+    next: next_action_attempt.Result = undefined,
+    /// The write reads it in place.
+    sender_handle: [32]u8 = undefined,
+
+    pub fn step(t: *AdmitNextAttempt, r: *transition.Round(AdmitNextAttempt), ran: ?rounds.At) !transition.Next(AdmitNextAttempt) {
+        if (ran == null) {
+            queueNextActionAttempt(r, &t.next);
+            return .{ .round = .candidate };
+        }
+        const found = t.next orelse return .{ .done = null };
+        var random: [16]u8 = undefined;
+        try std.Io.randomSecure(t.input.io, &random);
+        t.sender_handle = std.fmt.bytesToHex(random, .lower);
+        r.write(attempt_action, .{
+            .action_id = found.action_id.get(),
+            .timeout_ms = if (found.bash_timeout_override_ms) |override| override.get() else t.input.timeout_ms,
+            .sender_handle = &t.sender_handle,
+            .session = found.session,
+        });
+        if (r.faults().attempt_before_commit) return error.InjectedAttemptCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(t: *const AdmitNextAttempt) Result {
+        const found = t.next.?;
+        return .{ .permit = .{ .binding = .{
+            .turn_id = found.turn_id.get(),
+            .parent_operation_id = found.parent_operation_id.get(),
+            .action_id = found.action_id.get(),
+        } } };
+    }
+};
 
 /// The unresolved Attempt `binding` names, with its revision and its call,
 /// or none: the binding is stale. Its text columns decode in place into
@@ -580,17 +597,37 @@ const revoke_sender = rsql.Write(.{
 });
 
 /// Clears the Attempt's sender handle, when `binding` names an attempted
-/// Action; otherwise changes nothing. On a `.single` Access: the read and
-/// the one UPDATE. Access selects SQLite autocommit or an ownership-fenced
-/// network transaction, including the no-work and error exits.
-pub fn revokeActionSender(a: anytype, binding: ActionAttemptBinding) !void {
-    var found: attempt_session.Result = undefined;
-    a.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &found);
-    try a.run();
-    const row = found orelse return a.abandon(.{});
-    a.write(revoke_sender, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .session = row.session });
-    try a.commit();
-}
+/// Action; otherwise changes nothing. Its round reads the Attempt and its
+/// one UPDATE commits as a single write: SQLite autocommit, or an
+/// ownership-fenced network transaction, including the no-work and error
+/// exits.
+pub const RevokeSender = struct {
+    pub const rounds = transition.rounds(.{ .attempt = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .single;
+    pub const begin: ?rounds.At = .attempt;
+    pub const Input = struct { binding: ActionAttemptBinding };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
+
+    input: Input,
+    found: attempt_session.Result = undefined,
+
+    pub fn step(t: *RevokeSender, r: *transition.Round(RevokeSender), ran: ?rounds.At) !transition.Next(RevokeSender) {
+        const binding = t.input.binding;
+        if (ran == null) {
+            r.read(attempt_session, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &t.found);
+            return .{ .round = .attempt };
+        }
+        const row = t.found orelse return .{ .done = {} };
+        r.write(revoke_sender, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .session = row.session });
+        return .commit;
+    }
+
+    pub fn committed(_: *const RevokeSender) Result {}
+};
 
 /// The first Session stop, in command order, that selected the Turn of the
 /// attempted Action `binding` names, or null.
@@ -652,53 +689,77 @@ const resolve_action = rsql.Write(.{
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleActionAttemptBinding } },
 });
 
-/// Round 1 reads the binding's facts. Round 2 looks up the content the
-/// Action settles with: its result, or, when a stop selected the Turn, the
-/// cancellation text, together with whether the Turn is ready to close. So
-/// a stop never hashes a result it discards, and the common path runs the
-/// two reads main did. The write round resolves the Action, closes a
-/// stopped Turn its last Action leaves ready, and records a continuation,
-/// then commits.
-pub fn settleActionAttempt(
-    a: anytype,
-    binding: ActionAttemptBinding,
-    code: ActionResolutionCode,
-    result: []const u8,
-    faults: Faults,
-) !ActionSettlement {
-    var facts: settle_facts.Result = undefined;
-    a.read(settle_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &facts);
-    try a.run();
-    const found = facts orelse return error.StaleActionAttemptBinding;
-    if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
+/// Settles the Attempt `binding` names. Round 1 reads the binding's
+/// facts. Round 2 looks up the content the Action settles with: its result,
+/// or, when a stop selected the Turn, the cancellation text, together with
+/// whether the Turn is ready to close. So a stop never hashes a result it
+/// discards, and the common path runs the two reads main did. The commit
+/// round resolves the Action, closes a stopped Turn its last Action leaves
+/// ready, and records a continuation.
+pub const SettleAttempt = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always}, .content = .{.always} });
+    pub const round_budget = 3;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { binding: ActionAttemptBinding, code: ActionResolutionCode, result: []const u8 };
+    pub const Result = ActionSettlement;
+    pub const Ordinary = store_core.Ordinary.action_attempt;
+    pub const Guards = store_core.Ordinary.action_attempt;
+    pub const Declined = error{};
 
-    // Bash stop confirms local cancellation. MCP keeps the adapter's evidence:
-    // closing a sent request cannot establish that the remote work stopped.
-    const settled: struct { code: ActionResolutionCode, text: []const u8 } =
-        if (found.stopped and found.runner != .mcp) .{ .code = .cancelled, .text = found.runner.stoppedText(code, result) } else .{ .code = code, .text = result };
-    var content: content_domain.Import = .ofBytes(settled.text, false);
-    var completion: turn_domain.stopped_turn.Result = null;
-    content_domain.lookup(a, &content);
-    if (found.stopped) a.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &completion);
-    try a.run();
+    input: Input,
+    facts: settle_facts.Result = undefined,
+    code: ActionResolutionCode = undefined,
+    /// The bytes the Action settles with, which its payload write reads
+    /// in place: the caller's result or a fixed cancellation text.
+    text: []const u8 = &.{},
+    content: content_domain.Import = undefined,
+    completion: turn_domain.stopped_turn.Result = null,
 
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const positions = try a.positions(found.session);
-    const content_id = try content_domain.importBytes(a, &content, settled.text);
-    a.write(resolve_action, .{
-        .action_id = binding.action_id,
-        .code = settled.code,
-        .content_id = content_id,
-        .position = try positions.take(1),
-        .parent_operation_id = binding.parent_operation_id,
-        .session = found.session,
-    });
-    try turn_domain.queueStopCompletion(a, completion, binding.turn_id);
-    turn_domain.queueContinuation(a, binding.turn_id, found.session);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return if (found.stopped) .session_stop else .effect;
-}
+    pub fn step(t: *SettleAttempt, r: *transition.Round(SettleAttempt), ran: ?rounds.At) !transition.Next(SettleAttempt) {
+        const binding = t.input.binding;
+        const at = ran orelse {
+            r.read(settle_facts, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id }, &t.facts);
+            return .{ .round = .facts };
+        };
+        const found = t.facts orelse return error.StaleActionAttemptBinding;
+        switch (at) {
+            .facts => {
+                if (found.turn_id.get() != binding.turn_id) return error.StaleActionAttemptBinding;
+                // Bash stop confirms local cancellation. MCP keeps the adapter's evidence:
+                // closing a sent request cannot establish that the remote work stopped.
+                const stopped = found.stopped and found.runner != .mcp;
+                t.code = if (stopped) .cancelled else t.input.code;
+                t.text = if (stopped) found.runner.stoppedText(t.input.code, t.input.result) else t.input.result;
+                t.content = .ofBytes(t.text, false);
+                content_domain.lookup(r, &t.content);
+                if (found.stopped) r.read(turn_domain.stopped_turn, .{ .turn_id = binding.turn_id, .resolving_action_id = binding.action_id }, &t.completion);
+                return .{ .round = .content };
+            },
+            .content => {
+                if (r.faults().content_import) return error.InjectedContentImportFailure;
+                const positions = try r.positions(found.session);
+                const content_id = try content_domain.importBytes(r, &t.content, t.text);
+                r.write(resolve_action, .{
+                    .action_id = binding.action_id,
+                    .code = t.code,
+                    .content_id = content_id,
+                    .position = try positions.take(1),
+                    .parent_operation_id = binding.parent_operation_id,
+                    .session = found.session,
+                });
+                try turn_domain.queueStopCompletion(r, t.completion, binding.turn_id);
+                turn_domain.queueContinuation(r, binding.turn_id, found.session);
+                if (r.faults().before_commit) return error.InjectedCommitFailure;
+                return .commit;
+            },
+        }
+    }
+
+    pub fn committed(t: *const SettleAttempt) Result {
+        return if (t.facts.?.stopped) .session_stop else .effect;
+    }
+};
 
 /// Unresolved Attempts in id order.
 const uncertain_actions = rsql.Read(.{
@@ -755,39 +816,65 @@ const UncertainChoice = struct {
     }
 };
 
-/// Resolves one Attempt no slot holds as indeterminate. The read Access
-/// `candidate` scans outside any transaction, so a pass that finds none
-/// costs one statement; the scan stops at the first Attempt `active` does
-/// not hold, after at most one more than it can exclude. The write
-/// Access `a` reads the Attempt's facts, then whether its stopped Turn is
-/// ready, which needs the Turn, then resolves it and commits.
-pub fn recoverOneUncertainAction(candidate: anytype, a: anytype, active: ActiveOperationFilter) !bool {
-    var choice: UncertainChoice = .{ .active = active };
-    candidate.readEach(uncertain_actions, .{}, try std.math.add(u64, active.maximum_exclusions, 1), &choice);
-    try candidate.run();
-    const action_id = choice.chosen orelse return false;
+/// Resolves one Attempt no slot holds as indeterminate. Its scan runs
+/// outside any transaction, so a pass that finds none costs one statement;
+/// the scan stops at the first Attempt `active` does not hold, after at
+/// most one more than it can exclude. The transaction then reads the
+/// Attempt's facts, then whether its stopped Turn is ready, which needs
+/// the Turn, then resolves it and commits.
+pub const RecoverUncertain = struct {
+    pub const rounds = transition.rounds(.{ .scan = .{.always}, .facts = .{.always}, .completion = .{.always} });
+    pub const round_budget = 4;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { active: ActiveOperationFilter };
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{ActionSelectionChanged};
+    pub const Declined = error{};
 
-    var facts: uncertain_facts.Result = undefined;
-    var content: content_domain.Import = undefined;
-    a.read(uncertain_facts, .{ .action_id = action_id }, &facts);
-    try a.run();
-    const found = facts orelse return error.ActionSelectionChanged;
-    const text = found.runner.indeterminateText();
-    content = recoveryContent(found.runner);
-    content_domain.lookup(a, &content);
-    const turn_id = found.turn_id.get();
-    var completion: turn_domain.stopped_turn.Result = undefined;
-    a.read(turn_domain.stopped_turn, .{ .turn_id = turn_id, .resolving_action_id = action_id }, &completion);
-    try a.run();
+    input: Input,
+    choice: UncertainChoice = undefined,
+    facts: uncertain_facts.Result = undefined,
+    content: content_domain.Import = undefined,
+    completion: turn_domain.stopped_turn.Result = undefined,
 
-    const positions = try a.positions(found.session);
-    const content_id = try content_domain.importBytes(a, &content, text);
-    a.write(resolve_uncertain, .{ .action_id = action_id, .content_id = content_id, .position = try positions.take(1), .session = found.session });
-    try turn_domain.queueStopCompletion(a, completion, turn_id);
-    turn_domain.queueContinuation(a, turn_id, found.session);
-    try a.commit();
-    return true;
-}
+    pub fn step(t: *RecoverUncertain, r: *transition.Round(RecoverUncertain), ran: ?rounds.At) !transition.Next(RecoverUncertain) {
+        const at = ran orelse {
+            t.choice = .{ .active = t.input.active };
+            r.readEach(uncertain_actions, .{}, try std.math.add(u64, t.input.active.maximum_exclusions, 1), &t.choice);
+            return .{ .round = .scan };
+        };
+        const action_id = t.choice.chosen orelse return .{ .done = false };
+        switch (at) {
+            .scan => {
+                r.read(uncertain_facts, .{ .action_id = action_id }, &t.facts);
+                return .{ .round = .facts };
+            },
+            .facts => {
+                const found = t.facts orelse return error.ActionSelectionChanged;
+                t.content = recoveryContent(found.runner);
+                content_domain.lookup(r, &t.content);
+                r.read(turn_domain.stopped_turn, .{ .turn_id = found.turn_id.get(), .resolving_action_id = action_id }, &t.completion);
+                return .{ .round = .completion };
+            },
+            .completion => {
+                const found = t.facts.?;
+                const turn_id = found.turn_id.get();
+                const positions = try r.positions(found.session);
+                const content_id = try content_domain.importBytes(r, &t.content, found.runner.indeterminateText());
+                r.write(resolve_uncertain, .{ .action_id = action_id, .content_id = content_id, .position = try positions.take(1), .session = found.session });
+                try turn_domain.queueStopCompletion(r, t.completion, turn_id);
+                turn_domain.queueContinuation(r, turn_id, found.session);
+                return .commit;
+            },
+        }
+    }
+
+    pub fn committed(_: *const RecoverUncertain) Result {
+        return true;
+    }
+};
 
 // Reads share a wave; writes fence every unresolved earlier MCP call. An
 // attempted write remains a barrier even if its Action is later in order.
@@ -812,10 +899,11 @@ const ReadyFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.
 // Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
 // offers never open their call ranges; candidate calls seek their Action by
 // parent and ordinal. CROSS JOIN keeps that bound before the Action lookup.
+// Only the current Operation can have executable Actions: continuation waits for every call to settle.
 const next_mcp_action = rsql.Read(.{
     .sql = "SELECT action.action_id,tool.server " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
+        "CROSS JOIN model_operation operation ON operation.operation_id=active.operation_id " ++
         "CROSS JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
         "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
@@ -873,42 +961,81 @@ fn queueReadyFacts(a: anytype, selected: ReadyAction, facts: *mcp_facts.Result) 
     }
 }
 
-pub fn resolveAction(a: anytype, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
-    var facts: mcp_facts.Result = undefined;
-    var content: content_domain.Import = .ofBytes(text, false);
-    queueReadyFacts(a, selected, &facts);
-    content_domain.lookup(a, &content);
-    try a.run();
-    const found = facts orelse {
-        // A stop or permission decision may win after selection. No effect
-        // was dispatched, so there is nothing left for this Host to resolve.
-        try a.commit();
-        return;
-    };
-    if (faults.content_import) return error.InjectedContentImportFailure;
-    const content_id = try content_domain.importBytes(a, &content, text);
-    try queueResolution(a, .{ .action_id = selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, code, content_id);
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-}
+/// Resolves the selected Action without running it, with `text`. One
+/// round reads its facts and looks up the text's content; the commit
+/// resolves it. A stop or permission decision may win after selection: no
+/// effect was dispatched, so the commit then has nothing to write.
+pub const ResolveSelected = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { selected: ReadyAction, code: ActionResolutionCode, text: []const u8 };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{};
+    pub const Declined = error{};
 
-/// Admission commits the attempt and sender before any adapter effect.
-pub fn admitActionAttempt(a: anytype, io: std.Io, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptBinding {
-    var facts: mcp_facts.Result = undefined;
-    queueReadyFacts(a, selected, &facts);
-    try a.run();
-    const found = facts orelse {
-        try a.commit();
-        return null;
-    };
-    var random: [16]u8 = undefined;
-    try std.Io.randomSecure(io, &random);
-    const sender = std.fmt.bytesToHex(random, .lower);
-    a.write(attempt_action, .{ .action_id = selected.action_id, .sender_handle = &sender, .session = found.session, .timeout_ms = if (found.timeout_override_ms) |value| value.get() else timeout_ms });
-    if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    try a.commit();
-    return .{ .action_id = selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() };
-}
+    input: Input,
+    facts: mcp_facts.Result = undefined,
+    content: content_domain.Import = undefined,
+
+    pub fn step(t: *ResolveSelected, r: *transition.Round(ResolveSelected), ran: ?rounds.At) !transition.Next(ResolveSelected) {
+        if (ran == null) {
+            t.content = .ofBytes(t.input.text, false);
+            queueReadyFacts(r, t.input.selected, &t.facts);
+            content_domain.lookup(r, &t.content);
+            return .{ .round = .facts };
+        }
+        const found = t.facts orelse return .commit;
+        if (r.faults().content_import) return error.InjectedContentImportFailure;
+        const content_id = try content_domain.importBytes(r, &t.content, t.input.text);
+        try queueResolution(r, .{ .action_id = t.input.selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() }, found.session, t.input.code, content_id);
+        if (r.faults().before_commit) return error.InjectedCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(_: *const ResolveSelected) Result {}
+};
+
+/// Admits the selected Action: one round rechecks it is ready, and the
+/// commit attempts it and stores its sender before any adapter effect. A
+/// selection that is no longer ready commits nothing and answers null.
+pub const AdmitSelected = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{.always} });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { io: std.Io, selected: ReadyAction, timeout_ms: u64 };
+    pub const Result = ?ActionAttemptAdmission;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{ActionSelectionChanged};
+    pub const Declined = error{};
+
+    input: Input,
+    facts: mcp_facts.Result = undefined,
+    /// The write reads it in place.
+    sender: [32]u8 = undefined,
+
+    pub fn step(t: *AdmitSelected, r: *transition.Round(AdmitSelected), ran: ?rounds.At) !transition.Next(AdmitSelected) {
+        if (ran == null) {
+            queueReadyFacts(r, t.input.selected, &t.facts);
+            return .{ .round = .facts };
+        }
+        const found = t.facts orelse return .commit;
+        var random: [16]u8 = undefined;
+        try std.Io.randomSecure(t.input.io, &random);
+        t.sender = std.fmt.bytesToHex(random, .lower);
+        r.write(attempt_action, .{ .action_id = t.input.selected.action_id, .sender_handle = &t.sender, .session = found.session, .timeout_ms = if (found.timeout_override_ms) |value| value.get() else t.input.timeout_ms });
+        if (r.faults().attempt_before_commit) return error.InjectedAttemptCommitFailure;
+        return .commit;
+    }
+
+    pub fn committed(t: *const AdmitSelected) Result {
+        const found = t.facts orelse return null;
+        return .{ .permit = .{ .binding = .{ .action_id = t.input.selected.action_id, .parent_operation_id = found.parent_operation_id.get(), .turn_id = found.turn_id.get() } } };
+    }
+};
 const mcp_input = rsql.Read(.{
     .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.attempt_timeout_ms AS timeout_ms," ++
         "EXISTS(SELECT 1 FROM tool_set_member bash_member JOIN tool_record bash_tool ON bash_tool.tool_record_id=bash_member.tool_record_id " ++

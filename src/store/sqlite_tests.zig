@@ -18,6 +18,7 @@ const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const store_core = @import("Store.zig");
 const store_access = @import("access.zig");
+const transition = @import("transition.zig");
 const rsql = @import("rsql.zig");
 const Store = store_core.Store;
 const action_domain = @import("domain/action.zig");
@@ -1780,46 +1781,34 @@ test "a stale Action settlement leaves the Store byte-identical" {
     try std.testing.expectEqual(before.ids, after.ids);
     try std.testing.expectEqual(before.generation, after.generation);
 
-    // Round 1 finds `open` current; before the write round runs, the
+    // Round 1 finds `open` current; before the commit round runs, the
     // Action stops being attempted, so the resolve guard fails after the
     // result's content row and position were queued.
     const Interposed = struct {
-        const Inner = store_access.Access(.write, error{StaleActionAttemptBinding});
-        inner: *Inner,
-        action_id: u64,
+        const Inner = action_domain.SettleAttempt;
+        pub const rounds = Inner.rounds;
+        pub const round_budget = Inner.round_budget;
+        pub const commit = Inner.commit;
+        pub const begin = Inner.begin;
+        pub const Result = Inner.Result;
+        pub const Guards = Inner.Guards;
+        pub const Declined = Inner.Declined;
 
-        pub fn read(self: *@This(), comptime S: type, args: S.Args, destination: *S.Result) void {
-            self.inner.read(S, args, destination);
+        inner: Inner,
+        storage: *Store,
+
+        pub fn step(t: *@This(), r: *transition.Round(@This()), ran: ?rounds.At) !transition.Next(@This()) {
+            const next = try Inner.step(&t.inner, r, ran);
+            if (next == .commit) {
+                var sql: [160]u8 = undefined;
+                const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,attempt_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{t.inner.input.binding.action_id}, 0) catch unreachable;
+                sqlite.exec(t.storage.sqliteDatabase(), unattempt) catch unreachable;
+            }
+            return next;
         }
-        pub fn run(self: *@This()) Inner.Error!void {
-            return self.inner.run();
-        }
-        pub fn positions(self: *@This(), head: rsql.SessionHead) !*store_access.Positions {
-            return self.inner.positions(head);
-        }
-        pub fn write(self: *@This(), comptime S: type, args: S.Args) void {
-            self.inner.write(S, args);
-        }
-        pub fn identity(self: *@This(), comptime column: store_core.Identity) !u64 {
-            return self.inner.identity(column);
-        }
-        pub fn writeContent(self: *@This(), content_id: u64, bytes: []const u8) void {
-            self.inner.writeContent(content_id, bytes);
-        }
-        pub fn insertedContent(self: *const @This(), digest: *const [32]u8, length: u64, private: bool) ?u64 {
-            return self.inner.insertedContent(digest, length, private);
-        }
-        pub fn recordInserted(self: *@This(), digest: *const [32]u8, length: u64, private: bool, content_id: u64) void {
-            self.inner.recordInserted(digest, length, private, content_id);
-        }
-        pub fn recordContentRow(self: *@This(), content_id: u64) void {
-            self.inner.recordContentRow(content_id);
-        }
-        pub fn commit(self: *@This()) Inner.Error!void {
-            var sql: [160]u8 = undefined;
-            const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,attempt_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{self.action_id}, 0) catch unreachable;
-            sqlite.exec(self.inner.store.sqliteDatabase(), unattempt) catch unreachable;
-            return self.inner.commit();
+
+        pub fn committed(t: *const @This()) Result {
+            return Inner.committed(&t.inner);
         }
     };
     const guarded = try Snapshot.take(&storage, tmp.dir);
@@ -1828,10 +1817,8 @@ test "a stale Action settlement leaves the Store byte-identical" {
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: Interposed.Inner = .open(&entry);
-        defer access.deinit();
-        var interposed: Interposed = .{ .inner = &access, .action_id = open.action_id };
-        try std.testing.expectError(error.StaleActionAttemptBinding, entry.finishTransaction(error{StaleActionAttemptBinding}, .{}, access.end(.{}, action_domain.settleActionAttempt(&interposed, open, .failed, "A result the guard refuses.", .{}))));
+        var interposed: Interposed = .{ .inner = .{ .input = .{ .binding = open, .code = .failed, .result = "A result the guard refuses." } }, .storage = &storage };
+        try std.testing.expectError(error.StaleActionAttemptBinding, entry.finishTransaction(error{StaleActionAttemptBinding}, .{}, transition.run(&entry, Interposed, &interposed, .{})));
     }
     try std.testing.expect(!storage.isFenced());
     const refused = try Snapshot.take(&storage, tmp.dir);
@@ -3696,46 +3683,64 @@ test "a Bash binding that is unknown, unattempted or without its revision is sta
     try std.testing.expect(!storage.isFenced());
 }
 
-test "SQLite single Access keeps autocommit on success guard failure and abandon" {
+test "SQLite single commit keeps autocommit on success guard failure and abandon" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var storage: Store = undefined;
     try testingStore(&storage, &tmp, std.testing.io);
     defer storage.close() catch unreachable;
-    const read = rsql.Read(.{
-        .sql = "SELECT min(content_id) AS id FROM content",
-        .Args = struct {},
-        .Row = struct { id: u64 },
-        .cardinality = .one,
-    });
-    const write = rsql.Write(.{
-        .sql = "UPDATE content SET private=private WHERE content_id=?1",
-        .Args = struct { id: u64 },
-        .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
-    });
-    for ([_]enum { success, guard, abandon, no_op }{ .success, .guard, .abandon, .no_op }) |outcome| {
+    const Outcome = enum { success, guard, abandon, no_op };
+    const Single = struct {
+        const read = rsql.Read(.{
+            .sql = "SELECT min(content_id) AS id FROM content",
+            .Args = struct {},
+            .Row = struct { id: u64 },
+            .cardinality = .one,
+        });
+        const write = rsql.Write(.{
+            .sql = "UPDATE content SET private=private WHERE content_id=?1",
+            .Args = struct { id: u64 },
+            .expect = .{ .exact = .{ .rows = 1, .otherwise = error.TestingGuard } },
+        });
+        pub const rounds = transition.rounds(.{ .read = .{.always} });
+        pub const round_budget = 2;
+        pub const commit: transition.Commit = .single;
+        pub const begin: ?rounds.At = .read;
+        pub const Result = void;
+        pub const Guards = error{TestingGuard};
+        pub const Declined = error{};
+
+        storage: *Store,
+        outcome: Outcome,
+        row: read.Result = undefined,
+        /// Whether a transaction was open once the read ran.
+        read_open: bool = true,
+
+        pub fn step(t: *@This(), r: *transition.Round(@This()), ran: ?rounds.At) !transition.Next(@This()) {
+            if (ran == null) {
+                r.read(read, .{}, &t.row);
+                return .{ .round = .read };
+            }
+            t.read_open = t.storage.engine.inTransaction();
+            if (t.outcome != .no_op) r.write(write, .{ .id = if (t.outcome == .guard) 0 else t.row.id });
+            return if (t.outcome == .no_op or t.outcome == .abandon) .{ .done = {} } else .commit;
+        }
+
+        pub fn committed(_: *const @This()) Result {}
+    };
+    for (std.enums.values(Outcome)) |outcome| {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var a: store_access.Access(.single, error{TestingGuard}) = .open(&entry);
-        defer a.deinit();
         var statements: TestingStatements = .{};
         statements.begin(storage.sqliteDatabase());
         defer statements.end(storage.sqliteDatabase());
-        var row: read.Result = undefined;
-        a.read(read, .{}, &row);
-        try a.run();
-        try std.testing.expect(!storage.engine.inTransaction());
-        if (outcome != .no_op) a.write(write, .{ .id = if (outcome == .guard) 0 else row.id });
-        if (outcome == .no_op or outcome == .abandon) {
-            // Even a rollback fault is irrelevant: no transaction opened,
-            // and a queued, unstepped autocommit write is simply discarded.
-            try a.abandon(.{ .rollback_failure = true });
-        } else if (outcome == .guard) {
-            const result = a.end(.{ .rollback_failure = true }, a.commit());
-            try std.testing.expectError(error.TestingGuard, entry.finishTransaction(error{TestingGuard}, .{}, result));
-        } else {
-            try entry.finishTransaction(error{TestingGuard}, .{}, a.end(.{}, a.commit()));
-        }
+        var single: Single = .{ .storage = &storage, .outcome = outcome };
+        // Even a rollback fault is irrelevant: no transaction opens, and a
+        // queued, unstepped autocommit write is simply discarded.
+        const faults: store_core.Faults = .{ .rollback_failure = outcome != .success };
+        const result = entry.finishTransaction(error{TestingGuard}, .{}, transition.run(&entry, Single, &single, faults));
+        if (outcome == .guard) try std.testing.expectError(error.TestingGuard, result) else try result;
+        try std.testing.expect(!single.read_open);
         try std.testing.expectEqual(@as(u64, if (outcome == .success or outcome == .guard) 2 else 1), statements.count);
         try std.testing.expect(!storage.engine.inTransaction());
         try std.testing.expect(!storage.isFenced());
@@ -5510,33 +5515,37 @@ test "a refresh claim whose UPDATE changes no row answers false and does not fen
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // Claims between the read round and the write, so the guarded UPDATE finds no row.
     const Interposed = struct {
-        const Inner = store_access.Access(.write, store_core.Ordinary.attempt_binding || error{AuthRefreshUnclaimed});
-        inner: *Inner,
+        const Inner = model_settlement_domain.ClaimAuthRefresh;
+        pub const rounds = Inner.rounds;
+        pub const round_budget = Inner.round_budget;
+        pub const commit = Inner.commit;
+        pub const begin = Inner.begin;
+        pub const Result = Inner.Result;
+        pub const Guards = Inner.Guards;
+        pub const Declined = Inner.Declined;
 
-        pub fn read(self: *@This(), comptime S: type, args: S.Args, destination: *S.Result) void {
-            self.inner.read(S, args, destination);
+        inner: Inner,
+        storage: *Store,
+
+        pub fn step(t: *@This(), r: *transition.Round(@This()), ran: ?rounds.At) !transition.Next(@This()) {
+            const next = try Inner.step(&t.inner, r, ran);
+            if (next == .commit) sqlite.exec(t.storage.sqliteDatabase(), "UPDATE model_operation SET auth_refresh_claimed=1") catch unreachable;
+            return next;
         }
-        pub fn run(self: *@This()) Inner.Error!void {
-            return self.inner.run();
+
+        pub fn committed(t: *const @This()) Result {
+            return Inner.committed(&t.inner);
         }
-        pub fn write(self: *@This(), comptime S: type, args: S.Args) void {
-            self.inner.write(S, args);
-        }
-        pub fn abandon(self: *@This(), faults: store_core.Faults) Inner.Error!void {
-            return self.inner.abandon(faults);
-        }
-        pub fn commit(self: *@This()) Inner.Error!void {
-            sqlite.exec(self.inner.store.sqliteDatabase(), "UPDATE model_operation SET auth_refresh_claimed=1") catch unreachable;
-            return self.inner.commit();
+
+        pub fn declined(t: *const @This(), err: Declined) Result {
+            return Inner.declined(&t.inner, err);
         }
     };
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: Interposed.Inner = .open(&entry);
-        defer access.deinit();
-        var interposed: Interposed = .{ .inner = &access };
-        try std.testing.expect(!try entry.finishTransaction(store_core.Ordinary.attempt_binding, .{}, access.end(.{}, model_settlement_domain.claimModelAuthRefresh(&interposed, binding))));
+        var interposed: Interposed = .{ .inner = .{ .input = .{ .binding = binding } }, .storage = &storage };
+        try std.testing.expect(!try entry.finishTransaction(store_core.Ordinary.attempt_binding, .{}, transition.run(&entry, Interposed, &interposed, .{})));
     }
     try std.testing.expect(!storage.isFenced());
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE auth_refresh_claimed=1", .{}));
@@ -10141,6 +10150,56 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
         try std.testing.expectEqual(count, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND resolution_code IS NULL", .{}));
         const statement = try sqlite.prepare(storage.sqliteDatabase(), action_domain.next_mcp_action_sql);
         defer _ = c.sqlite3_finalize(statement);
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
+        cost.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    try std.testing.expectEqual(costs[0], costs[1]);
+}
+
+test "MCP selection cost does not grow with earlier Operations of an open Turn" {
+    var costs: [2]c_int = undefined;
+    for ([_]usize{ 1, 32 }, &costs) |count, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var configuration = try completeConfiguration("mcp-history", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+        configuration.configuration.tools = try .of(&.{"fetch_page"});
+        configuration.configuration.permission_mode.state = .value;
+        try configuration.configuration.permission_mode.value.set("bypass");
+        const configured = try storage.configure(&configuration, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        try submitTestMessage(&storage, &tmp, "mcp-history-input", "mcp-history-input", session.slice(), "fetch");
+        var turn_id: u64 = 0;
+        for (0..count) |index| {
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (index == 0) turn_id = model.turn_id;
+            try std.testing.expectEqual(turn_id, model.turn_id);
+            if (index + 1 < count) {
+                // Queued input keeps the answer's Turn open for another Operation,
+                // without adding historical Actions to MCP serialization's work.
+                var key_buffer: [64]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "mcp-history-input-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), "continue");
+                try settleMessagesForTesting(&storage, &tmp, model, 1, false, null);
+            } else {
+                try settleCallsForTesting(&storage, &tmp, model, "mcp-history-calls", &.{
+                    .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                });
+            }
+        }
+        // Read the durable population through production selection before measuring.
+        const selected = (try storage.nextAction(.mcp)).?;
+        try std.testing.expectEqual(count, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE turn_id=?1", .{turn_id}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND outcome_code IS NULL", .{turn_id}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
+        const statement = try sqlite.prepare(storage.sqliteDatabase(), action_domain.next_mcp_action_sql);
+        defer _ = c.sqlite3_finalize(statement);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+        try std.testing.expectEqual(selected.action_id, @as(u64, @intCast(c.sqlite3_column_int64(statement, 0))));
         try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
         cost.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
     }

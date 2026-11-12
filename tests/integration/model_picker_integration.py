@@ -9,7 +9,9 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import command_frame, overview_frame, overview_title, read_terminal, terminal_exit
+from product_defaults import CATALOG
+from human_cli_fixture import (AppModelCatalog, app_model_open, assert_chat_info_layout, assert_model_choice, chat_info_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame,
+                               overview_title, read_terminal, terminal_exit)
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -24,6 +26,7 @@ def main():
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
     host = caller = None
+    catalog = None
     master = slave = None
     completed = False
     try:
@@ -36,28 +39,31 @@ def main():
         )
         assert configured.returncode == 0, configured.stderr
         master, slave = open_pty(columns=80, rows=24)
+        catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
-        overview_frame(master, lambda screen: "/model" in screen, b"/m")
-        overview_frame(master, lambda screen: "/model" in screen and any(
-            "gpt-5.5" in row and "‹" in row for row in screen.splitlines()), b"\r")
-        filtered = overview_frame(master, lambda screen: "gpt-6-luna" in screen,
-                                  b"luna")
-        assert "/model luna" in filtered, filtered
+        opened = app_model_open(master, catalog=catalog)
+        assert any("Sign-in" in row and "Codex" in row for row in opened.splitlines()), opened
+        full = assert_model_choice(opened, query="", more=True)
+        filtered = model_choice_frame(master, b"luna", query="luna", more=False)
+        narrow = assert_model_choice(filtered, query="luna", more=False)
+        assert len(narrow["matches"]) == 2 < len(full["matches"]), filtered
+        effort_row = next(index for index, row in enumerate(narrow["rows"]) if row.startswith("   Effort"))
+        assert effort_row == narrow["matches"][-1][0] + 1, ("list shrinks without blank placeholders", filtered)
         rows = filtered.splitlines()
         first = next(row for row in rows if "gpt-5.6-luna" in row)
         second = next(row for row in rows if "gpt-6-luna" in row)
-        assert rows.index(first) < rows.index(second) and "‹" in first and "‹" not in second, filtered
-        moved = overview_frame(master, lambda screen: any(
-            "gpt-6-luna" in row and "‹" in row for row in screen.splitlines()), b"\x1b[B")
-        assert "/model luna" in moved, moved
-        changed = overview_frame(master, lambda screen: any(
-            "gpt-6-luna" in row and "‹ medium ›" in row for row in screen.splitlines()), b"\x1b[C")
-        assert "/model luna" in changed, changed
-        selected = overview_frame(master, lambda screen: "gpt-6-luna · medium" in screen and "/model" not in screen,
-                                  b"\r")
-        assert "gpt-6-luna · medium" in selected, selected
+        assert rows.index(first) < rows.index(second), filtered
+        model_choice_frame(master, b"\x1b[B", query="luna", more=False)
+        selected = panel_frame(master, lambda screen: not model_choice_shown(screen) and
+                               "gpt-6-luna" in screen and "saving" not in screen, b"\r")
+        assert "Model" in selected, selected
+        # Effort is a separate setting, not a model-row keyboard submode.
+        panel_frame(master, lambda screen: "model default" in screen, b"\x1b[B\r")
+        panel_frame(master, lambda screen: not model_choice_shown(screen) and "saving" not in screen
+                    and any("Effort" in row and "medium" in row for row in screen.splitlines()),
+                    b"\x1b[B" * (1 + CATALOG["gpt-6-luna"].efforts.index("medium")) + b"\r")
         def saved_model():
             saved = subprocess.run([str(fixture.RUI), "defaults", "inspect"], env=env,
                                    capture_output=True, text=True, timeout=20)
@@ -75,11 +81,12 @@ def main():
         master = slave = None
 
         master, slave = open_pty(columns=80, rows=24)
+        catalog = AppModelCatalog(host)
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env={**env, "LC_ALL": "C"}, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
-        ascii_frame = overview_frame(master, lambda screen: any(
-            "+  gpt-6-luna" in row and "< medium >" in row for row in screen.splitlines()), b"/model luna")
+        ascii_frame = app_model_open(master, b"luna", catalog=catalog)
+        assert "gpt-6-luna" in ascii_frame, ascii_frame
         assert ascii_frame.isascii(), ascii_frame
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
@@ -100,20 +107,33 @@ def main():
         caller = spawn([str(fixture.RUI), "session", "resume", "--store", str(store), session],
                        cwd=state, env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         read_terminal(master, "› ")
-        session_model = command_frame(master, "/model", lambda screen: "new Session: /model in overview" in screen)
-        assert "gpt-5.5" in session_model and "ChatGPT" in session_model, session_model
-        assert "Known to Rui" not in session_model, session_model
-        host_process.wait_for(saved_model, "overview default remains unchanged")
+        session_model = chat_info_open(master)
+        assert "gpt-5.5" in session_model and "Folder" in session_model, session_model
+        assert_chat_info_layout(session_model, context=False)
+        choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
+        assert "gpt-5.5" in choice and "Known to Rui" not in choice, choice
+        assert_chat_info_layout(choice, context=False)
+        model_choice_frame(master, b"luna", query="luna", more=False)
+        panel_frame(master, lambda screen: not model_choice_shown(screen) and "gpt-6-luna" in screen
+                    and "saving" not in screen, b"\x1b[B\r")
+        inspected = subprocess.run([str(fixture.RUI), "session", "inspect", "--store", str(store),
+                                    "--session", session], env=env, capture_output=True, text=True, timeout=20)
+        assert inspected.returncode == 0, inspected.stderr
+        saved_session = json.loads(inspected.stdout)["session"]
+        assert saved_session["model"] == "gpt-6-luna" and saved_session["provider"] == "codex", inspected.stdout
+        host_process.wait_for(saved_model, "chat model change leaves overview default unchanged")
+        panel_frame(master, lambda screen: "Copy last answer" not in screen, b"\x1b")
         os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
         completed = True
-        print("model picker: filtering, navigation, effort, one-Enter save, facts and read-only Session passed", flush=True)
+        print("model picker: filtering, navigation, effort, one-Enter save, separate effort and chat model save passed", flush=True)
     finally:
         host_process.dispose_all(
             lambda: host_process.stop_process(caller, timeout=5) if caller else None,
             lambda: close_pty(master) if master is not None else None,
             lambda: close_pty(slave) if slave is not None else None,
+            lambda: catalog.close() if catalog else None,
             lambda: fixture.stop_host(host) if host else None,
             endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
         )
