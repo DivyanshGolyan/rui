@@ -140,6 +140,48 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_min_columns_is_a_positive_integer_wait_or_gone_modifier_only(self):
+        validate = self.helper["validate_scenario"]
+        for action in ("wait", "gone"):
+            data = self.scenario()
+            data["states"][0].update(steps=[{action: "Sidebar", "min_columns": 140}], expect=[])
+            self.assertEqual(validate(data)["states"][0]["steps"], data["states"][0]["steps"])
+            for value in (None, 0, -1, True, 140.0, "140"):
+                with self.subTest(action=action, value=value), self.assertRaisesRegex(ValueError, "min_columns"):
+                    data["states"][0]["steps"][0]["min_columns"] = value
+                    validate(data)
+        for step in ({"text": "draft"}, {"keys": ["Enter"]}, {"sleep": 1},
+                     {"mouse": {"at": "Settings", "do": "click"}}, {"exited": 0},
+                     {"host": "pause"}, {"send": {"to": "Fix it", "text": "hello"}}):
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "min_columns"):
+                data = self.scenario()
+                data["states"][1].update(steps=[{**step, "min_columns": 140}], expect=[])
+                validate(data)
+
+    def test_min_columns_skips_only_narrow_waits_and_logs_the_reason(self):
+        steps = [{"wait": "Sidebar", "min_columns": 140},
+                 {"gone": "Old sidebar", "min_columns": 140, "timeout": 3},
+                 {"wait": "Input"}, {"gone": "Loading"}]
+        for columns in (46, 140, 180):
+            with self.subTest(columns=columns), patch.dict(self.helper["frame_steps"].__globals__) as owner:
+                wait = unittest.mock.Mock()
+                owner["frame_wait"] = wait
+                terminal = types.SimpleNamespace(frame=committed("Input", columns=columns), status=None)
+                with contextlib.redirect_stderr(io.StringIO()) as log:
+                    self.helper["frame_steps"](None, terminal, steps)
+                expected = [] if columns < 140 else [
+                    unittest.mock.call(None, terminal, "Sidebar", False, 20, False),
+                    unittest.mock.call(None, terminal, "Old sidebar", True, 3, False),
+                ]
+                expected += [unittest.mock.call(None, terminal, "Input", False, 20, False),
+                             unittest.mock.call(None, terminal, "Loading", True, 20, False)]
+                self.assertEqual(wait.call_args_list, expected)
+                if columns < 140:
+                    self.assertIn("skip wait 'Sidebar': 46 columns < 140", log.getvalue())
+                    self.assertIn("skip gone 'Old sidebar': 46 columns < 140", log.getvalue())
+                else:
+                    self.assertEqual(log.getvalue(), "")
+
     def test_mouse_steps_validate_shared_nested_shape(self):
         validate = self.helper["validate_scenario"]
         for action in ("move", "click", "press", "release", "wheel-up", "wheel-down"):
@@ -676,7 +718,7 @@ while True:
         self.assertGreater(len(default["states"]), 25)
 
     def test_regex_absences_validate_and_roundtrip_before_launch(self):
-        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
         data = self.scenario()
         data["states"][0]["absent_regex"] = [pattern]
         validated = self.helper["validate_scenario"](data)
@@ -689,11 +731,12 @@ while True:
 
     def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
         state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
-                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"]}
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"]}
         clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings\nenter open"
         run = types.SimpleNamespace(meta={"sha": "a" * 40})
         for size in ((140, 40), (46, 30)):
-            for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d")):
+            for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d"),
+                             ("9xt4vy", "0s │"), ("emged6", "42s│ Model")):
                 with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
                     bad = f"{clean}\n ○ {sid}                  {age}"
 
@@ -721,10 +764,17 @@ while True:
                     " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
             with self.subTest(named_or_nonrow=row):
                 self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
-        # Regex absence is opt-in: a current empty chat may own its sidebar row.
-        self.assertIsNone(self.helper["frame_row_failure"]({"name": "current-chat"}, " ○ 9xt4vy  0s"))
+        for row in (" ○ 9xt4vy  0s │", " ○ emged6  42s│ Model", " ○ 000000  2m │chat text"):
+            with self.subTest(raw_sidebar=row):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, row))
+        for row in (" ○ New Session  0s │", " ○ New Session  0s │Model",
+                    " ○ Existing 9xt4vy  2m │chat", " ○ 9xt4vy extra  2m │chat"):
+            with self.subTest(named_sidebar=row):
+                self.assertIsNone(self.helper["frame_row_failure"](state, row))
+        # The helper remains generic: only recipes opt into row exclusions.
+        self.assertIsNone(self.helper["frame_row_failure"]({"name": "unrelated"}, " ○ 9xt4vy  0s"))
 
-    def test_empty_chat_roundtrips_exclude_abandoned_rows_without_rejecting_current_chat(self):
+    def test_empty_chat_roundtrips_and_current_chat_labels_exclude_raw_ids(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         states = {state["name"]: state for state in scenario["states"]}
         for name in ("start-empty", "day-start", "start-busy", "overview-printable-ignored", "many-sessions",
@@ -734,8 +784,19 @@ while True:
                 state = states[name]
                 self.assertEqual(set(state["sizes"]), {(140, 40), (46, 30)})
                 self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy                  2m"))
+        for name, state in states.items():
+            if state.get("first_run"):
+                continue
+            with self.subTest(raw_id_excluded_in_state=name):
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy  0s │ chat"))
         for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
-            self.assertNotIn("absent_regex", states[name], "the currently open empty sidebar row is allowed")
+            state = states[name]
+            steps = state["steps"]
+            typed_ready = steps.index({"wait": "Type a task"})
+            self.assertEqual(steps[typed_ready + 1], {"wait": "○ New Session", "min_columns": 140})
+            self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+            self.assertIsNone(self.helper["frame_row_failure"](
+                {"name": name, "absent_regex": state["absent_regex"]}, " ○ New Session  0s │chat"))
         for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
             state = states[name]
             self.assertTrue(state["first_frame"])

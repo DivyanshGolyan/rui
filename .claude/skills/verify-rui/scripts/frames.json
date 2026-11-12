@@ -41,6 +41,9 @@
         "/unarchive",
         "{session:Archive audit}",
         "Archived Archive audit"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -68,6 +71,9 @@
         "Archived Archive audit",
         "/unarchive",
         "{session:Archive audit}"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -178,7 +184,7 @@
         "gpt-6.1-sol · low"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -194,6 +200,10 @@
         },
         {
           "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
         }
       ],
       "expect": [
@@ -205,6 +215,9 @@
       "absent": [
         "enter start",
         "Configured."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -245,6 +258,9 @@
       "absent": [
         "› /effort",
         "enter pick"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -270,6 +286,9 @@
       ],
       "absent": [
         "› /nope"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -299,6 +318,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -340,6 +362,9 @@
         "Filter:",
         "↑ ",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -387,6 +412,9 @@
         "↑ ",
         "gpt-5.5",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -421,6 +449,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -436,6 +467,10 @@
         },
         {
           "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
         },
         {
           "mouse": {
@@ -460,6 +495,9 @@
         "click to change",
         "▾",
         "Filter:"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -475,6 +513,10 @@
         },
         {
           "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
         },
         {
           "keys": [
@@ -503,6 +545,9 @@
         "click to change",
         "▾",
         "Filter:"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -518,6 +563,10 @@
         },
         {
           "wait": "Type a task"
+        },
+        {
+          "wait": "○ New Session",
+          "min_columns": 140
         },
         {
           "keys": [
@@ -549,6 +598,9 @@
         "✓ xhigh",
         "click to change",
         "▾"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -598,7 +650,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -673,7 +725,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -746,7 +798,7 @@
         "enter start"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ],
       "sizes": [
         "140x40",
@@ -786,6 +838,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -875,6 +930,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -903,6 +961,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -930,6 +991,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -984,7 +1048,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1023,6 +1087,9 @@
         "enter sends",
         "Type a task",
         "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1063,6 +1130,9 @@
         "Configured.",
         "click to change",
         "▾"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1108,6 +1178,9 @@
         "enter sends",
         " · exit 127",
         " · exit 1"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1153,7 +1226,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour"
+      "note": "10a-tool-open: Ctrl-O selects the lowest tool; output is indented on its band, other rows folded; no extra mark; literal stored envelope in quiet colour",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "tool-open-two",
@@ -1249,6 +1325,9 @@
       "absent": [
         " · exit 127",
         " · exit 1"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1294,7 +1373,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines"
+      "note": "10c-tool-open-long: twenty quiet stored-result rows, including status and label, then fourteen remaining lines",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "tool-open-nocolor",
@@ -1342,7 +1424,10 @@
         "46x30",
         "140x40"
       ],
-      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour"
+      "note": "10d-tool-open-nocolor: the same open tool is indented without selection or output backgrounds; no extra mark; literal stored envelope in quiet colour",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "chat-draft-kept",
@@ -1371,7 +1456,10 @@
           "wait": "Keep this chat draft"
         }
       ],
-      "expect": "Keep this chat draft"
+      "expect": "Keep this chat draft",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "chat-scrolled",
@@ -1389,6 +1477,9 @@
       ],
       "expect": [
         "↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1411,6 +1502,9 @@
       "expect": [
         "The retry loop waits",
         "↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1444,6 +1538,9 @@
         "The retry loop waits",
         "↓",
         "new"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1472,6 +1569,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1495,6 +1595,9 @@
         "expired",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1534,6 +1637,9 @@
       ],
       "absent": [
         "Waiting"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1572,6 +1678,9 @@
       ],
       "absent": [
         "No code block in the last answer."
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1617,6 +1726,9 @@
       ],
       "absent": [
         "Waiting"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1656,6 +1768,9 @@
             "Ready."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1707,7 +1822,10 @@
       "first_frame": true,
       "expect_next": {
         "■ Stop the slow job": "   Stopped"
-      }
+      },
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "stop-narrow",
@@ -1753,7 +1871,10 @@
       "sizes": [
         "46x30"
       ],
-      "first_frame": true
+      "first_frame": true,
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "stopped",
@@ -1763,6 +1884,9 @@
         {
           "wait": "■ Stopped"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1778,6 +1902,9 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1800,6 +1927,9 @@
         "Type a message",
         "enter sends",
         "more lines · shift+↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1828,6 +1958,9 @@
       ],
       "expect": [
         "Deny"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1851,6 +1984,9 @@
       ],
       "absent": [
         "more lines · shift+↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1872,6 +2008,9 @@
         {
           "wait": "Allow once"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1940,6 +2079,9 @@
         "/configure",
         "/model",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1970,6 +2112,9 @@
         "/status",
         "/configure",
         "/model"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -1997,6 +2142,9 @@
         "/copy",
         "code · file",
         "/effort"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2039,7 +2187,7 @@
         "/configure"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2053,6 +2201,9 @@
         {
           "wait": "/copy"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2071,6 +2222,9 @@
         {
           "wait": "Unknown command /nope"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2100,6 +2254,9 @@
         {
           "wait": "Usage: /requests"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2151,6 +2308,9 @@
             "Give a chat info specimen summarizing the retry deadline fix."
           ]
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2200,6 +2360,9 @@
         "alt+i info",
         "Filter:",
         "↑ "
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2239,6 +2402,9 @@
         "Filter:",
         "↑ ",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2284,6 +2450,9 @@
         "Filter:",
         "↑ ",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2313,6 +2482,9 @@
       ],
       "absent": [
         "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2341,6 +2513,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2376,7 +2551,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2432,7 +2607,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2470,7 +2645,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2510,7 +2685,7 @@
         "Type a task"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2547,6 +2722,9 @@
           "mode": "bypass",
           "effort": "high"
         }
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2570,6 +2748,9 @@
       "expect_last": "alt+i info",
       "absent": [
         "+ New Session"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2589,7 +2770,7 @@
         "gpt-6.1-sol · low"
       ],
       "absent_regex": [
-        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2608,6 +2789,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2627,6 +2811,9 @@
       "theme": "mist",
       "expect": [
         "↓"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2647,6 +2834,9 @@
         "pub fn next",
         "Late request  waits 30 s  fails at once",
         "retry policy notes"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2663,6 +2853,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2687,7 +2880,10 @@
         "46x30",
         "140x40"
       ],
-      "expect": "Host stopped"
+      "expect": "Host stopped",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     },
     {
       "name": "host-back",
@@ -2704,6 +2900,9 @@
       "expect": "Batch job",
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
       ]
     },
     {
@@ -2727,7 +2926,10 @@
         "46x30",
         "140x40"
       ],
-      "expect": "Detached. Host work continues."
+      "expect": "Detached. Host work continues.",
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *(?:│.*)?$"
+      ]
     }
   ]
 }
