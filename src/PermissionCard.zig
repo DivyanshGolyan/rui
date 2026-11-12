@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Consent = @import("ActionConsent.zig");
 const Policy = @import("session_consent.zig");
+const input_choice = @import("choice_row.zig");
 const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
@@ -95,16 +96,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 /// InputArea supplies the composer only when the consent owner selects it.
 /// This is placement, not row/key policy: the request always stays above it.
-fn choiceStyle(self: *const Self, highlighted: bool, target: Hover.Rect) vaxis.Style {
-    var style = self.style;
-    if (highlighted) {
-        style.reverse = true;
-    } else if (self.hover.contains(target)) {
-        style.bg = self.hover_style.bg;
-        style.reverse = self.hover_style.reverse;
-        style.ul_style = self.hover_style.ul_style;
-    }
-    return style;
+fn choiceLook(self: *const Self, highlighted: bool, target: Hover.Rect) input_choice.Look {
+    return if (highlighted) .selected else if (self.hover.contains(target)) .hovered else .plain;
 }
 
 pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
@@ -143,14 +136,12 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
         const deny_column = @min(self.choice_width, " Allow once   ".len);
         targets[1] = .{ .row = self.choice_row.?, .col = self.choice_column + deny_column, .width = @min(self.choice_width - deny_column, " Deny ".len) };
         self.hover.targets = targets;
-        const allow = self.choiceStyle(self.consent.highlight == .allow_once, targets[0]);
-        const deny = self.choiceStyle(self.consent.highlight == .deny, targets[1]);
-        if (self.choice_column != 0) _ = window.child(.{ .width = 2, .y_off = self.choice_row.?, .height = 1 }).printSegment(.{ .text = " ›", .style = self.style }, .{ .wrap = .none });
-        _ = window.child(.{ .x_off = self.choice_column, .width = self.choice_width, .y_off = self.choice_row.?, .height = 1 }).print(&.{
-            .{ .text = " Allow once ", .style = allow },
-            .{ .text = "  ", .style = self.style },
-            .{ .text = " Deny ", .style = deny },
-        }, .{ .wrap = .none });
+        const looks: [2]input_choice.Look = .{
+            self.choiceLook(self.consent.highlight == .allow_once, targets[0]),
+            self.choiceLook(self.consent.highlight == .deny, targets[1]),
+        };
+        const choices = input_choice.segments(.{ "Allow once", "Deny" }, looks, self.style, self.hover_style, self.choice_column != 0);
+        _ = window.child(.{ .width = size.width - self.choice_column, .y_off = self.choice_row.?, .height = 1 }).print(&choices, .{ .wrap = .none });
         if (self.consent.draw()) self.ready_pending = true;
     }
     surface.children = children;
