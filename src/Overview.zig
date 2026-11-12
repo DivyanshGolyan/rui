@@ -439,6 +439,8 @@ app: ?*TerminalApp = null,
 /// Program status records beside App's frames.
 attention: *TerminalApp.Attention = undefined,
 root: Root = undefined,
+/// The sign-in page Root shows as an opaque widget; its worker is this owner's.
+sign_in: SignIn = .{},
 app_screen: AppScreen.Overview = undefined,
 app_input: InputArea = undefined,
 /// What can fill the list's place, each its own widget: the screen shows
@@ -537,7 +539,7 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
 /// Stops the open Session's workers and the overview's before App releases
 /// the terminal. A Session that failed to open has no frontend to stop.
 fn stopApp(self: *Self) void {
-    self.root.sign_in_page.cancel();
+    self.sign_in.cancel();
     if (self.app_session) |left| if (left.frontend) |frontend| frontend.stop();
     self.worker.cancel();
 }
@@ -835,7 +837,7 @@ fn disposeSession(self: *Self, left: Left) void {
 }
 
 fn finishApp(self: *Self, ended: anyerror!void) !void {
-    const sign_in_ended = self.root.sign_in_page.stop();
+    const sign_in_ended = self.sign_in.stop();
     defer {
         for (self.retired.items) |retired| self.disposeSession(retired.left);
         self.retired.deinit(self.init.gpa);
@@ -990,8 +992,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const size = ctx.max.size();
     self.caps.width = self.attention.vx.caps.unicode;
     const normal = @import("widget_style.zig").of(self.caps, .{});
-    self.root.sign_in_page.style = normal;
-    self.root.sign_in_page.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
+    self.sign_in.style = normal;
+    self.sign_in.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     const quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     self.app_screen.style = normal;
     var list: ?*GroupedList = null;
@@ -1123,7 +1125,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     };
     self.composer = self.emptyComposer(0);
     self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .sign_in_open = options.sign_in };
-    self.root.sign_in_page = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
+    self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
+    self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
     // The status's rows sit above the one Footer row.
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" }, .facts_at = .bottom };
@@ -1137,14 +1140,19 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
 }
 
 fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (self.root.sign_in_page.task.thread != null) return;
+    if (self.sign_in.task.thread != null) return;
     if (!view.admitsDefaultsEdit(&self.state) or self.state.save.running != null or self.defaults_save == .pending) return error.DefaultsUnavailable;
-    self.root.sign_in_page.reset();
-    self.root.sign_in_page.selectors = self.options.selectors;
-    self.root.sign_in_page.selectors.store = self.options.store;
+    self.sign_in.reset();
+    self.sign_in.selectors = self.options.selectors;
+    self.sign_in.selectors.store = self.options.store;
     self.root.sign_in_open = true;
-    try ctx.requestFocus(self.root.sign_in_page.widget());
+    try ctx.requestFocus(self.sign_in.widget());
     ctx.redraw = true;
+}
+
+fn listVisible(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.root.listVisible();
 }
 
 fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
@@ -7211,7 +7219,7 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
         overview.ops.open = Nav.open;
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
-        const page = &overview.root.sign_in_page;
+        const page = &overview.sign_in;
         // The rig gives no launch hooks; nothing here begins an attempt.
         page.activate = null;
         page.ready = null;
@@ -7255,6 +7263,15 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
         for (ctx.cmds.items) |command| if (command == .request_focus) {
             try std.testing.expect(command.request_focus.eql(page.widget()));
         };
+        // The page names the app on its top row only when the list is hidden,
+        // as it was when Root set the page's title from its width.
+        for ([_]u16{ 140, 46 }) |width| {
+            var shown = try rig.shown(width, 40);
+            defer shown.deinit();
+            const top = try shown.line(0);
+            errdefer std.debug.print("top row at {d}: '{s}'\n", .{ width, top });
+            try std.testing.expectEqual(@as(usize, @intFromBool(width < Root.split_at)), std.mem.count(u8, top, "rui"));
+        }
         // Esc leaves as before: from the key back to the choice, then out.
         ctx.cmds.clearRetainingCapacity();
         try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());

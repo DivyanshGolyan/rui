@@ -5,7 +5,6 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Split = @import("widgets/Split.zig");
 const AppSettings = @import("app_settings.zig");
-const SignIn = @import("SignIn.zig");
 const TerminalApp = @import("TerminalApp.zig");
 const Self = @This();
 
@@ -19,7 +18,8 @@ divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
 settings_page: AppSettings = .{},
 settings_open: bool = false,
-sign_in_page: SignIn = .{},
+/// The sign-in page its owner supplies; Root only routes to and draws it.
+sign_in: ?vxfw.Widget = null,
 sign_in_open: bool = false,
 pasting: bool = false,
 frames: u64 = 0,
@@ -43,6 +43,7 @@ const Layout = struct {
 
 /// One derived pane decision drives drawing, visibility and return focus.
 fn chooseLayout(self: *const Self) Layout {
+    std.debug.assert(!self.sign_in_open or self.sign_in != null);
     return .{
         .split = self.size.width >= split_at,
         .pane = if (self.sign_in_open) .sign_in else if (self.settings_open) .settings else if (self.session != null) .session else .overview,
@@ -91,7 +92,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     // paste boundaries with those same bytes. Esc is the way out.
     if (self.sign_in_open) switch (input) {
         .key_press, .paste_start, .paste_end, .invalid_key => {
-            try self.sign_in_page.widget().handleEvent(ctx, input);
+            try self.sign_in.?.handleEvent(ctx, input);
             ctx.consumeEvent();
             return;
         },
@@ -141,7 +142,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .init => {
             try ctx.requestFocus(self.overview);
             try self.overview.handleEvent(ctx, .init);
-            if (self.sign_in_open) try ctx.requestFocus(self.sign_in_page.widget());
+            if (self.sign_in_open) try ctx.requestFocus(self.sign_in.?);
             try ctx.tick(16, self.widget());
             ctx.redraw = true;
         },
@@ -167,7 +168,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.cmds.items.len = kept;
                 if (self.settings_open) try self.settings_page.widget().handleEvent(ctx, .tick);
             }
-            try self.sign_in_page.widget().handleEvent(ctx, .tick);
+            if (self.sign_in) |page| try page.handleEvent(ctx, .tick);
             try ctx.tick(16, self.widget());
         },
         else => {},
@@ -179,13 +180,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const size = ctx.max.size();
     self.size = size;
     self.settings_page.narrow = size.width < split_at;
-    self.sign_in_page.show_title = size.width < split_at;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     const layout = self.chooseLayout();
     const pane = switch (layout.pane) {
         .overview => if (layout.split) self.compose else self.overview,
         .session => self.session.?,
-        .sign_in => self.sign_in_page.widget(),
+        .sign_in => self.sign_in.?,
         .settings => self.settings_page.widget(),
     };
     const child = if (layout.split) split: {
@@ -617,19 +617,30 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
     const empty: vxfw.Text = .{ .text = "" };
     const list: vxfw.Text = .{ .text = " rui" };
     var root: Self = .{ .overview = empty.widget(), .list = list.widget(), .compose = empty.widget(), .sign_in_open = true };
+    // As the page's owner does: the page names the app only when the
+    // screen's list, whose header names it, is not shown.
+    const Owner = struct {
+        fn listVisible(raw: *anyopaque) bool {
+            const owner: *Self = @ptrCast(@alignCast(raw));
+            return owner.listVisible();
+        }
+    };
+    var page: @import("SignIn.zig") = .{ .userdata = &root, .list_visible = Owner.listVisible };
+    root.sign_in = page.widget();
     for ([_]u16{ 140, 46 }) |width| {
         for ([_]@import("sign_in.zig").Stage{ .choice, .codex_waiting, .key_entry }) |stage| {
-            root.sign_in_page.state.stage = stage;
-            try root.sign_in_page.code.set("BDL9-KI88H");
+            page.state.stage = stage;
+            try page.code.set("BDL9-KI88H");
             const secret = "sk-secret";
-            @memcpy(root.sign_in_page.key.bytes[0..secret.len], secret);
-            root.sign_in_page.key.len = secret.len;
+            @memcpy(page.key.bytes[0..secret.len], secret);
+            page.key.len = secret.len;
             const surface = try root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} });
             try std.testing.expectEqual(width >= split_at, root.listVisible());
             var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 12, .x_pixel = 0, .y_pixel = 0 });
             surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 12, .screen = &screen }, root.widget());
             var dump: std.Io.Writer.Allocating = .init(arena.allocator());
             var linked: usize = 0;
+            var titles: usize = 0;
             for (0..12) |row| {
                 var line: std.Io.Writer.Allocating = .init(arena.allocator());
                 for (0..width) |col| {
@@ -641,10 +652,14 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
                         linked += 1;
                     }
                 }
+                if (row == 0) titles = std.mem.count(u8, line.written(), " rui");
                 try dump.writer.writeAll(std.mem.trimEnd(u8, line.written(), " "));
                 try dump.writer.writeByte('\n');
             }
             const text = dump.written();
+            // One title on the top row: the list's beside the page, else the page's.
+            try std.testing.expectEqual(@as(usize, 1), titles);
+            try std.testing.expect(std.mem.startsWith(u8, text, " rui"));
             try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
             switch (stage) {
                 .choice => try std.testing.expect(std.mem.indexOf(u8, text, "› ChatGPT    API key") != null),
@@ -662,7 +677,8 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
 
 test "Sign-in input stays with the row over settings and a previously focused list" {
     const empty: vxfw.Text = .{ .text = "" };
-    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .settings_open = true, .sign_in_open = true };
+    var page: @import("SignIn.zig") = .{};
+    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .settings_open = true, .sign_in = page.widget(), .sign_in_open = true };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
@@ -673,12 +689,12 @@ test "Sign-in input stays with the row over settings and a previously focused li
         try root.widget().captureEvent(&ctx, value);
         try std.testing.expect(ctx.consume_event);
     }
-    try std.testing.expectEqual(@import("sign_in.zig").Stage.key_entry, root.sign_in_page.state.stage);
-    try std.testing.expectEqualStrings("sk-masked", root.sign_in_page.key.slice());
+    try std.testing.expectEqual(@import("sign_in.zig").Stage.key_entry, page.state.stage);
+    try std.testing.expectEqualStrings("sk-masked", page.key.slice());
     try std.testing.expect(!root.settings_page.hasChoice());
     try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
-    try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, root.sign_in_page.state.stage);
-    try std.testing.expectEqual(@as(usize, 0), root.sign_in_page.key.len);
+    try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
+    try std.testing.expectEqual(@as(usize, 0), page.key.len);
     try std.testing.expect(root.settings_open);
     try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
     try std.testing.expect(ctx.quit);
@@ -690,8 +706,8 @@ test "Sign-in takes every click at each stage, over settings or not, and changes
     defer arena.deinit();
     const Stage = @import("sign_in.zig").Stage;
     for ([_]bool{ false, true }) |settings_open| for (std.enums.values(Stage)) |stage| {
-        var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .settings_open = settings_open, .sign_in_open = true };
-        root.sign_in_page.state.stage = stage;
+        var page: @import("SignIn.zig") = .{ .state = .{ .stage = stage } };
+        var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .settings_open = settings_open, .sign_in = page.widget(), .sign_in_open = true };
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
             ctx.consume_event = false;
@@ -700,7 +716,7 @@ test "Sign-in takes every click at each stage, over settings or not, and changes
         }
         try std.testing.expect(root.sign_in_open);
         try std.testing.expectEqual(settings_open, root.settings_open);
-        try std.testing.expectEqual(stage, root.sign_in_page.state.stage);
+        try std.testing.expectEqual(stage, page.state.stage);
         try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
     };
 }

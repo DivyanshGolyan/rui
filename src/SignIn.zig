@@ -39,7 +39,9 @@ style: vaxis.Style = .{},
 quiet: vaxis.Style = .{},
 key: api_key.Key = .{},
 key_rejected: bool = false,
-show_title: bool = true,
+/// Whether the screen shows the list, whose header names the app; without
+/// an answer the page names it itself.
+list_visible: ?*const fn (*anyopaque) bool = null,
 pasting: bool = false,
 task: ClientTask = .{},
 /// Cancellation and publication claim the same gate, as the CLI does. Once
@@ -347,7 +349,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     @memset(surface.buffer, .{ .style = self.style });
     if (size.width == 0 or size.height == 0) return surface;
     const header = try ctx.arena.create(vxfw.Text);
-    header.* = .{ .text = if (self.show_title) " rui" else "", .style = self.style };
+    const list_visible = if (self.list_visible) |visible| visible(self.userdata.?) else false;
+    header.* = .{ .text = if (list_visible) "" else " rui", .style = self.style };
     const row: u16 = size.height -| 4;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 3);
     const one = ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 });
