@@ -19,6 +19,7 @@ Only the first size runs steps; later sizes set the PTY window size and wait for
 
 Each size waits for the combined `expect`/`absent` predicate, then verifies the actual saved snapshot again.
 `expect_next: {"row text": "detail text"}` additionally requires the line containing that row to be followed by its expected detail.
+`expect_last: "footer text"` requires that text on the physical last row, including when the other pane has a nonempty tail.
 For a transition regression, `first_frame: true` skips readiness polling after the steps and asserts their last committed frame directly, so a later refresh cannot hide a wrong first frame. `expect` defaults to the last `wait`, or none when there is no wait. An action after the last wait requires explicit `expect` (text/list, or `[]` deliberately); `absent` is a list. Use content waits before acting on asynchronously loaded transcripts or Session lists. The tool-fold states wait for stored results before navigating; `many-sessions-end` waits for list population before Down. The Host-stopped chat starts the fixture-owned Host before pausing its live connection.
 
 ## Recordings
