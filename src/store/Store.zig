@@ -42,6 +42,7 @@ const session_list_read = @import("domain/session_list_read.zig");
 const session_report_read = @import("domain/session_report_read.zig");
 const rsql = @import("rsql.zig");
 const store_access = @import("access.zig");
+const transition = @import("transition.zig");
 const Access = store_access.Access;
 const ReadAccess = reads_domain.ReadAccess;
 const Engine = @import("engine.zig").Engine;
@@ -1513,13 +1514,7 @@ pub const Store = struct {
         faults: Faults,
         scheduled: ?*?u64,
     ) !?AttemptAdmission {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var candidate: ReadAccess = .open(&entry);
-        defer candidate.deinit();
-        var access: Access(.write, error{RetryNoLongerDue}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, model_admission_domain.tryAdmitNextModelRetry(&candidate, &access, self.io, active, faults, scheduled)));
+        return transition.apply(self, model_admission_domain.AdmitRetry, .{ .io = self.io, .active = active, .scheduled = scheduled }, faults);
     }
 
     /// Opens the view in `out`, where it stays until it closes: a view
