@@ -200,13 +200,13 @@ fn lines(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u8, 
 
 /// A field choice uses the picker's model row without its overview status
 /// sentences or effort/sign-in controls. Width is the full field-choice width.
-pub fn modelLine(arena: std.mem.Allocator, entry: picker.Entry, row: picker.Row, id_width: usize, width: usize) !Line {
+pub fn modelLine(arena: std.mem.Allocator, entry: picker.Entry, row: picker.Row, id_width: usize, width: usize, unicode: bool) !Line {
     const buffer = try arena.alloc(u8, @max(entry.id.len, id_width) + 256);
     var columns: Columns = .{ .mark_gap = 1 };
-    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, true).text) > width) columns.context = false;
-    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, true).text) > width) columns.all_sign_ins = false;
-    const reserved = cells(format(buffer, entry, row, false, 0, columns, .unicode, true).text);
-    const formatted = format(buffer, entry, row, false, @min(id_width, width -| reserved), columns, .unicode, true);
+    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, unicode).text) > width) columns.context = false;
+    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, unicode).text) > width) columns.all_sign_ins = false;
+    const reserved = cells(format(buffer, entry, row, false, 0, columns, .unicode, unicode).text);
+    const formatted = format(buffer, entry, row, false, @min(id_width, width -| reserved), columns, .unicode, unicode);
     const text = try arena.dupe(u8, formatted.text);
     return .{ .text = text, .segments = try segments(arena, text, formatted) };
 }
@@ -834,6 +834,22 @@ test "model picker domain shows provider columns only across sign-ins and short 
         const row = try private.row(arena.allocator(), 0);
         try std.testing.expect(std.mem.indexOf(u8, row.text, "API key") == null);
     }
+}
+
+test "model picker shared ASCII model rows preserve compact mark gap and truncation" {
+    const entry: picker.Entry = .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) };
+    const row = picker.Query.parse("").row(entry, .{ .model = entry.id, .provider = .codex }).?;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for (0..100) |width| {
+        const line = try modelLine(arena.allocator(), entry, row, entry.id.len, width, false);
+        for (line.text) |byte| try std.testing.expect(byte < 0x80);
+        try std.testing.expect(std.mem.startsWith(u8, line.text, "+ "));
+    }
+    const unicode = try modelLine(arena.allocator(), entry, row, entry.id.len, 99, true);
+    try std.testing.expect(std.mem.startsWith(u8, unicode.text, "✓ gpt-6.1-sol"));
+    const ascii = try modelLine(arena.allocator(), entry, row, entry.id.len, 99, false);
+    try std.testing.expect(std.mem.startsWith(u8, ascii.text, "+ gpt-6.1-sol"));
 }
 
 test "model picker controls use printed cell columns for effort and every offered sign-in" {

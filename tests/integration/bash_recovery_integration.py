@@ -77,9 +77,15 @@ def prove_effect_without_result_becomes_indeterminate(state):
             env={**os.environ, "HOME": str(home)},
         ) as (entered, master):
             human.read_terminal(master, "› ")
-            status = human.terminal_step(master, "/status", " Status · ", composer=True)
-            assert "Indeterminate Action: 1" in status, status
-            assert "The command may have run; Rui did not replay it." in status, status
+            info = human.chat_info_frame(master)
+            assert "Model" in info and "Tools" in info, info
+            # Indeterminate execution is an Action fact, not a settings field.
+            report = json.loads(human.run(home, "session", "inspect", "--store", store,
+                                         "--session", session, "--profile", "full"))
+            action, = report["full"]["actions"]
+            assert action["action"] == "1" and action["resolution"] == "indeterminate", action
+            assert action["result"]["text"] == result, action
+            assert bash.resolution(store, session) == "indeterminate"
             human.terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         continuation_release.set()
