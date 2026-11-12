@@ -92,7 +92,7 @@ fn mysqlRefusal(err: anyerror) ?Failure {
         error.PeerFailed => .init(.mysql_unreachable, "could not verify the MySQL server's TLS certificate"),
         error.DeadlineExceeded => .init(.mysql_unreachable, "timed out connecting to the MySQL server"),
         error.ConnectionLost => .init(.mysql_unreachable, "the MySQL connection was lost during startup"),
-        error.LoginRefused, error.AuthMethodRefused => .init(.mysql_login, "the MySQL server refused the login; check credentials and database access"),
+        error.LoginRefused, error.AuthMethodRefused => .init(.mysql_login, "the MySQL server refused the login or the login lacks a privilege the Store needs; check credentials and SELECT, INSERT, UPDATE privileges on the database"),
         else => null,
     };
 }
@@ -149,6 +149,7 @@ test "a launched Host's start failure is refused with its Store's codes only" {
     try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlFlushLogUnsafe).?.message.slice(), "innodb_flush_log_at_trx_commit=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlSyncBinlogUnsafe).?.message.slice(), "sync_binlog=1") != null);
     try std.testing.expectEqualStrings("the MySQL server refused the connection before login", mysqlRefusal(error.ServerRefused).?.message.slice());
+    try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.LoginRefused).?.message.slice(), "SELECT, INSERT, UPDATE") != null);
     try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.HostNotFound).?.message.slice(), mysqlRefusal(error.ConnectFailed).?.message.slice()));
     try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.UntrustedPeer).?.message.slice(), mysqlRefusal(error.TlsFailed).?.message.slice()));
 }
@@ -209,4 +210,59 @@ test "start report preserves JSON escaping and the maximum message" {
     try std.testing.expect(std.mem.startsWith(u8, rendered, prefix));
     try std.testing.expectEqualStrings("\"}}\n", rendered[prefix.len + 6 * max_refusal_message_bytes ..]);
     for (0..max_refusal_message_bytes) |i| try std.testing.expectEqualStrings("\\u0000", rendered[prefix.len + 6 * i ..][0..6]);
+}
+
+// Independent expectations from main's launch-frame classifier at the merge.
+test "start report classifier preserves every refusal code and message byte" {
+    const cases = .{
+        .{ error.StoreAlreadyOwned, StartError.store_locked, "another Host owns this Store", false },
+        .{ error.RuntimeDirectoryInUse, StartError.runtime_dir_unusable, "another Host owns this runtimeDir", false },
+        .{ error.RuntimeDirectoryUnusable, StartError.runtime_dir_unusable, "runtimeDir must be a private (mode 0700) directory this Host can lock", false },
+        .{ error.StoreLocked, StartError.store_locked, "another Host owns this Store", true },
+        .{ error.StoreSchemaMissing, StartError.store_schema_missing, "apply this build's MySQL schema before starting the Host", true },
+        .{ error.StoreSchemaBehind, StartError.store_schema_behind, "the MySQL Store format is older than this build; apply its forward migrations", true },
+        .{ error.StoreSchemaAhead, StartError.store_schema_behind, "the MySQL Store format is newer than this build; use a compatible build", true },
+        .{ error.MalformedStoreFormat, StartError.store_schema_behind, "the MySQL Store format metadata is not a valid number", true },
+        .{ error.WrongStoreVersion, StartError.store_schema_behind, "the MySQL Store wire version does not match this build", true },
+        .{ error.WrongStoreSchema, StartError.store_schema_behind, "the MySQL Store metadata contains an unexpected key", true },
+        .{ error.StoreCatalogMismatch, StartError.store_schema_behind, "the MySQL Store catalog does not match this build", true },
+        .{ error.WrongStoreIdentity, StartError.store_schema_behind, "the MySQL Store identity metadata or connection target is invalid", true },
+        .{ error.MysqlTooOld, StartError.mysql_version, "MySQL 8.4 or newer is required", true },
+        .{ error.UnsupportedServer, StartError.mysql_version, "MySQL 8.4 or newer is required", true },
+        .{ error.MysqlIsMariadb, StartError.mariadb, "MariaDB is not supported; use MySQL 8.4 or newer", true },
+        .{ error.MysqlReadOnly, StartError.read_only_replica, "MySQL requires read_only=OFF and super_read_only=OFF", true },
+        .{ error.MysqlFlushLogUnsafe, StartError.durability_innodb_flush_log_at_trx_commit, "MySQL requires innodb_flush_log_at_trx_commit=1", true },
+        .{ error.MysqlSyncBinlogUnsafe, StartError.durability_sync_binlog, "MySQL requires sync_binlog=1 when binlogging is enabled", true },
+        .{ error.MysqlStatementBinlog, StartError.binlog_statement, "MySQL STATEMENT binlogging is not supported; use ROW or MIXED", true },
+        .{ error.ServerRefused, StartError.mysql_unreachable, "the MySQL server refused the connection before login", true },
+        .{ error.ConnectFailed, StartError.mysql_unreachable, "could not connect to the MySQL server", true },
+        .{ error.HostNotFound, StartError.mysql_unreachable, "could not resolve the MySQL host", true },
+        .{ error.InvalidHost, StartError.mysql_unreachable, "the MySQL host address is invalid", true },
+        .{ error.InvalidCaFile, StartError.mysql_unreachable, "could not load the MySQL ssl-ca file", true },
+        .{ error.TrustUnavailable, StartError.mysql_unreachable, "could not load MySQL system TLS trust", true },
+        .{ error.InvalidSslCertFile, StartError.mysql_unreachable, "could not load MySQL system TLS trust", true },
+        .{ error.InvalidSslCertDir, StartError.mysql_unreachable, "could not load MySQL system TLS trust", true },
+        .{ error.TlsRefused, StartError.mysql_unreachable, "the MySQL server does not offer TLS", true },
+        .{ error.TlsFailed, StartError.mysql_unreachable, "the MySQL server's TLS handshake failed", true },
+        .{ error.UntrustedPeer, StartError.mysql_unreachable, "the MySQL server's TLS certificate is not trusted", true },
+        .{ error.PeerFailed, StartError.mysql_unreachable, "could not verify the MySQL server's TLS certificate", true },
+        .{ error.DeadlineExceeded, StartError.mysql_unreachable, "timed out connecting to the MySQL server", true },
+        .{ error.ConnectionLost, StartError.mysql_unreachable, "the MySQL connection was lost during startup", true },
+        .{ error.LoginRefused, StartError.mysql_login, "the MySQL server refused the login or the login lacks a privilege the Store needs; check credentials and SELECT, INSERT, UPDATE privileges on the database", true },
+        .{ error.AuthMethodRefused, StartError.mysql_login, "the MySQL server refused the login or the login lacks a privilege the Store needs; check credentials and SELECT, INSERT, UPDATE privileges on the database", true },
+    };
+    inline for (cases) |case| {
+        inline for (.{ Store.sqlite, Store.mysql }) |store| {
+            const refusal = classify(store, case[0]);
+            if (case[3] and store == .sqlite) {
+                try std.testing.expect(refusal == null);
+            } else {
+                try std.testing.expectEqual(case[1], refusal.?.code);
+                try std.testing.expectEqualStrings(case[2], refusal.?.message.slice());
+            }
+        }
+    }
+    inline for (.{ Store.sqlite, Store.mysql }) |store| {
+        try std.testing.expect(classify(store, error.OutOfMemory) == null);
+    }
 }

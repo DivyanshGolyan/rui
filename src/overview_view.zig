@@ -12,9 +12,14 @@
 //! overview state.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
+const configure_input = @import("configure_input.zig");
 const session_archive = @import("session_archive.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const session_line = @import("session_line.zig");
+const chrome = @import("session_chrome.zig");
+pub const FooterField = chrome.FooterField;
+pub const FooterFocus = chrome.FooterFocus;
+pub const FooterInput = chrome.FooterInput;
 const attention = @import("attention.zig");
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
@@ -345,6 +350,8 @@ pub const StartResult = union(enum) {
 
 pub const Event = union(enum) {
     composed: Composed,
+    /// A key at the drawn footer, before the editor can consume it.
+    footer_input: FooterInput,
     /// The size of the screen the shell draws next; keys read until the
     /// next one act on that screen.
     resized: Size,
@@ -396,6 +403,8 @@ pub const Click = union(enum) {
     new_session,
     settings,
     command: slash_commands.Shown.Pick,
+    /// The field the footer span actually drew, not a column to re-read.
+    footer: FooterField,
 };
 
 /// What a click on a list item names; an empty slot takes none.
@@ -610,24 +619,22 @@ pub const ModelsRead = union(enum) {
 
 const ReasoningEffort = model_capability.ReasoningEffort;
 
-/// Which effort from the saved defaults a start applies: none when the
-/// start holds an effort of its own, `default` included, or names no model;
-/// else the saved one when the model offers it.
+/// The effort input a start holds, projected through creation's owner.
 pub const StartEffort = struct {
     /// What `/configure --reasoning-effort` holds for the start.
     held: ?[]const u8,
     model: ?[]const u8,
 
-    /// Whether the saved effort can reach the start, so the shell reads it.
+    /// Whether the shell needs to read saved effort. Creation alone
+    /// decides whether the read value applies to the chosen model.
     pub fn readsSaved(self: StartEffort) bool {
         return self.held == null and self.model != null;
     }
 
-    /// The effort the start applies from `saved`, which is null when the
-    /// launch reads no saved defaults.
-    pub fn applied(self: StartEffort, saved: ?ReasoningEffort) ?ReasoningEffort {
-        if (!self.readsSaved()) return null;
-        return model_capability.startEffort(model_catalog.shipped, saved, self.model.?);
+    pub fn shown(self: StartEffort, saved: ?ReasoningEffort) ?ReasoningEffort {
+        const model = self.model orelse return null;
+        const effort = configure_input.creationEffort(model, if (self.held) |held| configure_input.policy(held) else .{}, saved);
+        return if (effort.value) |value| std.meta.stringToEnum(ReasoningEffort, value) else null;
     }
 };
 
@@ -696,6 +703,9 @@ pub const Effect = union(enum) {
     start: StartRequest,
     open: Reference,
     open_settings,
+    open_choice: FooterField,
+    /// Continue the original event to the editor without changing its bytes.
+    forward_input,
     stop: Reference,
     archive: ArchiveRequest,
     /// Read the Host's model lists.
@@ -1001,6 +1011,8 @@ pub const State = struct {
     lines: Vec(Bounded(max_line_bytes)) = .{},
 
     selected: Selection = .new_session,
+    /// Focus and an admitted opening waiting for its borrowed source.
+    footer: chrome.Footer = .{},
     /// The Session whose conversation holds the terminal, if any.
     conversing: ?Reference = null,
     notice: ?Notice = null,
@@ -1095,6 +1107,17 @@ pub const State = struct {
         return .compose;
     }
 
+    /// A failed read deliberately permits the retained/shipped fallback;
+    /// an unread or still-loading list cannot yet back a stable choice.
+    pub fn modelsReady(self: *const State) bool {
+        if (self.asking_models) return false;
+        return switch (self.menu_read) {
+            .unread => false,
+            .read => !self.menu.loading(),
+            .unanswered, .invalid => true,
+        };
+    }
+
     /// How the shell takes an input.
     pub fn route(self: *const State, _: keymap.Selection(Action)) Route {
         return switch (self.inputMode()) {
@@ -1117,12 +1140,33 @@ pub const State = struct {
         return self.settings.get(startOption("reasoning-effort").?);
     }
 
+    /// The provider for a confirmed defaults refresh. Keep explicit and
+    /// saved authority ahead of the committed choice; never use held
+    /// Configure here or invent a first-run provider.
+    pub fn savedProvider(self: *const State, explicit: ?[]const u8, saved: ?[]const u8) ?[]const u8 {
+        return explicit orelse saved orelse if (self.default) |binding| @tagName(binding.provider) else null;
+    }
+
     pub fn nextBinding(self: *const State) Binding {
         const default = if (self.default) |*binding| binding else null;
         return .{
             .provider = self.settings.get(startOption("provider").?) orelse if (default) |binding| @tagName(binding.provider) else null,
             .model = self.settings.get(startOption("model").?) orelse if (default) |binding| binding.model.slice() else null,
         };
+    }
+
+    /// The same completed effort the creation owner will submit.
+    pub fn nextEffort(self: *const State) ?ReasoningEffort {
+        return (StartEffort{ .held = self.heldEffort(), .model = self.nextBinding().model }).shown(if (self.default) |binding| binding.effort else null);
+    }
+
+    /// An owned presentation value for the existing standalone choice.
+    /// Binding precedence stays with nextBinding; effort stays with creation.
+    pub fn nextStart(self: *const State) ?Default {
+        const binding = self.nextBinding();
+        var current = Default.of(binding.provider, binding.model) orelse return null;
+        current.effort = self.nextEffort();
+        return current;
     }
 
     fn releaseModels(self: *State) void {
@@ -1559,7 +1603,15 @@ fn lookup(keyed: []const Keyed, ref: Reference) ?u32 {
 pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     var effects: Effects = .{};
     switch (event) {
+        .composed, .open, .leave => state.footer.pending = null,
+        .clicked => |input| if (input.target != .footer) {
+            state.footer.pending = null;
+        },
+        else => {},
+    }
+    switch (event) {
         .composed => |value| try compose(state, value, &effects),
+        .footer_input => |input| footerInput(state, input, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
             .page => |page| try listPage(state, page, &effects),
@@ -1574,6 +1626,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         // A click is input as a key is: the screen that takes no key takes
         // no click, wherever it lands.
         .clicked => |input| if (state.inputMode() != .frozen) switch (input.target) {
+            .footer => |field| if (!input.pasting) footerInput(state, .{ .click = field }, &effects),
             .open => |reference| try clickOpen(state, reference, &effects),
             // The row the frame drew, only in the list it drew: then
             // Enter takes it, as arrowing to it and pressing Enter would.
@@ -1712,7 +1765,14 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 state.next_list_ms = 0;
             }
         },
-        .models => |read| readModels(state, read),
+        .models => |read| {
+            readModels(state, read);
+            if (state.footer.pending != null and state.modelsReady() and !state.left and state.conversing == null) {
+                const field = state.footer.pending.?;
+                state.footer.pending = null;
+                effects.add(.{ .open_choice = field });
+            }
+        },
         .ran => |ran| try ranCommand(state, ran),
         .defaults_saved => |saved| {
             if (saved) |binding| state.default = binding;
@@ -1730,6 +1790,31 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         else => {},
     };
     return effects;
+}
+
+/// Both the facts and Tab stops derive effort from the next start's owner.
+fn footerEffort(state: *const State) ?[]const u8 {
+    const shown = state.nextEffort();
+    return if (shown) |value| @tagName(value) else null;
+}
+
+fn footerInput(state: *State, input: FooterInput, effects: *Effects) void {
+    if (state.inputMode() == .frozen) {
+        // The existing frozen composer route owns global exit keys and
+        // suppresses edits. Footer focus must not intercept that authority.
+        effects.add(.forward_input);
+        return;
+    }
+    const decision = state.footer.step(footerEffort(state) != null, input);
+    if (state.footer.pending) |field| {
+        if (field == .model and !state.modelsReady()) {
+            askModels(state, effects);
+        } else {
+            state.footer.pending = null;
+            effects.add(.{ .open_choice = field });
+        }
+    }
+    if (decision.forward) effects.add(.forward_input);
 }
 
 /// Takes a shared model-list answer. A failed read keeps the last menu.
@@ -3443,6 +3528,15 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
 /// The Footer's key: what Enter does (`enterAction`), after Esc when a
 /// cancellable Upgrade takes it. The frame keeps the list it draws in
 /// `state.commands` before asking.
+pub const ChoiceKeys = chrome.ChoiceKeys;
+pub const choiceKeys = chrome.choiceKeys;
+
+pub fn footerKeys(state: *const State, draft: Draft, choice_open: bool) []const u8 {
+    if (choice_open) return choiceKeys(true).text;
+    if (state.footer.focus != .input) return "enter open";
+    return footerRight(state, draft);
+}
+
 pub fn footerRight(state: *const State, draft: Draft) []const u8 {
     const listed = if (state.commands) |shown| shown.seen != .closed else false;
     const action = enterAction(state, listed, draft.bytes);
@@ -3457,20 +3551,43 @@ pub fn footerLeft(arena: Allocator, state: *const State, width: u16, caps: Caps)
     return std.mem.trimEnd(u8, try segmentText(arena, try factsSegments(arena, state, width, caps)), " ");
 }
 
-pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+/// Fitted facts retain the identity of each drawn button. Shells may add
+/// hit surfaces, but never infer a field from a column or label.
+pub const FooterSpan = struct { span: Span, button: ?FooterField = null };
+
+pub fn footerSpans(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const FooterSpan {
     var built: Spans = .of(arena, caps, width);
     built.begin();
+    const model = state.nextBinding().model orelse "no model";
+    const effort = footerEffort(state);
     const path = shortPath(state.home, state.workspaces.items[state.cwd]);
-    const binding = state.nextBinding();
-    const model = binding.model orelse "no model";
-    const held = state.heldEffort();
-    const saved = if (state.default) |default| default.effort else null;
-    const applied = (StartEffort{ .held = held, .model = binding.model }).applied(saved);
-    const effort = held orelse if (applied) |value| @tagName(value) else null;
-    const text = try std.fmt.allocPrint(arena, "{s}{s}{s} {s} {s}{s}", .{ model, if (effort != null) " · " else "", effort orelse "", built.glyphs.dot, path.prefix, path.rest });
+    const folder = try std.fmt.allocPrint(arena, " {s} {s}{s}", .{ built.glyphs.dot, path.prefix, path.rest });
+    const separator = try std.fmt.allocPrint(arena, " {s} ", .{built.glyphs.dot});
     const facts_style: Style = .{ .colour = .quiet, .background = .bar };
-    _ = try built.put(1, text, width -| 2, facts_style);
-    return segmentsOf(arena, try built.finish(), width, plain(caps, facts_style));
+    const available = width -| 2;
+    // The folder is optional; reserve the effort before fitting the model.
+    const effort_width = if (effort) |text| built.measure(separator) + built.measure(text) else 0;
+    const model_width = try built.put(1, model, available -| effort_width, facts_style);
+    const model_index: ?usize = if (model_width != 0) built.count - 1 else null;
+    var effort_index: ?usize = null;
+    if (effort) |text| if (model_width != 0 and effort_width <= available -| model_width) {
+        _ = try built.put(built.column, separator, built.measure(separator), facts_style);
+        if (try built.put(built.column, text, built.measure(text), facts_style) != 0) effort_index = built.count - 1;
+    };
+    if (built.measure(folder) <= width -| 1 -| built.column) _ = try built.put(built.column, folder, built.measure(folder), facts_style);
+    const spans = try arena.alloc(FooterSpan, built.count);
+    for (built.spans[0..built.count], spans, 0..) |span, *fact, at| fact.* = .{
+        .span = span,
+        .button = if (model_index == at) .model else if (effort_index == at) .effort else null,
+    };
+    return spans;
+}
+
+pub fn factsSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
+    const facts = try footerSpans(arena, state, width, caps);
+    const spans = try arena.alloc(Span, facts.len);
+    for (facts, spans) |fact, *span| span.* = fact.span;
+    return segmentsOf(arena, spans, width, plain(caps, .{ .colour = .quiet, .background = .bar }));
 }
 
 /// A panel supplies its own rows instead of Session groups.
@@ -3762,7 +3879,8 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                     try std.testing.expectEqual(x.action, y.action);
                 }
             },
-            .list_models, .clear_draft, .cancel_upgrade, .open_settings, .exit => {},
+            .open_choice => |field| try std.testing.expectEqual(field, got.open_choice),
+            .list_models, .clear_draft, .cancel_upgrade, .open_settings, .forward_input, .exit => {},
         }
     }
 }
@@ -5367,6 +5485,7 @@ test "every click obeys the input mode: a frozen screen takes none, whatever it 
             .new_session => try std.testing.expectEqual(Selection.new_session, state.selected),
             .settings => try expectEffects(&.{ .open_settings, .list_models }, effects),
             .command => try expectEffects(&.{}, effects), // No list was drawn.
+            .footer => unreachable, // This table exercises list identities only.
         }
     };
 }
@@ -5956,11 +6075,11 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
     try expectEffects(&.{}, try step(&state, .start_upgrade));
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     // Esc cancels the Upgrade and keeps the draft.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
     // The worker says whether the stop held; until then the line stands.
-    try std.testing.expectEqualStrings("Upgrading to 0.60.0 · no Host running · esc cancels", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
+    try std.testing.expectEqualStrings("Preparing Upgrade · no Hosts running · esc cancels", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     _ = try step(&state, .{ .upgrade = .cancelling });
     // A second Esc is still the Upgrade's while it winds down.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
@@ -5972,7 +6091,7 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
 
     // Past publishing Esc is the draft's, and an incompatible end holds.
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } }, .step = .publishing } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .{ .running = 1 } }, .step = .publishing } } });
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
@@ -5991,13 +6110,13 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .{ .running = 0 } } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } }, .outcome = .compatible } } });
     try std.testing.expect(state.upgrade.after == .reobserving);
 }
 
 test "every place an Upgrade run can stand decides the hold, Esc and another Upgrade from that one value" {
-    const found: upgrade_status.Found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } };
+    const found: upgrade_status.Found = .{ .host = .{ .running = 2 } };
     const Case = struct { run: ?upgrade_status.Run, going: bool, escape: bool };
     const cases = [_]Case{
         .{ .run = null, .going = false, .escape = false },
@@ -6008,7 +6127,7 @@ test "every place an Upgrade run can stand decides the hold, Esc and another Upg
         .{ .run = .cancelling, .going = true, .escape = true },
         .{ .run = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } }, .going = false, .escape = false },
         .{ .run = .{ .ended = .{ .how = .superseded, .outcome = .unchanged } }, .going = false, .escape = false },
-        .{ .run = .{ .ended = .{ .how = .{ .incompatible = found.version }, .outcome = .incompatible } }, .going = false, .escape = false },
+        .{ .run = .{ .ended = .{ .how = .{ .incompatible = upgrade_status.Version{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } }, .going = false, .escape = false },
     };
     for (cases) |case| {
         var state = try opened(&.{});
@@ -6034,12 +6153,12 @@ test "another Upgrade while one runs changes nothing: its progress and Esc stay"
     defer state.deinit();
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     const preparing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(preparing);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     try std.testing.expectEqualStrings(preparing, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none }, .step = .publishing } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } } });
     const publishing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(publishing);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
@@ -6058,11 +6177,11 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     _ = try step(&state, .start_upgrade);
     try expectStatus(&state, "Checking for updates…", .normal);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
-    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
+    try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     // A notice never hides the run's line, where Esc is offered.
     state.say(.attention, "! Select a Session first.", .{});
-    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    try expectStatus(&state, "Preparing Upgrade · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .{}, .next);
     // An ending that is news is a notice: it goes with the next key and
     // the unconfirmed send shows again.
@@ -6072,7 +6191,7 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     // A release this client cannot use stays until another Upgrade.
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try press(&state, .{}, .next);
     try expectStatus(&state, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention);
@@ -6091,9 +6210,9 @@ test "the status rows above the Footer say the status bar's line" {
     const unconfirmed = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{})).?);
     try std.testing.expect(std.mem.startsWith(u8, unconfirmed, " ! Not confirmed · rui request recover " ++ key));
     _ = try step(&state, .start_upgrade);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     const upgrading = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{ .unicode = false })).?);
-    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
+    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Preparing Upgrade - no Hosts running - esc cancels"));
 }
 
 test "Upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {
@@ -6104,7 +6223,7 @@ test "Upgrade is never refused as a Host request: the status bar shows its run a
     // Enter again while it runs starts nothing and hides nothing.
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
-    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
+    _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
     // A Host request is refused in words; the retry shows its own progress.
@@ -6843,7 +6962,7 @@ test "the Footer names the Enter action submission takes, over every composer st
 test "overview Footer reserves the Upgrade cancellation key before clipping progress" {
     var state = try opened(&.{});
     defer state.deinit();
-    const found: upgrade_status.Found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 20 } };
+    const found: upgrade_status.Found = .{ .host = .{ .running = 20 } };
     const cases = [_]struct { run: upgrade_status.Run, right: []const u8 }{
         .{ .run = .checking, .right = "esc cancels" },
         .{ .run = .{ .installing = .{ .found = found, .step = .preparing } }, .right = "esc cancels" },
@@ -7150,5 +7269,252 @@ test "overview command list click takes the drawn row only from the list the fra
                 try std.testing.expectEqual(shown.seen, clicked.commands.?.seen);
             }
         }
+    };
+}
+
+test "new chat footer focus domain uses the same drawn fields as chat" {
+    // Independent expectations for every input from each focus, on both
+    // screens. The new-chat adapter must emit exactly the core decision.
+    const Case = struct { input: FooterInput, focus: [3]FooterFocus, open: [3]?FooterField = @splat(null), forward: [3]bool = @splat(false) };
+    for ([_]bool{ false, true }) |has_effort| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        const no_effort = for (model_catalog.shipped) |entry| {
+            if (entry.efforts.count() == 0 and model_catalog.canChat(entry.id)) break entry.id;
+        } else unreachable;
+        state.default = Default.of("codex", if (has_effort) "gpt-6.1-sol" else no_effort);
+        state.menu_read = .read;
+        const cases = [_]Case{
+            .{ .input = .{ .tab = false }, .focus = .{ .model, if (has_effort) .effort else .input, .input } },
+            .{ .input = .{ .tab = true }, .focus = .{ if (has_effort) .effort else .model, .input, .model } },
+            .{ .input = .escape, .focus = @splat(.input), .forward = .{ true, false, false } },
+            .{ .input = .text, .focus = @splat(.input), .forward = @splat(true) },
+            .{ .input = .enter, .focus = @splat(.input), .open = .{ null, .model, if (has_effort) .effort else null }, .forward = .{ true, false, false } },
+            .{ .input = .{ .click = .model }, .focus = @splat(.input), .open = @splat(.model) },
+            .{ .input = .{ .click = .effort }, .focus = @splat(.input), .open = @splat(.effort) },
+            .{ .input = .{ .click = null }, .focus = @splat(.input), .forward = @splat(true) },
+        };
+        for (cases) |case| for (std.enums.values(FooterFocus), 0..) |focus, at| {
+            state.footer.focus = focus;
+            const effects = try step(&state, .{ .footer_input = case.input });
+            const chat = chrome.footerInput(focus, has_effort, case.input);
+            try std.testing.expectEqual(case.focus[at], state.footer.focus);
+            try std.testing.expectEqual(case.focus[at], chat.focus);
+            try std.testing.expectEqual(case.open[at], chat.open_choice);
+            try std.testing.expectEqual(case.forward[at], chat.forward);
+            try std.testing.expectEqual(@as(usize, @intFromBool(case.open[at] != null) + @intFromBool(case.forward[at])), effects.len);
+            if (case.open[at]) |field| try std.testing.expectEqual(field, effects.slice()[0].open_choice);
+            if (case.forward[at]) try std.testing.expect(effects.slice()[0] == .forward_input);
+        };
+        // Clicks name what the previous frame drew, not the newer model.
+        for (std.enums.values(FooterField)) |field| {
+            const effects = try step(&state, .{ .clicked = .{ .target = .{ .footer = field } } });
+            try std.testing.expectEqual(field, effects.slice()[0].open_choice);
+        }
+        for (std.enums.values(FooterField)) |field| {
+            state.footer.focus = .model;
+            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .footer = field }, .pasting = true } }));
+            try std.testing.expectEqual(FooterFocus.model, state.footer.focus);
+        }
+        state.footer.focus = .input;
+        const sequence = if (has_effort) &[_]FooterFocus{ .model, .effort, .input } else &[_]FooterFocus{ .model, .input };
+        for (sequence) |expected| {
+            _ = try step(&state, .{ .footer_input = .{ .tab = false } });
+            try std.testing.expectEqual(expected, state.footer.focus);
+        }
+    }
+}
+
+test "new chat footer spans show default and explicit effort and drop folder first" {
+    var state: State = undefined;
+    try state.init(std.testing.allocator, .{ .cwd = "/home/d/code/a-very-long-project-name", .home = "/home/d" });
+    defer state.deinit();
+    state.default = Default.of("codex", "gpt-6.1-sol");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]?ReasoningEffort{ null, .xhigh }) |effort| for ([_]u16{ 140, 46 }) |width| {
+        state.default.?.effort = effort;
+        const right = footerRight(&state, .{});
+        const budget = width - @as(u16, @intCast(right.len));
+        const text = try footerLeft(arena.allocator(), &state, budget, .{});
+        const expected = if (effort != null) "gpt-6.1-sol · xhigh" else "gpt-6.1-sol · " ++ @import("product_defaults.zig").reasoning_effort;
+        try std.testing.expect(std.mem.startsWith(u8, text, " "));
+        try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
+        const spans = try footerSpans(arena.allocator(), &state, budget, .{});
+        var fields: std.enums.EnumSet(FooterField) = .empty;
+        for (spans) |fact| if (fact.button) |field| fields.insert(field);
+        try std.testing.expect(fields.eql(.initMany(std.enums.values(FooterField))));
+        const full = if (width == 46) try std.fmt.allocPrint(arena.allocator(), " {s}", .{expected}) else try std.fmt.allocPrint(arena.allocator(), " {s} · ~/code/a-very-long-project-name", .{expected});
+        try std.testing.expectEqualStrings(full, text);
+    };
+}
+
+test "new chat model intent waits for a settled snapshot and cancels without draft effects" {
+    for (std.enums.values(enum { complete, invalid, unanswered })) |answer| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.default = Default.of("codex", "gpt-6.1-sol");
+        try expectEffects(&.{.list_models}, try step(&state, .{ .clicked = .{ .target = .{ .footer = .model } } }));
+        try std.testing.expect(state.footer.pending == .model and !state.modelsReady());
+        var loading: model_picker.Menu = .{};
+        loading.sources.set(.codex, .pending);
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = loading } }));
+        try std.testing.expect(state.footer.pending == .model and !state.modelsReady());
+        const result: ModelsRead = switch (answer) {
+            .complete => .{ .menu = .{} },
+            .invalid => .invalid,
+            .unanswered => .unanswered,
+        };
+        try expectEffects(&.{.{ .open_choice = .model }}, try step(&state, .{ .models = result }));
+        try std.testing.expect(state.footer.pending == null and state.modelsReady());
+    }
+    for (std.enums.values(enum { escape, text, tab, elsewhere, settings, composing, open, leave })) |cancel| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.default = Default.of("codex", "gpt-6.1-sol");
+        _ = try step(&state, .{ .clicked = .{ .target = .{ .footer = .model }, .draft = .{ .bytes = "kept draft" } } });
+        const event: Event = switch (cancel) {
+            .escape => .{ .footer_input = .escape },
+            .text => .{ .footer_input = .text },
+            .tab => .{ .footer_input = .{ .tab = false } },
+            .elsewhere => .{ .footer_input = .{ .click = null } },
+            .settings => .{ .clicked = .{ .target = .settings } },
+            .composing => .{ .composed = .{ .input = .{ .composer = .append }, .draft = .{ .bytes = "kept draftx" } } },
+            .open => .{ .open = "aaaaaa".* },
+            .leave => .leave,
+        };
+        const effects = try step(&state, event);
+        for (effects.slice()) |effect| try std.testing.expect(effect != .clear_draft and effect != .start);
+        try std.testing.expect(state.footer.pending == null);
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = .{} } }));
+    }
+}
+
+test "new chat footer keys describe the action that currently owns Enter" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    for (std.enums.values(FooterFocus)) |focus| {
+        state.footer.focus = focus;
+        try std.testing.expectEqualStrings(if (focus == .input) "enter start" else "enter open", footerKeys(&state, .{}, false));
+        try std.testing.expectEqualStrings("enter pick · esc close", footerKeys(&state, .{}, true));
+    }
+}
+
+test "new chat frozen footer leaves global keys with the existing frozen composer" {
+    var state = try opened(&.{});
+    defer state.deinit();
+    state.default = Default.of("codex", "gpt-6.1-sol");
+    _ = try submit(&state, .{ .bytes = "start a task" });
+    try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+    for ([_]FooterInput{ .{ .tab = false }, .{ .tab = true }, .enter, .escape, .text, .other }) |input| {
+        try expectEffects(&.{.forward_input}, try step(&state, .{ .footer_input = input }));
+        try std.testing.expectEqual(FooterFocus.input, state.footer.focus);
+        try std.testing.expect(state.footer.pending == null);
+    }
+}
+
+test "new chat saved provider and defaults outcomes preserve unpinned authority" {
+    const Case = struct { current: ?Provider = .codex, explicit: ?[]const u8 = null, saved: ?[]const u8 = null, expected: ?[]const u8 = "codex" };
+    const cases = [_]Case{
+        .{},
+        .{ .current = .openai, .expected = "openai" },
+        .{ .current = null, .expected = null },
+        .{ .saved = "openai", .expected = "openai" },
+        .{ .current = null, .saved = "codex" },
+        .{ .explicit = "openai", .saved = "codex", .expected = "openai" },
+        .{ .current = null, .explicit = "codex", .saved = "openai" },
+        .{ .saved = "invalid-provider", .expected = "invalid-provider" },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |held| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.default = if (case.current) |provider| Default.of(@tagName(provider), "gpt-6.1-sol") else null;
+        if (held) {
+            configure(&state, "--provider openai --model gpt-6-sol --reasoning-effort medium");
+            try std.testing.expectEqualStrings("medium", state.heldEffort().?);
+        }
+        const provider = state.savedProvider(case.explicit, case.saved);
+        if (case.expected) |expected| try std.testing.expectEqualStrings(expected, provider.?) else try std.testing.expect(provider == null);
+        // Confirmation carries an effective binding, not a saved pin.
+        // Both unpinned effort and first model picks update it completely.
+        for ([_][]const u8{ "gpt-6.1-sol", "gpt-5.5" }) |model| for ([_]?ReasoningEffort{ null, .low, .xhigh }) |effort| {
+            var confirmed = Default.of("codex", model).?;
+            confirmed.effort = effort;
+            try expectEffects(&.{}, try step(&state, .{ .defaults_saved = confirmed }));
+            try std.testing.expect(confirmed.eql(&state.default.?));
+            try std.testing.expectEqualStrings(if (held) "openai" else "codex", state.nextBinding().provider.?);
+            try std.testing.expectEqualStrings(if (held) "gpt-6-sol" else model, state.nextBinding().model.?);
+            try std.testing.expectEqualStrings(if (held) "medium" else if (effort) |value| @tagName(value) else "low", footerEffort(&state).?);
+        };
+    };
+}
+
+test "new chat footer effort and stops match creation across catalog saved and held policies" {
+    const SavedKind = enum { absent, supported, unsupported };
+    const HeldKind = enum { absent, explicit, unsupported_explicit, default };
+    const Case = struct { model: []const u8, supported: ?ReasoningEffort, unsupported: ReasoningEffort, fallback: ?ReasoningEffort };
+    const cases = [_]Case{
+        .{ .model = "openai/whisper-1", .supported = null, .unsupported = .high, .fallback = null },
+        .{ .model = "gpt-5.5", .supported = .high, .unsupported = .max, .fallback = .low },
+        .{ .model = "azure/gpt-5-pro", .supported = .high, .unsupported = .low, .fallback = .high },
+    };
+    for (cases) |case| for (std.enums.values(SavedKind)) |saved_kind| for (std.enums.values(HeldKind)) |held_kind| {
+        const saved: ?ReasoningEffort = switch (saved_kind) {
+            .absent => null,
+            .supported => case.supported,
+            .unsupported => case.unsupported,
+        };
+        const held: ?[]const u8 = switch (held_kind) {
+            .absent => null,
+            .explicit => "high",
+            .unsupported_explicit => "max",
+            .default => "default",
+        };
+        const expected: ?ReasoningEffort = switch (held_kind) {
+            .explicit => .high,
+            .unsupported_explicit => .max,
+            .default => case.fallback,
+            .absent => if (saved_kind == .supported) case.supported else case.fallback,
+        };
+        // These independent expected outcomes prevent shared bad fallback
+        // logic from making the footer and creation agree incorrectly.
+        var creation: configure_input.ConfigureInput = .{
+            .store = "/store",
+            .session = .create,
+            .reasoning_effort = if (held) |value| configure_input.policy(value) else .{},
+        };
+        var compaction: [20]u8 = undefined;
+        creation.completeCreation(.openai, case.model, saved, null, &compaction);
+        try std.testing.expect(creation.reasoning_effort.present);
+        try std.testing.expectEqualStrings(if (expected) |value| @tagName(value) else "", creation.reasoning_effort.value orelse "");
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.default = Default.of("openai", case.model);
+        state.default.?.effort = saved;
+        if (held) |value| {
+            var arguments: [64]u8 = undefined;
+            configure(&state, try std.fmt.bufPrint(&arguments, "--reasoning-effort {s}", .{value}));
+            try std.testing.expectEqualStrings(value, state.heldEffort().?);
+        }
+        try std.testing.expectEqual(expected, state.nextEffort());
+        try std.testing.expectEqual(expected, state.nextStart().?.effort);
+        try std.testing.expectEqualStrings(case.model, state.nextStart().?.model.slice());
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        for ([_]u16{ 140, 46 }) |width| {
+            const spans = try footerSpans(arena.allocator(), &state, width, .{});
+            var word: ?[]const u8 = null;
+            for (spans) |span| if (span.button == .effort) {
+                try std.testing.expect(word == null);
+                word = span.span.text;
+            };
+            try std.testing.expectEqual(expected != null, word != null);
+            if (word) |text| try std.testing.expectEqualStrings(creation.reasoning_effort.value.?, text);
+        }
+        state.footer.focus = .input;
+        try expectEffects(&.{}, try step(&state, .{ .footer_input = .{ .tab = false } }));
+        try std.testing.expectEqual(FooterFocus.model, state.footer.focus);
+        try expectEffects(&.{}, try step(&state, .{ .footer_input = .{ .tab = false } }));
+        try std.testing.expectEqual(if (expected != null) FooterFocus.effort else .input, state.footer.focus);
     };
 }

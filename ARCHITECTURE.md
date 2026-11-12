@@ -464,7 +464,8 @@ Each Session evolves independently; sharing a settings object creates no shared 
 Tool names remain exactly as supplied by MCP servers, without an inferred server namespace (D120).
 At Host startup, an unreachable server keeps its saved tool copies; a configured server with no records contributes no tools (D147).
 When a create or update spec names a tool absent from the catalog, admission refuses it as `mcp_server_unavailable` if any configured MCP server contributes no tools, otherwise `unknown_tool`.
-This is deliberately not an ownership claim: the refusal's advisory `message` says the name is unknown and lists every empty server that may provide it.
+The refusal's advisory `message` names the first unknown tool in canonical tool-name order for either code (D241).
+This is deliberately not an ownership claim: when servers are empty, it lists every empty server that may provide the tool.
 The same catalog decision applies to a creating Message and `start_agent`; the latter returns a failed tool result naming `spec.tools`, without starting a Session.
 Known tools, including saved copies of an unreachable server's tools, remain admissible subject to the existing provider and child-narrowing rules.
 Only the rejection code is durable; direct replies derive the advisory message from the current Host's catalog and launch configuration, including on replay, with no extra Store read or format change.
@@ -1586,12 +1587,12 @@ If candidate facts are absent, it reports unknown and leaves validation to Host 
 The installer's read-only Store probe uses the defaults-selected Store, which is not necessarily the client's explicitly selected active Store.
 MySQL schema application and backup remain operator-owned.
 
-`rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
+`rui upgrade` replaces an eligible managed released selection with the latest published stable release, then calls the same restart-all core as `rui host restart --all` for every running same-user Host. The read-only check names the discovered Host count, Stores and unsupported reasons.
 `rui upgrade --check` is read-only and starts no Host.
 The Version row of app settings starts an Upgrade run, available from the overview or with a conversation open. The run stays inline on the status row, without sending a command to the model or adding an updater service.
 The overview owns the one run and runs its worker once its own and the conversation's Client work has settled; both screens hand Esc to that run.
-It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
-Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
+It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Preparing Upgrade · restarts every eligible Host (2 found) · esc cancels`.
+Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting Hosts…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 When this run installs a different Rui, compatible or incompatible with the old client, the terminal leaves through its ordinary cancellation, save-flush and restoration path, then the CLI replaces its process image with the published selection's `bin/rui` (same PID and terminal, never PATH or the old executable).
 It reopens the overview or the same conversation (`Overview.Options.open`), pinning the old client's actual canonical Store explicitly and preserving its explicit `--provider` and `--model` selectors, the overview draft and every chat draft, including the open editor's bytes, caret, recall anchor and rejection state.
 A changed saved Store cannot redirect this restart.
@@ -1611,8 +1612,8 @@ One pure core, `upgrade_status`, turns that value into the Version field and sta
 `UpgradeJob.ending` alone derives the small failure reason from the run error: a download failure says "couldn't reach GitHub" even while settings hides the status bar. The restored shell report retains curl's last stderr line.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
-Restart can interrupt work in every Session in that Store, not other Stores.
-No running Host means install only.
+Restart can interrupt work in every Session across all affected Stores, not only the selected Store.
+No running Hosts means install only; absent Stores are not started. The pre-install census is warning-only: post-publication discovery includes Hosts started during preparation.
 
 The TUI handoff is a cross-version contract: the departing binary writes it and the selected binary reads it.
 `RUI_RELAUNCH` names an absolute `HOME/.rui-relaunch/<32 lowercase hexadecimal digits>.json` path; the directory is current-user-owned mode 0700, the exclusive random file is a current-user-owned regular file of mode 0600 with one link, and neither final component is followed through a symlink.
@@ -1631,14 +1632,17 @@ Each draft is bounded by `SessionInput.capacity`, the Store and ending line by t
 The encoded size bound allows six JSON-escaped bytes per input byte plus fixed field/integer overhead for that population; the reader streams into owned decoded drafts rather than allocating the file's advertised size.
 The exact v1 bytes are pinned in `relaunch_handoff.zig`.
 
-The thin upgrade coordinator composes `InstallationOutcome` separately from HostLifecycle `ActivationOutcome`.
-After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
+The thin upgrade coordinator composes `InstallationOutcome` with the restart-all batch of per-Host outcomes. Under its publication lock, `Installation` records `Receipt.selected_after` and `selected_version` from the same chosen build. Upgrade revalidates that pinned build against the receipt identity, never selects through PATH or substitutes the discovered candidate, and calls the restart-all owner once.
+Every versioned ending (status bar, Settings field and relaunch handoff) uses that receipt version, even if another publisher won or restarting Hosts fails. Before publication, the UI says `Preparing Upgrade` without promising a target version; publishing and restarting remain version-neutral. No live version cache or additional worker synchronization is kept.
+For each eligible Host that owner reobserves the exact instance, waits for lease retirement after stopping it, starts the pinned target with preserved settings and verifies readiness before claiming activation.
+Upgrade keeps no single-Store activation path or private launch snapshot in its check. The TUI derives selected-Store compatibility from that Store's per-Host outcome; failure or unsupported-owner guidance from any Store remains visible and prevents a relaunch from swallowing it.
+Per-Host result lines and totals are the same as the standalone command. Any failed/unconfirmed Host produces `host_restart_failed` (operate, exit 6) after reporting the successful binary publication; unsupported Hosts are explained successful skips. Publication is never rolled back for a restart failure.
 A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
 An already-installed target can still need activation of an older running Host.
 Source and release installers invoke the newly published command's `rui host restart --all` after publication; failure prints its receipt and a note without failing or undoing installation.
 `host_coordinator` owns restart-all and Upgrade activation in fresh processes that leave the inherited session before accepting a task, independent of the Bash tool (and Host) that launched the caller; no Host thread is added.
-Upgrade hands off its original checked Host observation, launch snapshot and selected target over a private bounded pipe, not a replacement observation or a persisted copy of the Host's environment.
-Cancellation is checked before handoff; once accepted, activation finishes retirement and pinned startup even if the caller departs or its report pipe closes.
+Upgrade hands off the publication receipt's pinned target and HOME over a private bounded pipe. The worker runs the whole shared restart-all batch, with fresh discovery after publication; no checked launch snapshot or private Host environment crosses the pipe. There is no separate single-Host activation task.
+Cancellation is checked before handoff; once accepted, the entire batch finishes retirement and pinned startup even if the caller departs or its report pipe closes.
 Restart-all similarly completes every discovered target after the originating Host stops, without identifying that Host or reordering it last.
 Closed stdout cannot abort remaining restarts: outcome counts are retained and receipts fall back to the existing optional stderr diagnostic boundary; closed diagnostics remain best-effort, not a new log registry.
 `--all` is required (`option_required` without it); per-Store restart selection is not exposed yet.
@@ -1660,10 +1664,10 @@ Unknown managed, ineligible and foreign builds remain application-owned; a manag
 Upgrade installation eligibility still requires a selected managed release, independently of the running Host's build kind; a source-started Host newer than that release is superseded without interruption, otherwise normal activation can restart it.
 The target is the pinned installed selection, with a verified numeric version; an unversioned source target is reported without stopping Hosts.
 No running Hosts prints `No running Hosts.` and starts nothing.
-This install-wide operation is separate from `rui upgrade`, whose selected-Store behavior is unchanged.
+Source/release installers and `rui upgrade` use this one install-wide restart owner; only installation eligibility differs.
 
 Lifecycle control observation is separate from ordinary client readiness.
-Upgrade can read the complete bounded Host-info envelope using only the current wire or the released wire `9`, with matching HTTP and body versions and peer PID from that same connection.
+Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
 Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
 A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
 Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.
@@ -2904,7 +2908,11 @@ A stop finds excluded Messages by walking Admission-only pages backward from its
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
-Wire version 13 adds the `chatgpt` provider key, and the `chatgpt_plan` route, to `host_info`'s `capabilities.providers`; different versions refuse each other.
+Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
+A wire bump also appends a Store format step because the Store saves its wire label: format 70 moves the saved label from 13 to 14 on SQLite and MySQL, without changing ordinary rows.
+The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
+`tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
+Upgrade and restart-all control recognize wire 13 as a historical Host-info profile: v0.69.1 may omit `chatgpt`, while v0.69.2 reports it. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
 
 Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
@@ -3956,6 +3964,8 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-14 facts require the provider; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
+Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.
@@ -4291,7 +4301,8 @@ An untruncated stream is complete in the result and names no file.
 
 MCP answers are bounded by the existing 4 MiB per-call answer buffer.
 Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
-When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+When bytes are omitted and the Operation's frozen offer includes Bash, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+Without Bash in that frozen offer, keep the omitted-byte suffix but retain no full answer and append no path or retention hint (D242); later Session settings do not change this choice.
 MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
 Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
 The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.

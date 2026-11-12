@@ -570,7 +570,7 @@ fn writeDefaultsJson(io: std.Io, facts: DefaultsFacts) !void {
 // omitted destinations use the same saved/HOME rule in every CLI mode.
 // Missing HOME is an environment repair, not a Store or request outcome:
 // report what needed it before any capture or transmission.
-const upgrade_usage = "Usage: rui upgrade [--check] [--store PATH]\nInstall the latest published stable release in the managed user installation.\nRestart the selected Store's Host only if already running; affects ALL Sessions there.\n--check only observes, without installation, Host startup, restart or Store migration.\n";
+const upgrade_usage = "Usage: rui upgrade [--check] [--store PATH]\nInstall the latest published stable release in the managed user installation.\nRestart every running same-user Host with a supported launch; affects ALL Sessions across their Stores.\n--store selects the client context, not the restart scope.\n--check only observes, without installation, Host startup, restart or Store migration.\n";
 
 noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     failure_held.resource = "upgrade";
@@ -613,10 +613,10 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         return error.Reported;
     };
     defer checked.deinit(allocator);
-    var buffer: [16384]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try upgrade.writeCheck(&writer, &checked);
-    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
+    var buffer: [4096]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    try upgrade.writeCheck(&output.interface, &checked);
+    try output.flush();
     if (checking) return;
     if (!upgrade.canInstall(&checked)) {
         recordExit(.environment);
@@ -625,10 +625,10 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     var cleanup: upgrade.CleanupReceipts = .{};
     defer {
         var cleanup_buffer: [512]u8 = undefined;
-        var output = std.Io.File.stdout().writerStreaming(init.io, &cleanup_buffer);
+        var cleanup_output = std.Io.File.stdout().writerStreaming(init.io, &cleanup_buffer);
         const written: anyerror!void = emitted: {
-            cleanup.write(&output.interface) catch |err| break :emitted err;
-            break :emitted output.flush();
+            cleanup.write(&cleanup_output.interface) catch |err| break :emitted err;
+            break :emitted cleanup_output.flush();
         };
         written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
     }
@@ -639,14 +639,9 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         return error.Reported;
     };
     defer result.deinit(allocator);
-    writer = .fixed(&buffer);
-    try upgrade.writeResult(&writer, &result);
-    try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
-    switch (result.activation) {
-        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled, .client_incompatible => recordExit(.environment),
-        else => {},
-    }
-    if (exit_status != .done) return error.Reported;
+    try upgrade.writeResult(&output.interface, &result);
+    try output.flush();
+    if (result.hosts.totals().failed != 0) return error.HostRestartFailed;
 }
 
 noinline fn upgradeDownloadDiagnostic(err: anyerror, download: *const @import("upgrade.zig").DownloadDiagnostic) void {
@@ -1937,7 +1932,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
     if (launched) |frame| {
         const endpoint = providers.endpointUnder(init.arena.allocator(), frame.base_url.slice()) catch |err| {
-            if (err == error.InvalidBaseUrl) writeRefusal(io, &.init(.launch_frame_invalid, "provider.baseUrl must be an https URL with a host and no query"));
+            if (err == error.InvalidBaseUrl) return writeRefusal(io, &.init(.launch_frame_invalid, "provider.baseUrl must be an https URL with a host and no query"));
             return err;
         };
         served.ca_file = if (frame.ca_file.len == 0) null else frame.ca_file.slice();
@@ -1990,11 +1985,11 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
 /// Settle the whole Host outcome before treating stdin closure as a clean end.
 fn finishServe(io: std.Io, store: ?start_report.Store, failure: *const ?start_report.Failure, result: anyerror!void) !void {
     if (store) |kind| {
-        if (failure.*) |*value| writeRefusal(io, value);
+        if (failure.*) |*value| return writeRefusal(io, value);
         result catch |err| {
-            // A supplied failure must still be reported on this clean exit.
+            // Without a refusal, closing a launched Host's stdin is clean.
             if (err == error.EffectAwareShutdown) return;
-            if (failure.* == null) if (start_report.classify(kind, err)) |value| writeRefusal(io, &value);
+            if (start_report.classify(kind, err)) |value| return writeRefusal(io, &value);
             return err;
         };
     }
@@ -2036,12 +2031,16 @@ test "start report CLI publishes once before settling every Host outcome" {
                     null;
                 Probe.used = 0;
                 const outcome = finishServe(io, store, &failure, if (err) |value| value else {});
-                if (err) |value| {
+                const expected = if (store == null) "" else if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (store == .mysql and err != null and err.? == error.StoreLocked) mysql_line else "";
+                if (expected.len != 0) {
+                    // Every refusal is already reported, even when a fence
+                    // overrides success or an otherwise clean stdin closure.
+                    try std.testing.expectError(error.Reported, outcome);
+                } else if (err) |value| {
                     if (store != null and value == error.EffectAwareShutdown) {
                         try outcome;
                     } else try std.testing.expectError(value, outcome);
                 } else try outcome;
-                const expected = if (store == null) "" else if (supplied) supplied_line else if (err != null and err.? == error.RuntimeDirectoryInUse) fallback_line else if (store == .mysql and err != null and err.? == error.StoreLocked) mysql_line else "";
                 try std.testing.expectEqualStrings(expected, Probe.output[0..Probe.used]);
             }
         }
@@ -2049,9 +2048,11 @@ test "start report CLI publishes once before settling every Host outcome" {
 }
 
 /// Startup-only rendering scratch does not stay in serve's resident frame.
-noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure) void {
+// The CLI owns publication and the already-reported status, through cleanup.
+noinline fn writeRefusal(io: std.Io, failure: *const start_report.Failure) error{Reported} {
     var buffer: [start_report.max_line_bytes]u8 = undefined;
     std.Io.File.stdout().writeStreamingAll(io, start_report.line(failure, &buffer)) catch {};
+    return error.Reported;
 }
 
 /// Reads the launch frame from stdin, or reports its refusal on stdout.
@@ -2061,7 +2062,7 @@ noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
     frame.* = .{};
     var refusal: start_report.Failure = undefined;
     launch_frame.read(init.io, .stdin(), std.heap.c_allocator, frame, &refusal) catch |err| {
-        if (err == error.LaunchFrameInvalid) writeRefusal(init.io, &refusal);
+        if (err == error.LaunchFrameInvalid) return writeRefusal(init.io, &refusal);
         return err;
     };
     return frame;
@@ -4111,7 +4112,7 @@ const usage_text =
     \\  rui RESOURCE COMMAND --help
     \\    Installed operation help owns exact options. Help needs no Host or credentials.
     \\  rui upgrade [--check] [--store PATH]
-    \\    Check/install published stable; restart only an already-running managed Host.
+    \\    Check/install published stable; restart every eligible running same-user Host.
     \\  rui --version
     \\    Print the release version and source revision.
     \\

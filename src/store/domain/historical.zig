@@ -86,6 +86,8 @@ pub const HistoricalSettings = struct {
     /// exact Session reference, for the Rui-owned request context.
     store: Bounded(store_path.max_bytes),
     session: Bounded(session_id.max_reference_bytes),
+    /// The saved attachment relation; null for an unattached Session.
+    parent: ?Bounded(session_id.max_reference_bytes),
     session_affinity: [16]u8,
     baseline_instructions: HistoricalContent,
     output_schema: ?HistoricalContent,
@@ -795,7 +797,7 @@ fn readHistoricalSettingsHeld(self: *Store, view: *HistoricalView, out: *Histori
 const historical_settings = rsql.Read(.{
     .sql = "SELECT r.model,baseline.instructions_content_id,r.output_schema_content_id,o.tool_set_id AS tool_set_id,tool_set.member_count," ++
         "(SELECT count(*) FROM tool_set_member member JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id " ++
-        "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
+        "WHERE member.tool_set_id=o.tool_set_id AND tool.owner='provider') AS provider_count,r.provider,o.session_ref,s.parent_ref,r.workspace,o.compaction_trigger,o.output_reservation," ++
         operation_effort.effectiveSql("o") ++ " AS reasoning_effort,(" ++ operation_effort.emittedSql("o") ++ ") AS effort_update,s.codec,s.codec_options IS NULL AS plain_codec,o.purpose," ++
         "(SELECT first.reasoning_effort FROM model_operation first JOIN session_revision first_revision ON first_revision.session_ref=first.session_ref AND first_revision.revision=first.settings_revision " ++
         "WHERE first.session_ref=o.session_ref AND first_revision.model=r.model ORDER BY first.admission_position LIMIT 1) AS starting_effort," ++ skills_domain.sourcesConsistentSql("o.session_ref", "catalog_required.position<o.admission_position") ++ " AS catalogs_consistent," ++
@@ -816,6 +818,7 @@ const historical_settings = rsql.Read(.{
         provider_count: u64,
         provider: provider_name.Provider,
         session_ref: *Bounded(session_id.max_reference_bytes),
+        parent_ref: ?Bounded(session_id.max_reference_bytes),
         workspace: *Bounded(workspace_path.max_bytes),
         compaction_trigger: ?u64,
         output_reservation: ?u64,
@@ -1026,6 +1029,7 @@ pub const SettingsRead = struct {
             break :schema try viewContent(view, id.get(), &output_schema, false);
         } else null;
         out.store = view.store.selector;
+        out.parent = row.parent_ref;
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update("rui/session-affinity/v1");
         var length: [8]u8 = undefined;
