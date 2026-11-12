@@ -625,7 +625,10 @@ pub const Document = struct {
         if (T == activity_reply.ItemJson) {
             const kinds = comptime std.meta.tags(protocol.ActivityItem.Kind);
             var values: [kinds.len]Value = undefined;
-            inline for (kinds, 0..) |kind, index| values[index] = try d.shapeSchema(tuple(T.head(kind)) ++ @field(T.value_shapes, @tagName(kind)) ++ T.tail);
+            inline for (kinds, 0..) |kind, index| {
+                values[index] = try d.shapeSchema(tuple(T.head(kind)) ++ @field(T.value_shapes, @tagName(kind)) ++ T.tail);
+                if (kind == .model_call) try values[index].object.put(d.arena, "description", .{ .string = "One resolved model Operation at its admission position. Timings describe the FINAL attempt only: latency_ms is request sent to resolution; first_event_ms is request sent to the first HTTP response event (including an interim head), not the first token. Missing evidence, usage or timings is null. A resolution may become visible within a previously captured end (D219)." });
+            }
             return d.anyOf(&values);
         }
         if (T == protocol.SessionRow) return d.shapeSchemaWith(T.json_shape, ToolNames);
@@ -1674,4 +1677,31 @@ test "catalog full report schema represents turnless catalog source facts" {
         .{},
     );
     try std.testing.expect(conforms(document.schemas, shape, json));
+}
+
+test "model_call Activity schema requires nullable metrics and final attempt description" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var document: Document = .init(allocator);
+    const built = try document.build();
+    const schemas = built.object.get("components").?.object.get("schemas").?.object;
+    const schema = schemas.get("ActivityItem").?;
+    const row = "{\"position\":\"4\",\"ordinal\":\"0\",\"at\":\"7\",\"value\":{\"model_call\":{\"model\":\"requested\",\"served_model\":null,\"input_tokens\":null,\"output_tokens\":null,\"cached_tokens\":null,\"latency_ms\":\"0\",\"first_event_ms\":null,\"status\":\"cancelled\",\"attempts\":\"2\"}}}";
+    const parsed = try std.json.parseFromSliceLeaky(Value, allocator, row, .{});
+    try std.testing.expect(conforms(schemas, schema, parsed));
+    inline for (.{ "served_model", "input_tokens", "output_tokens", "cached_tokens", "latency_ms", "first_event_ms" }) |field| {
+        var missing = try std.json.parseFromSliceLeaky(Value, allocator, row, .{});
+        _ = missing.object.getPtr("value").?.object.getPtr("model_call").?.object.swapRemove(field);
+        try std.testing.expect(!conforms(schemas, schema, missing));
+    }
+    var found = false;
+    for (schema.object.get("anyOf").?.array.items) |variant_schema| {
+        if (variant_schema.object.get("description")) |row_description| {
+            try std.testing.expect(std.mem.indexOf(u8, row_description.string, "FINAL attempt") != null);
+            try std.testing.expect(std.mem.indexOf(u8, row_description.string, "first HTTP response event") != null);
+            found = true;
+        }
+    }
+    try std.testing.expect(found);
 }

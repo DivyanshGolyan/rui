@@ -6,7 +6,7 @@ const session_id = @import("session_id.zig");
 const tool_proposal = @import("tool_proposal.zig");
 const change_ring = @import("change_ring.zig");
 
-pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_call, turn_ended, stop, sent, send_failed, received, approval_requested, session_changed, compacted };
+pub const Kind = enum { admission, user, assistant, call, tool_result, hosted_call, turn_ended, stop, sent, send_failed, received, approval_requested, session_changed, compacted, model_call };
 
 pub const ActivityPage = struct {
     since: ?change_ring.SessionToken = null,

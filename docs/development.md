@@ -24,6 +24,7 @@ It pins native dependencies, builds into a new directory under `~/.local/lib/rui
 A failed build leaves the previous installation unchanged.
 
 Installation keeps Stores, credentials, shell profiles and earlier builds, because a running Host may still use an earlier build.
+The release installer, unlike this source install, adds `~/.local/bin` to the shell profile when `PATH` lacks it.
 It starts and stops nothing.
 It reports only what needs action: a running Host and the command that can stop it, a Store format the new build cannot open, and a `PATH` that does not select the new command.
 A running Host keeps its old executable.

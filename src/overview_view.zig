@@ -360,7 +360,7 @@ pub const Event = union(enum) {
     memory: Memory,
     /// A needs-you row's command read ended.
     command: CommandText,
-    /// Where the run /upgrade started stands now.
+    /// Where the run app settings started stands now.
     upgrade: upgrade_status.Run,
     conversed: Conversed,
     /// A model-list read ended.
@@ -370,7 +370,7 @@ pub const Event = union(enum) {
     /// A write of the saved defaults that was no pick ended: the default a
     /// fresh launch would now take from them, null when they decide none.
     defaults_saved: ?Default,
-    /// The app settings page asked for the Upgrade /upgrade starts.
+    /// The app settings page asked for the Upgrade the Version row starts.
     start_upgrade,
     /// A read the open conversation applied.
     observed: Observed,
@@ -392,7 +392,7 @@ pub const Click = union(enum) { open: Reference, new_session, settings };
 /// What a click on a list item names; an empty slot takes none.
 pub fn clickOf(state: *const State, item: Item) ?Click {
     return switch (item) {
-        .empty => null,
+        .empty, .gap => null,
         .new_session => .new_session,
         .row => |at| .{ .open = state.rows.items[state.order.items[at]].reference },
     };
@@ -671,12 +671,10 @@ pub const ConversationInput = union(enum) {
     stop,
     archive: ArchiveState,
     unarchive,
-    /// /upgrade: the same run the overview's starts.
-    upgrade,
     /// Esc, while the run can still change nothing.
     cancel_upgrade,
     /// The conversation could not settle its Client work for the run, or
-    /// read itself again after it: Host intents wait until another /upgrade.
+    /// read itself again after it: Host intents wait until another Upgrade.
     upgrade_failed,
 };
 pub const Conversed = struct { reference: Reference, work: Kind, input: ConversationInput };
@@ -1075,7 +1073,7 @@ pub const State = struct {
     host: ?Host = null,
     /// The latest memory read; null before the first.
     memory: ?Memory = null,
-    /// The Upgrade: /upgrade's run and what the last one left Host intents.
+    /// The Upgrade: Upgrade's run and what the last one left Host intents.
     /// The one value both screens read.
     upgrade: session_upgrade.Upgrade = .{},
 
@@ -1268,7 +1266,7 @@ pub const State = struct {
         return at;
     }
 
-    /// /upgrade's run has not ended: the shell runs and polls its worker.
+    /// Upgrade's run has not ended: the shell runs and polls its worker.
     pub fn upgrading(self: *const State) bool {
         return self.upgrade.going();
     }
@@ -1679,7 +1677,6 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
                 .stop => stopKey(state, .{ .reference = input.reference, .work = input.work }, &effects),
                 .archive => |archive| archiveIntent(state, .{ .ask = .{ .reference = input.reference, .work = input.work, .archive = archive } }, &effects),
                 .unarchive => archiveIntent(state, .{ .restore = input.reference }, &effects),
-                .upgrade => startUpgrade(state),
                 .cancel_upgrade => if (state.upgrade.takesEscape()) effects.add(.cancel_upgrade),
                 .upgrade_failed => {
                     state.upgrade.block();
@@ -1775,7 +1772,7 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .memory => |memory| state.memory = memory,
         .command => |answer| try commandRead(state, answer),
         .upgrade => |run| {
-            // The shell reports only the run /upgrade asked for.
+            // The shell reports only the run Upgrade asked for.
             state.upgrade.stand(run);
             if (run == .ended) {
                 // An ending that is only news is a notice, which the next
@@ -2308,7 +2305,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             .select_next => select(state, .next),
             // Esc closes the picker; else it cancels an Upgrade that can
             // still change nothing, as the status row offers, even while the
-            // draft still lists `/upgrade`; else a shown command list closes,
+            // draft still lists `Upgrade`; else a shown command list closes,
             // then a panel, each keeping the draft.
             .clear => if (picker != null) {
                 state.closePicker();
@@ -2447,7 +2444,7 @@ fn select(state: *State, action: Action) void {
     move(state, action);
 }
 
-pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. /upgrade or reopen with the selected Rui.";
+pub const upgrade_recovery = "! Host requests paused after Upgrade; draft retained. Upgrade or reopen with the selected Rui.";
 
 /// Admission applies only to new Host intents, never to their completions.
 fn admitHostRequest(state: *State) bool {
@@ -2456,7 +2453,7 @@ fn admitHostRequest(state: *State) bool {
     return false;
 }
 
-/// /upgrade checks at once; Host intents wait until it ends. The shell
+/// Upgrade checks at once; Host intents wait until it ends. The shell
 /// runs the worker for as long as `upgrading` says.
 fn startUpgrade(state: *State) void {
     // The run going on keeps its progress and its Esc. An ending that
@@ -2500,13 +2497,7 @@ fn textAction(state: *const State, text: []const u8) EnterAction {
     const blank = std.mem.trim(u8, text, " \t\r\n").len == 0;
     // As in a conversation, `//` starts text with one slash.
     if (!blank and text[0] == '/' and !std.mem.startsWith(u8, text, "//")) {
-        // The Upgrade's own command and leaving are no Host requests, so no
-        // hold refuses them.
-        const free = switch (commands.parse(text)) {
-            .command => |command| command.name == .upgrade or command.name == .exit,
-            else => false,
-        };
-        return if (!free and state.holdsHost()) .held else .run;
+        return if (state.holdsHost()) .held else .run;
     }
     if (blank) switch (state.selected) {
         .new_session => return if (state.holdsHost()) .none else .await_task,
@@ -2577,8 +2568,6 @@ fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMem
             effects.add(.clear_draft);
             try changeArchiveView(state, filter, effects);
         },
-        .exit => effects.add(.exit),
-        .upgrade => startUpgrade(state),
         .model => unreachable, // The draft-backed picker takes /model before submission.
         .configure => if (configure(state, command.argument)) effects.add(.clear_draft),
         .help => {
@@ -3508,25 +3497,31 @@ pub fn writeSettings(settings: *const StartSettings, writer: *std.Io.Writer) std
     }
 }
 
-/// The New Session entry followed by every Session in screen order.
-pub const Item = union(enum) { new_session, row: usize, empty };
+/// The New Session entry, the blank line under it, then every Session in
+/// screen order. The gap is its own line, so New Session's highlight never
+/// covers it and no press lands on it.
+pub const Item = union(enum) { new_session, gap, row: usize, empty };
+
+/// Lines before the first Session: New Session and its gap.
+pub const first_row_line = 2;
 
 pub fn listLength(state: *const State) usize {
-    return state.order.items.len + 1;
+    return state.order.items.len + first_row_line;
 }
 
 /// Settings is pinned outside the list and therefore has no list line.
 pub fn selectedLine(state: *const State) ?usize {
     return switch (state.selected) {
         .new_session => 0,
-        .session => |ref| if (position(state, ref)) |at| at + 1 else null,
+        .session => |ref| if (position(state, ref)) |at| at + first_row_line else null,
         .settings => null,
     };
 }
 
 pub fn listItem(state: *const State, line: usize) ?Item {
     if (line == 0) return .new_session;
-    return if (line <= state.order.items.len) .{ .row = line - 1 } else null;
+    if (line == 1) return .gap;
+    return if (line - first_row_line < state.order.items.len) .{ .row = line - first_row_line } else null;
 }
 
 /// The panel in the Sessions' rows: its heading, with the way back at the
@@ -3637,6 +3632,7 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
             _ = try built.put(3, " New Session", width -| 3, .{});
             break :new try built.finish();
         },
+        .gap => &.{},
         .empty => try emptyLine(&built, state),
         .row => unreachable,
     };
@@ -4063,7 +4059,8 @@ const Frame = struct {
             while (listItem(state, at)) |item| : (at += 1) {
                 lines[count] = (try listSegments(gpa, state, item, width, caps, frame)).segments;
                 count += 1;
-                lines[count] = if (item == .row) try rowSecondSegments(gpa, state, item.row, width, caps) else &.{};
+                if (item != .row) continue;
+                lines[count] = try rowSecondSegments(gpa, state, item.row, width, caps);
                 count += 1;
             }
         }
@@ -4250,7 +4247,7 @@ test "overview rows draw a flat order without headings" {
     defer std.testing.allocator.free(text);
     inline for (.{ " Needs you ·", " Yours ·", " Active ·", " Idle ·", " Finished ·", " Stopped or failed ·", " more" }) |heading| try std.testing.expect(std.mem.indexOf(u8, text, heading) == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
-    try std.testing.expectEqual(mixed.len + 1, listLength(&state));
+    try std.testing.expectEqual(mixed.len + first_row_line, listLength(&state));
 }
 
 fn expectOrder(state: *const State, expected: []const []const u8) !void {
@@ -4835,7 +4832,7 @@ test "typing / lists the overview's commands between the rule and the draft, as 
     defer state.deinit();
     // App's palette draws the list (Overview's tests); the core keeps it.
     _ = try typeText(&state, "/");
-    try std.testing.expectEqual(@as(usize, 10), state.commands.?.list.shown().len);
+    try std.testing.expectEqual(@as(usize, 8), state.commands.?.list.shown().len);
     // Typing narrows the list; Tab completes the one left.
     _ = try typeText(&state, "/m");
     try std.testing.expectEqualStrings("odel", state.commands.?.list.completion(0));
@@ -4856,13 +4853,14 @@ test "typing / lists the overview's commands between the rule and the draft, as 
 test "Enter takes a row only from a list the latest frame drew, and a long line still runs" {
     var state = try opened(&mixed);
     defer state.deinit();
-    // A screen too short for the list drew none: Enter runs `/e` as typed.
-    var draft = try typeText(&state, "/e");
+    _ = try step(&state, .{ .resized = .{ .width = 80, .height = 24 } });
+    // A screen too short for the list drew none: Enter runs `/h` as typed.
+    var draft = try typeText(&state, "/h");
     state.commands.?.drew(false);
     const unlisted = try submit(&state, draft);
-    for (unlisted.slice()) |effect| try std.testing.expect(effect != .exit);
-    draft = try typeText(&state, "/e");
-    try expectEffects(&.{.exit}, try submit(&state, draft));
+    for (unlisted.slice()) |effect| try std.testing.expect(effect != .clear_draft);
+    draft = try typeText(&state, "/h");
+    try expectEffects(&.{.clear_draft}, try submit(&state, draft));
     // A value that completes a line longer than any scratch line runs it.
     const long: [600]u8 = @splat('w');
     draft = try typeText(&state, "/configure --workspace /" ++ long ++ " --permission-mode a");
@@ -4874,13 +4872,14 @@ test "Enter takes a row only from a list the latest frame drew, and a long line 
 test "a key on a draft changed since the latest frame acts on that draft's list when the frame drew one" {
     var state = try opened(&mixed);
     defer state.deinit();
-    // The frame drew `/e`'s list; `x` changes the draft before a frame
-    // lists it, and Enter takes /exit from `/ex`'s list.
-    const drawn = try typeText(&state, "/e");
+    _ = try step(&state, .{ .resized = .{ .width = 80, .height = 24 } });
+    // The frame drew `/h`'s list; `e` changes the draft before a frame
+    // lists it, and Enter takes /help from `/he`'s list.
+    const drawn = try typeText(&state, "/h");
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
-    const typed: Draft = .{ .bytes = "/ex", .cursor = 3, .edits = drawn.edits +% 1 };
+    const typed: Draft = .{ .bytes = "/he", .cursor = 3, .edits = drawn.edits +% 1 };
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .append }, .draft = typed } }));
-    try expectEffects(&.{.exit}, try submit(&state, typed));
+    try expectEffects(&.{.clear_draft}, try submit(&state, typed));
     // The frame drew `/m`'s list; Backspace leaves `/`, whose list Down
     // moves through, the selected Session kept.
     const model = try typeText(&state, "/m");
@@ -4898,15 +4897,16 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
 test "arrows move the command list's highlight, and Enter takes it: a word another follows, or the command it completes" {
     var state = try opened(&mixed);
     defer state.deinit();
+    _ = try step(&state, .{ .resized = .{ .width = 80, .height = 24 } });
     var draft = try typeText(&state, "/");
     // The selected Session's row stays put while the list takes the arrows.
     const selected = state.selected;
     _ = try step(&state, .{ .composed = .{ .input = .{ .composer = .{ .action = .next } }, .draft = draft } });
     try std.testing.expectEqual(@as(usize, 1), state.commands.?.highlight);
     try std.testing.expectEqual(selected, state.selected);
-    // Enter on /exit, highlighted, runs it.
+    // Enter on /help, highlighted, runs it.
     _ = try press(&state, draft, .next);
-    try expectEffects(&.{.exit}, try submit(&state, draft));
+    try expectEffects(&.{.clear_draft}, try submit(&state, draft));
     // /configure alone only says its usage: Enter adds its word and a
     // space, for an option.
     state.commands.?.highlight = 1;
@@ -4932,9 +4932,9 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
 test "Enter runs a command by the overview's table and names its usage when misused" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/exit now")));
-    try expectNotice(&state, "! Usage: /exit");
-    try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit ")));
+    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/help now")));
+    try expectNotice(&state, "! Usage: /help");
+    try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, "/help ")));
 }
 
 test "Esc closes a shown command list and keeps the draft; a change opens it again" {
@@ -4957,7 +4957,7 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
     // The hint says what Enter does to each slash draft.
-    try expectLastLine(&state, try typeText(&state, "/exit "), "enter run");
+    try expectLastLine(&state, try typeText(&state, "/help "), "enter run");
 }
 
 test "the composer sends its draft byte for byte, as a conversation does" {
@@ -5079,15 +5079,13 @@ fn expectScreenLine(state: *State, line: usize, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, lines.next().?);
 }
 
-test "end of input, ctrl-c and /exit leave" {
+test "end of input and ctrl-c leave" {
     var draft: Draft = .{};
     var state = try opened(&mixed);
     defer state.deinit();
     try expectEffects(&.{.exit}, try press(&state, .{}, .exit));
     draft = try typeText(&state, "draft");
     try expectEffects(&.{.exit}, try press(&state, draft, .exit));
-    draft = try typeText(&state, "/exit");
-    try expectEffects(&.{.exit}, try submit(&state, draft));
 }
 
 test "a line the editor rejects says why once; text it could not take clears" {
@@ -5340,7 +5338,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     // A selected row remains selected when its age moves it to the end.
     _ = try refresh(&state, .changed, testToken(3), &.{session("m1n2p3", .{ .finished = ago(10 * 86400) }, .{ .label = "Explain provider output parsing" })});
     try expectSelected(&state, "m1n2p3");
-    try std.testing.expectEqual(state.order.items.len + 1, listLength(&state));
+    try std.testing.expectEqual(state.order.items.len + first_row_line, listLength(&state));
 }
 
 /// Takes every program status record waiting for the shell, as sent.
@@ -5437,7 +5435,7 @@ test "overview selection walks both ends and every row without folding" {
     for (state.order.items, 0..) |index, at| {
         _ = try press(&state, .{}, .next);
         try expectSelected(&state, &state.rows.items[index].reference);
-        try std.testing.expectEqual(@as(?usize, at + 1), selectedLine(&state));
+        try std.testing.expectEqual(@as(?usize, at + 2), selectedLine(&state));
     }
     _ = try press(&state, .{}, .next);
     try std.testing.expectEqual(Selection.settings, state.selected);
@@ -5498,21 +5496,24 @@ test "overview settings and New Session clicks follow Enter and draft rules" {
     try expectEffects(&.{.{ .start = .{ .text = draft.bytes, .settings = &state.settings, .binding = state.nextBinding(), .local_effort = state.localEffort() } }}, try submit(&state, draft));
 }
 
-test "overview list items are New Session then all Sessions, with no trailing item" {
+test "overview list items are New Session, its gap, then all Sessions, with no trailing item" {
     var state = try opened(&mixed);
     defer state.deinit();
     try std.testing.expectEqual(Click.new_session, clickOf(&state, listItem(&state, 0).?).?);
+    try std.testing.expectEqual(Item.gap, listItem(&state, 1).?);
+    try std.testing.expectEqual(null, clickOf(&state, .gap));
     for (state.order.items, 0..) |index, at| {
-        const item = listItem(&state, at + 1).?;
+        const item = listItem(&state, at + 2).?;
         try std.testing.expectEqual(Item{ .row = at }, item);
         try std.testing.expectEqualStrings(&state.rows.items[index].reference, &clickOf(&state, item).?.open);
     }
     try std.testing.expectEqual(null, listItem(&state, listLength(&state)));
     var empty = try opened(&.{});
     defer empty.deinit();
-    try std.testing.expectEqual(@as(usize, 1), listLength(&empty));
+    try std.testing.expectEqual(@as(usize, 2), listLength(&empty));
     try std.testing.expectEqual(Item.new_session, listItem(&empty, 0).?);
-    try std.testing.expectEqual(null, listItem(&empty, 1));
+    try std.testing.expectEqual(Item.gap, listItem(&empty, 1).?);
+    try std.testing.expectEqual(null, listItem(&empty, 2));
 }
 
 test "a click that names a Session gone from the list since it was drawn changes nothing" {
@@ -6544,16 +6545,14 @@ test "/help shows the overview's keys and commands in the Sessions' rows until E
         " / lists commands · Up/Down choose · Tab or Enter takes it",
         " Esc/Ctrl-G closes list, panel, draft, settings · Ctrl-C/Ctrl-D leaves",
         "",
-        " /archive              archive the selected Session; stop active work first",
-        " /configure [OPTIONS]  hold settings for the next Session",
-        " /exit                 leave; Host work continues",
-        " /help                 keys and commands",
-        " /model                choose the model new Sessions use",
-        " /rename NAME          name the selected Session",
-        " /sessions [VIEW]      view Unarchived, Archived or All Sessions",
-        " /setup [OPTIONS]      future defaults",
-        " /unarchive            restore the selected Session without restarting work",
-        " /upgrade              check stable Rui; install restarts this Store's Host",
+        " /archive",
+        " /configure [OPTIONS]",
+        " /help",
+        " /model",
+        " /rename NAME",
+        " /sessions [VIEW]",
+        " /setup [OPTIONS]",
+        " /unarchive",
     }) |expected| try std.testing.expectEqualStrings(expected, lines.next().?);
     try std.testing.expect(std.mem.indexOf(u8, shown, label) == null);
     // The line under the input says Esc closes it, over held settings or a
@@ -6738,32 +6737,32 @@ test "upgrade emits only its local effect and preserves selection settings and u
     try std.testing.expect(state.request(.stop, selected.session));
     state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
     const request = state.requests[0];
-    const draft = try typeText(&state, "/upgrade");
-    try expectEffects(&.{}, try submit(&state, draft));
+    const draft = try typeText(&state, "keep upgrade draft");
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     try std.testing.expectEqual(selected, state.selected);
     try std.testing.expect(std.meta.eql(settings, state.settings));
     try std.testing.expectEqual(@as(usize, 1), state.request_count);
     try std.testing.expect(std.meta.eql(request, state.requests[0]));
-    try std.testing.expectEqualStrings("/upgrade", draft.bytes);
+    try std.testing.expectEqualStrings("keep upgrade draft", draft.bytes);
     try std.testing.expect(state.command == null);
 }
 
-test "/upgrade runs inline: Esc cancels it before the draft, checking or preparing, and its end sets the Host hold" {
+test "Upgrade runs inline: Esc cancels it before the draft, checking or preparing, and its end sets the Host hold" {
     var state = try opened(&.{});
     defer state.deinit();
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     try std.testing.expectEqualStrings("Checking for updates…", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     // Esc cancels the check too, keeping the draft, even while the draft
-    // is still `/upgrade` and lists its command: the status row says esc
+    // is still `Upgrade` and lists its command: the status row says esc
     // cancels.
-    const typed = try typeText(&state, "/upgrade");
+    const typed = try typeText(&state, "/help");
     try std.testing.expect(shownCommands(&state, typed) != null);
     try expectEffects(&.{.cancel_upgrade}, try press(&state, typed, .clear));
     const draft = try typeText(&state, "keep me");
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } });
     try std.testing.expectEqualStrings("Upgrade cancelled; nothing changed", state.notice.?.text());
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     // Esc cancels the Upgrade and keeps the draft.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
@@ -6779,7 +6778,7 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
 
     // Past publishing Esc is the draft's, and an incompatible end holds.
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .{ .running = 1 } }, .step = .publishing } } });
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
@@ -6788,23 +6787,23 @@ test "/upgrade runs inline: Esc cancels it before the draft, checking or prepari
 
     // A retry that installs nothing keeps the hold unless the job found
     // the Host it left usable, though both say up to date.
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .unchanged } } });
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 61, .patch = 0 } }, .outcome = .compatible } } });
     try std.testing.expect(state.upgrade.after == .reobserving);
 
-    // Another /upgrade that upgrades lifts the hold until the next listing.
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    // Another Upgrade that upgrades lifts the hold until the next listing.
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 1 }, .host = .{ .running = 0 } } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 1 }, .restarted = true } }, .outcome = .compatible } } });
     try std.testing.expect(state.upgrade.after == .reobserving);
 }
 
-test "every place an Upgrade run can stand decides the hold, Esc and another /upgrade from that one value" {
+test "every place an Upgrade run can stand decides the hold, Esc and another Upgrade from that one value" {
     const found: upgrade_status.Found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } };
     const Case = struct { run: ?upgrade_status.Run, going: bool, escape: bool };
     const cases = [_]Case{
@@ -6830,27 +6829,27 @@ test "every place an Upgrade run can stand decides the hold, Esc and another /up
         const draft = try typeText(&state, "keep me");
         try expectEffects(if (case.escape) &.{.cancel_upgrade} else &.{.clear_draft}, try press(&state, draft, .clear));
         try std.testing.expectEqual(case.run, state.upgrade.run);
-        // Another /upgrade starts a check only when none is going.
-        try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+        // Another Upgrade starts a check only when none is going.
+        try expectEffects(&.{}, try step(&state, .start_upgrade));
         if (case.going) try std.testing.expectEqual(case.run, state.upgrade.run) else try std.testing.expect(state.upgrade.run.? == .checking);
         try std.testing.expect(state.holdsHost());
     }
 }
 
-test "another /upgrade while one runs changes nothing: its progress and Esc stay" {
+test "another Upgrade while one runs changes nothing: its progress and Esc stay" {
     var state = try opened(&.{});
     defer state.deinit();
     var buffer: [upgrade_status.max_line_bytes]u8 = undefined;
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     const preparing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(preparing);
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     try std.testing.expectEqualStrings(preparing, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none }, .step = .publishing } } });
     const publishing = try std.testing.allocator.dupe(u8, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     defer std.testing.allocator.free(publishing);
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     try std.testing.expectEqualStrings(publishing, upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     // Past publishing Esc is still the draft's: nothing cancels.
     try expectEffects(&.{.clear_draft}, try press(&state, try typeText(&state, "x"), .clear));
@@ -6864,7 +6863,7 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     const key: [36]u8 = "01234567-89ab-4cde-8012-0123456789ab".*;
     _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .start_upgrade);
     try expectStatus(&state, "Checking for updates…", .normal);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
@@ -6878,8 +6877,8 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     try expectStatus(&state, "Upgraded to 0.60.0", .normal);
     _ = try press(&state, .{}, .next);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
-    // A release this client cannot use stays until another /upgrade.
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    // A release this client cannot use stays until another Upgrade.
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
     _ = try press(&state, .{}, .next);
@@ -6898,19 +6897,19 @@ test "the status rows above the Footer say the status bar's line" {
     _ = try step(&state, .{ .unconfirmed = .{ .reference = "k7m2qx".*, .recovery = .{ .saved = .{ .original = .{ .kind = .message, .key = key }, .rejected = false } } } });
     const unconfirmed = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{})).?);
     try std.testing.expect(std.mem.startsWith(u8, unconfirmed, " ! Not confirmed · rui request recover " ++ key));
-    _ = try submit(&state, try typeText(&state, "/upgrade"));
+    _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     const upgrading = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{ .unicode = false })).?);
     try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
 }
 
-test "/upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {
+test "Upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
     // Enter again while it runs starts nothing and hides nothing.
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none } } } });
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } } });
@@ -6918,7 +6917,7 @@ test "/upgrade is never refused as a Host request: the status bar shows its run 
     // A Host request is refused in words; the retry shows its own progress.
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "start this")));
     try expectStatus(&state, upgrade_recovery, .attention);
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
 }
 
@@ -6948,8 +6947,8 @@ test "upgrade protocol hold refuses starts opens stops and Host commands but per
     }
     try expectEffects(&.{}, try press(&state, try typeText(&state, "draft"), .stop));
     try std.testing.expectEqual(@as(usize, 0), state.request_count);
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
-    try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
+    try expectEffects(&.{}, try step(&state, .start_upgrade));
+    try expectEffects(&.{.exit}, try press(&state, .{}, .exit));
 }
 
 test "archive views remove changed rows outside the server filter and select the nearest Session" {
@@ -7227,8 +7226,8 @@ test "upgrade holds refuse archive until admitted and allow local draft recovery
         // Edits stay local; existing local exit and recovery commands still
         // bypass the hold.
         try expectEffects(&.{}, try step(&state, .{ .composed = .{ .draft = draft, .input = .{ .composer = .redraw } } }));
-        try expectEffects(&.{.exit}, try submit(&state, try typeText(&state, "/exit")));
-        try expectEffects(&.{}, try submit(&state, try typeText(&state, "/upgrade")));
+        try expectEffects(&.{.exit}, try press(&state, .{}, .exit));
+        try expectEffects(&.{}, try step(&state, .start_upgrade));
         try std.testing.expect(state.upgrading());
         // That run ends having changed nothing, and the overview lists again.
         try expectEffects(&.{}, try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = .unchanged } } }));
@@ -7304,7 +7303,7 @@ test "an Upgrade's end lists again at once, whatever it leaves Host intents" {
     defer state.deinit();
     for ([_]session_upgrade.Outcome{ .unchanged, .incompatible, .unchanged, .compatible }, [_]session_upgrade.After{ .reobserving, .blocked, .blocked, .reobserving }) |outcome, after| {
         state.next_list_ms = 10_000;
-        _ = try submit(&state, try typeText(&state, "/upgrade"));
+        _ = try step(&state, .start_upgrade);
         _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = outcome } } });
         try std.testing.expect(state.upgrade.after == after and state.next_list_ms == 0);
     }
@@ -7612,25 +7611,25 @@ test "the Footer names the Enter action submission takes, over every composer st
         .{ .setup = .typed, .selection = .settings, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
         // Command completion open: Enter takes the highlighted entry.
         .{ .setup = .typed, .draft = "/he", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.clear_draft} },
-        .{ .setup = .typed, .draft = "/exit", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.exit} },
+        .{ .setup = .typed, .draft = "/help", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.clear_draft} },
         // Completion dismissed, or none for a command with its argument:
         // Enter runs the draft as written.
         .{ .setup = .dismissed, .draft = "/he", .action = .run, .right = "enter run", .effects = &.{} },
-        .{ .setup = .dismissed, .draft = "/exit", .action = .run, .right = "enter run", .effects = &.{.exit} },
+        .{ .setup = .dismissed, .draft = "/help", .action = .run, .right = "enter run", .effects = &.{.clear_draft} },
         .{ .setup = .typed, .selection = k7, .draft = "/rename NAME", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
         // The model picker saves the highlighted default.
         .{ .setup = .picker, .draft = "/model gpt-6-luna", .action = .pick_model, .right = "enter pick / esc close", .effects = &.{ .clear_draft, .save_default } },
         // A frozen composer takes no Enter.
         .{ .setup = .frozen, .draft = "a task", .action = .none, .right = "", .effects = &.{} },
         .{ .setup = .frozen, .selection = k7, .draft = "", .action = .none, .right = "", .effects = &.{} },
-        // Held Host requests refuse all but leaving, /upgrade and Settings.
+        // Held Host requests refuse all but leaving, Upgrade and Settings.
         .{ .setup = .held, .draft = "", .action = .none, .right = "", .effects = &.{} },
         .{ .setup = .held, .draft = " \n", .action = .none, .right = "", .effects = &.{.clear_draft} },
         .{ .setup = .held, .draft = "a task", .action = .held, .right = "", .effects = &.{} },
         .{ .setup = .held, .selection = k7, .draft = "", .action = .held, .right = "", .effects = &.{} },
         .{ .setup = .held, .selection = .settings, .draft = "", .action = .open_settings, .right = "enter open", .effects = &.{.open_settings} },
         .{ .setup = .held, .draft = "/help", .action = .held, .right = "", .effects = &.{} },
-        .{ .setup = .held, .draft = "/exit", .action = .run, .right = "enter run", .effects = &.{.exit} },
+        .{ .setup = .held, .draft = "/exit", .action = .held, .right = "", .effects = &.{} },
     };
     for (cases) |case| {
         var state = if (case.setup == .picker) try pickerState(Default.of("codex", "gpt-6.1-sol")) else try opened(&mixed);

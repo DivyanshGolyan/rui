@@ -2091,6 +2091,129 @@
               "value"
             ],
             "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "position": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "ordinal": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "at": {
+                "$ref": "#/components/schemas/Decimal"
+              },
+              "value": {
+                "type": "object",
+                "properties": {
+                  "model_call": {
+                    "type": "object",
+                    "properties": {
+                      "model": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "x-rui-max-bytes": 256
+                      },
+                      "served_model": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 256,
+                            "x-rui-max-bytes": 256
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "input_tokens": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "output_tokens": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "cached_tokens": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "latency_ms": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "first_event_ms": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/components/schemas/Decimal"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "status": {
+                        "type": "string",
+                        "maxLength": 96,
+                        "x-rui-max-bytes": 96
+                      },
+                      "attempts": {
+                        "$ref": "#/components/schemas/Decimal"
+                      }
+                    },
+                    "required": [
+                      "model",
+                      "served_model",
+                      "input_tokens",
+                      "output_tokens",
+                      "cached_tokens",
+                      "latency_ms",
+                      "first_event_ms",
+                      "status",
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "model_call"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "position",
+              "ordinal",
+              "at",
+              "value"
+            ],
+            "additionalProperties": false,
+            "description": "One resolved model Operation at its admission position. Timings describe the FINAL attempt only: latency_ms is request sent to resolution; first_event_ms is request sent to the first HTTP response event (including an interim head), not the first token. Missing evidence, usage or timings is null. A resolution may become visible within a previously captured end (D219)."
           }
         ]
       },
@@ -2276,7 +2399,8 @@
                 "received",
                 "approval_requested",
                 "session_changed",
-                "compacted"
+                "compacted",
+                "model_call"
               ]
             },
             "uniqueItems": true,
@@ -2375,7 +2499,8 @@
               "received",
               "approval_requested",
               "session_changed",
-              "compacted"
+              "compacted",
+              "model_call"
             ]
           },
           "hits": {
@@ -2469,7 +2594,8 @@
                 "received",
                 "approval_requested",
                 "session_changed",
-                "compacted"
+                "compacted",
+                "model_call"
               ]
             },
             "uniqueItems": true,

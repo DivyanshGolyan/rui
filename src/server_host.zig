@@ -480,6 +480,20 @@ pub const Host = struct {
         return previous;
     }
 
+    /// Stops the Host because someone asked: a `host-stop` control (pause,
+    /// stop, an Upgrade's swap) or a launcher closing stdin. When this ask is
+    /// what stops the Host, it leaves the stop record, so a client that later
+    /// finds the lease free does not take the stop for a crash. A stop the
+    /// Host began itself, after a fault, leaves none. Returns whether this
+    /// ask stopped the Host.
+    pub fn stopAsked(self: *Host) bool {
+        if (self.advance(.stopping) == .stopping) return false;
+        // The stop goes on without the record; a client then reads it as a
+        // crash and may start one Host the person meant to stop.
+        self.lease.recordStopAsked() catch |err| stderr.print("rui: stop record not written: {s}\n", .{@errorName(err)});
+        return true;
+    }
+
     pub fn withEffectLaunch(self: *Host, context: anytype, comptime launch: anytype) !void {
         self.launch_mutex.lockUncancelable(self.io);
         defer self.launch_mutex.unlock(self.io);
@@ -1465,4 +1479,35 @@ test "effect launch gate releases its mutex after native failure" {
     try std.testing.expectError(error.TestLaunchFailure, host.withEffectLaunch(&calls, Launch.fail));
     try host.withEffectLaunch(&calls, Launch.succeed);
     try std.testing.expectEqual(@as(usize, 2), calls);
+}
+
+test "an asked stop leaves the stop record only when it is what stops the Host, and the next start removes it" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    for (std.enums.values(Phase)) |before| {
+        errdefer std.debug.print("phase before the ask: {t}\n", .{before});
+        var lease = try platform.StoreLease.acquire(io, path);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
+        // A stop the Host began itself, after a fault, is not an ask.
+        _ = host.advance(before);
+        try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+        const stopped = before != .stopping;
+        try std.testing.expectEqual(stopped, host.stopAsked());
+        try std.testing.expect(host.stopping());
+        try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
+        // A repeated ask, as a retried host-stop, changes nothing.
+        try std.testing.expect(!host.stopAsked());
+        try std.testing.expectEqual(if (stopped) platform.StoreLease.LastStop.asked else .unasked, platform.StoreLease.lastStop(io, path));
+        // The next Host start removes it before serving.
+        try lease.prepareForServing(false);
+        try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+    }
 }

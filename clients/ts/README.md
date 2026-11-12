@@ -1,9 +1,9 @@
-# rui (TypeScript client)
+# ruicode (TypeScript client for Rui)
 
 Starts a Rui Host as a child of your process and talks to it over its local socket.
 
 ```ts
-import { Rui } from "rui";
+import { Rui } from "ruicode";
 
 const rui = await Rui.connect({
 	database: "/var/lib/myapp/rui-store",
@@ -17,9 +17,10 @@ await rui.close();
 
 ## Install
 
-The `rui` package carries the client.
+Run `npm install ruicode`.
+The `ruicode` package carries the client.
 The `rui` executable comes from the platform package beside it
-(`rui-linux-x64`, `rui-linux-arm64` or `rui-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
+(`ruicode-linux-x64`, `ruicode-linux-arm64` or `ruicode-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
 Pass `binary` to `Rui.connect` to name one yourself.
 
 Bundled and custom binaries and their child Host launch are application-owned.
@@ -59,6 +60,10 @@ A creating Message uses the same request rule, and `start_agent` reports it as a
 
 `session.listActivity()` reads to the current end; `{ follow: true }` follows new entries.
 Feed entries are a discriminated union: `switch (entry.kind)` narrows to that wire row's fields.
+A `model_call` entry is one resolved model Operation at its admission position: `model`, nullable `servedModel`, nullable `inputTokens`, `outputTokens`, `cachedTokens`, `latencyMs`, `firstEventMs`, plus `status` and `attempts`.
+Counts and durations remain decimal strings (or null); both timings describe the **final attempt**, and `firstEventMs` measures the first HTTP response event, not the first token.
+The requested model comes from the immutable admitted revision; served model uses stored body evidence before header evidence, never the requested model as fallback.
+A late resolution can reveal this row inside a previously captured end (D219); following from a later cursor does not replay it, so reread that range to observe it.
 Only top-level field names become camelCase (for example `callOrdinal`); nested objects keep their wire spelling (for example `presentation.publication_position`).
 Text-bearing kinds add `text`, or `truncated: true` when the text exceeds 16 KiB; `contentBytes` gives its byte length.
 Use `session.readContent(entry)` or `readContentBytes(entry)` for the whole text.
@@ -81,7 +86,7 @@ RUI_BINARY=../../zig-out/bin/rui npm test
 ```
 
 `node scripts/pack.mjs <version> <outdir> <platform>=<executable> ...` builds the release tarballs (the compiled client and one package per platform).
-It publishes nothing; the first npm publish waits for the maintainer.
+It publishes nothing. `node scripts/publish.mjs <dir>` publishes them, dependencies first, skipping versions npm already has; each release runs it in the `npm_publish` job.
 
 The repository's `zig build ts-client` runs the tests against the Rui it builds.
 The real-Host feed test uses a local HTTPS provider and the `openssl` command to generate its temporary test certificate; no live provider credentials are needed.

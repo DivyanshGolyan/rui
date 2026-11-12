@@ -932,7 +932,7 @@
     },
     {
       "name": "slash",
-      "note": "21-slash: conversation commands without a tool-details page",
+      "note": "21-slash: names only, with quiet fixed-choice words",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -943,12 +943,38 @@
         },
         {
           "gone": "/details"
+        },
+        {
+          "gone": "/effort LEVEL"
         }
       ],
       "expect": [
-        "/copy [code|file]",
-        "/effort LEVEL",
+        "/copy",
+        "code · file",
+        "/effort",
         "/help"
+      ]
+    },
+    {
+      "name": "slash-overview",
+      "note": "Overview slash list: names only with quiet fixed-choice words",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/sessions"
+        },
+        {
+          "gone": "/configure [OPTIONS]"
+        }
+      ],
+      "expect": [
+        "/archive",
+        "/sessions",
+        "unarchived · archived · all",
+        "/unarchive"
       ]
     },
     {
@@ -1347,11 +1373,8 @@
       "open": "Fix retry deadline",
       "steps": [
         {
-          "text": "/exit"
-        },
-        {
           "keys": [
-            "Enter"
+            "C-c"
           ]
         },
         {

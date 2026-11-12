@@ -112,7 +112,7 @@ jobs:
           retention-days: 3
           if-no-files-found: error
   npm:
-    # The npm tarballs: the compiled client and one package per platform. Nothing is published to npm.
+    # The npm tarballs: the compiled client (npm name ruicode) and one package per platform. npm_publish publishes them.
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -218,7 +218,7 @@ jobs:
             echo
             echo "The target build checks Store compatibility at Host startup. Supported SQLite formats are backed up and migrated then; installation alone never migrates or resets a Store. MySQL schema changes remain operator-owned."
             echo
-            echo "Also attached: the Linux ARM64 archive, and the npm tarballs (the TypeScript client and one executable package per platform). npm publishing is manual."
+            echo "Also attached: the Linux ARM64 archive, and the npm tarballs (the TypeScript client and one executable package per platform). The same packages are on npm: npm install ruicode."
             echo
             echo "The Linux executables ship without debug info. For readable crash traces, add it"
             echo "to the installed build (again after each update, which installs a new build):"
@@ -229,3 +229,39 @@ jobs:
             echo '```'
           } > notes.md
           python3 -B tests/ci/release.py publish "$VERSION" "$SHA" dist notes.md
+  npm_publish:
+    # Publishes the npm tarballs after the GitHub release; scripts/publish.mjs reads their manifests
+    # and orders dependencies first. npm trusted publishing (OIDC) authenticates it: each package
+    # trusts this repository's promote.yml, the workflow that calls this one. No token is stored.
+    # A rerun skips versions npm already has.
+    needs: [plan, npm, publish]
+    if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish to npm
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.15.0 --no-audit --no-fund
+          for delay in 10 30 ''; do
+            rm -rf "$RUNNER_TEMP/npm"
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-npm --dir "$RUNNER_TEMP/npm" && break
+            test -n "$delay" || exit 1
+            echo "::warning::Artifact download failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          node clients/ts/scripts/publish.mjs "$RUNNER_TEMP/npm"
