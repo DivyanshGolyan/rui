@@ -506,6 +506,7 @@ test "store.mysql live metadata failures precede missing-key repair and ownershi
         .{ std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version + 1}), error.StoreSchemaAhead },
         .{ "UPDATE store_meta SET meta_value='not-a-number' WHERE meta_key='format'", error.MalformedStoreFormat },
         .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='format'", error.MalformedStoreFormat },
+        .{ "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version'", error.WrongStoreVersion },
         .{ "UPDATE store_meta SET meta_value='wrong-wire' WHERE meta_key='wire_version'", error.WrongStoreVersion },
         .{ "UPDATE store_meta SET meta_value=REPEAT('9',600) WHERE meta_key='wire_version'", error.WrongStoreVersion },
         .{ "INSERT INTO store_meta VALUES('store_id','not-an-id')", error.WrongStoreIdentity },
