@@ -759,7 +759,8 @@ const IdleChecks = struct {
 /// and commits. The Entry mutex excludes every other writer; a moved head is
 /// `SelectionChanged`.
 pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
-    const queued = try queueNextModelAttempt(reader, writer, kind, pressure, faults) orelse return null;
+    var queued: QueuedAdmission = undefined;
+    if (!try queueNextModelAttempt(reader, writer, kind, pressure, faults, &queued)) return null;
     return commitAdmission(writer, &queued, start);
 }
 
@@ -795,13 +796,17 @@ const QueuedAdmission = struct {
     session: @FieldType(rsql.SessionHead, "ref"),
     /// The Operation's admission position.
     position: u64,
+    /// The selected model: the Operation's insert reads these bytes in
+    /// place when the commit steps it, after the facts' frame is gone.
+    model: @FieldType(SelectedRow, "model"),
 };
 
 /// Selects the next Attempt and queues its admission's writes on `writer`,
-/// which the caller commits; null when nothing is runnable. Never inlined:
+/// which the caller commits, and says in `queued` what they admit; false
+/// when nothing is runnable. Never inlined:
 /// the facts it reads are over 1 KiB, and its frame is gone before the
 /// commit, whose message is the deepest part of the engine thread's stack.
-noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults) !?QueuedAdmission {
+noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, queued: *QueuedAdmission) !bool {
     var found: runnable_selection.Result = undefined;
     var facts_row: SelectedRow = undefined;
     var facts_found: store_access.Found = undefined;
@@ -817,13 +822,14 @@ noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelA
         idle.queue(reader);
         try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
         try idle.settle(reader);
-        return null;
+        return false;
     };
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
     const session_ref: []const u8 = &selection.session.ref;
     const first_admission = selection.first_admission.get();
     if (!facts_found.get()) return error.CorruptStore;
     const facts = &facts_row;
+    queued.model = facts.model;
     if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
     const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
     var compaction: turn_policy.CompactionFacts = .{
@@ -922,14 +928,17 @@ noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelA
         .history_floor = floor,
         .history_level = if (room) |choice| choice.level else null,
         .history_dropped = if (room != null) dropped else null,
-        .model = facts.model.slice(),
+        .model = queued.model.slice(),
         .shipped_context_window = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()),
         .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
         .tool_set_id = offer,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    return .{ .binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 }, .session = facts.session.ref, .position = position };
+    queued.binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
+    queued.session = facts.session.ref;
+    queued.position = position;
+    return true;
 }
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
