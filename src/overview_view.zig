@@ -1007,8 +1007,9 @@ pub const Row = struct {
     archive_state: ArchiveState = .active,
     /// Index of its Workspace in `State.workspaces`.
     workspace: u32,
-    /// The provider it reaches: whose sign-in or key a failure names.
-    provider: Provider,
+    /// Listing metadata: whose sign-in or key a failure names. Only a
+    /// hidden row observed before its first listing can lack this fact.
+    provider: ?Provider = null,
     label: ?Bounded(max_label_bytes),
     state: WorkState,
     /// The Turn the state belongs to: which finish or failure the row shows.
@@ -2159,6 +2160,7 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
         const same = if (incoming.first) |first| if (row.first) |known| first.admission == known.admission else false else false;
         row.archive_state = incoming.archive_state;
         row.workspace = incoming.workspace;
+        row.provider = incoming.provider;
         row.label = incoming.label;
         row.first = incoming.first;
         row.from_person_at = incoming.from_person_at;
@@ -3099,7 +3101,7 @@ pub fn band(state: *const State) ?Band {
         switch (work) {
             .finished => |value| finished = @max(finished, value.since),
             .failed => |failed| for (band_rules, &newest) |rule, *held| {
-                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.failed.since < failed.since)) held.* = .{ .failed = failed, .provider = row.provider };
+                if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.failed.since < failed.since)) held.* = .{ .failed = failed, .provider = row.provider.? };
             },
             .retrying => |retry| for (band_rules, &retrying) |rule, *count| {
                 if (rule.kind == .retrying and rule.matches(retry.cause.slice())) count.* += 1;
@@ -5016,6 +5018,49 @@ test "activity before metadata and an omitted open row use the same bounded row 
     _ = try step(&state, .{ .conversation = null });
     _ = try step(&state, .{ .observed = settled }); // The producer was retired.
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
+}
+
+test "full and changed metadata supply every provider without replacing newer activity work" {
+    const ref = "aaaaaa".*;
+    const providers = std.enums.values(Provider);
+    for ([_]Delta{ .full, .changed }) |delta| for ([_]bool{ false, true }) |known| for (providers, 0..) |provider, i| {
+        const other = providers[(i + 1) % providers.len];
+        var state = if (known)
+            try opened(&.{session(&ref, .{ .working = ago(10) }, .{ .provider = other })})
+        else
+            try testState();
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = ref });
+        const latest: Observed = .{
+            .reference = ref,
+            .read_version = testToken(3),
+            .work = .{ .state = .{ .failed = .{ .since = test_now_s, .code = bounded(session_work.max_code_bytes, "provider_http_401"), .resets_at = null } }, .turn = 8 },
+            .last_line = .{ .position = 9 },
+            .opening = false,
+        };
+        _ = try step(&state, .{ .observed = latest });
+        try std.testing.expectEqual(if (known) @as(?Provider, other) else null, state.find(ref).?.provider);
+        if (!known) try std.testing.expect(band(&state) == null);
+        _ = try step(&state, .{ .tick = (test_now_s * 1000) + list_interval_ms });
+        const metadata = session(&ref, .{ .stopping = ago(5) }, .{ .provider = provider, .label = "Listed metadata" });
+        _ = try respond(&state, delta, testToken(2), &.{metadata});
+        try std.testing.expectEqual(@as(?Provider, provider), state.find(ref).?.provider);
+        try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
+        try std.testing.expectEqualDeep(latest.last_line, state.find(ref).?.last_line);
+        try std.testing.expectEqual(testToken(3), state.find(ref).?.read_version.?);
+        try std.testing.expectEqual(test_now_s, shownSince(&state, state.find(ref).?));
+        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = provider }, band(&state).?);
+        _ = try step(&state, .{ .conversation = null });
+        try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
+        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = provider }, band(&state).?);
+        // Existing metadata is replaced too, without a separate provider cache.
+        var changed = session(&ref, latest.work.state, .{ .provider = other, .turn = 8 });
+        changed.last_line = .{ .position = 9, .text = null };
+        _ = try refresh(&state, delta, testToken(4), &.{changed});
+        try std.testing.expectEqual(Band{ .trouble = .sign_in, .provider = other }, band(&state).?);
+        try std.testing.expectEqualDeep(latest.work, state.find(ref).?.work());
+        try std.testing.expectEqualDeep(latest.last_line, state.find(ref).?.last_line);
+    };
 }
 
 test "only a Host handshake rebases read revisions and rejects old traversals and replies" {

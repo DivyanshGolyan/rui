@@ -4848,7 +4848,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .provider = .codex, .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });
