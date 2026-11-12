@@ -1,4 +1,4 @@
-"""Session-list resource census helpers shared with session_list_release_proof.py."""
+"""Session-list value and resource assertions shared by native caller fixtures."""
 import os
 import pathlib
 import re
@@ -13,6 +13,23 @@ def assert_empty_full(page):
     assert {key: value for key, value in page.items() if key != "since"} == {
         "version": host_process.WIRE_VERSION, "type": "session_list", "sessions": [], "delta": "full", "next": None}, page
     assert re.fullmatch(r"[0-9a-f]{32}\.(0|[1-9][0-9]*)", page["since"]), page
+
+
+def session_values(page):
+    """All per-Session facts, without the Store-wide read freshness stamp.
+
+    A rejected command commits a record without changing any Session. The
+    next read_version can therefore change on every row; it is not a Session
+    mutation. Require its canonical wire form rather than ignoring omissions.
+    """
+    result = []
+    for incoming in page["sessions"]:
+        row = incoming.copy()
+        version = row.pop("read_version")
+        assert re.fullmatch(r"[0-9a-f]{32}\.(0|[1-9][0-9]*)", version), version
+        assert int(version.split(".")[1]) < 2**64, version
+        result.append(row)
+    return result
 
 
 def linux_resources(pid):
