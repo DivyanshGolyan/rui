@@ -160,7 +160,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             }
             const first_command = ctx.cmds.items.len;
             try self.overview.handleEvent(ctx, .tick);
+            // Leaving is terminal for this dispatch: a child must not start
+            // old-client reobservation after Upgrade has requested departure.
+            if (ctx.quit) return;
             if (self.session) |session| try session.handleEvent(ctx, .tick);
+            if (ctx.quit) return;
             if (self.settings_open or self.sign_in_open) {
                 // Hidden screens still settle their workers and consent state,
                 // but their presentation targets aren't in this focus tree.
@@ -175,8 +179,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.cmds.items.len = kept;
                 if (self.settings_open) try self.settings_page.widget().handleEvent(ctx, .tick);
             }
+            if (ctx.quit) return;
             if (self.sign_in) |page| try page.handleEvent(ctx, .tick);
-            try ctx.tick(16, self.widget());
+            if (!ctx.quit) try ctx.tick(16, self.widget());
         },
         else => {},
     }
@@ -645,6 +650,43 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     ctx.cmds.clearRetainingCapacity();
     try root.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(ctx.cmds.items[0].request_focus.eql(hidden.widget()));
+}
+
+test "App root relaunch departure stops child ticks and scheduling at the first quit" {
+    const Pane = struct {
+        ticks: usize = 0,
+        quit: bool = false,
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = onEvent, .drawFn = drawPane };
+        }
+        fn onEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (input == .tick) {
+                self.ticks += 1;
+                if (self.quit) ctx.quit = true;
+            }
+        }
+        fn drawPane(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+    };
+    for (std.enums.values(enum { overview, session, sign_in, none })) |quitter| {
+        for ([_]bool{ false, true }) |settings| {
+            var overview: Pane = .{ .quit = quitter == .overview };
+            var session: Pane = .{ .quit = quitter == .session };
+            var sign_in: Pane = .{ .quit = quitter == .sign_in };
+            var root: Self = .{ .overview = overview.widget(), .list = overview.widget(), .compose = overview.widget(), .session = session.widget(), .settings_open = settings, .sign_in = sign_in.widget(), .sign_in_open = true };
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+            defer ctx.cmds.deinit(std.testing.allocator);
+            try root.widget().handleEvent(&ctx, .tick);
+            try std.testing.expectEqual(@as(usize, 1), overview.ticks);
+            try std.testing.expectEqual(@as(usize, if (quitter == .overview) 0 else 1), session.ticks);
+            try std.testing.expectEqual(@as(usize, if (quitter == .overview or quitter == .session) 0 else 1), sign_in.ticks);
+            try std.testing.expectEqual(quitter != .none, ctx.quit);
+            try std.testing.expectEqual(quitter == .none, ctx.cmds.items.len != 0);
+        }
+    }
 }
 
 test "App root routes Model filter typing to settings and Escape closes only its choice" {
