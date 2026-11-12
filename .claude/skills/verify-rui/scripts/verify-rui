@@ -10,6 +10,7 @@ import functools
 import hashlib
 import html
 import io
+import itertools
 import math
 import contextlib
 import json
@@ -26,7 +27,6 @@ import sys
 import tarfile
 import threading
 import time
-import unicodedata
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
 SCRATCH_PARENT = pathlib.Path("/private/tmp" if sys.platform == "darwin" else "/tmp")  # short paths: Unix socket limits
@@ -592,11 +592,8 @@ def tap_main(args):
 
     def feed_output(chunk):
         nonlocal capture_ok
-        raw_out.write(chunk)
-        raw_out.flush()
-        outputs.write(json.dumps({"t_ns": now_ns(), "offset": offset["out"], "n": len(chunk)}) + "\n")
-        outputs.flush()
-        offset["out"] += len(chunk)
+        timed_output(raw_out, outputs, chunk)
+        offset["out"] = raw_out.tell()
         if terminal:
             view = memoryview(chunk)
             while view:
@@ -625,6 +622,8 @@ def tap_main(args):
                 if signum == signal.SIGWINCH and terminal:
                     size = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
                     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
+                    outputs.write(json.dumps({"t_ns": now_ns(), "resize": [size[1], size[0]]}) + "\n")
+                    outputs.flush()
                     if capture:
                         capture.resize(size[1], size[0])
                     append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "resize", "rows": size[0], "columns": size[1]})
@@ -1800,109 +1799,199 @@ def cmd_list(_args):
         print(f"{root}  sha={meta['sha'][:12]} label={meta.get('label')} {'cleaned' if cleaned else 'LIVE'}")
 
 
-# ---------------------------------------------------------------- named frames (plain tmux, no screen library)
+# ---------------------------------------------------------------- named frames (plain PTY and libghostty-vt)
 
 
 THEMES = {"night": ("#121933", "#d4cebf"), "day": ("#f3eee2", "#2f2b25"), "mist": ("#e6e9ef", "#2f2b25")}
-ANSI_BASE = ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
-             "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff"]
 
 
-ANSI_ESCAPE = re.compile(r"\x1b\[([0-9;:]*)m|\x1b\]8;[^\x1b\x07]*(?:\x1b\\|\x07)|\x1b\([B0]|\x0e|\x0f")
+def cells_render(frame):
+    """All three representations come from one immutable committed frame."""
+    ansi_rows, html_rows = [], []
+    for row in frame.cells:
+        ansi, spans = [], []
+        # Group identical adjacent styles, retaining blank-cell backgrounds.
+        for cell, group in itertools.groupby(row, key=lambda c: c._replace(data="")):
+            group = tuple(group)
+            text = "".join(c.data for c in group)
+            if not text:  # A wide grapheme's spacer tail is not another glyph.
+                continue
+            fg, bg = frame.colors(cell)
+            ansi_fg, ansi_bg = frame.colors(cell._replace(reverse=False))
+            sgr = ["0", "38;2;" + ";".join(str(v) for v in bytes.fromhex(ansi_fg)),
+                   "48;2;" + ";".join(str(v) for v in bytes.fromhex(ansi_bg))]
+            if cell.reverse:
+                sgr.append("7")
+            css = [f"color:#{fg}", f"background:#{bg}"]
+            for enabled, code, rule in ((cell.bold, "1", "font-weight:700"),
+                                         (cell.italic, "3", "font-style:italic"),
+                                         (cell.faint, "2", f"color:color-mix(in srgb,#{fg} 60%,#{bg})"),
+                                         (cell.invisible, "8", ""),
+                                         (cell.blink, "5", "")):
+                if enabled:
+                    sgr.append(code)
+                    if rule:
+                        css.append(rule)
+            decorations = []
+            if cell.underline:
+                sgr.append(f"4:{cell.underline}")
+                decorations.append("underline")
+                css.append("text-decoration-style:" + {2: "double", 3: "wavy", 4: "dotted", 5: "dashed"}.get(cell.underline, "solid"))
+                if cell.underline_rgb:
+                    sgr.append("58;2;" + ";".join(str(v) for v in bytes.fromhex(cell.underline_rgb)))
+                    css.append(f"text-decoration-color:#{cell.underline_rgb}")
+            for enabled, code, decoration in ((cell.strike, "9", "line-through"), (cell.overline, "53", "overline")):
+                if enabled:
+                    sgr.append(code)
+                    decorations.append(decoration)
+            if decorations:
+                css.append("text-decoration-line:" + " ".join(decorations))
+            if cell.invisible:
+                css.append("color:transparent;text-decoration-color:transparent")
+            # Raster captures use the visible blink phase; ANSI retains its flag.
+            ansi.append("\x1b[" + ";".join(sgr) + "m" + text)
+            glyphs = []
+            for index, glyph in enumerate(group):
+                if not glyph.data:
+                    continue
+                escaped = html.escape(glyph.data)
+                if index + 1 < len(group) and not group[index + 1].data:
+                    escaped = f'<span class="g">{escaped}</span>'
+                glyphs.append(escaped)
+            spans.append(f'<span style="width:{len(group)}ch;{";".join(css)}">{"".join(glyphs)}</span>')
+        ansi_rows.append("".join(ansi) + "\x1b[0m")
+        html_rows.append('<span class="r">' + "".join(spans) + "</span>")
+    cursor = frame.cursor
+    ansi = "\r\n".join(ansi_rows) + f"\x1b[{cursor.y + 1};{cursor.x + 1}H\x1b[?25{'h' if frame.visible else 'l'}"
+    body = "".join(html_rows)
+    page = cells_page(body, frame)
+    return frame.text + "\n", ansi, page
 
 
-def ansi_color(n):
-    if not 0 <= n <= 255:
-        return None
-    if n < 16:
-        return ANSI_BASE[n]
-    if n < 232:
-        n -= 16
-        levels = [0, 95, 135, 175, 215, 255]
-        return "#%02x%02x%02x" % (levels[n // 36], levels[n // 6 % 6], levels[n % 6])
-    return "#%02x%02x%02x" % ((8 + 10 * (n - 232),) * 3)
-
-
-def ansi_render(text, bg, fg):
-    """Render tmux SGR (including indexed/RGB colours) without interpreting HTML."""
-    default = dict(fg=None, bg=None, bold=False, dim=False, ital=False, ul=False, rev=False, strike=False)
-    style = default.copy()
-    out = []
-
-    def span(chunk):
-        f, b = style["fg"] or fg, style["bg"] or bg
-        if style["rev"]:
-            f, b = b, f
-        css = [f"color:{f}"]
-        if b != bg:
-            css.append(f"background:{b}")
-        for key, rule in (("bold", "font-weight:700"), ("dim", "opacity:.6"), ("ital", "font-style:italic")):
-            if style[key]:
-                css.append(rule)
-        deco = [d for d, key in (("underline", "ul"), ("line-through", "strike")) if style[key]]
-        if deco:
-            css.append("text-decoration:" + " ".join(deco))
-        return f'<span style="{";".join(css)}">{html.escape(chunk)}</span>'
-
-    pos = 0
-    for match in ANSI_ESCAPE.finditer(text):
-        if match.start() > pos:
-            out.append(span(text[pos:match.start()]))
-        pos = match.end()
-        if match.group(1) is None:
-            continue
-        fields = match.group(1).split(";")
-        i = 0
-        while i < len(fields):
-            parts = [int(v or 0) for v in fields[i].split(":")]
-            value = parts[0]
-            if value == 0:
-                style = default.copy()
-            elif value in (38, 48):
-                key = "fg" if value == 38 else "bg"
-                if len(parts) > 1:
-                    colour = parts[1:]
-                else:
-                    colour = [int(v or 0) for v in fields[i + 1:i + 5] if ":" not in v]
-                    count = 2 if colour and colour[0] == 5 else 4 if colour and colour[0] == 2 else 0
-                    i += min(count, len(fields) - i - 1)
-                if len(colour) >= 2 and colour[0] == 5:
-                    style[key] = ansi_color(colour[1])
-                elif len(colour) >= 4 and colour[0] == 2 and all(0 <= v <= 255 for v in colour[-3:]):
-                    style[key] = "#%02x%02x%02x" % tuple(colour[-3:])
-            elif 30 <= value <= 37:
-                style["fg"] = ANSI_BASE[value - 30]
-            elif 90 <= value <= 97:
-                style["fg"] = ANSI_BASE[value - 90 + 8]
-            elif 40 <= value <= 47:
-                style["bg"] = ANSI_BASE[value - 40]
-            elif 100 <= value <= 107:
-                style["bg"] = ANSI_BASE[value - 100 + 8]
-            elif value in (39, 49):
-                style["fg" if value == 39 else "bg"] = None
-            else:
-                toggles = {1: ("bold", True), 2: ("dim", True), 3: ("ital", True), 4: ("ul", True),
-                           7: ("rev", True), 9: ("strike", True), 23: ("ital", False), 24: ("ul", False),
-                           27: ("rev", False), 29: ("strike", False)}
-                if value == 22:
-                    style["bold"] = style["dim"] = False
-                elif value in toggles:
-                    key, enabled = toggles[value]
-                    style[key] = enabled
-            i += 1
-    if pos < len(text):
-        out.append(span(text[pos:]))
-    return "".join(out)
-
-
-def ansi_page(body, bg, fg, cols, rows, cursor):
-    cx, cy = cursor
+def cells_page(body, frame):
+    cursor = (f'<i id=c style="left:{frame.cursor.x}ch;top:{frame.cursor.y * 1.35}em"></i>'
+              if frame.visible else "")
     return f"""<!doctype html><meta charset=utf-8><style>
 body{{margin:0;background:#0000}}
-#t{{display:inline-block;padding:14px 16px;background:{bg};border-radius:10px;position:relative}}
-pre{{margin:0;font:14px/1.35 'JetBrains Mono','DejaVu Sans Mono',monospace;color:{fg};width:{cols}ch;height:{rows * 1.35}em;overflow:hidden;position:relative;font-variant-ligatures:none}}
-#c{{position:absolute;left:{cx}ch;top:{cy * 1.35}em;width:1ch;height:1.35em;background:{fg};opacity:.55}}
-</style><div id=t><pre>{body}<i id=c></i></pre></div>"""
+#t{{display:inline-block;padding:14px 16px;background:#{frame.background};border-radius:10px;position:relative}}
+pre{{margin:0;font:14px/1.35 'JetBrains Mono','DejaVu Sans Mono',monospace;color:#{frame.foreground};width:{frame.columns}ch;height:{frame.lines * 1.35}em;overflow:hidden;position:relative;font-variant-ligatures:none}}
+.r{{display:block;height:1.35em;line-height:1.35em}}
+.r>span{{display:inline-block;height:100%;vertical-align:top}}
+.g{{display:inline-block;width:2ch}}
+#c{{position:absolute;width:1ch;height:1.35em;background:#{frame.cursor_color};opacity:.55}}
+</style><div id=t><pre>{body}{cursor}</pre></div>"""
+
+
+def screen_options(theme):
+    bg, fg = THEMES[theme]
+    rgb = lambda color: tuple(bytes.fromhex(color.lstrip("#")))
+    return dict(background=rgb(bg), foreground=rgb(fg),
+                color_scheme="dark" if theme == "night" else "light")
+
+
+def timed_output(raw, events, data):
+    """The term tap and frame capture share one timed byte-log shape."""
+    offset = raw.tell()
+    raw.write(data)
+    raw.flush()
+    events.write(json.dumps({"t_ns": now_ns(), "offset": offset, "n": len(data)}) + "\n")
+    events.flush()
+
+
+def replay(log_dir, size, theme):
+    """Rebuild committed frames without sending terminal replies; first size only."""
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+    from terminal_screen import ScreenCapture
+    capture = ScreenCapture(*size, **screen_options(theme))
+    t_ns = None
+    try:
+        with open(log_dir / "output.bin", "rb") as raw, open(log_dir / "output.jsonl") as events:
+            for line in events:
+                event = json.loads(line)
+                if "resize" in event:
+                    break
+                t_ns = event["t_ns"]
+                raw.seek(event["offset"])
+                remaining = event["n"]
+                while remaining:
+                    chunk = raw.read(min(65536, remaining))
+                    if not chunk:
+                        raise FrameFailure("truncated timed output log")
+                    remaining -= len(chunk)
+                    for frame in capture.feed_frames(chunk):
+                        yield t_ns, frame
+        if t_ns is not None and not capture.synchronized:
+            capture.commit()  # Same quiescent main-screen commit as live collection.
+            yield t_ns, capture.frame
+    finally:
+        capture.free()
+
+
+def playback(timed):
+    """Deduplicate cells and retain the latest frame in each 80 ms bucket."""
+    def coalesced():
+        pending = previous = None
+        bucket_start = None
+        for t_ns, frame in timed:
+            if previous is not None and frame.cells == previous.cells:
+                continue
+            previous = frame
+            if bucket_start is None or t_ns - bucket_start >= 80_000_000:
+                if pending is not None:
+                    yield pending
+                bucket_start = t_ns
+            pending = t_ns, frame
+        if pending is None:
+            raise FrameFailure("no committed recording frames")
+        yield pending
+
+    frames = iter(coalesced())
+    t_ns, frame = next(frames)
+    for next_ns, next_frame in frames:
+        yield frame, max(.06, min(1.5, (next_ns - t_ns) / 1e9))
+        t_ns, frame = next_ns, next_frame
+    yield frame, 2.0
+
+
+def render_job(jobs, html_path, *, movie=False):
+    png = html_path.with_suffix(".png")
+    jobs.write(json.dumps({"html": str(html_path.resolve()), "png": str(png.resolve()),
+                           "scale": 1 if movie else 2, "opaque": movie}) + "\n")
+    return png
+
+
+def recording_jobs(log_dir, size, theme, directory, jobs):
+    """Materialize one playback frame at a time, plus the encoder's concat input."""
+    directory.mkdir(parents=True, exist_ok=True)
+    concat = directory / "frames.concat"
+    with open(concat, "w") as listing:
+        for index, (frame, delay) in enumerate(playback(replay(log_dir, size, theme))):
+            page = directory / f"{index:06d}.html"
+            page.write_text(cells_render(frame)[2])
+            png = render_job(jobs, page, movie=True)
+            entry = "file '" + str(png).replace("'", "'\\''") + "'\n"
+            listing.write(entry + f"duration {delay:.3f}\n")
+        listing.write(entry)  # concat needs a final file to apply its duration.
+    return concat
+
+
+def encode_recording(concat, gif):
+    """The global palette is a separate disk pass, never a buffered split graph."""
+    palette = concat.with_name("palette.png")
+    base = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", "1", "-filter_complex_threads", "1",
+            "-filter_threads", "1", "-f", "concat", "-safe", "0", "-i", str(concat)]
+    for options, description in (
+        (["-vf", "palettegen=max_colors=128:stats_mode=diff", "-frames:v", "1", str(palette)], "generate palette"),
+        (["-i", str(palette), "-filter_complex", "[0:v][1:v]paletteuse=diff_mode=rectangle:dither=bayer:bayer_scale=5",
+          "-fps_mode", "vfr", "-loop", "0", str(gif)], "encode GIF"),
+    ):
+        frame_command(subprocess.run(base + options, capture_output=True, text=True), description)
+    mp4 = gif.with_suffix(".mp4")
+    result = subprocess.run(base + ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p",
+                                    "-movflags", "+faststart", str(mp4)], capture_output=True, text=True)
+    if result.returncode == 0:
+        return mp4
+    print("verify-rui: optional MP4: " + result.stderr.strip(), file=sys.stderr)
 
 
 def parse_sizes(value):
@@ -1933,7 +2022,7 @@ def frame_expectations(state):
     else:
         steps = state["steps"]
         last_wait = next((index for index in range(len(steps) - 1, -1, -1) if "wait" in steps[index]), None)
-        if last_wait is not None and any(set(step) & {"text", "keys", "mouse", "send", "host"} for step in steps[last_wait + 1:]):
+        if last_wait is not None and any(set(step) & {"text", "keys", "send", "host", "mouse"} for step in steps[last_wait + 1:]):
             raise ValueError(f"{state['name']}: an action follows the last wait; set expect explicitly")
         value = steps[last_wait]["wait"] if last_wait is not None else []
     if isinstance(value, str):
@@ -1979,10 +2068,13 @@ def validate_scenario(data, sizes=None):
         require(name not in names, f"duplicate state {name}")
         names.add(name)
         require(isinstance(state.get("theme", "night"), str) and state.get("theme", "night") in THEMES, f"{name}: invalid theme")
+        require(type(state.get("record", False)) is bool, f"{name}: record must be boolean")
         env = state.get("env", {})
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
                                              and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
         require("note" not in state or isinstance(state["note"], str) and "\n" not in state["note"], f"{name}: note must be one line")
+        require(type(state.get("first_run", False)) is bool, f"{name}: first_run must be a boolean")
+        require(not state.get("first_run") or state.get("open") == "overview", f"{name}: first_run opens overview")
         state_sizes = parse_sizes(state["sizes"]) if "sizes" in state else default_sizes
         cast = state.get("cast", [])
         require(isinstance(cast, list), f"{name}: cast must be a list")
@@ -2007,20 +2099,27 @@ def validate_scenario(data, sizes=None):
         require(isinstance(steps, list), f"{name}: steps must be a list")
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout"}
-            require(len(actions) == 1 and actions <= {"text", "keys", "mouse", "wait", "gone", "sleep", "send", "host"}, f"{name}: unknown or ambiguous step {step}")
+            actions = set(step) - {"timeout", "repaint"}
+            require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
+            require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
             value = step[action]
-            require("timeout" not in step or action in ("wait", "gone") and duration(step["timeout"]), f"{name}: invalid timeout")
-            if action in ("text", "wait", "gone"):
+            require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
+            if action == "mouse":
+                require(isinstance(value, dict) and set(value) <= {"at", "do", "button"}
+                        and "at" in value and "do" in value, f"{name}: invalid mouse step")
+                require(value["do"] in ("click", "move", "press", "release", "wheel-up", "wheel-down"), f"{name}: invalid mouse action")
+                at = value["at"]
+                require((isinstance(at, list) and len(at) == 2 and all(type(v) is int and v >= 0 for v in at))
+                        or (isinstance(at, str) and bool(at) and not any(c in at for c in "\0\n\r")),
+                        f"{name}: mouse at must be text or zero-based [col, row]")
+                require(value.get("button", "left") in ("left", "right", "middle"), f"{name}: invalid mouse button")
+            elif action == "exited":
+                require(type(value) is int and 0 <= value <= 255, f"{name}: invalid exit status")
+            elif action in ("text", "wait", "gone"):
                 require(isinstance(value, str) and "\0" not in value, f"{name}: {action} must be text")
             elif action == "keys":
                 require(isinstance(value, list) and bool(value) and all(isinstance(k, str) and k in KEYS for k in value), f"{name}: unknown key")
-            elif action == "mouse":
-                require(isinstance(value, dict) and set(value) == {"at", "do"}
-                        and isinstance(value["at"], str) and bool(value["at"])
-                        and not any(c in value["at"] for c in "\0\n\r")
-                        and value["do"] in ("move", "click"), f"{name}: invalid mouse step")
             elif action == "sleep":
                 require(duration(value), f"{name}: invalid sleep")
             elif action == "host":
@@ -2118,60 +2217,209 @@ def seed_cast(run, entries):
             frame_request(run, result, settle, sid)
 
 
-def frame_pane(run, target):
-    return frame_command(run.tmux("capture-pane", "-p", "-t", target, check=False), "capture pane").stdout
+class FrameTerminal:
+    """Cell adapter and timed output log over the owned PTY and collector."""
+    def __init__(self, run, state, size):
+        # Use the working skill's observer and the shared PTY lifecycle owner,
+        # not the pinned product's older helpers.
+        sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+        from terminal_process import terminal_process
+        from terminal_screen import ScreenCapture
+        self.run, self.state = run, state
+        self.condition = threading.Condition()
+        self.pressed = None
+        self.log = run.evidence / "frames-pty" / state["name"]
+        self.log.mkdir(parents=True, exist_ok=True)
+        cols, rows = size
+        with contextlib.ExitStack() as setup:
+            self.capture = ScreenCapture(cols, rows, reply=lambda data: self.write(data, "reply"),
+                                         **screen_options(state.get("theme", "night")))
+            setup.callback(self.capture.free)
+            self.capture.listener = self._committed
+            self.raw_output = setup.enter_context(open(self.log / "output.bin", "wb"))
+            self.output_events = setup.enter_context(open(self.log / "output.jsonl", "w"))
+            env = run.env(**{"COLORTERM": "truecolor", **state.get("env", {})})
+            argv = list(map(str, session_argv(run, state["open"])))
+            if state.get("first_run"):
+                # A separate HOME/Store keeps the seeded run and every
+                # sibling state intact; this app has no credentials/Host.
+                home = run.scratch / "first-run" / state["name"]
+                home.mkdir(parents=True, mode=0o700, exist_ok=True)
+                env["HOME"] = str(home)
+                for key in ("RUI_CODEX_CREDENTIAL_FILE", "RUI_OPENAI_KEY_FILE"):
+                    env.pop(key, None)
+                argv = [str(run.rui), "--store", str(home / "store")]
+            # The collector may start before __enter__ returns. Keep its
+            # callbacks behind this lock until their borrowed handles exist.
+            with self.condition:
+                self.process, self.master = setup.enter_context(terminal_process(
+                    argv, env=env, cwd=run.project, columns=cols, rows=rows,
+                    feed=self._feed, collected=self._collected, condition=self.condition))
+            self.scope = setup.pop_all()
+
+    @property
+    def collected(self):
+        with self.condition:
+            return self.process.output.complete
+
+    @property
+    def status(self):
+        self.process.output.check()
+        # Child exit alone is not completed capture: let the owner deliver
+        # its retained terminal tail before exposing an exited surface.
+        return self.process.returncode if self.collected else None
+
+    def _committed(self, _text, _x, _y):
+        t_ns = now_ns()
+        frame = self.capture.frame
+        append_jsonl(self.log / "frames.jsonl", {"t_ns": t_ns, "generation": self.capture.generation,
+                                                "cursor": list(frame.cursor), "visible": frame.visible,
+                                                "size": [frame.columns, frame.lines]})
+        self.condition.notify_all()
+
+    def _feed(self, data):
+        with self.condition:
+            timed_output(self.raw_output, self.output_events, data)
+            self.capture.feed(data)
+
+    def _collected(self, error):
+        if error is not None:
+            raise error
+        with self.condition:
+            # The shared owner has reaped Rui and drained its retained
+            # terminal. Commit failures propagate back to that same owner.
+            if not self.capture.synchronized:
+                self.capture.commit()
+
+    @property
+    def frame(self):
+        with self.condition:
+            self.process.output.check()
+            if self.capture.frame is None:
+                raise FrameFailure("Rui produced no committed frame")
+            return self.capture.frame
+
+    def write(self, data, kind="input"):
+        remaining = memoryview(data)
+        while remaining:
+            try:
+                count = os.write(self.master, remaining)
+                remaining = remaining[count:]
+            except BlockingIOError:
+                select.select([], [self.master], [], .1)
+        append_jsonl(self.log / "input.jsonl", {"t_ns": now_ns(), "kind": kind, "hex": data.hex()})
+
+    def wait(self, predicate, description, timeout=20, allow_exit=False):
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while True:
+                self.process.output.check()
+                if not allow_exit and self.status is not None:
+                    raise FrameFailure(f"Rui exited with status {self.status} before {description}")
+                if self.capture.frame is not None and predicate(self.capture):
+                    return
+                if self.collected:
+                    raise FrameFailure(f"Rui exited with status {self.status} before {description}")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise FrameFailure(f"timeout waiting for {description}")
+                self.condition.wait(remaining)
+
+    def resize(self, size):
+        import fcntl
+        import struct
+        import termios
+        cols, rows = size
+        with self.condition:
+            generation = self.capture.generation
+            fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            self.output_events.write(json.dumps({"t_ns": now_ns(), "resize": [cols, rows]}) + "\n")
+            self.output_events.flush()
+            self.capture.resize(cols, rows)
+            if self.collected:
+                # An exited terminal cannot repaint; reflow its final screen.
+                self.capture.commit()
+        self.wait(lambda c: c.generation > generation, "committed resize frame", allow_exit=True)
+
+    def mouse(self, step, *, repaint=True):
+        with self.condition:
+            frame = self.frame
+            if isinstance(step["at"], list):
+                col, row = step["at"]
+            else:
+                found = None
+                for y, cells in enumerate(frame.cells):
+                    line = "".join(cell.data for cell in cells)
+                    index = line.find(step["at"])
+                    if index >= 0:
+                        offset = 0
+                        for x, cell in enumerate(cells):
+                            if cell.data and offset == index:
+                                found = x, y
+                                break
+                            offset += len(cell.data)
+                    if found is not None:
+                        break
+                if found is None:
+                    raise FrameFailure(f"mouse target absent from committed frame: {step['at']!r}")
+                col, row = found
+            if not (0 <= col < frame.columns and 0 <= row < frame.lines):
+                raise FrameFailure(f"mouse position outside {frame.columns}x{frame.lines}: {col},{row}")
+            generation = self.capture.generation
+            emitted = False
+            button = step.get("button", self.pressed or "left")
+            actions = ("press", "release") if step["do"] == "click" else (step["do"],)
+            for action in actions:
+                raw = self.capture.mouse(action, col, row, button, pressed=self.pressed is not None)
+                if action == "press":
+                    self.pressed = button
+                elif action == "release":
+                    self.pressed = None
+                append_jsonl(self.log / "mouse.jsonl", {"t_ns": now_ns(), "action": action, "at": [col, row],
+                                                       "button": button, "hex": raw.hex(), "emitted": bool(raw)})
+                if raw:
+                    emitted = True
+                    self.write(raw, "mouse")
+        if emitted and repaint:
+            self.wait(lambda c: c.generation > generation and c.frame.cells != frame.cells,
+                      f"mouse {step['do']} at {step['at']} did not repaint")
+
+    def close(self):
+        # Shared disposal stops/reaps the foreground job, joins its collector,
+        # and only then releases the master and retained slave.
+        self.scope.close()
+        self.process.output.check()
 
 
-def frame_dead(run, target):
-    return run.tmux("display-message", "-p", "-t", target, "#{pane_dead}", check=False).stdout.strip() != "0"
+def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False):
+    terminal.wait(lambda c: (text in c.completed) != absent,
+                  f"{'absence of ' if absent else ''}{text!r}", timeout, allow_exit)
 
 
-def frame_wait(run, target, text, absent=False, timeout=20, allow_exit=False):
-    deadline = time.monotonic() + timeout
-    while True:
-        screen = frame_pane(run, target)
-        if not allow_exit and frame_dead(run, target):
-            raise FrameFailure("Rui exited before the state was reached")
-        if (text in screen) != absent:
-            return
-        if time.monotonic() >= deadline:
-            raise FrameFailure(f"timeout waiting for {'absence of ' if absent else ''}{text!r}")
-        time.sleep(0.1)
-
-
-def frame_steps(run, target, steps, exiting=False):
+def frame_steps(run, terminal, steps, exiting=False):
     for step in steps:
         if "text" in step:
-            frame_command(run.tmux("send-keys", "-l", "-t", target, "--", step["text"], check=False), "type text")
-            time.sleep(0.4)  # Separate paste-sized literal input from the submit key, as in d.sh.
+            terminal.write(step["text"].encode())
         elif "keys" in step:
             for key in step["keys"]:
-                raw = KEYS[key]
                 exiting = exiting or key == EXIT_KEY
-                frame_command(run.tmux("send-keys", "-H", "-t", target, *[f"{b:02x}" for b in raw], check=False), "send keys")
-                # Let a lone Escape expire before any following key can become Alt-key input.
-                time.sleep(0.35 if key == "Esc" else 0.08)
+                terminal.write(KEYS[key])
+                if key == "Esc":
+                    # Rui itself waits for lone Esc to expire, otherwise the
+                    # following bytes become Alt-key input (independent of tmux).
+                    time.sleep(.35)
         elif "mouse" in step:
-            mouse = step["mouse"]
-            screen = frame_pane(run, target)
-            for y, line in enumerate(screen.splitlines(), 1):
-                index = line.find(mouse["at"])
-                if index >= 0:
-                    # tmux's plain capture retains wide and combining characters.
-                    x = 1 + sum(0 if unicodedata.combining(c) else
-                                2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
-                                for c in line[:index])
-                    break
-            else:
-                raise FrameFailure(f"mouse target absent: {mouse['at']}")
-            raw = (f"\x1b[<35;{x};{y}M" if mouse["do"] == "move" else
-                   f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m").encode()
-            frame_command(run.tmux("send-keys", "-H", "-t", target, *[f"{b:02x}" for b in raw], check=False), "send mouse")
-            time.sleep(0.15)  # Let the injected event draw before the capture.
+            terminal.mouse(step["mouse"], repaint=step.get("repaint", True))
         elif "wait" in step or "gone" in step:
             action = "wait" if "wait" in step else "gone"
-            frame_wait(run, target, step[action], action == "gone", step.get("timeout", 20), exiting)
+            frame_wait(run, terminal, step[action], action == "gone", step.get("timeout", 20), exiting)
+        elif "exited" in step:
+            terminal.wait(lambda _c: terminal.collected, "Rui exit", step.get("timeout", 20), allow_exit=True)
+            if terminal.status != step["exited"]:
+                raise FrameFailure(f"Rui exit status {terminal.status}, expected {step['exited']}")
+            exiting = True
         elif "sleep" in step:
+            # An explicit scenario hold also keeps draining/recording output.
             time.sleep(step["sleep"])
         elif "send" in step:
             message = step["send"]
@@ -2182,9 +2430,25 @@ def frame_steps(run, target, steps, exiting=False):
             frame_command(run.rui_cmd("host", "pause", "--store", run.store), "pause Host")
         else:
             launch_host(run)
-        if not exiting and frame_dead(run, target):
-            raise FrameFailure("Rui exited before the state was reached")
+        if not exiting and terminal.status is not None:
+            raise FrameFailure(f"Rui exited with status {terminal.status} before the state was reached")
     return exiting
+
+
+def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
+    # The opening read resets the scroll anchor, so wait for it before releasing input.
+    terminal.wait(lambda c: "›" in c.completed and "Opening…" not in c.completed
+                  and (not first_wait or first_wait in c.completed),
+                  "initial composer ready" + (f" with {first_wait!r}" if first_wait else ""),
+                  allow_exit=allow_exit)
+
+
+def frame_ready(terminal, state, allow_exit=False):
+    expected, absent = frame_expectations(state), frame_absences(state)
+    terminal.wait(lambda c: all(text in c.completed for text in expected)
+                  and all(text not in c.completed for text in absent),
+                  "state expectations: " + repr({"expect": expected, "absent": absent}),
+                  allow_exit=allow_exit)
 
 
 def frame_capture(run, target, out, state, size, reason):
@@ -2192,24 +2456,17 @@ def frame_capture(run, target, out, state, size, reason):
     name = size_name(size)
     stem = f"{state['name']}@{name}"
     files = {ext: f"{stem}.{ext}" for ext in ("txt", "ansi", "html")}
-    ansi = frame_command(run.tmux("capture-pane", "-e", "-N", "-p", "-t", target, check=False), "capture ANSI").stdout
-    # Derive text and HTML from this same snapshot: a second capture could
-    # already show the next state while the first still satisfied its marker.
-    plain = "\n".join(line.rstrip(" ") for line in ANSI_ESCAPE.sub("", ansi).split("\n"))
+    frame = target.frame
+    plain, ansi, page = cells_render(frame)
     missing = next((text for text in frame_expectations(state) if text not in plain), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
     unexpected = next((text for text in frame_absences(state) if text in plain), None)
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
-    info = run.tmux("display-message", "-p", "-t", target,
-                    "#{cursor_x} #{cursor_y} #{cursor_flag}").stdout.split()
-    cx, cy, visible = map(int, info)
-    bg, fg = THEMES[state.get("theme", "night")]
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
-    (out / files["html"]).write_text(ansi_page(ansi_render(ansi.removesuffix("\n"), bg, fg), bg, fg, cols, rows,
-                                              (cx, cy) if visible else (-5, -5)))
+    (out / files["html"]).write_text(page)
     return {"name": state["name"], "size": name, "files": files, "status": "failed" if reason else "ok",
             "ok": not bool(reason), "reason": reason, "sha": run.meta["sha"], "note": state.get("note", "")}
 
@@ -2220,7 +2477,7 @@ def frames_index(out, frames, png):
         caption = html.escape(f"{frame['name']} · {frame['size']}")
         files = frame["files"]
         links = " · ".join(f'<a href="{html.escape(path, quote=True)}">{ext}</a>' for ext, path in files.items())
-        view = f'<img src="{files["png"]}" alt="{caption}">' if png and "png" in files else \
+        view = f'<img src="{files.get("gif", files.get("png"))}" alt="{caption}">' if png and ("gif" in files or "png" in files) else \
             f'<iframe title="{caption}" src="{files["html"]}"></iframe>' if "html" in files else ""
         sections.append(f'<section><h2>{caption}</h2><p>{html.escape(frame["note"])}</p>'
                         f'<p>{frame["status"]}: {html.escape(frame["reason"] or "")}</p><p>{links}</p>{view}</section>')
@@ -2239,8 +2496,14 @@ def cmd_frames(args):
             raise ValueError("unknown states: " + ", ".join(sorted(unknown)))
     except (OSError, ValueError, TypeError) as error:
         die(str(error))
-    if not shutil.which("tmux"):
-        die("frames requires tmux")
+    build = load_build(args.sha)
+    require_screen(build)
+    os.environ["RUI_TEST_GHOSTTY_VT"] = build["screen_library"]
+    record_requested = getattr(args, "record", False) or any(s.get("record", False) for s in scenario["states"] if s["name"] in selected)
+    if record_requested and args.no_png:
+        die("recordings require PNG rendering; remove --no-png")
+    if record_requested and not shutil.which("ffmpeg"):
+        die("recordings require ffmpeg")
     if not args.no_png:
         if not shutil.which("node"):
             die("frames requires node and Playwright; use --no-png")
@@ -2277,44 +2540,28 @@ def cmd_frames(args):
     try:
         out.mkdir(parents=True, exist_ok=True)
         (out / "scenario.json").write_text(json.dumps(scenario_snapshot(scenario), indent=2) + "\n")
-        # A keeper window preserves the private server and its options between states.
-        run.tmux("-f", "/dev/null", "new-session", "-d", "-s", "frames", "-n", "keeper", "sleep 86400")
-        run.own("tmux-server", int(run.tmux("display-message", "-p", "#{pid}").stdout), socket=str(run.sock))
-        run.tmux("set-option", "-g", "remain-on-exit", "on")
-        run.tmux("set-option", "-g", "escape-time", "0")
-        run.tmux("set-option", "-g", "status", "off")
         last = max(i for i, state in enumerate(scenario["states"]) if state["name"] in selected)
         for state in scenario["states"][:last + 1]:
             state_sizes = state["sizes"]
             cols, rows = state_sizes[0]
-            target = f"=frames:={state['name']}"
+            target = None
             reason = None
+            exiting = False
             opened = False
             failure_capture = None
+            first_record = len(records)
             try:
                 seed_cast(run, state.get("cast", []))
-                bg, fg = THEMES[state.get("theme", "night")]
-                run.tmux("set-option", "-g", "window-style", f"bg={bg},fg={fg}")
-                run.tmux("set-option", "-g", "window-active-style", f"bg={bg},fg={fg}")
-                env = run.env(**{"COLORTERM": "truecolor", **state.get("env", {})})
-                argv = session_argv(run, state["open"])
-                command = "exec env -i " + shlex.join([f"{k}={v}" for k, v in env.items()]) + " " + shlex.join(argv)
-                # No client is attached: default-size sets the PTY before exec.
-                # Resizing only after exec can lose SIGWINCH during Rui startup.
-                run.tmux("set-option", "-g", "default-size", f"{cols}x{rows}")
-                run.tmux("set-option", "-g", "window-size", "latest")
-                run.tmux("new-window", "-d", "-t", "frames", "-n", state["name"], "-c", run.project, command)
+                target = FrameTerminal(run, state, state_sizes[0])
                 opened = True
-                run.tmux("set-option", "-g", "window-size", "manual")
-                run.tmux("resize-window", "-t", target, "-x", cols, "-y", rows)
-                # An explicit Host-stopped diagnostic is an intentionally exited
-                # surface, unlike an early exit in a normal interactive state.
+                # Initial readiness is a committed Rui frame, not elapsed wall
+                # time or a terminal query. State-specific waits own later readiness.
                 stopped_marker = next((step["wait"] for step in state["steps"]
                                        if "The Host stopped." in step.get("wait", "")), None)
-                time.sleep(1.2)  # Rui's first composer precedes its opening transcript read.
                 first_wait = state["steps"][0].get("wait") if state["steps"] else None
-                frame_wait(run, target, first_wait or "›", allow_exit=bool(stopped_marker))
-                frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
+                frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
+                exiting = frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
+                frame_ready(target, state, allow_exit=exiting)
             except (Exception, SystemExit) as error:
                 reason = str(error)
                 if state["name"] in selected:
@@ -2336,9 +2583,10 @@ def cmd_frames(args):
                             continue
                         try:
                             if index > 0:
-                                width, height = size
-                                frame_command(run.tmux("resize-window", "-t", target, "-x", width, "-y", height, check=False), "resize window")
-                                time.sleep(0.8)
+                                if target is None:
+                                    raise FrameFailure("terminal did not launch")
+                                target.resize(size)
+                                frame_ready(target, state, allow_exit=exiting)
                             # The first viewport is already sized. Capture directly
                             # after its steps/wait, while a transient is still visible.
                             record = frame_capture(run, target, out, state, size, reason)
@@ -2350,12 +2598,44 @@ def cmd_frames(args):
                         if not record["ok"] and reason is None:
                             print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
                         records.append(record)
-                    frames_index(out, records, False)
             finally:
                 if opened:
-                    run.tmux("kill-window", "-t", target, check=False)
+                    try:
+                        target.close()
+                    except (Exception, SystemExit) as error:
+                        if state["name"] in selected:
+                            failed = True
+                            # Disposal can discover an error after the last
+                            # capture. Keep its files, but never publish ok.
+                            for record in records[first_record:]:
+                                record.update(ok=False, status="failed", reason=record["reason"] or str(error))
+                            print(f"verify-rui: {state['name']}: disposal failed: {error}", file=sys.stderr)
+                        else:
+                            print(f"verify-rui: warning: {state['name']}: disposal failed: {error} "
+                                  "(not selected; its failure does not fail this run)", file=sys.stderr)
+                if state["name"] in selected:
+                    frames_index(out, records, False)
         if not args.no_png:
-            result = subprocess.run(["node", str(HERE.with_name("frames_png.js")), str(out)], capture_output=True, text=True)
+            movies = []
+            jobs_path = out / "render-jobs.jsonl"
+            states = {state["name"]: state for state in scenario["states"]}
+            with open(jobs_path, "w") as jobs:
+                for record in records:
+                    state = states[record["name"]]
+                    if "html" in record["files"]:
+                        render_job(jobs, out / record["files"]["html"])
+                    if record["size"] == size_name(state["sizes"][0]) and (
+                            getattr(args, "record", False) or state.get("record", False)):
+                        try:
+                            stem = f"{record['name']}@{record['size']}"
+                            concat = recording_jobs(run.evidence / "frames-pty" / state["name"], state["sizes"][0],
+                                                    state.get("theme", "night"), out / (stem + ".recording"), jobs)
+                            movies.append((record, concat, out / (stem + ".gif")))
+                        except Exception as error:
+                            failed = True
+                            record.update(ok=False, status="failed", reason=record["reason"] or f"recording replay failed: {error}")
+                            print(f"verify-rui: {record['name']}: recording replay failed: {error}", file=sys.stderr)
+            result = subprocess.run(["node", str(HERE.with_name("frames_png.js")), str(jobs_path)], capture_output=True, text=True)
             if result.returncode:
                 failed = True
                 print("verify-rui: PNG rendering failed: " + " ".join(result.stderr.strip().splitlines()), file=sys.stderr)
@@ -2365,6 +2645,16 @@ def cmd_frames(args):
                     record["files"]["png"] = png
                 elif "html" in record["files"]:
                     record.update(ok=False, status="failed", reason=record["reason"] or "PNG rendering failed")
+            for record, concat, gif in movies:
+                try:
+                    mp4 = encode_recording(concat, gif)
+                    record["files"]["gif"] = gif.name
+                    if mp4:
+                        record["files"]["mp4"] = mp4.name
+                except Exception as error:
+                    failed = True
+                    record.update(ok=False, status="failed", reason=record["reason"] or f"recording encoding failed: {error}")
+                    print(f"verify-rui: {record['name']}: recording encoding failed: {error}", file=sys.stderr)
         frames_index(out, records, not args.no_png)
     finally:
         if not args.keep:
@@ -2398,13 +2688,14 @@ def main():
     p.add_argument("--label", default="")
     p.add_argument("--answers", choices=["realistic", "echo"], default="echo")
     p.set_defaults(func=cmd_new)
-    p = sub.add_parser("frames", help="render named screen states to text, HTML and PNG without a screen library")
+    p = sub.add_parser("frames", help="render committed PTY screen states to text, ANSI, HTML, PNG and recordings")
     p.add_argument("sha")
     p.add_argument("--scenario", default=str(HERE.with_name("frames.json")))
     p.add_argument("--only", metavar="NAME,...")
     p.add_argument("--sizes", metavar="WxH,...")
     p.add_argument("--out")
     p.add_argument("--no-png", action="store_true")
+    p.add_argument("--record", action="store_true", help="record committed transitions at each state's first size as GIF")
     p.add_argument("--keep", action="store_true")
     p.set_defaults(func=cmd_frames)
     p = sub.add_parser("restart-host", help="stop the run's Host and start a fresh one on the same Store and fixture")

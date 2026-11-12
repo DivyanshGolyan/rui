@@ -48,6 +48,7 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const command_input = @import("command_input.zig");
 const slash_commands_shared = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -1388,36 +1389,59 @@ pub const Departure = struct {
     failure_notice: bool,
     /// The recovery guide is written; otherwise a failed notice writes it.
     recovery_shown: bool,
+    /// Anything beyond the ordinary Detached notice must survive departure.
+    has_guidance: bool,
+    failure: ?anyerror,
 };
 
 /// Joins what the Session stopped, after the caller restored the terminal, and writes
 /// the guidance that follows restoration. The caller prints the Detached notice.
 pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
+    const result = self.settleDeparture(ended, restored);
+    self.writeDeparture(result);
+    return result;
+}
+
+/// Settles every borrower before the caller decides whether departure can be
+/// replaced by a new TUI. No terminal guidance is emitted here.
+pub fn settleDeparture(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     const settled = self.settle(restored);
     self.submission.close();
+    const cause: ?anyerror = if (ended) |_| null else |err| err;
+    const plan = departure.exit(settled, cause, self.submission.view() != null);
+    const action_view = self.screen.action_view != null;
+    return .{
+        .end = if (plan.failure) |err| err else ended,
+        .action = if (action_view) self.live.work.first_action else null,
+        .failure_notice = action_view and !std.meta.isError(restored),
+        .recovery_shown = plan.recovery_before_notice,
+        .has_guidance = self.hasDepartureGuidance() or plan.recovery_before_notice or plan.failure != null,
+        .failure = plan.failure,
+    };
+}
+
+/// Known guidance while the screen is still open. A later settlement can add
+/// failures, so `settleDeparture` always checks again before any replacement is allowed.
+pub fn hasDepartureGuidance(self: *const Self) bool {
+    return self.reading.pending_diagnostic != null or self.submission.view() != null or
+        self.inspection.command_running or self.screen.action_view != null;
+}
+
+/// Emits the already-settled departure. Relaunch never swallows these bytes.
+pub fn writeDeparture(self: *Self, result: Departure) void {
     if (self.reading.pending_diagnostic != null) {
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
         self.writePendingDiagnostic(&out) catch unreachable;
         stderr.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
     }
-    const cause: ?anyerror = if (ended) |_| null else |err| err;
-    const plan = departure.exit(settled, cause, self.submission.view() != null);
-    if (plan.recovery_before_notice) self.recoveryGuide();
+    if (result.recovery_shown) self.recoveryGuide();
     if (self.inspection.command_running and self.inspection.kind == .command) self.commandOutputGuide();
-    if (plan.failure) |err| switch (err) {
+    if (result.failure) |err| switch (err) {
         error.TerminalTooSmall => stderr.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
         error.TerminalTooLarge => stderr.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
         error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => stderr.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
         else => {},
-    };
-    const action_view = self.screen.action_view != null;
-    return .{
-        .end = if (plan.failure) |err| err else ended,
-        .action = if (action_view) self.live.work.first_action else null,
-        // Never a main-screen notice before confirmed restoration.
-        .failure_notice = action_view and !std.meta.isError(restored),
-        .recovery_shown = plan.recovery_before_notice,
     };
 }
 
@@ -2322,6 +2346,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc closes only a list the person saw.
             if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
+                if (command_input.consumesDraft(self.input.composition().bytes, .cancelled)) self.input.clear();
                 self.dirty = true;
                 return;
             };
@@ -2571,8 +2596,8 @@ fn commandLine(self: *Self) !void {
 /// stays until the hold lifts.
 fn runLine(self: *Self) !void {
     const text = self.input.composition().bytes;
-    const takes = !self.upgradeHeld();
-    defer if (takes) self.input.clear();
+    const end: command_input.DraftEnd = if (self.upgradeHeld()) .held else .submitted;
+    defer if (command_input.consumesDraft(text, end)) self.input.clear();
     try self.slashCommand(text);
 }
 
@@ -3156,8 +3181,8 @@ fn showInspection(self: *Self) !void {
 fn showCopy(self: *Self) !void {
     self.dirty = true;
     self.notice = switch (self.job.result.copied) {
-        .no_answer => "No answer to copy yet.",
-        .no_code => "No code block in the last answer.",
+        .no_answer => "No answer to copy",
+        .no_code => "No code block",
         .too_large => TerminalText.clipboard_too_large,
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
@@ -3983,11 +4008,12 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try held.settle();
     try std.testing.expectEqualStrings("c", held.screen.commands.?.list.typed);
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
-    // Esc on `/co`, typed after the frame drew `/c`'s list, closes the list.
+    // Esc on `/co`, typed after the frame drew `/c`'s list, cancels the command.
     try stepKeys(held, "o\x07");
     try std.testing.expectEqualStrings("", try barShows(held));
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+    try std.testing.expect(held.screen.commands == null);
 }
 
 test "Tab completes from the draft's own list, however many keys arrive before a frame" {
@@ -4024,19 +4050,21 @@ test "Esc closes the command list first only when the latest frame drew it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     try held.settle();
-    // Drawn: the first Esc closes only the list, the next one acts as Esc.
-    try stepKeys(held, "/st");
+    held.self.line.read = .{ .revision = 1, .end = 1 };
+    try held.self.line.model.set("gpt-6.1-sol");
+    // The first Esc consumes a drawn command; it does not leave the chat.
+    try stepKeys(held, "/effort ");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.leaving == null);
     try std.testing.expect((try barShows(held)).len == 0);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
-    try stepKeys(held, "\x07");
-    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
-    // The latest frame drew no list, the first being closed: Esc acts at
-    // once.
-    try stepKeys(held, "\x15/st\x07");
+    try std.testing.expect(held.screen.commands == null);
+    // A command the latest frame did not list is not cancelled by Esc.
+    try stepKeys(held, "/st\x07");
+    try std.testing.expectEqualStrings("/st", held.self.input.composition().bytes);
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
 }
 
@@ -5727,12 +5755,12 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expectEqualStrings("⠹ Read docs/using-rui.md", shown[first + 2]);
     try std.testing.expectEqualStrings("+2 more running · /status", shown[first + 3]);
     // No shown call carries the clock, so the work line follows, once.
-    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 13s"));
+    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 13s"));
     // The chip always reserves a row between the tail and the input rule.
     try std.testing.expectEqualStrings("", shown[first + 5]);
     try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "─"));
     var waiting: usize = 0;
-    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Waiting"));
+    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Thinking"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
     // Work ends: the tail goes, and history reaches the rule again.
     self.live.view = .{};
@@ -5754,7 +5782,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     const row = ChromeFixture.find(&three, "◌").?;
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     // The waiting row is the tail's last, under the work line.
-    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Waiting"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Thinking"));
     try std.testing.expectEqualStrings("", three[row + 1]);
     try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "─"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
@@ -6046,6 +6074,26 @@ test "App Session question mark encodings append ordinary text to empty and none
             try std.testing.expect(self.app_screen.overlay == null);
             try std.testing.expectEqualStrings(if (has_draft) "a??" else "??", self.input.composition().bytes);
         }
+    }
+}
+
+test "App Session copy notices are compact state phrases" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    for ([_]struct { result: reads.Copied, words: []const u8 }{
+        .{ .result = .no_answer, .words = "No answer to copy" },
+        .{ .result = .no_code, .words = "No code block" },
+        .{ .result = .too_large, .words = TerminalText.clipboard_too_large },
+        .{ .result = .saved, .words = "Saved to ./rui-k7m2qx-answer.md" },
+        .{ .result = .{ .clipboard = .{ .start = 0, .length = 0 } }, .words = "Sent to clipboard" },
+    }) |case| {
+        self.dirty = false;
+        self.job.result.copied = case.result;
+        try self.showCopy();
+        try std.testing.expectEqualStrings(case.words, self.notice.?);
+        try std.testing.expect(self.dirty);
     }
 }
 

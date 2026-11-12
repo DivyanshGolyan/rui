@@ -16,6 +16,7 @@ const vxfw = vaxis.vxfw;
 const TerminalApp = @import("TerminalApp.zig");
 const Root = @import("Root.zig");
 const AppSettings = @import("app_settings.zig");
+const SignIn = @import("SignIn.zig");
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
@@ -60,6 +61,7 @@ const model_capability = @import("model_capability.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const preferences = @import("preferences.zig");
 const marks = @import("marks.zig");
+const handoff = @import("relaunch_handoff.zig");
 
 comptime {
     // The draft holds what a conversation's does.
@@ -80,6 +82,7 @@ pub const Options = struct {
     model: ?[]const u8 = null,
     /// This terminal's own successful login, Unix seconds.
     login_at: ?u64 = null,
+    sign_in: bool = false,
     /// The launch's own `--store`, `--provider` and `--model`, as given.
     /// When it named all three, a start reads no saved defaults, the saved
     /// effort included. Otherwise a `/setup` that ran re-resolves the
@@ -87,6 +90,29 @@ pub const Options = struct {
     selectors: new_session_selection.Intent = .{},
     /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
+    /// CLI-authenticated one-shot handoff, borrowed through run and copied
+    /// before any terminal startup. No environment or file reads live here.
+    restoration: ?*const handoff.Payload = null,
+};
+
+/// A settled departure the CLI can replace. All slices are owned by the caller;
+/// no terminal, worker or editor remains borrowed when `run` returns it.
+pub const Relaunch = struct {
+    executable: []const u8,
+    handoff: []const u8,
+    receipt: []const u8,
+    open: ?view.Reference,
+
+    pub fn deinit(self: Relaunch, gpa: std.mem.Allocator) void {
+        gpa.free(self.executable);
+        gpa.free(self.handoff);
+        gpa.free(self.receipt);
+    }
+
+    pub fn writeFallback(self: Relaunch, store: []const u8) void {
+        _ = stderr.writeReceipt(self.receipt);
+        TerminalApp.detached(store, if (self.open) |*id| id else null, null);
+    }
 };
 
 /// What the CLI lends the overview and its conversations: scratch files and
@@ -99,72 +125,13 @@ pub const Hooks = struct {
     /// Runs between a start's capture and its send, as the CLI's other
     /// captures do.
     captured: *const fn (std.Io) anyerror!void,
+    activate: ?SignIn.Activate = null,
+    ready: ?SignIn.Ready = null,
     /// The launch owner, without terminal output while App holds the screen.
     start_host: *const fn (std.process.Init, []const u8) HostLaunch,
 };
 
-/// The screen's semantic projection of the shared launch result. It owns no
-/// terminal receipt or child bytes; kind, words and next action stay together.
-pub const HostLaunch = union(enum) {
-    ready: ?Warning,
-    failed: Failure,
-
-    pub const Next = enum {
-        start,
-        retry,
-
-        pub fn label(self: HostLaunch.Next) []const u8 {
-            return switch (self) {
-                .start => "r start",
-                .retry => "r retry",
-            };
-        }
-    };
-    pub const Failure = struct {
-        kind: Kind,
-        /// Terminal exit classification is retained, never shown as UI text.
-        err: anyerror,
-
-        pub const Kind = enum { setup, worker, os_launch, child_refused, child_closed, startup_full, readiness_timeout, incompatible, store_access, store_identity, mysql_unavailable, interrupted };
-
-        pub fn words(self: Failure) []const u8 {
-            return switch (self.kind) {
-                // The person can only retry these three, so they read alike.
-                .setup, .worker, .os_launch => "could not start",
-                .child_refused => "refused to start",
-                .child_closed => "quit on start",
-                .startup_full => "start unconfirmed",
-                .readiness_timeout => "start timed out",
-                .incompatible => "different Rui version",
-                .store_access => "can't read Store",
-                .store_identity => "not the same Store",
-                .mysql_unavailable => "can't start from here",
-                .interrupted => "start interrupted",
-            };
-        }
-
-        pub fn next(self: Failure) ?HostLaunch.Next {
-            return switch (self.kind) {
-                .incompatible, .store_identity, .mysql_unavailable => null,
-                else => .retry,
-            };
-        }
-    };
-    pub const Warning = enum {
-        invalid_openai_base_url,
-
-        pub fn words(_: Warning) []const u8 {
-            return "OpenAI URL invalid";
-        }
-    };
-
-    pub fn words(self: HostLaunch) []const u8 {
-        return switch (self) {
-            .ready => |warning| if (warning) |value| value.words() else "",
-            .failed => |failure| failure.words(),
-        };
-    }
-};
+pub const HostLaunch = @import("host_launch.zig").Summary;
 
 /// One discovery observation, not a UI phase or a launch outcome. A pause
 /// belongs only to a reachable Host; a free Store lease proves it stopped.
@@ -487,6 +454,7 @@ const Signals = struct {
 
 init: std.process.Init,
 options: Options,
+signed_in_store: protocol.Bounded(protocol.max_store_bytes) = .{},
 hooks: Hooks,
 ops: Operations,
 state: view.State,
@@ -497,6 +465,8 @@ app: ?*TerminalApp = null,
 /// Program status records beside App's frames.
 attention: *TerminalApp.Attention = undefined,
 root: Root = undefined,
+/// The sign-in page Root shows as an opaque widget; its worker is this owner's.
+sign_in: SignIn = .{},
 app_screen: AppScreen.Overview = undefined,
 app_input: InputArea = undefined,
 /// What can fill the list's place, each its own widget: the screen shows
@@ -537,6 +507,11 @@ host_launch: ?HostLaunch = null,
 /// This run's one automatic start after a crash (`host_restart`).
 restart_allowance: host_restart.Allowance = .unspent,
 upgrade_report: ?std.Io.Writer.Allocating = null,
+/// The finished publication is retained after its worker frees the Check.
+relaunch_build: ?[]const u8 = null,
+upgrade_guidance: bool = false,
+relaunch_line: [upgrade_status.max_line_bytes]u8 = undefined,
+relaunch_line_len: usize = 0,
 /// What the overview last said under the open conversation.
 conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
 /// The terminal title as last set: the open Session's name, if any, and how
@@ -568,11 +543,12 @@ screen_fresh: bool = true,
 screen_ready: bool = false,
 
 /// Opens the overview and returns once the person leaves it, or a signal
-/// stops it. Every way out restores the terminal and then prints the
-/// Detached notice once.
-pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
+/// stops it. Every way out restores the terminal, then returns a relaunch
+/// value or prints the ordinary Detached notice once.
+pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     const self = try create(init, options, hooks, client_operations, &Signals.cancellation);
     defer self.destroy();
+    try self.restoreRelaunch();
     const screen = try init.gpa.create(SessionScreen);
     defer init.gpa.destroy(screen);
     const prepared: anyerror!void = prepare: {
@@ -585,7 +561,7 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     self.session_screen = screen;
     Signals.cancellation.stopped.store(false, .release);
     var app: TerminalApp = undefined;
-    app.init(init.io, init.environ_map) catch |err| return self.failed(err, options.open);
+    app.init(init.io, init.environ_map) catch |err| return self.failed(err, self.options.open);
     self.app = &app;
     self.attention = &app.attention;
     const ended = app.run(self.root.widget());
@@ -597,6 +573,7 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
 /// Stops the open Session's workers and the overview's before App releases
 /// the terminal. A Session that failed to open has no frontend to stop.
 fn stopApp(self: *Self) void {
+    self.sign_in.cancel();
     if (self.app_session) |left| if (left.frontend) |frontend| frontend.stop();
     self.worker.cancel();
 }
@@ -670,6 +647,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .tick => {
             // A subsequent event is after App has replaced both the focus
             // path and mouse hit list, including their mouse_leave callbacks.
+            if (self.signInIsFirstRun()) return;
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -866,7 +844,34 @@ fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
         try self.appNext(ctx, try self.event(.{ .upgrade = stands }));
         ctx.redraw = true;
     }
-    if (done) try self.keepUpgrade();
+    if (done) {
+        const installed = job.relaunchBuild() != null;
+        try self.keepUpgrade();
+        if (installed) self.leaveForUpgrade(ctx, stands.ended.outcome);
+    }
+}
+
+fn leaveForUpgrade(self: *Self, ctx: *vxfw.EventContext, outcome: session_upgrade.Outcome) void {
+    if (self.relaunch_build == null) return;
+    if (session_upgrade.relaunch(outcome, self.upgrade_guidance or self.pendingDepartureGuidance())) {
+        ctx.quit = true;
+    } else {
+        // A guided run retains today's screen and exit behavior. A later
+        // ordinary quit is not a delayed request to relaunch.
+        self.init.gpa.free(self.relaunch_build.?);
+        self.relaunch_build = null;
+    }
+}
+
+/// Do not leave the screen automatically when guidance is already known.
+/// The settled departure is still authoritative for failures found on leave.
+noinline fn pendingDepartureGuidance(self: *const Self) bool {
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var text = std.Io.Writer.fixed(&bytes);
+    self.departureText(&text);
+    if (text.buffered().len != 0) return true;
+    if (self.app_session) |left| return if (left.frontend) |frontend| frontend.hasDepartureGuidance() else true;
+    return false;
 }
 
 /// The open conversation, if any, has no Client work of its own in flight.
@@ -881,6 +886,15 @@ fn conversationSettled(self: *const Self) bool {
 fn keepUpgrade(self: *Self) !void {
     const job = &self.upgrade_job;
     if (!job.started) return;
+    self.upgrade_guidance = self.upgrade_guidance or job.hasGuidance();
+    if (self.relaunch_build) |build| self.init.gpa.free(build);
+    self.relaunch_build = null;
+    if (job.relaunchBuild()) |build| {
+        self.relaunch_build = try self.init.gpa.dupe(u8, build);
+        const stands = job.status(self.state.summary.counts.working);
+        const line = upgrade_status.relaunchLine(stands, &self.relaunch_line, if (self.caps.unicode) .unicode else .ascii);
+        self.relaunch_line_len = line.len;
+    }
     const detailed = job.failure != null or job.cleanup.any() or job.outcome == .incompatible;
     if (detailed or job.result != null) {
         if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
@@ -898,45 +912,116 @@ fn disposeSession(self: *Self, left: Left) void {
     if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
 }
 
-fn finishApp(self: *Self, ended: anyerror!void) !void {
+fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
+    const sign_in_ended = self.sign_in.stop();
     defer {
         for (self.retired.items) |retired| self.disposeSession(retired.left);
         self.retired.deinit(self.init.gpa);
     }
-    // A run still going is cancelled and joined; what it published and
-    // the full check print with the departure.
     self.upgrade_job.settle();
     const kept = self.keepUpgrade();
-    // The terminal is restored: the report names what the run published or
-    // left behind, so it is written whole, however small the terminal's buffer.
-    // A stderr that takes nothing leaves no other place to say it.
-    if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
-    self.writeDeparture();
-    if (self.app_session) |held| {
-        // The Session the person left, or the one that failed to open,
-        // names itself on departure with the Session's own guidance.
-        var left = held;
-        self.app_session = null;
+    var left = self.app_session;
+    self.app_session = null;
+    defer if (left) |held| self.disposeSession(held);
+    var departure: ?SessionFrontend.Departure = null;
+    if (left) |*held| {
         ended catch |err| {
-            left.ended = err;
+            held.ended = err;
         };
-        if (answered) |_| {} else |err| left.ended = err;
+        if (answered) |_| {} else |err| {
+            held.ended = err;
+        }
         saved catch |err| {
-            left.ended = err;
+            held.ended = err;
         };
         kept catch |err| {
-            left.ended = err;
+            held.ended = err;
         };
-        return self.leave(left, {});
+        sign_in_ended catch |err| {
+            held.ended = err;
+        };
+        if (held.frontend) |frontend| departure = frontend.settleDeparture(held.ended, {});
     }
+    return self.finishDeparture(ended, answered, saved, kept, sign_in_ended, left, departure);
+}
+
+/// One rendered departure supplies both the pure decision and fallback output.
+/// Keep its bounded scratch off the ordinary finish frame.
+noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerror!?Next, saved: anyerror!void, kept: anyerror!void, sign_in_ended: anyerror!void, left: ?Left, departure: ?SessionFrontend.Departure) !?Relaunch {
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var text = std.Io.Writer.fixed(&bytes);
+    self.departureText(&text);
+    const has_failure = std.meta.isError(ended) or std.meta.isError(answered) or std.meta.isError(saved) or std.meta.isError(kept) or std.meta.isError(sign_in_ended);
+    const guidance = has_failure or self.upgrade_guidance or text.buffered().len != 0 or
+        (if (departure) |value| value.has_guidance else left != null);
+    // The core decides only after all leave work has settled. Encoding failure
+    // preserves today's departure instead of losing an unsent draft.
+    const outcome: session_upgrade.Outcome = if (self.state.upgrade.run) |stands| if (stands == .ended) stands.ended.outcome else .unchanged else .unchanged;
+    if (session_upgrade.relaunch(outcome, guidance) and self.relaunch_build != null) {
+        if (self.makeRelaunch(left)) |request| return request else |_| {}
+    }
+    if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
+    _ = stderr.write(text.buffered());
+    if (left) |held| {
+        // `finish` has already joined this frontend. Leave only emits the
+        // original guidance; the defer above disposes its scratch and editor.
+        try self.leaveFinished(held, departure);
+        return null;
+    }
+    try sign_in_ended;
     TerminalApp.detached(self.options.store, null, null);
     try ended;
     _ = try answered;
     try saved;
     try kept;
+    return null;
+}
+
+fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
+    const gpa = self.init.gpa;
+    // Put the open editor back under the sparse draft owner before encoding.
+    // The copied snapshot remains owned here until encoding succeeds.
+    if (left) |held| if (held.frontend) |frontend| {
+        try self.session_drafts.put(gpa, &held.session, frontend.input.snapshot());
+    };
+    var entries: std.ArrayList(handoff.Entry) = .empty;
+    defer entries.deinit(gpa);
+    var drafts = self.session_drafts.iterator();
+    while (drafts.next()) |entry| try entries.append(gpa, .{ .id = entry.id, .snapshot = entry.snapshot });
+    const bytes = try handoff.encode(gpa, .{
+        .v = 1,
+        .store = self.options.store,
+        .open = if (left) |*held| &held.session else null,
+        .overview = .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .rejected = self.composer.rejected },
+        .drafts = entries.items,
+        .line = self.relaunch_line[0..self.relaunch_line_len],
+    });
+    errdefer gpa.free(bytes);
+    const executable = try std.fmt.allocPrint(gpa, "{s}/bin/rui", .{self.relaunch_build.?});
+    errdefer gpa.free(executable);
+    const receipt = try gpa.dupe(u8, if (self.upgrade_report) |*report| report.written() else "");
+    return .{ .executable = executable, .handoff = bytes, .receipt = receipt, .open = if (left) |held| held.session else null };
+}
+
+/// Apply the CLI-owned startup value once; every restored byte becomes owned.
+fn restoreRelaunch(self: *Self) !void {
+    const value = self.options.restoration orelse return;
+    self.options.restoration = null;
+    // Copy every inactive draft before restoring the composer or opening a chat.
+    // An allocation failure refuses startup rather than showing a partial handoff.
+    for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
+    @memcpy(self.draft[0..value.overview.bytes.len], value.overview.bytes);
+    self.composer.length = value.overview.bytes.len;
+    self.composer.cursor = value.overview.cursor;
+    self.composer.rejected = value.overview.rejected;
+    if (value.open) |id| self.options.open = id[0..session_id.bytes].*;
+    var notice: view.Notice = .{ .colour = .normal };
+    @memcpy(notice.bytes[0..value.line.len], value.line);
+    notice.len = value.line.len;
+    self.state.notice = notice;
 }
 
 /// The Sessions list's rows for one frame, each with what a click on it
@@ -1001,9 +1086,13 @@ fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) 
     return text.widget();
 }
 
-/// Whether a spinning mark on screen has a step to turn.
 fn wantsFrame(self: *const Self) bool {
-    return self.root.listVisible() and self.animationFrame() != self.app_frame and self.listSpins();
+    return self.wantsFrameAt(self.animationFrame());
+}
+
+/// Whether a spinning mark on screen has a step to turn at spinner `frame`.
+fn wantsFrameAt(self: *const Self, frame: u64) bool {
+    return self.root.listVisible() and frame != self.app_frame and self.listSpins();
 }
 
 /// The drawn viewport is history; which current rows spin is derived. No
@@ -1055,6 +1144,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
     const size = ctx.max.size();
     self.caps.width = self.attention.vx.caps.unicode;
     const normal = @import("widget_style.zig").of(self.caps, .{});
+    self.sign_in.style = normal;
+    self.sign_in.quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     const quiet = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet });
     self.app_screen.style = normal;
     var list: ?*GroupedList = null;
@@ -1191,7 +1282,9 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version } };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .sign_in_open = options.sign_in };
+    self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
+    self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
     // The status's rows sit above the one Footer row.
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" }, .facts_at = .bottom };
@@ -1204,6 +1297,68 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
     return self;
+}
+
+fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (self.sign_in.task.thread != null) return;
+    if (!view.admitsDefaultsEdit(&self.state) or self.state.save.running != null or self.defaults_save == .pending) return error.DefaultsUnavailable;
+    self.sign_in.reset();
+    self.sign_in.selectors = self.options.selectors;
+    self.sign_in.selectors.store = self.options.store;
+    self.root.sign_in_open = true;
+    try ctx.requestFocus(self.sign_in.widget());
+    ctx.redraw = true;
+}
+
+fn listVisible(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.root.listVisible();
+}
+
+/// The first-run screen is the only thing the app can do, so it stays until
+/// sign-in gives a default; a screen opened from Settings always returns there.
+fn signInIsFirstRun(self: *const Self) bool {
+    return self.root.sign_in_open and !self.root.settings_open and self.state.default == null;
+}
+
+fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.signInIsFirstRun()) return;
+    self.root.sign_in_open = false;
+    if (self.root.settings_open) {
+        try ctx.requestFocus(self.root.settings_page.widget());
+    } else try self.root.showMain(ctx);
+    ctx.redraw = true;
+}
+
+fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const effort = try self.savedEffort();
+    if (!std.mem.eql(u8, self.options.store, activation.store.slice())) {
+        // Only first-run selection can change the Store. Settings pins the
+        // current Store, whose ongoing readers retain their borrowed path.
+        std.debug.assert(self.worker.thread == null);
+        self.signed_in_store = activation.store;
+        self.options.store = self.signed_in_store.slice();
+    }
+    var saved = view.Default.of(activation.binding.provider.slice(), activation.binding.model.slice());
+    if (saved) |*value| value.effort = effort;
+    try self.appNext(ctx, try self.event(.{ .defaults_saved = saved }));
+    self.state.login_at = self.realMs() / 1000;
+    self.state.next_list_ms = 0;
+    const warning = if (activation.launch) |*launch| launch.warning else null;
+    if (activation.default_failed or warning != null) {
+        var notice: view.Notice = .{ .colour = .failure };
+        var writer = std.Io.Writer.fixed(&notice.bytes);
+        if (warning != null) {
+            try @import("host_launch.zig").writeSignIn(&writer, .{ .ready = warning }, activation.default_failed, false);
+        } else try writer.writeAll("Sign-in saved; couldn't save default");
+        notice.len = writer.buffered().len;
+        self.state.notice = notice;
+    }
+    self.root.sign_in_open = false;
+    try self.root.showMain(ctx);
+    if (self.root.session == null) try ctx.requestFocus(self.app_input.composer.widget());
 }
 
 /// Accept one typed preference edit. Only this owner writes its worker queue;
@@ -1247,17 +1402,25 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn run(raw: *anyopaque) ?upgrade_status.Run {
             return owner(raw).state.upgrade.run;
         }
+        fn models(raw: *anyopaque) @import("model_choice.zig").Snapshot {
+            const state = &owner(raw).state;
+            return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision };
+        }
+        fn signIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+            try owner(raw).openSignIn(ctx);
+        }
         fn caps(raw: *anyopaque) view.Caps {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = Callbacks.models, .sign_in = Callbacks.signIn };
 }
 
 fn destroy(self: *Self) void {
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
     self.upgrade_job.deinit();
+    if (self.relaunch_build) |build| self.init.gpa.free(build);
     if (self.upgrade_report) |*report| report.deinit();
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
@@ -1843,36 +2006,23 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 
 /// Writes the core's departure to stderr in one write. Never inlined: its
 /// buffer stays off `finish`'s frame.
-noinline fn writeDeparture(self: *const Self) void {
-    // A ledger entry prints well under 512 bytes.
-    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
-    var guidance = std.Io.Writer.fixed(&bytes);
-    // Read now and whatever this launch named, since the line speaks for
-    // later launches. An unreadable file only leaves the effort out: the
-    // next launch that reads it reports the error.
+fn departureText(self: *const Self, out: *std.Io.Writer) void {
     const saved_effort = if (self.options.home.len == 0) null else if (preferences.load(self.options.home)) |values| values.reasoning_effort else |_| null;
-    view.writeDeparture(&self.state, saved_effort, &guidance) catch unreachable;
-    _ = stderr.write(guidance.buffered());
+    view.writeDeparture(&self.state, saved_effort, out) catch unreachable;
 }
 
 /// Lets the conversation the person left join its borrowers and write its
 /// guidance, then names the Session to resume.
-fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
-    const io = self.init.io;
-    defer if (left.files) |files| {
-        inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(io);
-        for (files.actions) |file| file.close(io);
-    };
-    defer if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
+fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !void {
     const session = &left.session;
     const store = self.options.store;
     const outcome: anyerror!void = run: {
         const frontend = left.frontend orelse {
-            restored catch {};
             _ = left.ended catch |err| break :run err;
             break :run {};
         };
-        const departure = frontend.leave(left.ended, restored);
+        const departure = settled.?;
+        frontend.writeDeparture(departure);
         const end = departure.end catch |err| {
             if (departure.failure_notice) TerminalApp.detached(store, session, departure.action);
             break :run err;
@@ -3543,14 +3693,14 @@ test "the overview asks for frames only while a spinning mark is on screen" {
     try std.testing.expect(try rig.settle() == null);
     const Frames = struct {
         /// Whether, a spinner step after drawing at `height` rows, the
-        /// overview asks App for another frame. The step is taken off the
-        /// frame drawn rather than waited for.
+        /// overview asks App for another frame. The next step is passed in
+        /// rather than waited for, so the clock never decides the result.
         fn after(from: *Rig, height: u16) !bool {
             var shown = try from.shown(80, height);
             defer shown.deinit();
-            if (from.overview.wantsFrame()) return error.TestUnexpectedResult;
-            from.overview.app_frame -%= 1;
-            return from.overview.wantsFrame();
+            const drawn = from.overview.app_frame;
+            if (from.overview.wantsFrameAt(drawn)) return error.TestUnexpectedResult;
+            return from.overview.wantsFrameAt(drawn +% 1);
         }
     };
     try std.testing.expect(try Frames.after(rig, 24));
@@ -3753,7 +3903,7 @@ fn finishedWith(rig: *Rig, ended: anyerror!void, failure: ?anyerror, buffer: []u
     const finished = rig.overview.finishApp(ended);
     _ = std.c.dup2(saved, 2);
     _ = std.c.close(saved);
-    if (failure) |expected| try std.testing.expectError(expected, finished) else try finished;
+    if (failure) |expected| try std.testing.expectError(expected, finished) else if (try finished) |request| request.deinit(rig.overview.init.gpa);
     const count = std.c.read(pipe[0], buffer.ptr, buffer.len);
     return if (count > 0) buffer[0..@intCast(count)] else "";
 }
@@ -4672,6 +4822,8 @@ test "Host recovery renders the launch result cause without confusing failure an
         .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed } }, .words = "start timed out", .retry = true },
         .{ .launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } }, .words = "not the same Store" },
         .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "different Rui version" },
+        .{ .launch = .{ .failed = .{ .kind = .provider_unserved, .err = error.HostModelUnavailable } }, .words = "does not serve this provider" },
+        .{ .launch = .{ .failed = .{ .kind = .store_format, .err = error.HostStartupFailed } }, .words = "needs a compatible Rui" },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });
@@ -6066,6 +6218,24 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
 }
 
+test "App overview applies command draft endings to its composer" {
+    for ([_]struct { line: []const u8, escape: bool = false }{
+        .{ .line = "/configure --permission-mode ", .escape = true },
+        .{ .line = "/nope" },
+        .{ .line = "/sessions" },
+        .{ .line = "/sessions nope" },
+    }) |case| {
+        const rig = try openListed();
+        defer rig.close();
+        _ = try rig.press(case.line);
+        var listed = try rig.shown(80, 24);
+        defer listed.deinit();
+        if (case.escape) try std.testing.expectEqual(.drawn, rig.overview.state.commands.?.seen);
+        _ = try rig.press(if (case.escape) "\x1b" else "\r");
+        try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
+    }
+}
+
 test "typing / lists the overview's commands over the Sessions, and a short screen counts the rest" {
     const rig = try openListed();
     defer rig.close();
@@ -6096,7 +6266,7 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         "+2 more · type to narrow",
         "────────────────────────────────────────────────────────────────────────────────",
     });
-    // Typing narrows it; Esc closes it and keeps the draft.
+    // Typing narrows it; Esc closes it and consumes the command draft.
     _ = try rig.press("m");
     var narrowed = try rig.shown(80, 24);
     defer narrowed.deinit();
@@ -6104,8 +6274,8 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("\x1b");
     var closed = try rig.shown(80, 24);
     defer closed.deinit();
-    try closed.expectLines(20, &.{ "────────────────────────────────────────────────────────────────────────────────", " › /m" });
-    try std.testing.expect(std.mem.endsWith(u8, try closed.line(23), "enter run"));
+    try closed.expectLines(20, &.{ "────────────────────────────────────────────────────────────────────────────────", " › Type a task" });
+    try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
 }
 
 test "the cursor sits at the composer's caret and hides while a start is pending" {
@@ -7157,6 +7327,558 @@ test "App settings typed queued saves settle on departure and retain failures" {
         }
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
     }
+}
+
+test "relaunch departure matrix preserves every screen and all unsent drafts" {
+    const gpa = std.testing.allocator;
+    for (std.enums.values(session_upgrade.Outcome)) |outcome| {
+        for ([_]bool{ false, true }) |conversation| {
+            for ([_]bool{ false, true }) |guidance| {
+                for ([_]bool{ false, true }) |drafted| {
+                    var cancellation: client.Cancellation = .{};
+                    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests" }, fake_operations, &cancellation);
+                    defer rig.close();
+                    const overview = rig.overview;
+                    // Exercise the real joined receipt -> keepUpgrade -> departure
+                    // route, not a synthetic no-guidance incompatible outcome.
+                    var arena: std.heap.ArenaAllocator = .init(gpa);
+                    defer arena.deinit();
+                    const a = arena.allocator();
+                    const receipt: @import("Installation.zig").Receipt = .{
+                        .operation_build = try a.dupe(u8, "/published/build"),
+                        .selected_after = try a.dupe(u8, "/published/build"),
+                    };
+                    overview.upgrade_job = .{
+                        .allocator = a,
+                        .started = true,
+                        .finished = true,
+                        .operation = .install,
+                        .outcome = outcome,
+                        .failure = if (guidance) error.ConnectionRefused else null,
+                        .checked = .{
+                            .candidate = .{
+                                .version = .{ .schema = 60, .patch = 0 },
+                                .tag = try a.dupe(u8, "v0.60.0"),
+                                .archive_name = try a.dupe(u8, "fixture"),
+                                .archive_url = try a.dupe(u8, "fixture"),
+                                .checksum_url = try a.dupe(u8, "fixture"),
+                                .sha256 = @splat(0),
+                            },
+                            .selected = .absent,
+                            .host = .absent,
+                            .home = try a.dupe(u8, "/home"),
+                            .store = try a.dupe(u8, "/store"),
+                            .running_executable = try a.dupeSentinel(u8, "/old/rui", 0),
+                            .path = .{ .state = .selected },
+                        },
+                        .result = .{
+                            .installation = if (outcome == .unchanged) .{ .unchanged = receipt } else .{ .installed = receipt },
+                            .activation = switch (outcome) {
+                                .unchanged => .not_needed,
+                                .compatible => .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
+                                .incompatible => .{ .client_incompatible = 42 },
+                            },
+                            .store = try a.dupe(u8, "/store"),
+                        },
+                    };
+                    overview.state.upgrade.run = overview.upgrade_job.status(0);
+                    try overview.keepUpgrade();
+                    try std.testing.expectEqual(guidance, overview.upgrade_guidance);
+                    var ending_buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+                    const ending = upgrade_status.relaunchLine(overview.state.upgrade.run.?, &ending_buffer, .unicode);
+                    if (outcome == .incompatible) {
+                        const report = overview.upgrade_report.?.written();
+                        try std.testing.expect(std.mem.indexOf(u8, report, "This client cannot safely resume Host requests") != null);
+                        try std.testing.expect(std.mem.indexOf(u8, report, "Next: inspect") == null);
+                        try std.testing.expect(std.mem.indexOf(u8, ending, "restart rui") == null);
+                    }
+                    if (drafted) {
+                        @memcpy(overview.draft[0.."overview α".len], "overview α");
+                        overview.composer.length = "overview α".len;
+                        overview.composer.cursor = 3;
+                        try overview.session_drafts.put(gpa, "aaaaaa", .{ .bytes = "inactive α", .cursor = 2, .anchor = .{ .position = 7, .end = 9 } });
+                        try overview.session_drafts.put(gpa, "bbbbbb", .{ .bytes = "another", .cursor = 0, .rejected = .invalid });
+                    }
+                    if (conversation) {
+                        overview.opened = "cccccc".*;
+                        const frontend = try gpa.create(SessionFrontend);
+                        frontend.begin(rig.init, "/store", &overview.opened, "/requests", undefined, undefined, undefined, undefined, rig.screen, &cancellation, undefined);
+                        if (drafted) frontend.input.restore(.{ .bytes = "open α", .cursor = 2, .anchor = .{ .position = 11, .end = 13 } });
+                        overview.app_session = .{ .session = overview.opened, .frontend = frontend, .files = null, .ended = .detached };
+                        overview.state.conversing = overview.opened;
+                    }
+                    var ctx = rig.context();
+                    defer ctx.cmds.deinit(gpa);
+                    overview.leaveForUpgrade(&ctx, outcome);
+                    try std.testing.expectEqual(outcome != .unchanged and !guidance, ctx.quit);
+                    // Finishing a guided run later must not be a delayed exec.
+                    const request = try overview.finishApp({});
+                    try std.testing.expectEqual(outcome != .unchanged and !guidance, request != null);
+                    if (request) |value| {
+                        defer value.deinit(gpa);
+                        try std.testing.expectEqualStrings("/published/build/bin/rui", value.executable);
+                        if (outcome == .incompatible) try std.testing.expect(std.mem.indexOf(u8, value.receipt, "This client cannot safely resume Host requests") != null);
+                        try std.testing.expectEqual(conversation, value.open != null);
+                        var parsed = try handoff.decode(gpa, value.handoff, "/store");
+                        defer parsed.deinit();
+                        try std.testing.expectEqual(conversation, parsed.value.open != null);
+                        if (conversation) try std.testing.expectEqualStrings("cccccc", parsed.value.open.?);
+                        try std.testing.expectEqualStrings(if (drafted) "overview α" else "", parsed.value.overview.bytes);
+                        try std.testing.expectEqual(@as(usize, if (drafted) 3 else 0), parsed.value.overview.cursor);
+                        try std.testing.expectEqual(@as(usize, if (drafted) (if (conversation) 3 else 2) else 0), parsed.value.drafts.len);
+                        for (parsed.value.drafts) |entry| {
+                            if (std.mem.eql(u8, entry.id, "aaaaaa")) {
+                                try std.testing.expectEqualStrings("inactive α", entry.snapshot.bytes);
+                                try std.testing.expectEqual(@as(usize, 2), entry.snapshot.cursor);
+                                try std.testing.expectEqual(SessionInput.Recalled{ .position = 7, .end = 9 }, entry.snapshot.anchor.?);
+                            } else if (std.mem.eql(u8, entry.id, "bbbbbb")) {
+                                try std.testing.expectEqualStrings("another", entry.snapshot.bytes);
+                                try std.testing.expectEqual(.invalid, entry.snapshot.rejected.?);
+                            } else {
+                                try std.testing.expectEqualStrings("cccccc", entry.id);
+                                try std.testing.expectEqualStrings("open α", entry.snapshot.bytes);
+                                try std.testing.expectEqual(SessionInput.Recalled{ .position = 11, .end = 13 }, entry.snapshot.anchor.?);
+                            }
+                        }
+                        try std.testing.expectEqualStrings(ending, parsed.value.line);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "relaunch startup restores copied drafts open conversation and ending notice exactly once" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview_draft: SessionInput.Snapshot = .{ .bytes = "overview α", .cursor = 3, .rejected = .overflow };
+    const chat: SessionInput.Snapshot = .{ .bytes = "chat β", .cursor = 2, .anchor = .{ .position = 7, .end = 9 }, .rejected = .invalid };
+    const line = "Upgraded to 0.60.0 · Host restarted";
+    const bytes = try handoff.encode(gpa, .{
+        .v = 1,
+        .store = "/store",
+        .open = "bbbbbb",
+        .overview = overview_draft,
+        .drafts = &.{ .{ .id = "aaaaaa", .snapshot = chat }, .{ .id = "bbbbbb", .snapshot = .{ .bytes = "open draft", .cursor = 1 } } },
+        .line = line,
+    });
+    defer gpa.free(bytes);
+    const parsed = try handoff.decode(gpa, bytes, "/store");
+    rig.overview.options.restoration = &parsed.value;
+    try rig.overview.restoreRelaunch();
+    parsed.deinit();
+    try std.testing.expectEqualStrings(overview_draft.bytes, rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(overview_draft.cursor, rig.overview.composer.cursor);
+    try std.testing.expectEqual(overview_draft.rejected, rig.overview.composer.rejected);
+    try std.testing.expectEqualStrings("bbbbbb", &rig.overview.options.open.?);
+    var status: view.StatusBuffer = undefined;
+    try std.testing.expectEqualStrings(line, view.statusLine(&rig.overview.state, rig.overview.caps, &status).?.text);
+    for ([_][]const u8{ "aaaaaa", "bbbbbb" }) |id| {
+        const draft = rig.overview.session_drafts.take(gpa, id).?;
+        defer draft.deinit(gpa);
+        if (std.mem.eql(u8, id, "aaaaaa")) {
+            try std.testing.expectEqualStrings(chat.bytes, draft.snapshot.bytes);
+            try std.testing.expectEqual(chat.cursor, draft.snapshot.cursor);
+            try std.testing.expectEqual(chat.anchor, draft.snapshot.anchor);
+            try std.testing.expectEqual(chat.rejected, draft.snapshot.rejected);
+        } else try std.testing.expectEqualStrings("open draft", draft.snapshot.bytes);
+    }
+    try rig.overview.restoreRelaunch();
+    try std.testing.expect(rig.overview.session_drafts.first == null);
+    try std.testing.expect(rig.overview.options.restoration == null);
+}
+
+test "App settings Model borrow ends on every Overview menu replacement or release" {
+    for ([_]bool{ false, true }) |release| {
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        try std.testing.expect(try rig.press("/model") == null);
+        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        const page = &overview.root.settings_page;
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(page.model_choice.active);
+        try std.testing.expectEqual(&overview.state.menu, page.model_choice.menu);
+        // A failed refresh retains the same immutable list and its choice.
+        try std.testing.expect(try overview.event(.{ .models = .unanswered }) == null);
+        try std.testing.expect(page.model_choice.active);
+        if (release) {
+            try std.testing.expect(try overview.event(.{ .composed = .{ .input = .{ .composer = .{ .action = .clear } }, .draft = overview.composerDraft() } }) == null);
+        } else {
+            try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
+        }
+        // The next page event validates before using an old index.
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(!page.hasChoice());
+        try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
+        try std.testing.expect(overview.root.settings_open);
+    }
+}
+
+test "App settings Model keeps every named app binding live while filter text stays local" {
+    for (std.enums.values(keymap.Key)) |key| for (key_encodings.get(key)) |bytes| {
+        // A lone ESC is deliberately incomplete in the byte fixture.
+        if (std.mem.eql(u8, bytes, "\x1b")) continue;
+        errdefer std.debug.print("settings Model key={s} bytes={x}\n", .{ @tagName(key), bytes });
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        const page = &overview.root.settings_page;
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(page.hasChoice());
+        const selected = overview.state.selected;
+        try app_events.send(&ctx, bytes, overview.root.widget(), page.widget());
+        const action = view.keys.get(key);
+        try std.testing.expectEqual(action == .exit, ctx.quit);
+        try std.testing.expectEqual(selected, overview.state.selected);
+        try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
+        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expectEqual(key != .escape and key != .ctrl_g, page.hasChoice());
+    };
+}
+
+test "App settings Sign-in Enter and click use the Overview owner and return to settings" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| for ([_]bool{ false, true }) |busy| {
+        errdefer std.debug.print("settings sign-in width={d} click={} busy={}\n", .{ width, click, busy });
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        const page = &overview.root.settings_page;
+        try std.testing.expect(page.backend.?.models != null);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        if (busy) overview.defaults_save = .pending;
+        ctx.cmds.clearRetainingCapacity();
+        if (click) {
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 3, .row = 2 + @backingInt(AppSettings.Row.sign_in), .button = .left, .type = .press, .mods = .{} } });
+        } else {
+            page.select(.sign_in);
+            try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());
+        }
+        try std.testing.expectEqual(!busy, overview.root.sign_in_open);
+        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(!page.hasChoice());
+        if (busy) {
+            try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
+            for (ctx.cmds.items) |command| try std.testing.expect(command != .request_focus);
+            continue;
+        }
+        try std.testing.expect(overview.root.sign_in.?.eql(overview.sign_in.widget()));
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(overview.sign_in.widget()));
+        // Defaultless Settings is not first-run: its owner returns here on Esc.
+        try std.testing.expect(!overview.signInIsFirstRun());
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), overview.sign_in.widget());
+        try std.testing.expect(!overview.root.sign_in_open);
+        try std.testing.expect(overview.root.settings_open and !ctx.quit);
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(page.widget()));
+    };
+}
+
+test "Sign-in completion applies the core default and restores only a visible focus target" {
+    for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |warning| for ([_]bool{ false, true }) |default_failed| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .low } }, &.initFill(.configured));
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        const session: vxfw.Text = .{ .text = "Retained Session" };
+        if (session_open) overview.root.session = session.widget();
+        overview.root.settings_open = true;
+        overview.root.sign_in_open = true;
+        var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
+        try activation.binding.provider.set("openai");
+        try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
+        try activation.store.set("/store");
+        activation.default_failed = default_failed;
+        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved } } } } }, .warning = .invalid_openai_base_url };
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try signedIn(overview, &ctx, activation);
+        if (warning or default_failed) {
+            try std.testing.expectEqual(true, overview.state.notice != null);
+            const text = overview.state.notice.?.text();
+            try std.testing.expectEqual(warning, std.mem.indexOf(u8, text, "OpenAI URL invalid") != null);
+            try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, text, if (warning) "default not saved" else "couldn't save default") != null);
+            try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
+        }
+        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
+        try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
+        try std.testing.expect(overview.state.login_at != null);
+        try std.testing.expect(!overview.root.sign_in_open and !overview.root.settings_open);
+        const expected = if (session_open) session.widget() else overview.app_input.composer.widget();
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(expected));
+        if (session_open) {
+            for (ctx.cmds.items) |command| if (command == .request_focus) {
+                try std.testing.expect(command.request_focus.eql(session.widget()));
+            };
+        }
+    };
+}
+
+test "Sign-in admission waits for every pending default writer and Host upgrade" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    for (0..4) |busy| {
+        switch (busy) {
+            0 => overview.defaults_save = .pending,
+            1 => overview.state.save.running = overview.state.default,
+            2 => overview.state.save.wanted = overview.state.default,
+            3 => overview.state.upgrade = .{ .run = .checking },
+            else => unreachable,
+        }
+        try std.testing.expectError(error.DefaultsUnavailable, overview.openSignIn(&ctx));
+        try std.testing.expect(!overview.root.sign_in_open);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        overview.defaults_save = .idle;
+        overview.state.save = .{};
+        overview.state.upgrade = .{};
+    }
+    try overview.openSignIn(&ctx);
+    try std.testing.expect(overview.root.sign_in_open);
+}
+
+test "Sign-in keeps the pane through Session and Settings clicks with and without a Session" {
+    const Origin = enum { first_run, settings };
+    const Click = enum { session, settings };
+    const Nav = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        var opens: usize = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn open(_: *Self, _: *vxfw.EventContext) !void {
+            opens += 1;
+        }
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
+            var i = ctx.cmds.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
+            }
+            return null;
+        }
+    };
+    const Stage = @import("sign_in.zig").Stage;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Nav.dir = tmp.dir;
+    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |retained| for ([_]Stage{ .choice, .key_entry }) |stage| for (std.enums.values(Click)) |click| {
+        errdefer std.debug.print("sign-in click: from={s} retained={} stage={s} click={s}\n", .{ @tagName(from), retained, @tagName(stage), @tagName(click) });
+        Nav.files = 0;
+        Nav.opens = 0;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .sign_in = from == .first_run }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        Seen.now.listed = 2;
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        defer {
+            if (overview.app_session) |left| {
+                if (left.frontend) |frontend| frontend.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        if (retained) {
+            overview.hooks.scratch = Nav.scratch;
+            overview.ops.open = openSession;
+            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            overview.app_session.?.frontend.?.reading.opening = false;
+        }
+        overview.ops.open = Nav.open;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        const page = &overview.sign_in;
+        // The rig gives no launch hooks; nothing here begins an attempt.
+        page.activate = null;
+        page.ready = null;
+        if (from == .settings) {
+            try overview.root.openSettings(&ctx);
+            try overview.openSignIn(&ctx);
+        }
+        try std.testing.expect(overview.root.sign_in_open);
+        const typed = "sk-typed-before-click";
+        if (stage == .key_entry) try app_events.send(&ctx, "\x1b[C\r" ++ typed, overview.root.widget(), page.widget());
+        try std.testing.expectEqual(stage, page.state.stage);
+        const session = overview.root.session;
+        const frontend = if (overview.app_session) |held| held.frontend else null;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+        try std.testing.expect(overview.root.listVisible());
+        const at: vxfw.RelativePoint = switch (click) {
+            .session => session: {
+                const list = Nav.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
+                const row = for (overview.app_sessions.shown_at) |span| {
+                    if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
+                } else return error.TestMissingSessionHit;
+                break :session .{ .row = list.row + row, .col = 4 };
+            },
+            .settings => .{ .row = 39, .col = 4 },
+        };
+        ctx.cmds.clearRetainingCapacity();
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+            try app_events.mouse(&ctx, frame, .{ .col = @intCast(at.col), .row = @intCast(at.row), .button = .left, .type = kind, .mods = .{} });
+        }
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expect(overview.root.sign_in_open);
+        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
+        try std.testing.expectEqual(session != null, overview.root.session != null);
+        if (session) |kept| try std.testing.expect(overview.root.session.?.eql(kept));
+        if (frontend) |held| try std.testing.expect(overview.app_session.?.frontend.? == held);
+        try std.testing.expectEqual(@as(usize, 0), Nav.opens);
+        try std.testing.expectEqual(stage, page.state.stage);
+        try std.testing.expectEqualStrings(if (stage == .key_entry) typed else "", page.key.slice());
+        for (ctx.cmds.items) |command| if (command == .request_focus) {
+            try std.testing.expect(command.request_focus.eql(page.widget()));
+        };
+        // The page names the app on its top row only when the list is hidden,
+        // as it was when Root set the page's title from its width.
+        for ([_]u16{ 140, 46 }) |width| {
+            var shown = try rig.shown(width, 40);
+            defer shown.deinit();
+            const top = try shown.line(0);
+            errdefer std.debug.print("top row at {d}: '{s}'\n", .{ width, top });
+            try std.testing.expectEqual(@as(usize, @intFromBool(width < Root.split_at)), std.mem.count(u8, top, "rui"));
+        }
+        // Esc leaves as before: from the key back to the choice, then out.
+        ctx.cmds.clearRetainingCapacity();
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        if (stage == .key_entry) {
+            try std.testing.expect(overview.root.sign_in_open);
+            try std.testing.expectEqual(Stage.choice, page.state.stage);
+            try std.testing.expectEqual(@as(usize, 0), page.key.len);
+            try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        }
+        try std.testing.expect(!overview.root.sign_in_open);
+        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
+        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
+        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
+    };
+}
+
+test "Sign-in Esc at the choice leaves unless the first-run screen has no default, and only that screen holds the overview's tick" {
+    const Origin = enum { first_run, settings };
+    const Nav = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
+            var i = ctx.cmds.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
+            }
+            return null;
+        }
+        fn titled(ctx: *vxfw.EventContext) bool {
+            for (ctx.cmds.items) |command| if (command == .set_title) return true;
+            return false;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Nav.dir = tmp.dir;
+    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |default| for ([_]bool{ false, true }) |retained| {
+        errdefer std.debug.print("sign-in escape: from={s} default={} retained={}\n", .{ @tagName(from), default, retained });
+        Nav.files = 0;
+        var cancellation: client.Cancellation = .{};
+        // A resumed Session with unreadable saved defaults has no default
+        // and reaches sign-in only from Settings.
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = if (default) "codex" else null, .model = if (default) "gpt-6-luna" else null, .sign_in = from == .first_run }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        try std.testing.expectEqual(default, overview.state.default != null);
+        Seen.now.listed = 2;
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        defer {
+            if (overview.app_session) |left| {
+                if (left.frontend) |frontend| frontend.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        if (retained) {
+            overview.hooks.scratch = Nav.scratch;
+            overview.ops.open = openSession;
+            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            overview.app_session.?.frontend.?.reading.opening = false;
+        }
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const page = &overview.sign_in;
+        // The rig gives no launch hooks; nothing here begins an attempt.
+        page.activate = null;
+        page.ready = null;
+        if (from == .settings) {
+            try overview.root.openSettings(&ctx);
+            try overview.openSignIn(&ctx);
+        }
+        try std.testing.expect(overview.root.sign_in_open);
+        try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
+        const stays = from == .first_run and !default;
+        // Only the first-run screen with no default holds the overview's
+        // tick; under any other sign-in the overview and Session are served.
+        ctx.cmds.clearRetainingCapacity();
+        try appEvent(overview, &ctx, .tick);
+        try std.testing.expectEqual(!stays, Nav.titled(&ctx));
+        ctx.cmds.clearRetainingCapacity();
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expectEqual(stays, overview.root.sign_in_open);
+        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
+        if (stays) {
+            try std.testing.expect(Nav.focus(&ctx) == null);
+            continue;
+        }
+        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
+        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
+        try std.testing.expectEqual(retained, overview.root.session != null);
+    };
 }
 
 test "Overview mouse model row forwards the displayed typed effort and sign-in" {

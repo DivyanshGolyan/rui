@@ -22,6 +22,7 @@ import termios
 import threading
 import time
 import tty
+import unicodedata
 
 import host_process
 from host_process import assert_caller_error, canonical_fixture_root, dispose_all, preserve_failure_metadata, retain_failure_state, screen_fixture_root, stop_process
@@ -38,7 +39,7 @@ def untimed(row):
 
 
 # What work under way says: the running call's row, "⠹ Run tests · 42s", or
-# the conversation's last line, "⠹ Waiting · 12s",
+# the conversation's last line, "⠹ Thinking · 12s",
 # "⠹ Rate limited · retry 2 in 18s", "Stopping…".
 LIVE_LINE = re.compile(r"^(?:[⠹◌?] .+ · (?:\d|retry )|Stopping…)", re.M)
 # What the line under a draft beside an Action says once Enter there denies
@@ -372,7 +373,7 @@ def compiled_model_cases():
         original = saved.read_bytes()
         # Bare rui with the saved unlisted pin goes on to sign-in, not a refusal.
         with terminal_process([str(fixture.RUI), "--store", str(root / "absent-store")], env=env) as (entered, master):
-            shown = read_terminal(master, "Choose Codex login")
+            shown = provider_prompt(master)
             assert "invalid model" not in shown and listing.strip() not in shown, shown
         assert saved.read_bytes() == original
         # The Host starts quietly with an unlisted pin, and leaves it as it is.
@@ -516,7 +517,7 @@ def status_frame(master, session, command="/status", timeout=15):
     """The /status page for exactly `session` (escaped as /status shows it)."""
     escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
     def page(frame):
-        rows = [chat_content_row(row) for row in frame.split("\n")]
+        rows = conversation_text(frame).split("\n")
         # App draws the page from the first feed row, with no browsing heading.
         return (rows[0].startswith(" Status · ")
             and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and " Work" in rows)
@@ -527,7 +528,7 @@ def saved_default(master, command, line):
     """The /setup reply that shows `line`. Every such reply opens with the
     same words and stays shown until the next, so the line this command
     changed is what tells its reply from the last one."""
-    return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in frame and shown(line, frame))
+    return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in conversation_text(frame) and shown(line, conversation_text(frame)))
 
 
 def configured_frame(master, command):
@@ -535,9 +536,9 @@ def configured_frame(master, command):
     the /status page, the change leaves the page shown with its reply as a
     notice; Esc then returns to the conversation, so a later /status page is
     the one that request reads, not the page already shown."""
-    frame = command_frame(master, command, lambda frame: "Configured." in frame.split("\n"))
-    if frame.startswith("  Status · "):
-        command_frame(master, "\x1b", lambda frame: not frame.startswith("  Status · "), end="")
+    frame = command_frame(master, command, lambda frame: "Configured." in conversation_text(frame).split("\n"))
+    if conversation_text(frame).startswith(" Status · "):
+        command_frame(master, "\x1b", lambda frame: not conversation_text(frame).startswith(" Status · "), end="")
     return frame
 
 
@@ -673,6 +674,51 @@ def command_wait_oracles():
     print("command wait oracles passed: Enter follows the typed frame; the shown page and the typed command are not the reply", flush=True)
 
 
+def conversation_wait_oracles():
+    """The list's answer arrives first; only the conversation ends a wait.
+
+    Queue committed frames, not byte substrings: the same ordering must hold
+    for an already shown frame, a fresh read and a command's ready reply.
+    """
+    marker = "edited 2"
+    for wide in (False, True):
+        def rows(answer, draft="", listed=marker):
+            chat = ["", answer, "⠹ Waiting" if answer != marker else "", "› " + draft]
+            return ([f"{left:20}│ {right}" for left, right in zip(
+                ("+ New Session", listed, "", ""), chat)] if wide else [" " + row for row in chat])
+
+        pending, complete = rows("edited 1"), rows(marker)
+        for mode in ("shown", "fresh", "await"):
+            reader, writer = os.pipe()
+            try:
+                capture = terminal_capture(reader)
+                capture.feed(b"\x1b[?1049h")
+                if mode != "fresh":
+                    capture.feed(terminal_frame(pending))
+                os.write(writer, terminal_frame(complete))
+                if mode == "await":
+                    observed = await_screen(reader, marker)
+                else:
+                    observed = read_terminal(reader, marker, fresh=mode == "fresh",
+                        initial=terminal_frame(pending) if mode == "fresh" else b"")
+                assert "\nedited 2" in conversation_text(observed), (wide, mode, observed)
+            finally:
+                dispose_all(lambda: _captures.pop(reader, None), lambda: os.close(reader), lambda: os.close(writer))
+
+        reader, writer = socket.socketpair()
+        master = reader.fileno()
+        try:
+            # command_frame sees the draft before Enter, then two ready replies.
+            # Its result is the first matching frame, even in one observer read.
+            writer.sendall(terminal_frame(rows("edited 1", "send", listed="edited 1"))
+                + terminal_frame(pending) + terminal_frame(complete))
+            observed = terminal_step(master, "send", marker, composer=True)
+            assert "\nedited 2" in conversation_text(observed), (wide, "command", observed)
+        finally:
+            dispose_all(lambda: _captures.pop(master, None), reader.close, writer.close)
+    print("conversation wait oracles passed: list-only answers cannot finish shown, fresh, await or command waits", flush=True)
+
+
 def terminal_frame(lines, cursor=None):
     """One synchronized full-screen frame as the renderer commits it."""
     row, column = cursor if cursor is not None else (len(lines), len(lines[-1]) + 1 if lines else 1)
@@ -726,12 +772,12 @@ def scroll_until(master, key, marker, *, presses=40):
     """
     seen = []
     for _ in range(presses):
-        if marker in current_screen(master):
+        if marker in conversation_text(current_screen(master)):
             return "\n".join(seen)
         os.write(master, key)
         while (frame := next_frame(master, 1)) is not None:
             seen.append(frame)
-    assert marker in current_screen(master), ("scroll did not reach marker", key, marker, current_screen(master))
+    assert marker in conversation_text(current_screen(master)), ("scroll did not reach marker", key, marker, current_screen(master))
     return "\n".join(seen)
 
 
@@ -820,8 +866,8 @@ def persistent_copy_case():
                 env={**os.environ, "HOME": str(home)}, cwd=here) as (caller, master):
             read_terminal(master, "› ")
             capture = terminal_capture(master)
-            terminal_step(master, "/copy", "No answer to copy yet.", composer=True)
-            terminal_step(master, "/copy code", "No answer to copy yet.", composer=True)
+            terminal_step(master, "/copy", "No answer to copy", composer=True)
+            terminal_step(master, "/copy code", "No answer to copy", composer=True)
             assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
             terminal_step(master, "Copy request", "Done.", composer=True)
             # A left drag over the answer's last word copies exactly the text
@@ -886,34 +932,9 @@ def persistent_copy_case():
             retain_failure_state("copy failure state", state)
 
 
-def provider_prompt(master, ready, command=None):
-    # Initial prompts use a fresh pipe. Later prompts must not consume an
-    # unread notification from an earlier choice as readiness for this one.
-    if command is not None:
-        assert not select.select([ready], [], [], 0)[0], "stale provider readiness"
-        os.write(master, (command + "\r").encode())
-    deadline = time.monotonic() + 15
-    output = read_terminal(master, "Provider: [c]", timeout=deadline - time.monotonic())
-    # The provider prompt is a main-screen line before any Session frame:
-    # its readiness is the notification itself, after the prompt's bytes.
-    capture = terminal_capture(master)
-    total = capture.plain_total
-    while True:
-        remaining = deadline - time.monotonic()
-        assert remaining > 0, ("provider prompt readiness did not arrive", capture.plain)
-        selected = select.select([ready, master], [], [], remaining)[0]
-        if master in selected:
-            capture.feed(os.read(master, 65536))
-        if ready in selected:
-            assert os.read(ready, 1) == b"x", "prompt caller exited before readiness"
-            while select.select([master], [], [], 0)[0]:
-                chunk = os.read(master, 65536)
-                assert chunk, "prompt terminal closed at readiness"
-                capture.feed(chunk)
-            break
-    output += capture.plain_since(total)
-    assert not select.select([ready], [], [], 0)[0], "extra provider readiness"
-    return output
+def provider_prompt(master):
+    # First run is now a committed app frame, not a canonical line prompt.
+    return await_screen(master, "› ChatGPT    API key")
 
 
 def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
@@ -1164,7 +1185,7 @@ def wait_for_listed_call(tty):
     # A matching Bash projection supplies the unresolved row's clock. The
     # command stays held until after traversal; a bare heading can precede claim.
     running = re.compile(r"⠹ Held call · (?:[0-9]+s|[0-9]+m [0-9]+s|[0-9]+h [0-9]+m)")
-    tty.wait(predicate=lambda: any(running.fullmatch(row) for row in tty.capture.completed.splitlines()), timeout=30)
+    tty.wait(predicate=lambda: any(running.fullmatch(row) for row in conversation_text(tty.capture.completed).splitlines()), timeout=30)
 
 
 def listed_call_readiness_cases():
@@ -1257,7 +1278,8 @@ def renderer_cases():
             previous = self.capture.listener
             def reached():
                 return ((after is None or self.capture.generation > after) and
-                        (predicate() if predicate is not None else self.capture.reached(marker)))
+                        (predicate() if predicate is not None else
+                         self.capture.reached(marker) and unicodedata.normalize("NFC", marker) in conversation_text(self.capture.completed)))
             def observe(screen, x, y):
                 nonlocal matched
                 if previous is not None:
@@ -1463,6 +1485,15 @@ def renderer_cases():
             assert "REPLY-04399" in tty.capture.completed and tty.capture.listener is listener
         finally:
             dispose_all(lambda: close_pty(master), lambda: os.close(writer) if writer is not None else None)
+        master, writer = os.pipe()
+        try:
+            tty = Terminal(master, None, None)
+            os.write(writer, terminal_frame(["  + New Session │", "  edited 2      │ edited 1", "                │ ⠹ Waiting"])
+                + terminal_frame(["  + New Session │", "  edited 2      │ edited 2", "                │ ›"]))
+            observed = tty.wait("edited 2", after=0)
+            assert "\nedited 2" in conversation_text(observed), observed
+        finally:
+            dispose_all(lambda: close_pty(master), lambda: os.close(writer))
         host = fixture.start_host(store, f"http://127.0.0.1:{endpoint.server_port}/responses")
         defaults(home, "--store", store)
         geometry = configure()
@@ -1530,7 +1561,8 @@ def renderer_cases():
             before = len(endpoint.requests)
             # Continuation rows align under the draft, inside the composer margin,
             # without a second glyph.
-            tty.send("\x1b[200~" + multiline + "\x1b[201~", "   second 中")
+            tty.send("\x1b[200~" + multiline + "\x1b[201~",
+                predicate=lambda: "   second 中" in tty.capture.completed)
             screen = tty.capture.screen
             assert screen.display[screen.cursor.y - 1].rstrip() == " › first café"
             assert screen.display[screen.cursor.y].rstrip() == "   second 中" and screen.cursor.x == 12
@@ -1552,7 +1584,7 @@ def renderer_cases():
             shown = tty.send("show invisible output\r", "output survived")
             assert all(value in shown for value in escaped), shown
             joined(tty)
-            shown = tty.send("\x0f", "    Bash ")
+            shown = tty.send("\x0f", chat_content_row("    Bash "))
             # Both the saved Tool Result and answer use the same display sink.
             assert all(value in shown for value in escaped), shown
             tty.caller.send_signal(signal.SIGINT)
@@ -1681,7 +1713,7 @@ def renderer_cases():
                 tty.send("x", predicate=lambda: tty.capture.draft("x", 3))
                 generation = tty.capture.generation
                 run(home, "action", decision, "--store", store, "--session", session, "--action", action)
-                shown = tty.wait(predicate=lambda: marker in tty.capture.completed and tty.capture.draft("x", 3), after=generation)
+                shown = tty.wait(predicate=lambda: marker in conversation_text(tty.capture.completed) and tty.capture.draft("x", 3), after=generation)
                 for pending in ("Allow once", "? Decided elsewhere"):
                     assert pending not in shown, (decision, shown)
                 assert effect.exists() == (decision == "allow"), decision
@@ -1710,7 +1742,7 @@ def renderer_cases():
                 first, second = [item["action"] for item in fixture.command("session", "inspect", "--store", store, "--session", session)["actionable_permissions"]]
                 generation = tty.capture.generation
                 run(home, "action", "deny", "--store", store, "--session", session, "--action", first)
-                tty.wait(predicate=lambda: "? Successor 2" in tty.capture.completed and CHOICE in tty.capture.completed, after=generation)
+                tty.wait(predicate=lambda: "? Successor 2" in conversation_text(tty.capture.completed) and CHOICE in conversation_text(tty.capture.completed), after=generation)
                 tty.ready(ready_read)
                 assert highlighted(tty.capture) == "Allow once", tty.capture.completed
                 # The other client saved its own record in this HOME.
@@ -1777,8 +1809,8 @@ def renderer_cases():
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
             # Only the first PgUp moves a feed this short; the rest draw nothing.
-            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in tty.capture.completed
-                and marker in tty.capture.completed and "↓" in tty.capture.completed)
+            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in conversation_text(tty.capture.completed)
+                and marker in conversation_text(tty.capture.completed) and "↓" in tty.capture.completed)
             assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
             assert shown.index("› fresh start") < shown.index(marker), shown
             assert "Start of conversation" not in shown, shown
@@ -1801,8 +1833,8 @@ def renderer_cases():
 
 
 def provider_line_cases():
-    """Canonical provider choices retry invalid lines and retain terminal modes."""
-    state = screen_fixture_root("rui-provider-lines.")
+    """First-run screen: choices, device cancellation, masked keys and no TTY."""
+    state = screen_fixture_root("rui-provider-screen.")
     store = state / "store"
     endpoint = fixture.SuccessEndpoint([])
     thread = threading.Thread(target=endpoint.serve_forever)
@@ -1821,64 +1853,102 @@ def provider_line_cases():
              "--test-codex-fixture-endpoint", url, "--test-openai-fixture-endpoint", url],
             env={**os.environ, "RUI_OPENAI_KEY_FILE": str(host_key), "RUI_CODEX_CREDENTIAL_FILE": str(host_codex)},
             required_fields={"execution": "enabled", "nghttp2": "1.70.0"})
-        for choice in ("c", "o", "d", "z", "\x1b", "\x03"):
-            home = state / f"home-{ord(choice)}"
+        no_tty = state / "no-tty"
+        no_tty.mkdir()
+        refused = subprocess.run([str(fixture.RUI)], cwd=state,
+            env={**os.environ, "HOME": str(no_tty)}, capture_output=True, text=True, timeout=5)
+        assert refused.returncode == 2 and "[terminal_required]" in refused.stderr, refused
+        assert "rui needs terminal input and output" in refused.stderr, refused.stderr
+        assert not (no_tty / ".config").exists() and not (no_tty / ".local").exists()
+        scripted = subprocess.run([str(fixture.RUI), "session", "start", "--store", str(no_tty / "store")],
+            cwd=state, env={**os.environ, "HOME": str(no_tty)}, input="script task",
+            capture_output=True, text=True, timeout=5)
+        assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
+        assert "› ChatGPT    API key" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
+        assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
+        for choice in ("codex", "ready-key", "key", "device", "escape"):
+            home = state / choice
             config = home / ".config/rui"
             config.mkdir(parents=True, mode=0o700)
-            if choice in ("c", "o"):
+            if choice in ("codex", "ready-key"):
                 codex_fixture.credentials(config / "codex.json")
-                key = config / "openai.key"
-                key.write_text("fixture-provider-choice-key\n")
-                key.chmod(0o600)
+                (config / "openai.key").write_text("fixture-provider-choice-key\n")
+                (config / "openai.key").chmod(0o600)
+            selected_store = home / "store" if choice == "key" else store
             master, slave = open_pty()
             original = termios.tcgetattr(slave)
-            ready_read, ready_write = os.pipe()
             caller = None
             try:
-                caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
-                    env={**os.environ, "HOME": str(home), "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                    pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=subprocess.PIPE,
+                env = {**os.environ, "HOME": str(home), "TERM": "xterm-256color", "RUI_TEST_LOGIN": "waiting"}
+                env.pop("RUI_CODEX_CREDENTIAL_FILE", None)
+                env.pop("RUI_OPENAI_KEY_FILE", None)
+                caller = spawn([str(fixture.RUI), "--store", str(selected_store)], cwd=state,
+                    env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                     default_signals=(signal.SIGINT,))
-                provider_prompt(master, ready_read)
-                if choice in ("z", "\x1b"):
-                    invalid = provider_prompt(master, ready_read, command=choice)
-                    assert "Rui: Choose c, o or d. No login or preference change." in invalid, invalid
-                    assert "Key combination not recognized" not in invalid, invalid
-                    assert not (config / "preferences").exists()
-                    os.write(master, b"d\r")
-                else:
-                    os.write(master, choice.encode() + (b"" if choice == "\x03" else b"\r"))
-                if choice in ("c", "o"):
+                if choice in ("codex", "ready-key"):
+                    provider_prompt(master)
+                    key_file = config / "openai.key"
+                    key_before = key_file.read_bytes(), key_file.stat().st_mtime_ns
+                    os.write(master, b"\x1b[C\r" if choice == "ready-key" else b"\r")
                     overview_frame(master, overview_title)
-                    saved = (config / "preferences").read_text()
-                    provider = "codex" if choice == "c" else "openai"
-                    assert f"provider={provider}\n" in saved, saved
-                    caller.send_signal(signal.SIGINT)
-                output, errors = terminal_exit(caller, master)
-                if choice == "\x03":
-                    assert caller.returncode == -signal.SIGINT, (caller.returncode, errors)
+                    provider = "openai" if choice == "ready-key" else "codex"
+                    assert f"provider={provider}\n" in (config / "preferences").read_text()
+                    assert (key_file.read_bytes(), key_file.stat().st_mtime_ns) == key_before
                 else:
-                    assert caller.returncode == 0, (choice, caller.returncode, errors)
-                    if choice not in ("c", "o"):
-                        assert b"Rui: Login deferred." in output, output
+                    offered = provider_prompt(master)
+                    assert "API key" in offered and "Provider: [c]" not in offered, offered
+                    if choice == "key":
+                        os.write(master, b"\x1b[C\r")
+                        await_screen(master, "API key")
+                        os.write(master, b"\r")
+                        read_terminal(master, "Invalid API key")
+                        os.write(master, b"sk-screen-secret")
+                        masked = read_terminal(master, "••••••••••••••••")
+                        assert "sk-screen-secret" not in masked, masked
+                        os.write(master, b"\r")
+                        overview_frame(master, overview_title)
+                        assert (config / "openai.key").read_text() == "sk-screen-secret\n"
+                        assert "provider=openai\n" in (config / "preferences").read_text()
+                        assert stat.S_IMODE((config / "openai.key").stat().st_mode) == 0o600
+                    elif choice == "device":
+                        os.write(master, b"\r")
+                        waiting = read_terminal(master, "BDL9-KI88H")
+                        assert "auth.openai.com/codex/device · BDL9-KI88H" in waiting, waiting
+                        assert "Waiting for ChatGPT" in waiting, waiting
+                        os.write(master, b"\x1b")
+                        read_terminal(master, "› ChatGPT    API key", fresh=True)
+                    else:
+                        # Choice typing does nothing. Escape from key entry
+                        # returns to a visibly different choice frame before
+                        # Ctrl-C, so it cannot become an Alt+Ctrl-C sequence.
+                        os.write(master, b"hello\x1b[C\r")
+                        read_terminal(master, "esc back")
+                        os.write(master, b"\x1b")
+                        read_terminal(master, "←→ choose · enter", fresh=True)
+                os.write(master, b"\x03")
+                output, errors = terminal_exit(caller, master)
+                assert caller.returncode == 0, (choice, caller.returncode, errors)
+                assert "sk-screen-secret".encode() not in output + errors
                 assert os_semantics.user_termios(termios.tcgetattr(slave)) == os_semantics.user_termios(original)
-                if choice not in ("c", "o"):
+                if choice in ("device", "escape"):
                     assert not (config / "preferences").exists()
-                assert not (config / "requests").exists(), "a provider choice captured a Message"
+                    assert not (config / "codex.json").exists()
+                assert not (config / "requests").exists(), "sign-in captured a Message"
             finally:
                 dispose_all(lambda: stop_process(caller, timeout=5) if caller is not None else None,
-                            lambda: close_pty(master), lambda: close_pty(slave),
-                            lambda: os.close(ready_read), lambda: os.close(ready_write))
+                            lambda: run(home, "host", "pause", "--store", selected_store)
+                            if choice == "key" and selected_store.exists() else None,
+                            lambda: close_pty(master), lambda: close_pty(slave))
         assert endpoint.requests == [], endpoint.requests
         completed = True
-        print("provider line input: c/o/d, invalid and Esc retries, Ctrl-C and unchanged terminal modes passed", flush=True)
+        print("provider screen: no-TTY, choices, device back, invalid/masked key and restored terminal passed", flush=True)
     finally:
         dispose_all(lambda: fixture.stop_host(host) if host is not None else None,
                     endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5))
         if completed:
             shutil.rmtree(state)
         else:
-            retain_failure_state("provider line input failure state", state)
+            retain_failure_state("provider screen failure state", state)
 
 
 def main(selected="all"):
@@ -1921,6 +1991,7 @@ def main(selected="all"):
         prove_terminal_process()
         pipe_wait_oracles()
         command_wait_oracles()
+        conversation_wait_oracles()
     if selected == "terminal-waits":
         return
     if selected == "all":
@@ -2238,68 +2309,23 @@ def main(selected="all"):
         assert not (no_tty_home / ".local/share/rui/store").exists(), "non-TTY invocation changed the Store"
         before_missing = set(json.loads(run(preferences_home, "request", "list")))
         master, slave = open_pty()
-        ready_read, ready_write = os.pipe()
         try:
             deferred = spawn([str(fixture.RUI)], cwd=workspace,
-                env={**os.environ, "HOME": str(preferences_home),
-                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                env={**os.environ, "HOME": str(preferences_home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         except BaseException:
-            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
-        finally:
-            dispose_all(lambda: os.close(ready_write))
         try:
-            offered = provider_prompt(master, ready_read)
-            assert "No locally ready provider" in offered and "Codex login" in offered, offered
-            assert "No new Session created" in terminal_step(master, "d", "No new Session created")
+            offered = provider_prompt(master)
+            assert "› ChatGPT    API key" in offered and "API key" in offered, offered
+            os.write(master, b"\x03")
+            terminal_exit(deferred, master)
             assert deferred.wait(timeout=5) == 0
             assert set(json.loads(run(preferences_home, "request", "list"))) == before_missing
         finally:
             dispose_all(lambda: stop_process(deferred, timeout=5),
-                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
-        # The shell's canonical line input owns editing. Rui accepts only a
-        # single provider letter or defer; it does not decode terminal chords.
-        for keys, outcome, notice in (
-                ("dx\x7f", "Rui: Login deferred.", None),
-                ("\x04", "Rui: Login deferred.", None),
-                ("z", "Rui: Choose c, o or d. No login or preference change.", None),
-                ("\x1b", "Rui: Choose c, o or d. No login or preference change.", None),
-                ("x" * 17, "Rui: Choose c, o or d. No login or preference change.", None),
-                ("d\x1b.", "Rui: Choose c, o or d. No login or preference change.", None),
-                ("\u0301d", "Rui: Choose c, o or d. No login or preference change.", None),
-                ("d\x1b[114;999u", "Rui: Choose c, o or d. No login or preference change.", None),
-                ("d\x1b[27;2;13;1~", "Rui: Choose c, o or d. No login or preference change.", None)):
-            master, slave = open_pty()
-            original = termios.tcgetattr(slave)
-            ready_read, ready_write = os.pipe()
-            try:
-                chooser = spawn([str(fixture.RUI)], cwd=workspace,
-                    env={**os.environ, "HOME": str(preferences_home),
-                        "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                    pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
-            except BaseException:
-                dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
-                raise
-            finally:
-                dispose_all(lambda: os.close(ready_write))
-            try:
-                provider_prompt(master, ready_read)
-                if "Choose" in outcome:
-                    answered = provider_prompt(master, ready_read, command=keys)
-                    assert outcome in answered, (keys, answered)
-                    assert "Key combination not recognized" not in answered, answered
-                    answered += terminal_step(master, "d", "No new Session created")
-                else:
-                    answered = terminal_step(master, keys, "No new Session created")
-                assert outcome in answered and (notice is None or notice in answered), (keys, answered)
-                assert chooser.wait(timeout=5) == 0
-                restored, expected = termios.tcgetattr(slave), list(original)
-                assert os_semantics.user_termios(restored) == os_semantics.user_termios(expected), ("one-shot choice termios restoration", keys, expected, restored)
-                assert set(json.loads(run(preferences_home, "request", "list"))) == before_missing
-            finally:
-                dispose_all(lambda: stop_process(chooser, timeout=5),
-                            lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
         explicit_config.mkdir(parents=True, mode=0o700)
@@ -2307,25 +2333,21 @@ def main(selected="all"):
         malformed.write_text("version=9\n")
         malformed.chmod(0o600)
         master, slave = open_pty()
-        ready_read, ready_write = os.pipe()
         try:
             explicit = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
-                env={**os.environ, "HOME": str(explicit_home),
-                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                env={**os.environ, "HOME": str(explicit_home)},
+                stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
-        finally:
-            dispose_all(lambda: os.close(ready_write))
         try:
-            assert "No locally ready provider" in provider_prompt(master, ready_read)
+            assert "› ChatGPT    API key" in provider_prompt(master)
             # Another client installs a fixture credential while this caller
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
-            welcome = overview_frame(master, overview_title, keys=b"d\r", timeout=10)
+            welcome = overview_frame(master, overview_title, keys=b"\r", timeout=10)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
             assert not (explicit_config / "requests").exists(), "the overview captured a request"
             assert malformed.read_text() == "version=9\n"
@@ -2333,38 +2355,34 @@ def main(selected="all"):
             assert explicit.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
-                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         # A renewal-due opaque credential arrives while the prompt is open. It
         # remains usable for creation.
         (explicit_config / "codex.json").unlink()
         master, slave = open_pty()
-        ready_read, ready_write = os.pipe()
         try:
             expiring = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
-                env={**os.environ, "HOME": str(explicit_home),
-                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                env={**os.environ, "HOME": str(explicit_home)},
+                stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
-        finally:
-            dispose_all(lambda: os.close(ready_write))
         try:
-            assert "No locally ready provider" in provider_prompt(master, ready_read)
+            assert "› ChatGPT    API key" in provider_prompt(master)
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
             assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credentials"]["codex"] == "renewal_due"
-            welcome = overview_frame(master, overview_title, keys=b"d\r")
+            welcome = overview_frame(master, overview_title, keys=b"\r")
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             leave_overview(master)
             assert expiring.wait(timeout=5) == 0
             assert malformed.read_text() == "version=9\n"
         finally:
             dispose_all(lambda: stop_process(expiring, timeout=5),
-                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
         try:
@@ -2374,29 +2392,25 @@ def main(selected="all"):
                 defaults(changing_home, "--store", before,
                     "--provider", "codex", "--model", "gpt-6-luna")
                 master, slave = open_pty()
-                ready_read, ready_write = os.pipe()
                 try:
                     changing = spawn([str(fixture.RUI)], cwd=workspace,
-                        env={**os.environ, "HOME": str(changing_home),
-                            "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                        pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                        env={**os.environ, "HOME": str(changing_home)},
+                        stdin=slave, stdout=slave, stderr=slave)
                 except BaseException:
-                    dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+                    dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
                     raise
-                finally:
-                    dispose_all(lambda: os.close(ready_write))
                 try:
-                    assert "No locally ready provider" in provider_prompt(master, ready_read)
+                    assert "› ChatGPT    API key" in provider_prompt(master)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
-                    welcome = overview_frame(master, overview_title, keys=b"d\r")
+                    welcome = overview_frame(master, overview_title, keys=b"\r")
                     assert all(noise not in welcome for noise in ("Diagnostics:", "request:", "Session:")), welcome
                     assert overview_store(leave_overview(master)) == str(after.resolve())
                     assert not (changing_home / ".config/rui/requests").exists(), "the overview captured a request"
                     assert changing.wait(timeout=5) == 0
                 finally:
                     dispose_all(lambda: stop_process(changing, timeout=5),
-                                lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                                lambda: close_pty(master), lambda: close_pty(slave))
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)
@@ -3096,12 +3110,11 @@ def main(selected="all"):
                     observed = terminal_step(master, "D\x1b[DZ", f"edited {index}")
                 else:
                     observed = terminal_step(master, typed, f"edited {index}")
-                assert f"edited {index}" in observed, observed
+                assert f"edited {index}" in conversation_text(observed), observed
                 if index == 2:
                     assert "\n› line1\n  line2" in "\n".join(map(untimed, conversation_text(observed).split("\n"))), observed
                     assert "\nedited 2" in conversation_text(observed), observed
-                if "› " not in observed.split(f"edited {index}", 1)[1]:
-                    await_screen(master, "", composer=True)
+                await_screen(master, "", composer=True)
                 body = json.loads(endpoint.requests[-1])
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                     if item.get("role") == "user")
@@ -3116,8 +3129,7 @@ def main(selected="all"):
                 actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                     if item.get("role") == "user")
                 assert actual == "Z", actual
-                if "› " not in observed.split(marker, 1)[1]:
-                    await_screen(master, "", composer=True)
+                await_screen(master, "", composer=True)
             endpoint.responses.append(fixture.sse_answer("paced-answer", "paced-reason",
                 "paced-message", "paced edited")[0])
             os.write(master, b"a" * 100)
@@ -3131,8 +3143,7 @@ def main(selected="all"):
             actual = next(item["content"][0]["text"] for item in reversed(body["input"])
                 if item.get("role") == "user")
             assert actual == "Z", actual
-            if "› " not in observed.split("paced edited", 1)[1]:
-                await_screen(master, "", composer=True)
+            await_screen(master, "", composer=True)
             endpoint.responses.append(fixture.sse_answer("wrapped-answer", "wrapped-reason",
                 "wrapped-message", "wrapped edit intact")[0])
             accepted = terminal_bulk(master, "a" * 2050 + "\x7f" * 2048, "wrapped edit intact")

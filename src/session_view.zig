@@ -609,7 +609,7 @@ fn toolHeadingWith(presentation: protocol.ToolPresentation, sink: anytype, colou
     try escaped.finish();
     try indented.feed(state.suffix);
     if (presentation.code == .failed and exit.len != 0) {
-        try indented.feed(" · exit ");
+        try indented.feed(" · ");
         try indented.feed(exit);
     }
     try indented.finish();
@@ -1317,7 +1317,7 @@ test "tool header hides all body lines for every outcome and first-line split" {
         .{ protocol.ToolPresentation.Code.unresolved, "⠹ Tool call" },
         .{ protocol.ToolPresentation.Code.pending_permission, "? Tool call" },
         .{ protocol.ToolPresentation.Code.succeeded, "✓ Tool call" },
-        .{ protocol.ToolPresentation.Code.failed, "× Tool call · exit 7" },
+        .{ protocol.ToolPresentation.Code.failed, "× Tool call · 7" },
         .{ protocol.ToolPresentation.Code.timed_out, "× Tool call · timed out" },
         .{ protocol.ToolPresentation.Code.indeterminate, "× Tool call · may have run" },
         .{ protocol.ToolPresentation.Code.storage_failed, "× Tool call · output lost" },
@@ -1359,20 +1359,27 @@ test "tool header hides all body lines for every outcome and first-line split" {
     }
 }
 
-test "failed tool exit status is named rather than read as a count" {
+test "failed tool suffix is the bare exit status" {
     const Sink = struct {
         out: *std.Io.Writer,
         pub fn feed(self: *@This(), bytes: []const u8) !void {
             try self.out.writeAll(bytes);
         }
     };
-    for ([_][]const u8{ "1", "7", "127" }) |exit| {
-        var buffer: [128]u8 = undefined;
-        var out = std.Io.Writer.fixed(&buffer);
-        var sink: Sink = .{ .out = &out };
-        try toolHeadingWith(.{ .description = null, .code = .failed, .publication_position = null }, &sink, false, exit, false);
-        var expected: [128]u8 = undefined;
-        try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "× Tool call · exit {s}\n", .{exit}), out.buffered());
+    for ([_]?[]const u8{ null, "Fail with exit 127" }) |title| {
+        var presentation: protocol.ToolPresentation = .{ .description = null, .code = .failed, .publication_position = null };
+        if (title) |words| {
+            presentation.description = .{};
+            try presentation.description.?.set(words);
+        }
+        for ([_][]const u8{ "1", "7", "127" }) |exit| {
+            var buffer: [128]u8 = undefined;
+            var out = std.Io.Writer.fixed(&buffer);
+            var sink: Sink = .{ .out = &out };
+            try toolHeadingWith(presentation, &sink, false, exit, false);
+            var expected: [128]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "× {s} · {s}\n", .{ title orelse "Tool call", exit }), out.buffered());
+        }
     }
 }
 
