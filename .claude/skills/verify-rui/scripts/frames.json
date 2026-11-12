@@ -322,8 +322,8 @@
       ],
       "expect": [
         "✓ List project files",
-        "× Fail with exit 127 · exit 127",
-        "× Fail with an excerpt · exit 1",
+        "× Fail with exit 127 · 127",
+        "× Fail with an excerpt · 1",
         "The project has a README",
         "retry policy notes",
         "Fail with an excerpt"
@@ -331,7 +331,9 @@
       "absent": [
         "asks before Bash/MCP",
         "Type a message",
-        "enter sends"
+        "enter sends",
+        " · exit 127",
+        " · exit 1"
       ]
     },
     {

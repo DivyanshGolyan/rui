@@ -318,12 +318,28 @@ class FramesTest(unittest.TestCase):
         states = {state["name"]: state for state in scenario["states"]}
         for name, wanted, old in (
             ("tool-open-two", "× Fail with exit 127 · 127", " · exit 127"),
+            ("fold-hover", "× Fail with exit 127 · 127", " · exit 127"),
+            ("fold-hover", "× Fail with an excerpt · 1", " · exit 1"),
             ("chat-working", "Thinking", "Waiting"),
             ("copy-no-code", "No code block", "No code block in the last answer."),
         ):
             with self.subTest(state=name):
                 self.assertIn(wanted, states[name]["expect"])
                 self.assertIn(old, states[name]["absent"])
+
+    def test_no_frame_waits_for_or_expects_retired_status_words(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        retired = (" · exit ", "⠹ Waiting", "No answer to copy yet.",
+                   "No code block in the last answer.")
+        for state in scenario["states"]:
+            markers = state.get("expect", [])
+            if isinstance(markers, str):
+                markers = [markers]
+            markers = [*markers, *(step["wait"] for step in state["steps"] if "wait" in step)]
+            for marker in markers:
+                with self.subTest(state=state["name"], marker=marker):
+                    for old in retired:
+                        self.assertNotIn(old, marker)
 
     def test_stop_frame_owns_work_and_waits_for_the_stable_ending(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))

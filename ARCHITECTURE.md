@@ -2807,7 +2807,7 @@ This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
 Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
-Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
+Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Thinking · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
 The activity tail remains part of the feed's measured height while scrolled away; inspection and Message panels show their own documents instead.
 The `↓` chip uses a permanently reserved row. Its count names newly rendered Activity entries arriving beyond the scan's starting cursor, not invisible Activity positions or replayed provisional entries.
@@ -3020,7 +3020,7 @@ Rui cannot see whether the terminal took the bytes.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
-Before the first answer each says `No answer to copy yet.`; `/copy code` on an answer with no complete fenced block says `No code block in the last answer.` A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).

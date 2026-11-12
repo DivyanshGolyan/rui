@@ -431,7 +431,7 @@ def return_to_live(master, live, key=b"\x1b", timeout=15):
         lambda screen, x, y: composer_ready(screen, x, y) and live(screen), timeout)
 
 
-# The clock that ends a live line ("⠹ Waiting · 12s") redraws every second
+# The clock that ends a live line ("⠹ Thinking · 12s") redraws every second
 # while work runs; it is not a change of what the screen says.
 LIVE_CLOCK = re.compile(r"^([⠹◌?] .+ · )(?:retry \d+ in )?\d+[hms](?: \d+[ms])?$", re.M)
 
