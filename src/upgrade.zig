@@ -188,7 +188,7 @@ fn activateSelected(init: std.process.Init, allocator: std.mem.Allocator, checke
     defer allocator.free(reported);
     const version = HostLifecycle.releaseVersion(reported) orelse return .{ .unconfirmed = .verifying };
     if (version.order(checked.candidate.version) != .eq) return .superseded;
-    return HostLifecycle.activate(init, allocator, &checked.host, selected, checked.candidate.version, cancellation, .{ .context = progress, .report = ActivationProgress.report }) catch .{ .unconfirmed = .starting };
+    return @import("host_coordinator.zig").activate(init, allocator, &checked.host, selected, checked.candidate.version, cancellation, .{ .context = progress, .report = ActivationProgress.report }) catch .{ .unconfirmed = .starting };
 }
 
 pub fn compatible(result: *const Result) bool {

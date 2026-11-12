@@ -5,7 +5,7 @@ if [[ $# == 1 && ( $1 == --help || $1 == -h ) ]]; then
     printf '%s\n' 'Usage: ./install.sh' \
         'Build this checkout and install Rui in ~/.local/bin.' \
         'Requires the Zig version in build.zig.zon and the native build prerequisites.' \
-        'Preserves Stores, credentials, shell profiles and running Hosts.' \
+        'Preserves Stores, credentials and shell profiles. Running Hosts are restarted on the new version.' \
         'Respects ZIG_GLOBAL_CACHE_DIR and XDG_CACHE_HOME.'
     exit 0
 fi
@@ -104,3 +104,9 @@ printf '%s\n' "$revision" >"$release/revision"
 # Keep each complete build: running processes may still use its files.
 published=1
 rui_publish "$prefix" "$release" "$format"
+
+# Restart through the selected command, never a PATH-shadowing older binary.
+# Activation failure does not undo a complete, successfully published install.
+if ! "$prefix/bin/rui" host restart --all; then
+    printf '%s\n' 'Rui was installed, but some Hosts could not be restarted; follow the instructions above and retry rui host restart --all.' >&2
+fi
