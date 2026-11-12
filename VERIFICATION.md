@@ -129,6 +129,7 @@ In the same job and suite, `--running-host` starts the pinned v0.69.1 release on
 The candidate is the existing `upgrade-fixture` production actor with a synthetic numeric release identity (ordinary untagged source builds report `unreleased`); archive transport is local, but checksum verification, extraction, publication and restart use the real release installer.
 The installer must exit 0 and name that Store's restart; without any subsequent start/restart command, status must report a new instance and the socket peer's executable must be the selected candidate and report its release version.
 The saved answer, request binding and configuration must survive without another provider request.
+The real v0.69.1 Host has neither the later `chatgpt` route fact nor a Store hint beside its socket, so this also gates same-wire fact normalization and authenticated socket-probe discovery before exact-instance pause/replacement.
 Startup, install, observation and cleanup are bounded; failures stop both the known previous child and any candidate Host, retain private diagnostics only in the job's artifact directory, and otherwise remove the fixture root after confirmed lease release.
 The historical source pin still tests stopped-Store unsupported-format refusal separately.
 Renderer contracts run nonblocking only for renderer and frontend owners.
@@ -869,6 +870,7 @@ It also restarts a retained managed source Host onto a newly selected managed so
 The lifecycle suite checks a released selection can activate a retained managed source Host through the same version and exact-instance rules.
 `host_restart_all` native unit tests cover every activation outcome (including a verified pinned launch with an incompatible client, counted as restarted with selected-client advice rather than readiness), every limitation and every failed/unconfirmed stage; platform/client tests cover runtime filtering and missing directories.
 The discovery boundary covers missing socket paths, stale refused sockets without hints, live saturated backlogs (immediate refusal on Darwin, pending on Linux) and connected unreadable peers; none grants absence authority without a verified Store lease observation.
+`Host information` decoder unit tests cover current and pre-ChatGPT same-wire replies, every explicit provider route, absent `chatgpt` as `unserved`, required older fields and malformed/unknown/duplicate fields; released wire-9 facts retain their strict profile.
 Additional platform/client cases distinguish a refused socket with its Store lock held from a stale socket with its Store lock free, reject a mismatched hint and verify private publication and clean hint retirement.
 The native restart-all suite explicitly crashes a real Host before its empty-runtime assertion: discovery must silently skip that free-lease socket, retain it without deletion and start nothing. This also covers stale sockets left by earlier lifecycle cases.
 Both installer suites record the exact newly selected command's restart-all invocation, retain its output and require exit zero after a failed restart handoff.
