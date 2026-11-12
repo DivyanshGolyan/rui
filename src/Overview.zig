@@ -613,7 +613,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .tick => {
             // A subsequent event is after App has replaced both the focus
             // path and mouse hit list, including their mouse_leave callbacks.
-            if (self.root.sign_in_open and self.state.default == null) return;
+            if (self.signInIsFirstRun()) return;
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -1155,10 +1155,15 @@ fn listVisible(raw: *anyopaque) bool {
     return self.root.listVisible();
 }
 
+/// The first-run screen is the only thing the app can do, so it stays until
+/// sign-in gives a default; a screen opened from Settings always returns there.
+fn signInIsFirstRun(self: *const Self) bool {
+    return self.root.sign_in_open and !self.root.settings_open and self.state.default == null;
+}
+
 fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    // With no sign-in the input remains the choice, not a task that cannot run.
-    if (self.state.default == null) return;
+    if (self.signInIsFirstRun()) return;
     self.root.sign_in_open = false;
     if (self.root.settings_open) {
         try ctx.requestFocus(self.root.settings_page.widget());
@@ -7336,5 +7341,92 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
         try std.testing.expectEqual(from == .settings, overview.root.settings_open);
         const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
         try std.testing.expect(Nav.focus(&ctx).?.eql(back));
+    };
+}
+
+test "Sign-in Esc at the choice leaves unless the first-run screen has no default, and only that screen holds the overview's tick" {
+    const Origin = enum { first_run, settings };
+    const Nav = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
+            var i = ctx.cmds.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
+            }
+            return null;
+        }
+        fn titled(ctx: *vxfw.EventContext) bool {
+            for (ctx.cmds.items) |command| if (command == .set_title) return true;
+            return false;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Nav.dir = tmp.dir;
+    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |default| for ([_]bool{ false, true }) |retained| {
+        errdefer std.debug.print("sign-in escape: from={s} default={} retained={}\n", .{ @tagName(from), default, retained });
+        Nav.files = 0;
+        var cancellation: client.Cancellation = .{};
+        // A resumed Session with unreadable saved defaults has no default
+        // and reaches sign-in only from Settings.
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = if (default) "codex" else null, .model = if (default) "gpt-6-luna" else null, .sign_in = from == .first_run }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        try std.testing.expectEqual(default, overview.state.default != null);
+        Seen.now.listed = 2;
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        defer {
+            if (overview.app_session) |left| {
+                if (left.frontend) |frontend| frontend.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        if (retained) {
+            overview.hooks.scratch = Nav.scratch;
+            overview.ops.open = openSession;
+            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            overview.app_session.?.frontend.?.reading.opening = false;
+        }
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const page = &overview.sign_in;
+        // The rig gives no launch hooks; nothing here begins an attempt.
+        page.activate = null;
+        page.ready = null;
+        if (from == .settings) {
+            try overview.root.openSettings(&ctx);
+            try overview.openSignIn(&ctx);
+        }
+        try std.testing.expect(overview.root.sign_in_open);
+        try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
+        const stays = from == .first_run and !default;
+        // Only the first-run screen with no default holds the overview's
+        // tick; under any other sign-in the overview and Session are served.
+        ctx.cmds.clearRetainingCapacity();
+        try appEvent(overview, &ctx, .tick);
+        try std.testing.expectEqual(!stays, Nav.titled(&ctx));
+        ctx.cmds.clearRetainingCapacity();
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expectEqual(stays, overview.root.sign_in_open);
+        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
+        if (stays) {
+            try std.testing.expect(Nav.focus(&ctx) == null);
+            continue;
+        }
+        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
+        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
+        try std.testing.expectEqual(retained, overview.root.session != null);
     };
 }
