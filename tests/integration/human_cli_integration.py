@@ -372,7 +372,7 @@ def compiled_model_cases():
         original = saved.read_bytes()
         # Bare rui with the saved unlisted pin goes on to sign-in, not a refusal.
         with terminal_process([str(fixture.RUI), "--store", str(root / "absent-store")], env=env) as (entered, master):
-            shown = read_terminal(master, "Choose Codex login")
+            shown = provider_prompt(master)
             assert "invalid model" not in shown and listing.strip() not in shown, shown
         assert saved.read_bytes() == original
         # The Host starts quietly with an unlisted pin, and leaves it as it is.
