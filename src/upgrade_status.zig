@@ -22,7 +22,8 @@ pub const Version = struct {
 /// Same-user Hosts discovered for the install-wide restart, including skips.
 pub const Host = union(enum) { none, running: usize };
 
-pub const Found = struct { version: Version, host: Host };
+/// Warning census only: the publication target does not exist during preparation.
+pub const Found = struct { host: Host };
 
 /// Why the check installs nothing here. The full reason prints in a shell.
 pub const Refusal = enum { first_install, source_build, unknown_build, package_managed };
@@ -106,7 +107,7 @@ pub fn line(run: Run, buffer: *[max_line_bytes]u8, script: Script) Line {
         .installing => |install| said: {
             switch (install.step) {
                 .preparing => {
-                    writer.print("Upgrading to {f} {s} ", .{ install.found.version, dot }) catch unreachable;
+                    writer.print("Preparing Upgrade {s} ", .{dot}) catch unreachable;
                     switch (install.found.host) {
                         .none => writer.writeAll("no Hosts running") catch unreachable,
                         .running => |count| writer.print("restarts every eligible Host ({d} found)", .{count}) catch unreachable,
@@ -179,22 +180,21 @@ const refusals = std.enums.EnumArray(Refusal, []const u8).init(.{
 comptime {
     // The widest line fits: the longest version, Host count and refusal.
     const version = "0.4294967295.4294967295";
-    std.debug.assert(("Upgrading to " ++ version ++ " · restarts every eligible Host (18446744073709551615 found) · esc cancels").len <= max_line_bytes);
+    std.debug.assert(("Preparing Upgrade · restarts every eligible Host (18446744073709551615 found) · esc cancels").len <= max_line_bytes);
     std.debug.assert(("Rui " ++ version ++ " installed · restart rui to continue · your draft is kept until you leave").len <= max_line_bytes);
     for (refusals.values) |why| std.debug.assert(("Can't upgrade here:  · run rui upgrade in a shell for details").len + why.len + 2 <= max_line_bytes);
 }
 
 test "a run's line: the check, what the restart will do, each step, and a stop" {
-    const v: Version = .{ .schema = 60, .patch = 1 };
     for ([_]struct { Run, []const u8, bool }{
         .{ .checking, "Checking for updates…", true },
-        .{ .{ .installing = .{ .found = .{ .version = v, .host = .{ .running = 2 } } } }, "Upgrading to 0.60.1 · restarts every eligible Host (2 found) · esc cancels", true },
-        .{ .{ .installing = .{ .found = .{ .version = v, .host = .{ .running = 1 } } } }, "Upgrading to 0.60.1 · restarts every eligible Host (1 found) · esc cancels", true },
-        .{ .{ .installing = .{ .found = .{ .version = v, .host = .{ .running = 0 } } } }, "Upgrading to 0.60.1 · restarts every eligible Host (0 found) · esc cancels", true },
-        .{ .{ .installing = .{ .found = .{ .version = v, .host = .none } } }, "Upgrading to 0.60.1 · no Hosts running · esc cancels", true },
+        .{ .{ .installing = .{ .found = .{ .host = .{ .running = 2 } } } }, "Preparing Upgrade · restarts every eligible Host (2 found) · esc cancels", true },
+        .{ .{ .installing = .{ .found = .{ .host = .{ .running = 1 } } } }, "Preparing Upgrade · restarts every eligible Host (1 found) · esc cancels", true },
+        .{ .{ .installing = .{ .found = .{ .host = .{ .running = 0 } } } }, "Preparing Upgrade · restarts every eligible Host (0 found) · esc cancels", true },
+        .{ .{ .installing = .{ .found = .{ .host = .none } } }, "Preparing Upgrade · no Hosts running · esc cancels", true },
         // Once it publishes the line stops offering Esc, and Esc is the screen's.
-        .{ .{ .installing = .{ .found = .{ .version = v, .host = .none }, .step = .publishing } }, "Publishing; cancelling no longer rolls back", false },
-        .{ .{ .installing = .{ .found = .{ .version = v, .host = .none }, .step = .restarting } }, "Restarting Hosts…", false },
+        .{ .{ .installing = .{ .found = .{ .host = .none }, .step = .publishing } }, "Publishing; cancelling no longer rolls back", false },
+        .{ .{ .installing = .{ .found = .{ .host = .none }, .step = .restarting } }, "Restarting Hosts…", false },
         // A second Esc is still the run's while it winds down.
         .{ .cancelling, "Cancelling…", true },
     }) |case| {
@@ -242,7 +242,7 @@ test "how a run ended: a notice, or held until another Upgrade when the client c
 test "ASCII spells the ellipsis and dot" {
     var buffer: [max_line_bytes]u8 = undefined;
     try std.testing.expectEqualStrings("Checking for updates...", line(.checking, &buffer, .ascii).text);
-    try std.testing.expectEqualStrings("Upgrading to 0.60.0 - restarts every eligible Host (2 found) - esc cancels", line(.{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .{ .running = 2 } } } }, &buffer, .ascii).text);
+    try std.testing.expectEqualStrings("Preparing Upgrade - restarts every eligible Host (2 found) - esc cancels", line(.{ .installing = .{ .found = .{ .host = .{ .running = 2 } } } }, &buffer, .ascii).text);
 }
 
 /// Compact state for a Version field. The shell status line can offer recovery
@@ -253,10 +253,7 @@ pub fn fieldTail(run: Run, buffer: *[max_line_bytes]u8) []const u8 {
         .checking => " · checking for updates…",
         .cancelling => " · cancelling…",
         .installing => |install| switch (install.step) {
-            .preparing => {
-                writer.print(" · upgrading to {f}", .{install.found.version}) catch unreachable;
-                return writer.buffered();
-            },
+            .preparing => " · preparing Upgrade…",
             .publishing => " · publishing…",
             .restarting => " · restarting Hosts…",
         },
@@ -291,8 +288,8 @@ test "Upgrade settings field reports state without shell instructions" {
     var buffer: [max_line_bytes]u8 = undefined;
     try std.testing.expectEqualStrings(" · checking for updates…", fieldTail(.checking, &buffer));
     try std.testing.expectEqualStrings(" · cancelling…", fieldTail(.cancelling, &buffer));
-    const found: Found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none };
-    try std.testing.expectEqualStrings(" · upgrading to 0.61.0", fieldTail(.{ .installing = .{ .found = found } }, &buffer));
+    const found: Found = .{ .host = .none };
+    try std.testing.expectEqualStrings(" · preparing Upgrade…", fieldTail(.{ .installing = .{ .found = found } }, &buffer));
     try std.testing.expectEqualStrings(" · publishing…", fieldTail(.{ .installing = .{ .found = found, .step = .publishing } }, &buffer));
     try std.testing.expectEqualStrings(" · restarting Hosts…", fieldTail(.{ .installing = .{ .found = found, .step = .restarting } }, &buffer));
     for ([_]struct { Failure, []const u8 }{
@@ -309,8 +306,8 @@ test "Upgrade settings field reports state without shell instructions" {
         .{ .refused = .package_managed },
         .cancelled,
         .{ .failed = .other },
-        .{ .upgraded = .{ .version = found.version, .restarted = true } },
-        .{ .incompatible = found.version },
+        .{ .upgraded = .{ .version = Version{ .schema = 61, .patch = 0 }, .restarted = true } },
+        .{ .incompatible = Version{ .schema = 61, .patch = 0 } },
     };
     for (endings) |ending| {
         const text = fieldTail(.{ .ended = .{ .how = ending, .outcome = .unchanged } }, &buffer);

@@ -997,7 +997,7 @@ def terminal_cases(root, binary, releases, artifacts):
             screen.contains("›")
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "terminal installation archive gate")
-            screen.contains(f"upgrading to {releases.version}")
+            screen.contains("preparing Upgrade")
             screen.contains("Version")
             screen.save(artifacts, "overview-preparing")
             assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
@@ -1075,7 +1075,7 @@ def conversation_case(root, binary, releases, artifacts):
             screen.contains(f"│ {session} · gpt-6-luna")
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "conversation installation archive gate")
-            screen.contains(f"upgrading to {releases.version}")
+            screen.contains("preparing Upgrade")
             screen.contains("Version")
             screen.save(artifacts, "conversation-preparing")
             assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]

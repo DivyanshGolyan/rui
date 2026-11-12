@@ -7347,6 +7347,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                     const receipt: @import("Installation.zig").Receipt = .{
                         .operation_build = try a.dupe(u8, "/published/build"),
                         .selected_after = try a.dupe(u8, "/published/build"),
+                        .selected_version = .{ .schema = 60, .patch = 0 },
                     };
                     overview.upgrade_job = .{
                         .allocator = a,
