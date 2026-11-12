@@ -129,7 +129,94 @@
         "Rui",
         "Notifications",
         "Sign-in",
-        "Version"
+        "Version",
+        "Keys"
+      ]
+    },
+    {
+      "name": "settings-model",
+      "note": "Open Settings from the overview, move to Model, and open the shared choice",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "✓"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Model",
+        "✓",
+        "gpt-6.1-sol",
+        "Keys"
+      ],
+      "absent": [
+        "Filter:",
+        "↑ "
+      ]
+    },
+    {
+      "name": "settings-model-filter",
+      "note": "Filter the shared settings Model choice by typing sol",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "keys": [
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Up",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "✓"
+        },
+        {
+          "text": "sol"
+        },
+        {
+          "wait": "Model           sol"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Model           sol",
+        "gpt-6.1-sol",
+        "Keys"
+      ],
+      "absent": [
+        "Filter:",
+        "↑ ",
+        "gpt-5.5"
       ]
     },
     {
