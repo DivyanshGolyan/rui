@@ -65,13 +65,18 @@
           ]
         },
         {
-          "wait": "Filter:"
+          "wait": "✓"
         }
       ],
       "expect": [
         "Rui",
-        "Filter:",
+        "Model",
+        "✓",
         "gpt-6.1-sol"
+      ],
+      "absent": [
+        "Filter:",
+        "↑ "
       ]
     },
     {
@@ -99,21 +104,23 @@
           ]
         },
         {
-          "wait": "Filter:"
+          "wait": "✓"
         },
         {
           "text": "sol"
         },
         {
-          "wait": "Filter: sol"
+          "wait": "Model           sol"
         }
       ],
       "expect": [
         "Rui",
-        "Filter: sol",
+        "Model           sol",
         "gpt-6.1-sol"
       ],
       "absent": [
+        "Filter:",
+        "↑ ",
         "gpt-5.5"
       ]
     },

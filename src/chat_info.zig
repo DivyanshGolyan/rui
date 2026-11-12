@@ -138,7 +138,7 @@ fn bind(self: *Self) void {
     self.model_choice.selection = self.panel.selection;
     self.model_choice.quiet = self.panel.quiet;
     self.panel.title_widget = .{ .userdata = self, .drawFn = drawTitle };
-    self.panel.custom_choice = if (self.model_choice.active) .{ .field = 4, .widget = self.model_choice.widget() } else null;
+    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(4) else null;
 }
 
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
@@ -381,7 +381,7 @@ fn drawContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
         .style = self.panel.quiet,
     };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
-    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
 }
 
 fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -773,11 +773,28 @@ test "Chat info model choice is a full-width field and saves a typed model" {
     page.panel.selected = 4;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.model_choice.active);
-    const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 20 }, .cell_size = .{} });
-    const child = surface.children[0].surface.children[1];
-    try std.testing.expectEqual(@as(i17, 0), child.origin.col);
-    try std.testing.expectEqual(@as(u16, 99), child.surface.size.width);
+    for ([_]u16{ 99, 46 }) |width| {
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const parts = surface.children[0].surface.children;
+        const child = parts[parts.len - 1];
+        try std.testing.expectEqual(@as(i17, 0), child.origin.col);
+        try std.testing.expectEqual(width, child.surface.size.width);
+        try std.testing.expectEqual(@as(u16, 19), surface.cursor.?.col);
+        try std.testing.expectEqual(@as(u16, 6), surface.cursor.?.row);
+        try std.testing.expectEqualStrings("C", surface.children[0].surface.readCell(3, 7 + page.panel.custom_height).char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, try dump(&page, arena.allocator(), width, 20), "Filter:") == null);
+    }
     try typeText(&page, &ctx, "5.5");
+    for ([_]u16{ 99, 46 }) |width| {
+        const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try std.testing.expect(screen.cursor_vis);
+        try std.testing.expectEqual(@as(u16, 22), screen.cursor.col);
+        try std.testing.expectEqual(@as(u16, 6), screen.cursor.row);
+        try std.testing.expectEqualStrings("5", screen.readCell(19, 6).?.char.grapheme);
+        try std.testing.expectEqualStrings("C", screen.readCell(3, 7 + page.panel.custom_height).?.char.grapheme);
+    }
     const id = page.model_choice.menu.entries[page.model_choice.selected.?].id;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expectEqualStrings(id, fixture.edit.?.model);

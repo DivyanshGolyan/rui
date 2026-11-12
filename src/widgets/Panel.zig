@@ -8,7 +8,13 @@ const Self = @This();
 pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
 /// A field's full-width choice. The child owns its selection and scrolling.
-pub const CustomChoice = struct { field: usize, widget: vxfw.Widget, height: u16 = 8 };
+pub const CustomChoice = struct {
+    field: usize,
+    widget: vxfw.Widget,
+    /// While open, this replaces the field's saved value at its value column.
+    value_widget: ?vxfw.Widget = null,
+    height: u16 = 8,
+};
 const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bool = false };
 
 title: []const u8,
@@ -148,7 +154,7 @@ fn rowOf(self: *const Self, field: usize) usize {
 }
 
 fn activeRow(self: *const Self) usize {
-    if (self.custom_choice) |choice| return choice.field + 1;
+    if (self.custom_choice) |choice| return choice.field + @as(usize, if (choice.value_widget == null) 1 else 0);
     if (self.choice) |choice| return choice.field + 1 + choice.selected;
     return self.rowOf(@min(self.selected, (self.fields.len + self.actions.len) -| 1));
 }
@@ -159,6 +165,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
     self.targets = &.{};
+    self.custom_origin = 0;
+    self.custom_height = 0;
     if (size.width == 0 or size.height == 0) return surface;
     for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.rule_style });
     if (size.height == 1) return surface;
@@ -174,11 +182,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const count = self.fields.len + self.actions.len;
     if (count > 0) self.selected = @min(self.selected, count - 1);
     const body_height = size.height - 2;
-    self.custom_height = if (self.custom_choice) |choice| @min(choice.height, body_height -| 1) else 0;
+    // The bounded child reports its actual height before subsequent rows are
+    // laid out. Filtering a choice must not leave its old reserved rows.
+    var custom_surface: ?vxfw.Surface = null;
+    if (self.custom_choice) |choice| if (body_height > 1) {
+        custom_surface = try choice.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(choice.height, body_height - 1) }));
+        self.custom_height = custom_surface.?.size.height;
+    };
     const rows = self.fields.len + self.custom_height + (if (self.actions.len > 0) (if (self.stacked_actions) self.actions.len else @as(usize, 1)) + self.action_gap else 0) + if (self.choice) |choice| choice.labels.len else @as(usize, 0);
     const active = self.activeRow();
     if (active < self.scroll) self.scroll = active;
-    const active_end = if (self.custom_choice != null) active + self.custom_height -| 1 else active;
+    const active_end = if (self.custom_choice) |choice| choice.field + self.custom_height else active;
     if (active_end >= self.scroll + body_height) self.scroll = active_end - body_height + 1;
     self.scroll = @min(self.scroll, rows -| body_height);
     var targets: std.array_list.Managed(Target) = .init(ctx.arena);
@@ -190,13 +204,26 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             _ = paintTo(ctx, surface, field.label, 3, row, style, @min(19, size.width));
             // Status/failure words belong to the field, even beside a long
             // saved value. Reserve them here for every Panel consumer.
-            const limit: u16 = @intCast(size.width -| ctx.stringWidth(field.tail orelse ""));
-            const end = paintTo(ctx, surface, field.value, 19, row, style, limit);
-            if (field.tail) |tail| {
-                var quiet = self.quiet;
-                quiet.bg = style.bg;
-                quiet.reverse = style.reverse;
-                _ = paint(ctx, surface, tail, end, row, quiet);
+            const value_widget = if (self.custom_choice) |choice| if (choice.field == index) choice.value_widget else null else null;
+            if (value_widget) |value| {
+                if (size.width > 19) {
+                    const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = size.width - 19, .height = 1 }));
+                    try children.append(.{ .origin = .{ .row = row, .col = 19 }, .surface = drawn });
+                    if (drawn.cursor) |cursor| {
+                        surface.cursor = cursor;
+                        surface.cursor.?.row += row;
+                        surface.cursor.?.col += 19;
+                    }
+                }
+            } else {
+                const limit: u16 = @intCast(size.width -| ctx.stringWidth(field.tail orelse ""));
+                const end = paintTo(ctx, surface, field.value, 19, row, style, limit);
+                if (field.tail) |tail| {
+                    var quiet = self.quiet;
+                    quiet.bg = style.bg;
+                    quiet.reverse = style.reverse;
+                    _ = paint(ctx, surface, tail, end, row, quiet);
+                }
             }
             if (field.selectable) try targets.append(.{ .row = row, .start = 0, .end = size.width, .index = index });
         }
@@ -214,8 +241,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (self.custom_choice) |choice| if (self.custom_height > 0) {
         if (self.visible(choice.field + 1, size.height)) |row| {
             self.custom_origin = row;
-            self.custom_height = @min(self.custom_height, size.height - row);
-            try children.append(.{ .origin = .{ .row = row, .col = 0 }, .surface = try choice.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = self.custom_height })) });
+            try children.append(.{ .origin = .{ .row = row, .col = 0 }, .surface = custom_surface.? });
         }
     };
     {
