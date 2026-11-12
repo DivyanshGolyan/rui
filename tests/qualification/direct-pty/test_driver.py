@@ -59,51 +59,38 @@ class NavigationTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "navigation composer rule"):
                 navigation_rows(screen.replace("─", " "))
 
-    def test_status_work_below_long_path_viewport(self):
+    def test_chat_info_observes_fields_footer_and_fitted_folder(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
-            from scenarios import status_work
+            from scenarios import chat_info_ready
 
         class Terminal:
-            def __init__(self, lines, feed_rows):
-                self.lines, self.top, self.generation = lines, 0, 1
-                self.feed_rows = feed_rows
+            def __init__(self, lines):
+                self.completed = "\n".join(lines)
                 self.screen = self
-                self.markers, self.sent = [], []
 
-            @property
-            def completed(self):
-                return "\n".join(self.lines[self.top:self.top + self.feed_rows])
+            def wait(self, predicate, *, label):
+                assert predicate(), label
 
-            def reached(self, text):
-                return text in self.completed
-
-            def marker(self, text):
-                self.markers.append(text)
-                assert self.reached(text), text
-
-            def send(self, data):
-                self.sent.append(data)
-                self.top += max(1, self.feed_rows // 2)
-                self.generation += 1
-
-            def wait(self, predicate, *, label, after):
-                assert self.generation > after and predicate(), label
-
-        lines = [" Status · aaaaaa", "Permissions     bypass"] + ["long path continuation"] * 27 + [" Work"]
-        for feed_rows in (8, 18, 19, 27):
-            with self.subTest(feed_rows=feed_rows):
-                page_rows = feed_rows // 2
-                tty = Terminal(lines, feed_rows)
-                status_work(tty, "aaaaaa", 1024, feed_rows)
-                self.assertEqual(tty.markers, [" Status · ", " · aaaaaa", "Permissions     "])
-                pages = (len(lines) - feed_rows + page_rows - 1) // page_rows
-                self.assertEqual(tty.sent, [b"\x1b[6~"] * pages)
-                self.assertTrue(tty.reached(" Work"))
-                # Missing Work must fail within a document-derived key budget.
-                missing = Terminal(lines[:-1] + ["missing heading"], feed_rows)
-                with self.assertRaisesRegex(AssertionError, "status Work within bounded page"):
-                    status_work(missing, "aaaaaa", 1024, feed_rows)
-                self.assertLessEqual(len(missing.sent), (14 * 2 + 4 + 2 * 26 + page_rows - 1) // page_rows)
+        lines = ["History line 099", "TD4 history end", "─" * 80, " Chat",
+                 "   Effort          low", "   Permissions     run without asking",
+                 "   Tools           bash", "   Folder          …/long-parent/specimen",
+                 "   Model           gpt-6-luna", "",
+                 "   Rename     Archive     Copy last answer", "", "─" * 80, " › ", "─" * 80,
+                 " ‹ Chat · info       esc close"]
+        chat_info_ready(Terminal(lines), "specimen")
+        # Each contract observation must fail independently; the old /status
+        # page and an Unknown-command notice cannot satisfy panel readiness.
+        for label in ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer", " · info", "esc close"):
+            with self.subTest(missing=label), self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
+                chat_info_ready(Terminal([line.replace(label, "missing") for line in lines]), "specimen")
+        with self.assertRaisesRegex(AssertionError, "chat info fields and footer"):
+            chat_info_ready(Terminal([line.replace("…/long-parent/specimen", "unavailable") for line in lines]), "specimen")
+        for changed, expected in (
+                ([*lines[:-1], " ‹ Chat · info", lines[-1]], "single bottom info footer"),
+                ([line.replace("…/long-parent/specimen", "…/long-parent/spec") for line in lines], "Folder retains basename"),
+                ([*lines[:9], "not a gap", *lines[10:]], "chat info action separator")):
+            with self.subTest(expected=expected), self.assertRaisesRegex(AssertionError, expected):
+                chat_info_ready(Terminal(changed), "specimen")
 
     def test_all_navigation_vectors_keep_their_input_intent(self):
         rows = inventory()
@@ -112,7 +99,10 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual(set(navigation), {
             "key-pgup", "key-pgdn", "key-shift-pgup", "key-shift-up",
             "key-up-csi", "key-up-ss3", "key-end-csi-f", "key-end-ss3-f",
-            "key-end-csi-4", "key-esc", "wheel-alt-scroll", "status"})
+            "key-end-csi-4", "key-esc", "wheel-alt-scroll", "chat-info"})
+        self.assertTrue(navigation["chat-info"]["chat_info"])
+        self.assertEqual(navigation["chat-info"]["chunks"][0]["hex"], b"\x1bi".hex())
+        self.assertEqual(navigation["chat-info"]["return_chunks"][0]["hex"], b"\x1b".hex())
         for name, encoded in (("key-end-csi-f", b"\x1b[F"),
                               ("key-end-ss3-f", b"\x1bOF"),
                               ("key-end-csi-4", b"\x1b[4~")):

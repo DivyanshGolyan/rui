@@ -126,7 +126,7 @@ pub const facts_bytes = session_line.capacity + " · ".len + "Stopping and archi
 
 /// The facts row after `‹ `: the Session's facts in the plan's priority
 /// order (name · model · effort · context, then `asks` in ask mode), else
-/// the Session's name, then the archive badge (`status_page.archiveBadge`)
+/// the Session's name, then the archive badge
 /// while it has one. A standing fact, so it sits here, never in place of a
 /// notice. On a short row the badge stays whole and the facts give way:
 /// whole facts drop from the low-priority end, marked ` · …`, and a name

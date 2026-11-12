@@ -77,8 +77,7 @@ A format refusal is not a successful upgrade.
 
 `cli.configure` currently parses arguments, resolves fresh defaults, captures a
 command, sends it, records admission, and presents the reply.
-Interactive
-`/configure` separately recognizes flags and then rebuilds one-shot argv.
+Chat info submits typed Session configuration edits; the overview’s `/configure` separately recognizes flags and then rebuilds one-shot argv.
 `cli_args.Command.session_configure` also describes the installed grammar.
 The final audit's configuration finding is number 8.
 This proposal changes no
@@ -92,7 +91,7 @@ Keep quoted interactive tokens borrowed only until capture copies
 them.
 Express interactive restrictions as validation of that parsed input:
 terminal stdin cannot supply instructions or schema content, and an attached
-Session cannot change its destination through `/configure`.
+Session cannot change its destination through chat info or `session configure`.
 
 Resolve only omitted fresh-Session fields at a composition boundary before
 capture.

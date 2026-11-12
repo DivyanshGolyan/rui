@@ -104,10 +104,10 @@ def inventory():
         ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 1, 0),
         ("key-esc", b"\x1b[5~", b"\x1b", 1, 0),
         ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 0, 3),
-        ("status", b"/status\r", b"\x1b", 0, 0),
+        ("chat-info", b"\x1bi", b"\x1b", 0, 0),
     ):
         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
-                  "return_chunks": [chunk(leave)], "status": name == "status",
+                  "return_chunks": [chunk(leave)], "chat_info": name == "chat-info",
                   "back": {"pages": pages, "lines": lines}}
         if name == "key-pgdn":
             vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "back": {"pages": 1, "lines": 0}}]

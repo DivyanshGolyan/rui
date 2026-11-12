@@ -1,5 +1,5 @@
 //! A clickable label on one row: `‹`, `↓ 3 new`, `ctrl+x stop`, `ctrl+r
-//! retries`, `+2 more running · /status`. A press and release on it runs
+//! retries`, `+2 more running · info`. A press and release on it runs
 //! `on_click`, the same action as its key; moving off before release
 //! cancels. Hover changes only its look and the pointer shape. It never
 //! takes focus, so the composer keeps typing.
