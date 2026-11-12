@@ -104,7 +104,7 @@ def retained(state, binary, label):
                 cli.terminal_step(master, "/status",
                     prompt if label == "baseline" else " Status · ", composer=label != "baseline")
             samples.append(sample(process.pid))
-        cli.terminal_step(master, "/exit", "Detached.")
+        cli.terminal_step(master, "\x03", "Detached.")
         assert process.wait(timeout=5) == 0
         # Legacy baselines own stdio; the sole frontend additionally owns its
         # unlinked render scratch. A single polling reader may own one socket.

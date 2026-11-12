@@ -914,7 +914,7 @@ def main():
             # withholding output credit or discarding any transcript bytes.
             os.set_blocking(master, False)
             deadline = time.monotonic() + 5
-            assert os.write(master, b"/exit\r") == 6, "incomplete /exit submission"
+            assert os.write(master, b"\x03") == 1, "incomplete Ctrl-C input"
             assert wait_for_terminal_exit(caller, master, output, deadline) == 0, output
             actual_terminal = termios.tcgetattr(slave)
             assert os_semantics.user_termios(actual_terminal) == os_semantics.user_termios(original_terminal), (actual_terminal, original_terminal, output)

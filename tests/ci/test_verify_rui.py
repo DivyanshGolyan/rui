@@ -245,9 +245,12 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(keys.count("C-o"), 2)
         self.assertIn("    output line 18", states["tool-open-long"]["expect"])
         self.assertIn("    … 14 more lines", states["tool-open-long"]["expect"])
-        for name in ("help", "slash"):
-            self.assertIn({"gone": "/details"}, states[name]["steps"])
-        self.assertIn("ctrl+o                 open", states["help"]["expect"])
+        self.assertIn({"gone": "/details"}, states["slash"]["steps"])
+        self.assertNotIn("help", states)
+        self.assertIn("ctrl+o   tool output", states["keys"]["expect"])
+        self.assertIn("ctrl+c   leave", states["keys"]["expect"])
+        self.assertEqual(len(states["keys"]["expect"]), 11)
+        self.assertIn("/help", states["keys"]["absent"])
         self.assertIn("× Fail with exit 127 · exit 127", states["chat"]["expect"])
 
     def test_two_open_folds_select_list_before_resizing_to_the_split_layout(self):
@@ -678,6 +681,14 @@ class FramesTest(unittest.TestCase):
                 self.helper["frames_index"](out, records, False)
                 self.assertEqual([r["ok"] for r in json.loads((out / "frames.json").read_text())],
                                  [reason is None for reason in reasons])
+
+    def test_frame_exit_key_allows_dead_pane_but_text_does_not(self):
+        steps = self.helper["frame_steps"]
+        run = types.SimpleNamespace(tmux=lambda *_args, **_kw: types.SimpleNamespace(returncode=0, stderr=""))
+        with patch.dict(steps.__globals__, {"frame_dead": lambda *_args: True}), patch("time.sleep"):
+            self.assertTrue(steps(run, "pane", [{"keys": [steps.__globals__["EXIT_KEY"]]}]))
+            with self.assertRaises(self.helper["FrameFailure"]):
+                steps(run, "pane", [{"text": "/exit"}])
 
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]

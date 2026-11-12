@@ -608,7 +608,7 @@ An **Operation** is one model request or Action, owning its exact descriptor, ca
 Its optional **Resolution** is its immutable final result; the Operation ID also identifies that result.
 A retry is another [Attempt](#admitting-an-attempt) of the same Operation; a model request admitted against new context or settings is a new Operation.
 
-Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, reasoning/output limits and output contract.
+Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, reasoning/output limits, effective context window and output contract.
 References/digests identify canonical content; runtime facts retain their original rendering references.
 Session facts and Operation admission share one committed per-Session order on their owning records, without a duplicate payload log.
 The Operation's admission position fixes its historical boundary.
@@ -766,6 +766,10 @@ It is null without a trigger and when the next call's purpose does not depend on
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
 `/status` shows it beside the trigger, and the conversation's Session line shows the share of the trigger it leaves.
 Resolve policy once before purpose selection and freeze the effective values on the admitted Operation.
+The Operation INSERT also freezes its model's effective context window from the selected saved-or-shipped catalog, in the same statement and Store hold, with no additional Store round.
+Only absence of a catalog source selects shipped facts; an authoritative saved generation with a missing model or null window uses the 128,000-token unlisted estimate, and a non-null window, including zero, is preserved.
+An overflowing compaction's settlement and successor admission both derive escalation from that failed Operation's frozen window and reservation, never the current catalog or the successor's window.
+A new Operation freezes the then-selected window; retries and replacement Attempts preserve the original.
 Later settings or capability changes cannot change its purpose or retry policy.
 
 The Store keeps usage in Rui's form: four counts, uncached input, cache read, cache write and output, each a whole SQLite integer, all present or all absent.
@@ -1507,6 +1511,10 @@ The step to 64 renames `host_catalog` to `host_tool_set` and `action_operation.b
 The step to 65 freezes each Operation's effective tool offer, retaining its settings revision's offer for old Operations.
 The step to 66 freezes configured effort sources and admitted effort emission/fallback, records immutable refusal provenance in `session_change`, and moves saved wire 12 metadata to 13.
 The step to 68 (D179, D219) adds nullable final-attempt `latency_ms` and `first_event_ms` to `model_operation`, without backfilling old resolutions.
+The step to 69 freezes each model Operation's effective context window as a non-null integer in 0..4294967295, with no default (D238).
+It backfills every old Operation using its frozen settings revision's exact model and a literal mapping of the pre-change shipped snapshot, using 128,000 for absent or null windows, not the mutable saved catalog.
+This pins legacy escalation policy; the old rows did not retain their admission-time saved window, and migration does not claim to recover it.
+Existing floors, levels, counts, resolutions and references are preserved.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -1572,13 +1580,13 @@ MySQL schema application and backup remain operator-owned.
 
 `rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
 `rui upgrade --check` is read-only and starts no Host.
-On the overview and in a conversation, `/upgrade` runs inline on the status row, with no page, without sending `/upgrade` to the model or adding an updater service.
-It is one run whichever screen asked for it: a conversation hands `/upgrade` and Esc to the overview, which runs the worker once its own and the conversation's Client work has settled.
+The Version row of app settings starts an Upgrade run, available from the overview or with a conversation open. The run stays inline on the status row, without sending a command to the model or adding an updater service.
+The overview owns the one run and runs its worker once its own and the conversation's Client work has settled; both screens hand Esc to that run.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
-A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another `/upgrade`; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
+A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another Version-row activation; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
-The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another `/upgrade` is a no-op by it alone.
+The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another Version-row activation is a no-op by it alone.
 A conversation keeps only that its own reading of the Session predates a run: after the run it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
 One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
@@ -1686,7 +1694,7 @@ Request headers come from two owners.
 The codec writes its own once per request from the frozen settings, which carry the Session's affinity, into the prepared request's own bounded storage: at most 8, whose values total at most 192 bytes.
 Each name is a tag of the codec's constant `RequestHeader` enum, so the request stores only its index and the 192 bytes count values alone.
 Each name is a lowercase token that names no field the Host or h2 writes itself (`content-type`, the credential's `authorization` and `chatgpt-account-id`, `user-agent`, `x-openai-fedramp`, every codec's routing header, and h2's `content-length`, `accept-encoding`, `host` and connection fields) and no earlier header, and each value is printable ASCII without a leading or trailing space; a built-in codec's headers are tested against these rules over its settings domain rather than checked at runtime.
-The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT sign-in's `authorization` and `chatgpt-account-id`, or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
+The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT device sign-in's `authorization` and `chatgpt-account-id`, or a ChatGPT plan sign-in's or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
 A route without a credential sends the codec's headers and no credential-path fields.
 To classify an HTTP error body, the shell maps the sealed body read-only and gives it whole, as one slice, to the classifier of the codec the request was encoded with, with scratch the shell lends for that call and the classifier writes before it reads.
 The classifier writes its answer into one value the shell lends: context overflow, or else the `codec_abi.Refusal` its code names with the reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
@@ -2484,7 +2492,7 @@ The built-in providers are Codex, OpenAI and ChatGPT; they share one catalog and
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
 The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
-Conversation `/login` does not invoke this chooser.
+Authentication remains an explicit shell operation, separate from the conversation.
 Denial/expiry leaves preferences unchanged.
 After secure credential installation, explicit `rui auth login codex`, like saving an OpenAI key, atomically fills only its own provider when no provider default exists; choosing a provider in the bare-entry chooser saves it as the default, leaving the model unpinned and preserving an existing choice even if unsupported.
 Failure of that independent preference save is reported without claiming credential rollback.
@@ -2522,11 +2530,11 @@ It captures each exact Message before transmission and observes Host activity wi
 Permission presents one exact Action above an Allow once / Deny choice that a fresh Enter confirms: Bash keeps its description and complete decoded command; MCP shows its frozen tool name and server, its call description when present, and the original JSON arguments.
 Queued chat, typeahead and marked paste authorize nothing.
 The durable decision retains that exact target for Host revalidation.
-One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal; `/inspect-action` also prints executable `rui action allow`/`deny` commands.
+One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal.
 `/configure` changes settings for this Session (including its immutable Workspace check).
 Instructions require a separate one-shot `session configure --instructions -`; schema input uses a file path rather than terminal stdin.
 `/status` shows the Session's settings, its Store and the defaults new Sessions start from, the work with its current message and the recent messages whose answers `/result KEY` shows; `/requests` lists this machine's local recovery handles; `/setup` edits only future defaults.
-`/wait` and `/login` are unsupported within the conversation; explicit operator authentication remains separate.
+Explicit operator authentication remains separate from the conversation.
 Re-entry uses Host facts, not local saved-request guesses.
 An unknown Session requires explicit configuration before entry.
 Terminal input and output are required; redirection rejects rather than silently changing semantics.
@@ -2573,7 +2581,6 @@ On a typed draft Ctrl-P says to empty the draft first, even while a step is read
 Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds the input, Ctrl-P and Ctrl-N do nothing and presses not yet read are dropped; a step already read still lands on the draft.
 Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
 Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is ignored without a notice as it arrives, leaving the draft unchanged (Divyansh’s decision): ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
-If the conversation shortcuts overlay is open, the key closes it first; the unbound chord otherwise does nothing.
 ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
 Alt-Enter adds a line like Shift-Enter and Ctrl-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
 A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
@@ -2707,8 +2714,8 @@ These client choices do not change existing Sessions, the Host's fixed fallback 
 The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the selected catalog's OpenAI IDs because it has no public list.
 The Host refreshes the models.dev fact catalog and saves it across Host runs.
 Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
-Historical compaction escalation for an already frozen Operation deliberately uses shipped windows: settlement and later admission independently recompute the same deeper floor, and no Store field freezes a saved catalog window between those calls.
-Using a refreshed window there could make their decisions disagree and produce `CorruptStore`; changing that historical rule requires an explicit freeze/format decision.
+Each new model Operation freezes the selected catalog's effective context window on its own row (D238).
+Historical compaction escalation reads only that frozen value, so a refresh between admission, overflow settlement and successor admission cannot change the failed Operation's deeper floor or make the two decisions disagree.
 Offline CLI defaults can therefore be refused by Host admission when its saved facts differ; the CLI does not silently substitute another model, effort or threshold.
 There is no model-list command.
 Help needs no Host or credentials.
@@ -2922,7 +2929,7 @@ Standalone zero-width output clusters, clusters wider than eight cells and clust
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
 
-`/status`, `/requests` and `/help` render selected inspections without changing the draft.
+`/status` and `/requests` render selected inspections without changing the draft.
 `/status` is rendered by the next settled live read from that read's own Current capture, and shows in the same step as that read's history and composer status, so the page never disagrees with them.
 While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
 A live read's failure is the same failure with or without `/status`.
@@ -2951,16 +2958,16 @@ Nothing typed while paused can authorize.
 Reading the final page requires fresh input after the completed prompt.
 A preview over 256 KiB cannot authorize an Action in this UI; exact one-shot inspection and decision commands remain available, including in the restored main-screen detach or fatal-renderer notice.
 Marked paste never grants permission.
-`/configure`, `/setup`, `/result KEY` and `/inspect-action` run on the reader worker once the current read finishes; editing continues, but a Message waits for the command.
+`/configure`, `/setup` and `/result KEY` run on the reader worker once the current read finishes; editing continues, but a Message waits for the command.
 Their unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
-`/discard`, `/recover KEY`, `/wait` and `/login` answer with a notice; an unknown command shows `! Unknown command /NAME · /help`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
+`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-`slash_commands.zig` holds one table per screen of each command's name, argument shape and one-line description; the draft's parser, the command runner, the list and `/help`'s command lines read it, and `/wait` and `/login` stay out of the list and `/help`.
-`/requests`, `/recover`, `/result`, `/inspect-action` and `/discard` are for recovery: they work and `/help` names them, but the list leaves them out (Divyansh, 2026-11-02).
+`slash_commands.zig` holds one table per screen of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too.
+`/requests`, `/recover`, `/result` and `/discard` are for recovery: they work, but the list leaves them out (Divyansh, 2026-11-02).
 `/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
 The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
 Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (23 of them, the list's rows less that one), the original included when it has no `/recover` row.
@@ -2981,11 +2988,15 @@ Enter in a shown list takes the highlighted row: a command with nothing more to 
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/configure`, `/exit`, `/help`, `/model`, `/rename` and `/setup`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
-Both screens share `/help`, `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME · /help` (Divyansh, 2026-11-02: "Same commands both screens").
-The overview's `/help` replaces the Sessions' rows with a panel headed `Help`, `Esc returns` at its right: the overview's keys, then its commands as its table lists them.
-A screen too small for the whole panel says `! Screen too small for /help` instead, as `/model` does; one that shrinks under it shows the lines that fit and counts the rest.
-Esc or Ctrl-G, past a shown command list, closes the panel and keeps the draft, and the line under the input says `esc close` while it shows; a key that acts on a Session (one that selects, Ctrl-X, Enter on an empty draft) and `/rename` close it first and act where the Sessions show.
+The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
+There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
+The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
+Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in aligned row-major pairs when they fit, or one column otherwise: no title, footer or instructions.
+One `ctrl+x` stops work; it does not require two presses.
+`keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key is listed or explicitly marked as an alias of one listed row, and neither rows nor aliases name unbound keys.
+`keys_panel` derives fields from those rows; `Panel.KeyList` reuses the Panel's cell clipping, without selection or an event handler.
+`AppSettings` owns whether the reference is open; Esc or Ctrl-G closes it back to Settings before any choice, Upgrade cancellation or settings-page close, never leaving a conversation through that first press.
 The overview's `/rename NAME` names the selected Session and `/setup [OPTIONS]` saves defaults with no Session, each through the same CLI owner a conversation's runs, on the overview's worker with stdout and stderr in an unlinked scratch file; without a selected Session `/rename` says `! Select a Session first.`, as Ctrl-X does.
 With no Session, the overview's `/setup` says `Saved defaults for future Sessions.` and its failures name no Session, where a conversation's add that the active Session is unchanged.
 One command runs at a time, and Enter on an empty draft waits for it too, since a conversation's commands write to the same stdout and stderr; either says `! Wait for /NAME to finish.`
@@ -3143,7 +3154,7 @@ MCP displays `? <saved description>` (at most 200 decoded UTF-8 bytes), `Tool`, 
 The description is extracted once at settlement from `rui_call_description`: a valid nonblank, single-line UTF-8 string of 1–200 bytes is saved; missing, non-string, blank, multi-line or oversized text falls back to the tool name.
 The terminal and TypeScript feed read the saved line, never re-parse arguments for it.
 The client retains that bounded saved line; it does not interpret the server's schema.
-`/inspect-action` shares this MCP presentation; raw one-shot inspection stays exact.
+Raw one-shot `rui action inspect` stays exact.
 A permission request replaces the composer's two rules and input rows with a focused card.
 The draft stays hidden, with its bytes and caret intact, until the request is answered or withdrawn.
 A taller command stays scrollable without an instructional overflow line; Allow once acts even when some command rows are off screen.
@@ -3176,14 +3187,14 @@ A definite stale-target rejection remains the original until explicit `/discard`
 The next draft and cursor survive choice and recovery.
 Tool outcomes start folded; opening a row shows bounded escaped saved output in place, and raw Conversation export remains unchanged.
 
-`/inspect-action` freshly inspects the first actionable exact Action through the existing CLI diagnostics path, shown as an inspection page.
+Exact one-shot diagnostics remain available through `rui action inspect`.
 It sends no decision.
 Inspection displays Workspace, complete arguments and executable exact-target one-shot allow/deny commands.
 Shared shell-selector emission preserves exact bytes while keeping controls and bidi bytes out of displayed commands.
 Slash text deliberately replaces normal composition; the original submission remains pinned.
 Inspection does not reserve an Action.
-`/exit` loses the unsent in-memory draft.
-`/wait` and `/login` are rejected so no nested legacy raw-terminal owner can run; login uses the explicit one-shot command.
+Ctrl-C leaves and loses the unsent in-memory draft; Ctrl-D also leaves where the current input accepts it.
+Deleted app command names (`/upgrade`, `/login`, `/wait`, `/inspect-action`, `/exit`) follow the ordinary unknown-command path on both screens; login uses the explicit one-shot command.
 A pending command or inspection waits for the current observation.
 A read that has delivered no output is cancelled and later repeated; once the UI owns a nonempty window, that read completes first, so output is never replayed.
 Only a successful joined observation advances Current and the activity cursor.
@@ -3651,14 +3662,13 @@ Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
 Bash and `bypass`, the default, stay quiet: no notice or banner announces them. Permission mode is a setting and never appears as a chat-footer suffix.
-`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it, and `/help` describes the Session line.
+`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 Successful conversation omits protocol receipts and follow reminders; original captured request handles remain available through `/requests`.
 If opening a Session started from the overview fails after its `session start` was confirmed, best-effort stderr guidance retains that request handle and an executable exact Store/Session resume command while preserving the original failure.
 This reports admission only, not completion, and does not promise delivery under stderr contention or failed output credit.
-`/help` describes the implemented Session commands and one-shot login route.
 These are presentation choices over existing Host facts, not new conversation or recovery authority; one-shot and JSON output remain unchanged.
 
 ### Connection capacity and control headroom
