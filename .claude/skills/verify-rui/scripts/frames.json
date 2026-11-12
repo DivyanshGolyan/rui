@@ -41,6 +41,37 @@
       ]
     },
     {
+      "name": "mouse-settings",
+      "note": "Click the pinned Settings row using terminal mouse modes",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Settings"
+        },
+        {
+          "mouse": {
+            "at": "Settings",
+            "do": "move"
+          }
+        },
+        {
+          "mouse": {
+            "at": "Settings",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Notifications"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Notifications",
+        "Sign-in",
+        "Version"
+      ]
+    },
+    {
       "name": "start",
       "note": "02-overview",
       "open": "overview",
@@ -269,6 +300,9 @@
           ]
         },
         {
+          "wait": "    stderr tail:"
+        },
+        {
           "gone": "Opening tool output…"
         },
         {
@@ -305,6 +339,9 @@
           "keys": [
             "C-o"
           ]
+        },
+        {
+          "wait": "    Bash succeeded. Exit code: 0."
         },
         {
           "gone": "Opening tool output…"
@@ -440,11 +477,27 @@
       "note": "chat draft and caret kept after Esc and reopening",
       "open": "Fix retry deadline",
       "steps": [
-        { "text": "Keep this chat draft" },
-        { "keys": ["Left", "Left", "Esc"] },
-        { "wait": "Type a task" },
-        { "keys": ["Enter"] },
-        { "wait": "Keep this chat draft" }
+        {
+          "text": "Keep this chat draft"
+        },
+        {
+          "keys": [
+            "Left",
+            "Left",
+            "Esc"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Keep this chat draft"
+        }
       ],
       "expect": "Keep this chat draft"
     },
@@ -562,7 +615,7 @@
           "wait": "retry policy notes"
         },
         {
-          "wait": "return null; //\n    expired"
+          "wait": "return null; //\n     expired"
         }
       ],
       "expect": [
@@ -978,7 +1031,7 @@
           "text": "/model"
         },
         {
-          "wait": "tab sign-in"
+          "wait": "enter pick / esc close"
         }
       ]
     },
@@ -1081,6 +1134,9 @@
       "note": "51b-many-sessions-end",
       "open": "overview",
       "steps": [
+        {
+          "wait": "Batch job"
+        },
         {
           "keys": [
             "Down",
@@ -1259,7 +1315,7 @@
     },
     {
       "name": "exit",
-      "note": "81-exit",
+      "note": "81-exit: quiescent main-screen diagnostic after Rui exits",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -1274,14 +1330,14 @@
           "wait": "Detached. Host work continues."
         },
         {
-          "wait": "Pane is dead (status 0"
+          "exited": 0
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Pane is dead (status 0"
+      "expect": "Detached. Host work continues."
     }
   ]
 }

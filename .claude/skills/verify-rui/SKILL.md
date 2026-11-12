@@ -18,7 +18,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
    ```
 
-   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` in containers that cannot build libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term` and `wait` refuse such builds with one line; direct tmux terminals and `frames` work. A build made before the library existed has none; rebuild it with `--force` to add it.
+   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` in containers that cannot build libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
 2. **New run, one per experiment.**
 
@@ -58,10 +58,14 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 ## Frames
 
 ```sh
-$V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--no-png] [--keep]
+$V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--record] [--no-png] [--keep]
 ```
 
-Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). These are L2 layout captures, not physical-input proof. State `expect` markers must be present and optional `absent: ["TEXT", ...]` markers must be absent from every saved capture at every size.
+Runs each named state in `scripts/frames.json` on a plain PTY, with libghostty-vt answering terminal queries and observing committed cells. Requires a build with `screen_library` (`build` without `--no-screen`); no tmux. Text, re-encoded ANSI, HTML and 2× PNG share those cells, including terminal theme, styles and cursor. PNG requires Node/Playwright/Chromium.
+
+`--record` (or state `"record": true`) saves first-size transitions as an inline-PR GIF, plus optional MP4 when ffmpeg exists. Recordings use the same HTML renderer, deduplicate unchanged pictures, coalesce playback into 80 ms buckets (latest wins), bound frame delays to 60–1500 ms and hold the last frame for 2 s. Requires PNG rendering and ffmpeg or Pillow. The index displays GIFs when present.
+
+Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html`, `frames.json` results and failure captures. Cleans up unless `--keep`; PTYs always close. `expect`/`absent` apply to every size. These are L1 synthetic PTY layout/transition captures, not physical-input proof. See [scenario format and selection](features/frames.md), including mouse steps.
 
 ## Doctor
 

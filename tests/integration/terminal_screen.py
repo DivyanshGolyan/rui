@@ -26,7 +26,9 @@ RESTORE = b"\x1b[?2026l\x1b[0m\x1b[?2004l\x1b[?1004l\x1b[?25h\x1b[?1049l"
 # and "" for a wide character's second cell; `fg` is None for the default
 # foreground, a palette index, or "rrggbb". `reverse`: drawn in reverse
 # video, the only mark of a highlighted button.
-Cell = collections.namedtuple("Cell", "data fg bold reverse", defaults=(False,))
+Cell = collections.namedtuple(
+    "Cell", "data fg bold reverse bg italic faint underline strike invisible blink overline fg_rgb underline_rgb",
+    defaults=(False, None, False, False, 0, False, False, False, False, None, None))
 Cursor = collections.namedtuple("Cursor", "x y")
 # The screen as it stands outside a synchronized frame: `display` holds one
 # string per row, a character per drawn cell.
@@ -35,6 +37,19 @@ Screen = collections.namedtuple("Screen", "columns lines cursor display")
 # The profile the observer's terminal answers queries with: Ghostty's default
 # dark background, reported to OSC 11 and as a dark scheme to CSI ? 996 n.
 BACKGROUND = (0x28, 0x2c, 0x34)
+
+
+class Frame(collections.namedtuple("Frame", "columns lines cursor visible cells background foreground cursor_color")):
+    """Immutable committed cells and terminal colors, independent of future output."""
+    __slots__ = ()
+
+    @property
+    def text(self):
+        return "\n".join("".join(cell.data for cell in row).rstrip() for row in self.cells)
+
+    def colors(self, cell):
+        fg, bg = cell.fg_rgb or self.foreground, cell.bg or self.background
+        return (bg, fg) if cell.reverse else (fg, bg)
 
 
 def shown(text, screen):
@@ -49,7 +64,7 @@ def shown(text, screen):
 Handle = ctypes.c_void_p
 WRITE_PTY = ctypes.CFUNCTYPE(None, Handle, Handle, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t)
 COLOR_SCHEME = ctypes.CFUNCTYPE(ctypes.c_bool, Handle, Handle, ctypes.POINTER(ctypes.c_int))
-OPT_USERDATA, OPT_WRITE_PTY, OPT_COLOR_SCHEME, OPT_COLOR_BACKGROUND = 1, 2, 8, 13
+OPT_USERDATA, OPT_WRITE_PTY, OPT_COLOR_SCHEME, OPT_COLOR_FOREGROUND, OPT_COLOR_BACKGROUND = 1, 2, 8, 12, 13
 DATA_CURSOR_X, DATA_CURSOR_Y = 3, 4
 STATE_DIRTY, STATE_ROW_ITERATOR = 3, 4
 ROW_DIRTY, ROW_CELLS = 1, 3
@@ -62,6 +77,15 @@ OUT_OF_SPACE = -3
 
 class Rgb(ctypes.Structure):
     _fields_ = [("r", ctypes.c_uint8), ("g", ctypes.c_uint8), ("b", ctypes.c_uint8)]
+
+
+class MousePosition(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float)]
+
+
+class MouseSize(ctypes.Structure):
+    _fields_ = [("size", ctypes.c_size_t)] + [(name, ctypes.c_uint32) for name in
+                ("width", "height", "cell_width", "cell_height", "top", "bottom", "right", "left")]
 
 
 class StyleColor(ctypes.Structure):
@@ -107,7 +131,17 @@ def library():
                 ("ghostty_render_state_row_cells_free", [Handle], None),
                 ("ghostty_render_state_row_cells_next", [Handle], ctypes.c_bool),
                 ("ghostty_render_state_row_cells_get", [Handle, ctypes.c_int, ctypes.c_void_p], ctypes.c_int),
-                ("ghostty_cell_get", [ctypes.c_uint64, ctypes.c_int, ctypes.c_void_p], ctypes.c_int)):
+                ("ghostty_cell_get", [ctypes.c_uint64, ctypes.c_int, ctypes.c_void_p], ctypes.c_int),
+                ("ghostty_mouse_encoder_new", [Handle, ctypes.POINTER(Handle)], ctypes.c_int),
+                ("ghostty_mouse_encoder_free", [Handle], None),
+                ("ghostty_mouse_encoder_set", [Handle, ctypes.c_int, Handle], ctypes.c_int),
+                ("ghostty_mouse_encoder_set_from_terminal", [Handle, Handle], ctypes.c_int),
+                ("ghostty_mouse_encoder_encode", [Handle, Handle, Handle, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)], ctypes.c_int),
+                ("ghostty_mouse_event_new", [Handle, ctypes.POINTER(Handle)], ctypes.c_int),
+                ("ghostty_mouse_event_free", [Handle], None),
+                ("ghostty_mouse_event_set_action", [Handle, ctypes.c_int], ctypes.c_int),
+                ("ghostty_mouse_event_set_button", [Handle, ctypes.c_int], ctypes.c_int),
+                ("ghostty_mouse_event_set_position", [Handle, MousePosition], ctypes.c_int)):
             function = getattr(lib, name)
             function.argtypes, function.restype = arguments, result
         _library = lib
@@ -135,7 +169,7 @@ def _write_pty(terminal, userdata, data, length):
 
 @COLOR_SCHEME
 def _color_scheme(terminal, userdata, scheme):
-    scheme[0] = 1  # Dark, matching BACKGROUND.
+    scheme[0] = _terminals[userdata].color_scheme
     return True
 
 
@@ -143,7 +177,10 @@ class ScreenCapture:
     """`reply` takes each answer the terminal gives a query, to write to the
     PTY the query came from; None drops them, for a silent terminal."""
 
-    def __init__(self, columns=80, rows=24, *, reply=None):
+    def __init__(self, columns=80, rows=24, *, reply=None, background=None, foreground=None, color_scheme="dark"):
+        if color_scheme not in ("dark", "light"):
+            raise ValueError("color_scheme must be dark or light")
+        self.color_scheme = 1 if color_scheme == "dark" else 0
         lib = library()
         self.terminal, self.state = Handle(), Handle()
         self.rows_iterator, self.row_cells = Handle(), Handle()
@@ -158,7 +195,9 @@ class ScreenCapture:
         assert lib.ghostty_terminal_set(self.terminal, OPT_USERDATA, self.key) == 0
         assert lib.ghostty_terminal_set(self.terminal, OPT_WRITE_PTY, ctypes.cast(_write_pty, ctypes.c_void_p)) == 0
         assert lib.ghostty_terminal_set(self.terminal, OPT_COLOR_SCHEME, ctypes.cast(_color_scheme, ctypes.c_void_p)) == 0
-        assert lib.ghostty_terminal_set(self.terminal, OPT_COLOR_BACKGROUND, ctypes.byref(Rgb(*BACKGROUND))) == 0
+        assert lib.ghostty_terminal_set(self.terminal, OPT_COLOR_BACKGROUND, ctypes.byref(Rgb(*(BACKGROUND if background is None else background)))) == 0
+        if foreground is not None:
+            assert lib.ghostty_terminal_set(self.terminal, OPT_COLOR_FOREGROUND, ctypes.byref(Rgb(*foreground))) == 0
         self.reply = reply
         self.replies = []
         self.grapheme = ctypes.create_string_buffer(64)
@@ -171,6 +210,7 @@ class ScreenCapture:
         self.completed = ""
         # Cells of the latest committed frame, for style oracles.
         self.completed_cells = []
+        self.frame = None
         self.synchronized = False
         self.generation = 0
         # Optional observer of every committed frame, not only the latest:
@@ -219,6 +259,12 @@ class ScreenCapture:
         lib = library()
         get = lib.ghostty_render_state_row_cells_get
         cells, style, raw, wide = [], Style(), ctypes.c_uint64(), ctypes.c_int()
+        def resolved(option):
+            rgb = Rgb()
+            result = get(self.row_cells, option, ctypes.byref(rgb))
+            assert result in (0, -4), result  # SUCCESS or NO_VALUE
+            return bytes(rgb).hex() if result == 0 else None
+
         while lib.ghostty_render_state_row_cells_next(self.row_cells):
             text = Buffer(ctypes.cast(self.grapheme, ctypes.c_void_p), len(self.grapheme), 0)
             result = get(self.row_cells, CELL_GRAPHEMES_UTF8, ctypes.byref(text))
@@ -237,7 +283,18 @@ class ScreenCapture:
             colour = style.fg
             fg = (colour.value[0] if colour.tag == COLOR_PALETTE
                   else bytes(colour.value).hex() if colour.tag == COLOR_RGB else None)
-            cells.append(Cell(data, fg, bool(style.flags & STYLE_BOLD), bool(style.flags & STYLE_INVERSE)))
+            underline = style.underline
+            if underline.tag == COLOR_PALETTE:
+                palette = (Rgb * 256)()
+                assert lib.ghostty_render_state_get(self.state, 9, ctypes.byref(palette)) == 0
+                underline_rgb = bytes(palette[underline.value[0]]).hex()
+            else:
+                underline_rgb = bytes(underline.value).hex() if underline.tag == COLOR_RGB else None
+            flags = style.flags
+            cells.append(Cell(data, fg, bool(flags & STYLE_BOLD), bool(flags & STYLE_INVERSE),
+                              resolved(5), bool(flags & 2), bool(flags & 4), (flags >> 8) & 7,
+                              bool(flags & 64), bool(flags & 32), bool(flags & 8), bool(flags & 128),
+                              resolved(6), underline_rgb))
         assert len(cells) == self.columns, (len(cells), self.columns)
         return tuple(cells)
 
@@ -334,13 +391,58 @@ class ScreenCapture:
                 self.synchronized = True
             else:
                 self.synchronized = False
-                self.view = self.snapshot()
-                self.generation += 1
-                self.completed = "\n".join(line.rstrip() for line in self.view.display)
-                self.completed_cells = list(self.cells_by_row)
-                assert len(self.completed.encode()) < LIMIT
-                if self.listener is not None:
-                    self.listener(self.completed, self.view.cursor.x, self.view.cursor.y)
+                self.commit()
+
+    def commit(self):
+        """Commit a synchronized close, or the quiescent final screen at PTY EOF."""
+        assert not self.synchronized, "cannot commit an incomplete synchronized update"
+        self.view = self.snapshot()
+        lib = library()
+        visible, background, foreground, cursor = ctypes.c_bool(), Rgb(), Rgb(), Rgb()
+        assert lib.ghostty_render_state_get(self.state, 11, ctypes.byref(visible)) == 0
+        assert lib.ghostty_render_state_get(self.state, 5, ctypes.byref(background)) == 0
+        assert lib.ghostty_render_state_get(self.state, 6, ctypes.byref(foreground)) == 0
+        result = lib.ghostty_render_state_get(self.state, 7, ctypes.byref(cursor))
+        assert result in (0, -4), result
+        self.frame = Frame(self.columns, self.lines, self.view.cursor, visible.value, tuple(self.cells_by_row),
+                           bytes(background).hex(), bytes(foreground).hex(),
+                           bytes(cursor).hex() if result == 0 else bytes(foreground).hex())
+        self.generation += 1
+        self.completed = self.frame.text
+        self.completed_cells = list(self.frame.cells)
+        assert len(self.completed.encode()) < LIMIT
+        if self.listener is not None:
+            self.listener(self.completed, self.view.cursor.x, self.view.cursor.y)
+
+    def mouse(self, action, col, row, button="left", *, pressed=False):
+        """Encode a zero-based cell position using the terminal's current mouse modes.
+
+        The caller owns held-button state across steps. No reporting mode means
+        no bytes, not a synthetic SGR report the terminal would never send.
+        """
+        lib, encoder, event = library(), Handle(), Handle()
+        assert lib.ghostty_mouse_encoder_new(None, ctypes.byref(encoder)) == 0
+        try:
+            assert lib.ghostty_mouse_event_new(None, ctypes.byref(event)) == 0
+            assert lib.ghostty_mouse_encoder_set_from_terminal(encoder, self.terminal) == 0
+            geometry = MouseSize(ctypes.sizeof(MouseSize), self.columns * 8, self.lines * 16, 8, 16, 0, 0, 0, 0)
+            assert lib.ghostty_mouse_encoder_set(encoder, 3, ctypes.byref(geometry)) == 0
+            held = ctypes.c_bool(pressed)
+            assert lib.ghostty_mouse_encoder_set(encoder, 4, ctypes.byref(held)) == 0
+            assert lib.ghostty_mouse_event_set_position(event, MousePosition(col * 8 + 4, row * 16 + 8)) == 0
+            assert lib.ghostty_mouse_event_set_action(event, {"press": 0, "release": 1, "move": 2,
+                                                            "wheel-up": 0, "wheel-down": 0}[action]) == 0
+            identity = {"left": 1, "right": 2, "middle": 3}[button]
+            if action.startswith("wheel-"):
+                identity = 4 if action == "wheel-up" else 5
+            if action != "move" or pressed:
+                assert lib.ghostty_mouse_event_set_button(event, identity) == 0
+            buf, length = ctypes.create_string_buffer(128), ctypes.c_size_t()
+            assert lib.ghostty_mouse_encoder_encode(encoder, event, buf, len(buf), ctypes.byref(length)) == 0
+            return buf.raw[:length.value]
+        finally:
+            lib.ghostty_mouse_event_free(event)
+            lib.ghostty_mouse_encoder_free(encoder)
 
     def style(self, text, offset=0):
         """Committed cell `offset` characters into the first `text`, or None."""

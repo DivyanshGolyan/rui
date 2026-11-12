@@ -17,6 +17,15 @@ from unittest.mock import patch
 SCRIPT = Path(__file__).parents[2] / ".claude/skills/verify-rui/scripts/verify-rui"
 
 
+sys.path.insert(0, str(SCRIPT.parents[4] / "tests/integration"))
+from terminal_screen import Cell, Cursor, Frame
+
+
+def committed(text, columns=100, lines=20):
+    rows = tuple(tuple(Cell(char, None, False) for char in row) for row in text.rstrip("\n").split("\n"))
+    return Frame(columns, lines, Cursor(2, 3), False, rows, "121933", "d4cebf", "d4cebf")
+
+
 class VerifyRuiTest(unittest.TestCase):
     def test_child_imports_user_site_with_synthetic_home(self):
         run_type = runpy.run_path(str(SCRIPT))["Run"]
@@ -131,6 +140,173 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_mouse_steps_validate_shared_nested_shape(self):
+        validate = self.helper["validate_scenario"]
+        for action in ("move", "click", "press", "release", "wheel-up", "wheel-down"):
+            for target in ("Settings", [0, 0], [139, 39]):
+                for button in ("left", "right", "middle"):
+                    data = self.scenario()
+                    data["states"][0].update(steps=[{"mouse": {"at": target, "do": action, "button": button}}], expect=[])
+                    self.assertEqual(validate(data)["states"][0]["steps"], data["states"][0]["steps"])
+        for value in ("click", {}, {"at": "Settings"}, {"at": "Settings", "do": "hover"},
+                      {"at": "", "do": "click"}, {"at": "bad\nrow", "do": "click"},
+                      {"at": [-1, 0], "do": "click"}, {"at": [True, 0], "do": "click"},
+                      {"at": [0], "do": "click"}, {"at": "Settings", "do": "click", "button": "four"},
+                      {"at": "Settings", "do": "click", "on": "text"}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                data = self.scenario()
+                data["states"][0]["steps"] = [{"mouse": value}]
+                validate(data)
+        data = self.scenario()
+        data["states"][0]["record"] = "true"
+        with self.assertRaisesRegex(ValueError, "record"):
+            validate(data)
+
+    def test_mouse_targets_first_drawn_cell_and_records_no_reporting_mode(self):
+        import threading
+        owner = self.helper["FrameTerminal"]
+        frame = committed("中Settings Settings")
+        row = (Cell("中", None, False), Cell("", None, False)) + frame.cells[0][1:]
+        frame = frame._replace(cells=(row,))
+        for payload in (b"", b"encoded"):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temp:
+                terminal = owner.__new__(owner)
+                terminal.condition = threading.Condition()
+                terminal.error = None
+                terminal.pressed = None
+                terminal.log = Path(temp)
+                events, writes = [], []
+                terminal.capture = types.SimpleNamespace(frame=frame, mouse=lambda *args, **kw:
+                    (events.append((args, kw)) or payload))
+                terminal.write = lambda data, _kind: writes.append(data)
+                terminal.mouse({"at": "Settings", "do": "click"})
+                self.assertEqual([event[0] for event in events], [("press", 2, 0, "left"), ("release", 2, 0, "left")])
+                self.assertEqual([event[1]["pressed"] for event in events], [False, True])
+                self.assertEqual(writes, [payload, payload] if payload else [])
+                self.assertEqual([r["emitted"] for r in self.helper["read_jsonl"](terminal.log / "mouse.jsonl")], [bool(payload)] * 2)
+                with self.assertRaisesRegex(self.helper["FrameFailure"], "absent from committed frame"):
+                    terminal.mouse({"at": "absent", "do": "move"})
+                with self.assertRaisesRegex(self.helper["FrameFailure"], "outside"):
+                    terminal.mouse({"at": [100, 0], "do": "click"})
+
+    def test_recording_keeps_every_timestamp_dedupes_cells_and_bounds_delays(self):
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            recorder = self.helper["FrameRecording"](out, "state@100x20")
+            for text, t_ns in (("first", 0), ("first", 1_000_000_000),
+                               ("second", 20_000_000_000), ("third", 20_000_000_001),
+                               ("last", 20_500_000_001)):
+                recorder.append(committed(text), t_ns)
+            path = recorder.finish(21_000_000_000)
+            manifest = json.loads((out / path).read_text())
+            self.assertEqual(len(manifest["frames"]), 5)
+            self.assertEqual(len(list((out / "state@100x20.recording").glob("*.html"))), 4)
+            self.assertEqual(manifest["frames"][1], {"t_ns": 1_000_000_000, "duplicate": True})
+            self.assertEqual([delay for _frame, delay in self.helper["recording_delays"](manifest)], [1.5, .5, 2])
+            self.assertEqual(len(self.helper["read_jsonl"](out / "state@100x20.recording/commits.jsonl")), 5)
+            record = {"name": "state", "size": "100x20", "files": {"png": "still.png", "gif": "movie.gif"},
+                      "status": "ok", "ok": True, "note": "", "reason": None}
+            self.helper["frames_index"](out, [record], True)
+            self.assertIn('src="movie.gif"', (out / "index.html").read_text())
+
+    def test_recording_playback_keeps_latest_in_each_80ms_bucket(self):
+        entries = [{"t_ns": t, "html": f"{t}.html"} for t in (0, 1, 79_999_999, 80_000_000, 90_000_000, 160_000_000)]
+        entries.insert(3, {"t_ns": 79_999_999, "duplicate": True})
+        playback = self.helper["recording_playback"](entries)
+        self.assertEqual([entry["t_ns"] for entry in playback], [79_999_999, 90_000_000, 160_000_000])
+        delays = self.helper["recording_delays"]({"playback": playback})
+        self.assertEqual([delay for _entry, delay in delays], [.06, .07, 2])
+
+    def test_gif_encoders_retain_canvas_and_update_only_changed_rectangles(self):
+        try:
+            from PIL import Image, ImageDraw
+        except ImportError:
+            self.skipTest("Pillow is optional")
+        import shutil
+        for native in (False, True):
+            if native and not shutil.which("ffmpeg"):
+                continue
+            with self.subTest(ffmpeg=native), tempfile.TemporaryDirectory() as temp:
+                out = Path(temp)
+                commits = []
+                for i in range(2):
+                    image = Image.new("RGBA", (64, 32), (18, 25, 51, 255))
+                    image.putpixel((0, 0), (0, 0, 0, 0))  # Rounded-corner alpha must not force full disposal.
+                    ImageDraw.Draw(image).rectangle((10 + i * 4, 10, 12 + i * 4, 12), fill="white")
+                    image.save(out / f"{i}.png")
+                    commits.append({"t_ns": i * 200_000_000, "html": f"{i}.html"})
+                (out / "recording.json").write_text(json.dumps({"stem": "movie", "playback": commits}))
+                records = [{"files": {"recording": "recording.json"}}]
+                with contextlib.ExitStack() as stack:
+                    if not native:
+                        stack.enter_context(patch("shutil.which", return_value=None))
+                    self.helper["encode_recordings"](out, records)
+                self.assertEqual(records[0]["files"]["gif"], "movie.gif")
+                with Image.open(out / "movie.gif") as movie:
+                    movie.seek(1)
+                    extent = movie.tile[0].extents
+                    self.assertLess((extent[2] - extent[0]) * (extent[3] - extent[1]), 64 * 32 // 2)
+                    self.assertEqual(movie.disposal_method, 1)
+                    self.assertGreaterEqual(movie.info["duration"], 2000)
+                    self.assertEqual(movie.convert("RGB").getpixel((15, 11)), (255, 255, 255))
+
+    def test_frames_refuses_missing_screen_library_before_run_allocation(self):
+        command = self.helper["cmd_frames"]
+        for png in (True, False):
+            with tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "scenario.json"
+                path.write_text(json.dumps(self.scenario()))
+                args = types.SimpleNamespace(sha="a" * 40, scenario=path, sizes=None, only=None, no_png=png)
+                with patch.dict(command.__globals__, {"load_build": lambda _sha: {"screen_library": None},
+                                                      "cmd_new": unittest.mock.Mock()}) as _patch, \
+                        contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                    allocate = command.__globals__["cmd_new"]
+                    command(args)
+                allocate.assert_not_called()
+                self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
+
+    @unittest.skipUnless(os.environ.get("RUI_TEST_GHOSTTY_VT"), "native observer library not selected")
+    def test_plain_pty_sets_size_before_exec_answers_queries_and_commits_exit(self):
+        program = r"""
+import os, signal, tty
+tty.setraw(0)
+os.write(1, b'\x1b]11;?\x1b\\')
+reply = os.read(0, 128)
+def draw(text):
+    width, height = os.get_terminal_size()
+    os.write(1, ('\x1b[?2026h\x1b[2J\x1b[H' + str(width) + 'x' + str(height) + ':' + text + '\x1b[?2026l').encode())
+signal.signal(signal.SIGWINCH, lambda *_args: draw('resized'))
+draw(reply.hex())
+while True:
+    data = os.read(0, 1)
+    if data == b'q':
+        os.write(1, b'\x1b[2J\x1b[Hexited')
+        break
+    draw(data.decode())
+"""
+        terminal_type = self.helper["FrameTerminal"]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = types.SimpleNamespace(evidence=root, project=root, env=lambda **_extra: dict(os.environ))
+            with patch.dict(terminal_type.__init__.__globals__, {"session_argv": lambda *_args: [sys.executable, "-c", program]}):
+                terminal = terminal_type(run, {"name": "native", "open": "overview", "theme": "day"}, (80, 8))
+            try:
+                terminal.wait(lambda c: "80x8:1b5d31313b7267623a663366332f656565652f653265321b5c" in c.completed,
+                              "initial size and OSC answer")
+                terminal.write(b"x")
+                terminal.wait(lambda c: "80x8:x" in c.completed, "typed x")
+                terminal.resize((50, 10))
+                self.assertIn("50x10:resized", terminal.frame.text)
+                terminal.write(b"q")
+                terminal.wait(lambda c: terminal.eof and "exited" in c.completed, "quiescent exit", allow_exit=True)
+                self.assertEqual(terminal.status, 0)
+                with self.assertRaisesRegex(self.helper["FrameFailure"], "Rui exited"):
+                    terminal.wait(lambda _c: False, "unreachable")
+            finally:
+                terminal.close()
+            with self.assertRaises(OSError):
+                os.fstat(terminal.master)
+
     def test_sizes(self):
         parse = self.helper["parse_sizes"]
         self.assertEqual(parse("140x40,46x30"), [(140, 40), (46, 30)])
@@ -196,7 +372,7 @@ class FramesTest(unittest.TestCase):
         state = next(state for state in scenario["states"] if state["name"] == "markdown-wrapped")
         self.assertEqual(state["open"], "Markdown retry")
         self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
-        self.assertIn({"wait": "return null; //\n    expired"}, state["steps"])
+        self.assertIn({"wait": "return null; //\n     expired"}, state["steps"])
         for text in ("return null; //", "expired", "Late request  waits 30 s  fails at once", "retry policy notes"):
             self.assertIn(text, state["expect"])
 
@@ -256,9 +432,10 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(state["sizes"], [(46, 30), (140, 40)])
         # Reach a known narrow tail, then move rows rather than four half-pages:
         # the wider terminal now gives only 99 columns to the chat beside the list.
-        self.assertEqual(state["steps"][:11], [
+        self.assertEqual(state["steps"][:13], [
             {"wait": "The project has a README"},
             {"keys": ["C-o"]},
+            {"wait": "    stderr tail:"},
             {"gone": "Opening tool output…"},
             {"keys": ["PgDn"]},
             {"wait": "    unknown option --help"},
@@ -266,6 +443,7 @@ class FramesTest(unittest.TestCase):
             {"wait": "✓ List project files"},
             {"gone": "× Fail with exit 127"},
             {"keys": ["C-o"]},
+            {"wait": "    Bash succeeded. Exit code: 0."},
             {"gone": "Opening tool output…"},
             {"keys": ["PgDn"] * 3},
         ])
@@ -394,33 +572,22 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(summary("Show long tool output.", 4, 1, "realistic"),
                          "Printed thirty-two numbered lines.")
 
-    def test_ansi_sgr_and_html_escaping(self):
-        render = self.helper["ansi_render"]
-        bg, fg = "#121933", "#d4cebf"
-        cases = [
-            ("\x1b[31mred\x1b[0mplain", ['color:#cd3131">red', f'color:{fg}">plain']),
-            ("\x1b[91;104mbright", ["color:#f14c4c", "background:#3b8eea"]),
-            ("\x1b[38;5;196mred\x1b[48;5;232mblack", ["color:#ff0000", "background:#080808"]),
-            ("\x1b[38;2;10;20;30;1mRGB", ["color:#0a141e", "font-weight:700"]),
-            ("\x1b[38:2::10:20:30mRGB", ["color:#0a141e"]),
-            ("\x1b[48:5:21mblue", ["background:#0000ff"]),
-            ("\x1b[1;2;3;4;9mstyled\x1b[22;23;24;29mnormal", ["font-weight:700", "opacity:.6", "font-style:italic", "underline line-through", f'color:{fg}">normal']),
-            ("\x1b[7minverse\x1b[27mnormal", [f"color:{bg};background:{fg}", f'color:{fg}">normal']),
-            ("\x1b[31;44mcolour\x1b[39;49mdefault", [f'color:{fg}">default']),
-        ]
-        for ansi, snippets in cases:
-            with self.subTest(ansi=ansi):
-                rendered = render(ansi, bg, fg)
-                self.assertNotIn("\x1b", rendered)
-                for snippet in snippets:
-                    self.assertIn(snippet, rendered)
-        link = '\x1b]8;;https://example.com\x1b\\<script>&\x1b]8;;\x1b\\'
-        self.assertIn("&lt;script&gt;&amp;", render(link, bg, fg))
-        self.assertNotIn("https:", render(link, bg, fg))
-        self.assertIn("color:#cd3131", render("\x1b[31mone\ntwo", bg, fg))
-        page = self.helper["ansi_page"]("body", bg, fg, 46, 30, (2, 3))
-        for snippet in ("width:46ch", "height:40.5em", "left:2ch", bg, fg):
+    def test_committed_cells_render_one_style_to_ansi_and_html(self):
+        frame = committed("<script>&")
+        cell = Cell("<script>&", 1, True, True, "0000ff", True, True, 3, True,
+                    False, False, True, "ff0000", "00ff00")
+        frame = frame._replace(cells=((cell,),), visible=True)
+        plain, ansi, page = self.helper["cells_render"](frame)
+        self.assertEqual(plain, "<script>&\n")
+        for code in ("38;2;255;0;0", "48;2;0;0;255", "7", "4:3", "58;2;0;255;0"):
+            self.assertIn(code, ansi)
+        for snippet in ("&lt;script&gt;&amp;", "font-weight:700", "font-style:italic", "color-mix",
+                        "text-decoration-style:wavy", "underline line-through overline", "left:2ch",
+                        "width:100ch", ".r>span{display:inline-block;height:100%;vertical-align:top}"):
             self.assertIn(snippet, page)
+        self.assertNotIn("<script>", page)
+        hidden = self.helper["cells_render"](frame._replace(visible=False))[2]
+        self.assertNotIn('<i id=c', hidden)
 
     def test_no_screen_guard_is_one_plain_line(self):
         err = io.StringIO()
@@ -493,9 +660,22 @@ class FramesTest(unittest.TestCase):
                                         evidence=root / "evidence", project=root, rui=Path("/pinned/rui"),
                                         sock=root / "tmux.sock", meta={"sha": "a" * 40},
                                         env=lambda **extra: extra, own=lambda *_args, **_kw: None)
-            run.tmux = lambda *argv, **_kw: (calls.append(argv) or types.SimpleNamespace(returncode=0, stdout="999\n", stderr=""))
             args = types.SimpleNamespace(sha="a" * 40, scenario=str(source), only=only, sizes=sizes,
-                                         out=str(root / "out"), no_png=True, keep=False)
+                                         out=str(root / "out"), no_png=True, keep=False, record=False)
+
+            class Terminal:
+                def __init__(self, _run, state, size, _recording):
+                    self.state = state
+                    calls.append(("open", state["name"], size, state.get("theme", "night")))
+
+                def resize(self, size):
+                    calls.append(("resize", size))
+
+                def stop_recording(self):
+                    return None
+
+                def close(self):
+                    calls.append(("close",))
 
             def capture(_run, _target, _out, state, size, reason):
                 calls.append(("capture", size))
@@ -505,28 +685,27 @@ class FramesTest(unittest.TestCase):
 
             def steps(_run, target, _steps, **_kwargs):
                 calls.append(("steps",))
-                if target == f"=frames:={failing_state}":
+                if target.state["name"] == failing_state:
                     raise self.helper["FrameFailure"]("fixture state failed")
+                return False
 
             replacements = {"Run": lambda _path: run, "cmd_new": lambda _args: print(root),
                             "cmd_cleanup": lambda _args: None, "frame_wait": lambda *_args, **_kw: None,
+                            "frame_ready": lambda *_args, **_kw: None, "FrameTerminal": Terminal,
+                            "load_build": lambda _sha: {"screen_library": "/test/library"},
                             "frame_steps": steps, "frame_capture": capture}
-            with patch.dict(command.__globals__, replacements), patch("shutil.which", return_value="/bin/tmux"), \
-                    patch("time.sleep", side_effect=lambda seconds: calls.append(("sleep", seconds))), \
+            with patch.dict(command.__globals__, replacements), patch.dict(os.environ), \
+                    patch("time.sleep", side_effect=AssertionError("frames must not sleep to settle")), \
                     contextlib.redirect_stdout(io.StringIO()):
                 command(args)
             records = json.loads((root / "out/frames.json").read_text())
         return calls, records
 
-    def test_frame_window_gets_its_size_before_rui_exec(self):
-        scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": []}]}
+    def test_frame_terminal_receives_initial_size_and_theme(self):
+        scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": [], "theme": "day"}]}
         calls, _records = self.run_frames_scenario(scenario)
-        initial_size = [i for i, c in enumerate(calls) if c == ("set-option", "-g", "default-size", "100x30")]
-        self.assertEqual(len(initial_size), 1)
-        create = next(i for i, c in enumerate(calls) if c[0] == "new-window")
-        self.assertLess(initial_size[0], create)
-        colour = next(i for i, c in enumerate(calls) if "window-style" in c)
-        self.assertLess(colour, create)
+        self.assertEqual(calls[0], ("open", "empty", (100, 30), "day"))
+        self.assertNotIn("tmux", repr(calls))
 
     def test_comma_sizes_at_both_levels_execute_two_sizes_and_cli_overrides_both(self):
         scenario = {"sizes": "100x30,46x30", "states": [
@@ -541,7 +720,7 @@ class FramesTest(unittest.TestCase):
                 first = next(i for i, call in enumerate(calls) if call[0] == "capture")
                 self.assertEqual(calls[first - 1], ("steps",))  # No first-size resize or sleep after the wait.
                 second = next(i for i, call in enumerate(calls) if i > first and call[0] == "capture")
-                self.assertEqual(calls[second - 1], ("sleep", 0.8))
+                self.assertEqual(calls[second - 1], ("resize", expected[1]))
 
     def test_failed_capture_makes_the_command_fail(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "working", "open": "overview", "steps": []}]}
@@ -622,10 +801,10 @@ class FramesTest(unittest.TestCase):
         state = self.helper["validate_scenario"](data)["states"][1]
         for screen, ok in (("New Sessions\n Model: example\n", True), ("This Session\n", False)):
             with self.subTest(screen=screen), tempfile.TemporaryDirectory() as temp:
-                run = types.SimpleNamespace(meta={"sha": "a" * 40}, tmux=lambda *argv, **_kw:
-                    types.SimpleNamespace(returncode=0, stderr="", stdout=screen if argv[0] == "capture-pane" else "0 0 0\n"))
+                run = types.SimpleNamespace(meta={"sha": "a" * 40})
+                terminal = types.SimpleNamespace(frame=committed(screen))
                 out = Path(temp)
-                record = self.helper["frame_capture"](run, "pane", out, state, (100, 20), None)
+                record = self.helper["frame_capture"](run, terminal, out, state, (100, 20), None)
                 self.assertEqual(record["ok"], ok)
                 self.assertEqual(record["reason"], None if ok else "state left before capture: New Sessions")
                 if ok:
@@ -658,22 +837,14 @@ class FramesTest(unittest.TestCase):
                 run = types.SimpleNamespace(meta={"sha": "a" * 40})
                 records = []
                 for size, screen, reason in zip(((100, 30), (46, 30)), screens, reasons):
-                    ansi = "\x1b[31m" + screen + "\x1b[0m  \n"
-
-                    def tmux(*argv, **_kwargs):
-                        self.assertIn(argv[0], ("capture-pane", "display-message"))
-                        if argv[0] == "capture-pane":
-                            self.assertIn("-e", argv)  # The text and HTML share this one snapshot.
-                        return types.SimpleNamespace(returncode=0, stderr="", stdout=ansi if argv[0] == "capture-pane" else "0 0 0\n")
-
-                    run.tmux = tmux
-                    record = capture(run, "pane", out, state, size, None)
+                    terminal = types.SimpleNamespace(frame=committed(screen, *size))
+                    record = capture(run, terminal, out, state, size, None)
                     records.append(record)
                     self.assertEqual(record["reason"], reason)
                     self.assertEqual(record["ok"], reason is None)
                     self.assertEqual(record["status"], "ok" if reason is None else "failed")
                     self.assertEqual((out / record["files"]["txt"]).read_text(), screen + "\n")
-                    self.assertEqual((out / record["files"]["ansi"]).read_text(), ansi)
+                    self.assertEqual((out / record["files"]["ansi"]).read_text(), self.helper["cells_render"](terminal.frame)[1])
                     self.assertIn(screen, (out / record["files"]["html"]).read_text())
                 self.helper["frames_index"](out, records, False)
                 self.assertEqual([r["ok"] for r in json.loads((out / "frames.json").read_text())],
@@ -685,19 +856,20 @@ class FramesTest(unittest.TestCase):
         stale = "■ Stopped  Stopping…\n"
         run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
                                     rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
-        run.tmux = lambda *argv, **_kw: types.SimpleNamespace(
-            returncode=0, stderr="", stdout=stale if argv[0] == "capture-pane" else "0 0 0\n")
-        steps = self.helper["frame_steps"]
-        panes = unittest.mock.Mock(side_effect=["⠹ Sleep eight seconds", "⠹ Sleep eight seconds", stale])
-        with patch.dict(steps.__globals__, {"frame_pane": panes, "frame_dead": lambda *_args: False,
-                                            "frame_request": lambda *_args: None}), patch("time.sleep"):
-            steps(run, "pane", state["steps"])
-        self.assertEqual(panes.call_count, 3)  # Running, still running, then the ending with stale text.
+        terminal = types.SimpleNamespace(frame=committed(stale))
+        # Combined readiness must reject an old sidebar's Stopping text even
+        # when the conversation already contains the stopped ending.
+        ready = self.helper["frame_ready"]
+        def wait(predicate, *_args, **_kwargs):
+            self.assertFalse(predicate(types.SimpleNamespace(completed=stale)))
+            self.assertTrue(predicate(types.SimpleNamespace(completed="■ Stopped")))
+        terminal.wait = wait
+        ready(terminal, state)
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)
             for size in state["sizes"]:
                 with self.subTest(size=size):
-                    record = self.helper["frame_capture"](run, "pane", out, state, size, None)
+                    record = self.helper["frame_capture"](run, terminal, out, state, size, None)
                     self.assertFalse(record["ok"])
                     self.assertEqual(record["reason"], "unexpected on screen: Stopping")
                     self.assertEqual((out / record["files"]["txt"]).read_text(), stale)

@@ -20,6 +20,21 @@ const { pathToFileURL } = require('url');
       await page.evaluate(() => document.fonts.ready);
       await page.locator('#t').screenshot({ path: out, omitBackground: true });
     }
+    // One page for the entire recording batch, using the exact still HTML.
+    const movie = await browser.newPage({ deviceScaleFactor: 1, viewport: { width: 2200, height: 1400 } });
+    for (const frame of frames) {
+      if (!frame.files.recording) continue;
+      const recording = JSON.parse(fs.readFileSync(path.join(dir, frame.files.recording), 'utf8'));
+      for (const commit of recording.playback) {
+        if (!commit.html) continue; // Consecutive identical cells are a hold.
+        const src = path.join(dir, commit.html);
+        await movie.goto(pathToFileURL(src).href);
+        await movie.evaluate(() => document.fonts.ready);
+        // An opaque canvas lets GIF reserve transparency for unchanged pixels,
+        // rather than clearing and re-encoding the whole picture each frame.
+        await movie.locator('#t').screenshot({ path: src.replace(/\.html$/, '.png'), omitBackground: false });
+      }
+    }
   } catch (error) {
     console.error('frames_png: ' + String(error.message).split('\n').join(' '));
     process.exitCode = 1;

@@ -57,6 +57,68 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
+    def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):
+        replies = []
+        default = ScreenCapture(8, 2, reply=replies.append)
+        default.feed(b"\x1b]11;?\x1b\\\x1b[?996n")
+        self.assertEqual(replies, [b"\x1b]11;rgb:2828/2c2c/3434\x1b\\", b"\x1b[?997;1n"])
+        replies.clear()
+        day = ScreenCapture(8, 2, reply=replies.append, background=(243, 238, 226),
+                            foreground=(47, 43, 37), color_scheme="light")
+        day.feed(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n")
+        self.assertEqual(replies, [b"\x1b]10;rgb:2f2f/2b2b/2525\x1b\\",
+                                   b"\x1b]11;rgb:f3f3/eeee/e2e2\x1b\\", b"\x1b[?997;2n"])
+        day.feed(b"\x1b[?2026hX\x1b[?2026l")
+        self.assertEqual((day.frame.background, day.frame.foreground), ("f3eee2", "2f2b25"))
+        with self.assertRaises(ValueError):
+            ScreenCapture(color_scheme="sepia")
+
+    def test_committed_style_resolves_native_palette_and_blank_backgrounds(self):
+        from terminal_screen import Cell
+        self.assertEqual(Cell("X", None, False), Cell("X", None, False, False))
+        capture = ScreenCapture(12, 3, foreground=(47, 43, 37), background=(243, 238, 226))
+        # Override a palette slot: the oracle must use the terminal's palette,
+        # not a second ANSI table. Erased blank cells also retain backgrounds.
+        capture.feed(b"\x1b]4;1;rgb:12/34/56\x1b\\"
+                     b"\x1b[?2026h\x1b[38;5;1;48;2;1;2;3;1;2;3;4:3;7;9;53mX"
+                     b"\x1b[0;48;2;4;5;6m\x1b[K\x1b[?25l\x1b[?2026l")
+        frame = capture.frame
+        cell = frame.cells[0][0]
+        self.assertEqual(cell.fg, 1)  # Existing style oracles retain their vocabulary.
+        self.assertEqual((cell.fg_rgb, cell.bg), ("123456", "010203"))
+        self.assertEqual(frame.colors(cell), ("010203", "123456"))
+        self.assertTrue(all((cell.bold, cell.reverse, cell.italic, cell.faint, cell.strike, cell.overline)))
+        self.assertEqual(cell.underline, 3)
+        self.assertEqual(frame.cells[0][1].bg, "040506")
+        self.assertFalse(frame.visible)
+        self.assertEqual((frame.cursor.x, frame.cursor.y), (1, 0))
+        capture.feed(b"\x1b[?2026h\x1b[0mY\x1b[?25h\x1b[?2026l")
+        self.assertEqual(frame.cells[0][1].data, " ")  # Immutable old commit.
+        self.assertTrue(capture.frame.visible)
+        self.assertEqual(capture.frame.cells[0][1].data, "Y")
+
+    def test_mouse_encoder_obeys_terminal_modes_and_held_button(self):
+        capture = ScreenCapture()
+        for action in ("press", "release", "move", "wheel-up", "wheel-down"):
+            self.assertEqual(capture.mouse(action, 2, 3), b"")
+        capture.feed(b"\x1b[?1000h")
+        self.assertEqual(capture.mouse("press", 2, 3), b"\x1b[M #$")
+        self.assertEqual(capture.mouse("release", 2, 3), b"\x1b[M##$")
+        self.assertEqual(capture.mouse("move", 2, 3), b"")
+        capture.feed(b"\x1b[?1000l\x1b[?1002h\x1b[?1006h")
+        self.assertEqual(capture.mouse("press", 2, 3), b"\x1b[<0;3;4M")
+        self.assertEqual(capture.mouse("release", 2, 3), b"\x1b[<0;3;4m")
+        self.assertEqual(capture.mouse("press", 2, 3, "right"), b"\x1b[<2;3;4M")
+        self.assertEqual(capture.mouse("press", 2, 3, "middle"), b"\x1b[<1;3;4M")
+        self.assertEqual(capture.mouse("move", 2, 3), b"")
+        self.assertEqual(capture.mouse("move", 2, 3, pressed=True), b"\x1b[<32;3;4M")
+        self.assertEqual(capture.mouse("wheel-up", 2, 3), b"\x1b[<64;3;4M")
+        self.assertEqual(capture.mouse("wheel-down", 2, 3), b"\x1b[<65;3;4M")
+        capture.feed(b"\x1b[?1002l\x1b[?1003h")
+        self.assertEqual(capture.mouse("move", 2, 3), b"\x1b[<35;3;4M")
+        capture.feed(b"\x1b[?1003l")
+        self.assertEqual(capture.mouse("press", 2, 3), b"")
+
     def setUp(self):
         self.descriptors = []
         real_openpty = pty.openpty
