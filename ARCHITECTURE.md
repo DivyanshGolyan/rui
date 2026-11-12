@@ -608,7 +608,7 @@ An **Operation** is one model request or Action, owning its exact descriptor, ca
 Its optional **Resolution** is its immutable final result; the Operation ID also identifies that result.
 A retry is another [Attempt](#admitting-an-attempt) of the same Operation; a model request admitted against new context or settings is a new Operation.
 
-Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, reasoning/output limits and output contract.
+Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, reasoning/output limits, effective context window and output contract.
 References/digests identify canonical content; runtime facts retain their original rendering references.
 Session facts and Operation admission share one committed per-Session order on their owning records, without a duplicate payload log.
 The Operation's admission position fixes its historical boundary.
@@ -766,6 +766,10 @@ It is null without a trigger and when the next call's purpose does not depend on
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
 `/status` shows it beside the trigger, and the conversation's Session line shows the share of the trigger it leaves.
 Resolve policy once before purpose selection and freeze the effective values on the admitted Operation.
+The Operation INSERT also freezes its model's effective context window from the selected saved-or-shipped catalog, in the same statement and Store hold, with no additional Store round.
+Only absence of a catalog source selects shipped facts; an authoritative saved generation with a missing model or null window uses the 128,000-token unlisted estimate, and a non-null window, including zero, is preserved.
+An overflowing compaction's settlement and successor admission both derive escalation from that failed Operation's frozen window and reservation, never the current catalog or the successor's window.
+A new Operation freezes the then-selected window; retries and replacement Attempts preserve the original.
 Later settings or capability changes cannot change its purpose or retry policy.
 
 The Store keeps usage in Rui's form: four counts, uncached input, cache read, cache write and output, each a whole SQLite integer, all present or all absent.
@@ -1500,6 +1504,10 @@ The step to 64 renames `host_catalog` to `host_tool_set` and `action_operation.b
 The step to 65 freezes each Operation's effective tool offer, retaining its settings revision's offer for old Operations.
 The step to 66 freezes configured effort sources and admitted effort emission/fallback, records immutable refusal provenance in `session_change`, and moves saved wire 12 metadata to 13.
 The step to 68 (D179, D219) adds nullable final-attempt `latency_ms` and `first_event_ms` to `model_operation`, without backfilling old resolutions.
+The step to 69 freezes each model Operation's effective context window as a non-null integer in 0..4294967295, with no default (D238).
+It backfills every old Operation using its frozen settings revision's exact model and a literal mapping of the pre-change shipped snapshot, using 128,000 for absent or null windows, not the mutable saved catalog.
+This pins legacy escalation policy; the old rows did not retain their admission-time saved window, and migration does not claim to recover it.
+Existing floors, levels, counts, resolutions and references are preserved.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2700,8 +2708,8 @@ These client choices do not change existing Sessions, the Host's fixed fallback 
 The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the selected catalog's OpenAI IDs because it has no public list.
 The Host refreshes the models.dev fact catalog and saves it across Host runs.
 Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
-Historical compaction escalation for an already frozen Operation deliberately uses shipped windows: settlement and later admission independently recompute the same deeper floor, and no Store field freezes a saved catalog window between those calls.
-Using a refreshed window there could make their decisions disagree and produce `CorruptStore`; changing that historical rule requires an explicit freeze/format decision.
+Each new model Operation freezes the selected catalog's effective context window on its own row (D238).
+Historical compaction escalation reads only that frozen value, so a refresh between admission, overflow settlement and successor admission cannot change the failed Operation's deeper floor or make the two decisions disagree.
 Offline CLI defaults can therefore be refused by Host admission when its saved facts differ; the CLI does not silently substitute another model, effort or threshold.
 There is no model-list command.
 Help needs no Host or credentials.
