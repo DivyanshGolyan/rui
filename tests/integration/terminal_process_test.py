@@ -213,10 +213,67 @@ class TerminalProcessTest(unittest.TestCase):
             observation["error"] = error
             completed.set()
 
-        with terminal_process(child(), env=os.environ, feed=feed, collected=collected):
-            wait_for(completed.is_set, "consumer EIO outcome", drain=False)
-            self.assertIsInstance(observation["error"], OSError)
-            self.assertEqual(observation["error"].errno, errno.EIO)
+        with self.assertRaisesRegex(OSError, "consumer failure"):
+            with terminal_process(child(), env=os.environ, feed=feed, collected=collected) as (process, _master):
+                wait_for(completed.is_set, "consumer EIO outcome", drain=False)
+                self.assertIsInstance(observation["error"], OSError)
+                self.assertEqual(observation["error"].errno, errno.EIO)
+                with self.assertRaises(OSError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, observation["error"])
+        self.assert_descriptors_closed()
+
+    def test_collector_failure_does_not_replace_a_primary_body_failure(self):
+        entered = threading.Event()
+        failure = RuntimeError("collector failure")
+
+        def feed(_data):
+            entered.set()
+            raise failure
+
+        with self.assertRaisesRegex(ValueError, "primary body failure") as primary:
+            with terminal_process(child(), env=os.environ, feed=feed, collected=lambda _error: None) as (process, _master):
+                wait_for(lambda: entered.is_set() and process.output.complete, "retained collector failure", drain=False)
+                with self.assertRaises(RuntimeError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, failure)
+                raise ValueError("primary body failure")
+        self.assertTrue(any("collector failure" in note for note in primary.exception.__notes__))
+        self.assert_descriptors_closed()
+
+    def test_final_collection_callback_failure_is_shared_by_check_and_close(self):
+        failure = RuntimeError("final commit failure")
+
+        def collected(_error):
+            raise failure
+
+        with self.assertRaises(RuntimeError) as disposed:
+            with terminal_process([sys.executable, "-c", "pass"], env=os.environ,
+                                  feed=lambda _data: None, collected=collected) as (process, _master):
+                wait_for(lambda: process.output.complete, "final collection callback", drain=False)
+                with self.assertRaises(RuntimeError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, failure)
+        self.assertIs(disposed.exception, failure)
+        self.assert_descriptors_closed()
+
+    def test_callback_failure_keeps_the_original_collection_error(self):
+        failure = RuntimeError("original collection failure")
+
+        def feed(_data):
+            raise failure
+
+        def collected(_error):
+            raise ValueError("secondary callback failure")
+
+        with self.assertRaises(RuntimeError) as disposed:
+            with terminal_process(child(), env=os.environ, feed=feed, collected=collected) as (process, _master):
+                wait_for(lambda: process.output.complete, "collection and callback failure", drain=False)
+                with self.assertRaises(RuntimeError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, failure)
+        self.assertIs(disposed.exception, failure)
+        self.assertTrue(any("secondary callback failure" in note for note in failure.__notes__))
         self.assert_descriptors_closed()
 
     def test_wait_drains_writer_and_opt_out_preserves_output(self):

@@ -311,6 +311,7 @@ class TerminalProcess:
         self.stdin, self.stdout, self.stderr = stdin, stdout, stderr
         self.returncode = None
         self.collected = {}
+        self.output = None
 
     def poll(self):
         return self.settle(time.monotonic())
@@ -363,19 +364,21 @@ class TerminalOutput:
     """Exclusive background collection on a borrowed master, while its slave lives.
 
     The process owns exit status; collection finishes only after that status and
-    a final drain. `collected(error)` receives the outcome, or close raises it
-    when no outcome callback was supplied. Neither path retains output bytes.
+    a final drain. This owner retains every collection or callback failure;
+    `check` and scope disposal raise it even when `collected(error)` returns.
+    Neither path retains output bytes. `condition` can also guard a consumer's
+    view, so frame changes and collection completion wake the same readers.
     """
 
-    def __init__(self, process, master, feed, collected=None):
+    def __init__(self, process, master, feed, collected=None, condition=None):
         self.process, self.master, self.feed, self.collected = process, master, feed, collected
-        self.error = None
+        self.condition = condition if condition is not None else threading.Condition()
+        self.error, self.complete = None, False
         os.set_blocking(master, False)
         self.thread = threading.Thread(target=self._read, name="terminal-output", daemon=True)
         self.thread.start()
 
     def _read(self):
-        error = None
         try:
             while self.process.poll() is None:
                 if select.select([self.master], [], [], .05)[0]:
@@ -385,25 +388,37 @@ class TerminalOutput:
             while drain_ready(self.master, self.feed):
                 pass
         except BaseException as caught:
-            error = caught
+            with self.condition:
+                self.error = caught
         try:
-            if self.collected is None:
-                self.error = error
-            else:
-                self.collected(error)
+            if self.collected is not None:
+                self.collected(self.error)
         except BaseException as caught:
-            self.error = caught  # A callback failure must reach scope disposal.
+            with self.condition:
+                if self.error is None:
+                    self.error = caught
+                elif caught is not self.error:
+                    self.error.add_note(f"Terminal collection callback also failed: {caught!r}")
+        finally:
+            with self.condition:
+                self.complete = True
+                self.condition.notify_all()
+
+    def check(self):
+        """Raise the same retained failure for readers and disposal alike."""
+        with self.condition:
+            if self.error is not None:
+                raise self.error
 
     def close(self):
         self.thread.join(5)
         if self.thread.is_alive():
             raise TimeoutError(f"terminal output collection did not stop for {self.process.pid}")
-        if self.error is not None:
-            raise self.error
+        self.check()
 
 
 @contextmanager
-def terminal_process(args, *, env, cwd=None, columns=COLUMNS, rows=ROWS, feed=None, collected=None):
+def terminal_process(args, *, env, cwd=None, columns=COLUMNS, rows=ROWS, feed=None, collected=None, condition=None):
     """Borrow (process, master) until scope exit; collect and assert inside it.
 
     The caller owns response boundaries and explicit exit assertions. This owner
@@ -411,14 +426,15 @@ def terminal_process(args, *, env, cwd=None, columns=COLUMNS, rows=ROWS, feed=No
     and reap so Darwin does not discard unread output. Do not close borrowed handles.
     With `feed`, this owner continuously collects output in a background thread;
     the caller must not also read the master. `collected(error)` reports the final
-    drain or its failure before disposal releases either descriptor.
+    drain or its failure before disposal releases either descriptor. The process's
+    `output` owns completion and errors; its check() never consumes a failure.
     """
     master, slave = open_pty(columns, rows)
     process, output = None, None
     try:
         process = spawn(args, env=env, cwd=cwd, stdin=slave, stdout=slave, stderr=slave)
         if feed is not None:
-            output = TerminalOutput(process, master, feed, collected)
+            output = process.output = TerminalOutput(process, master, feed, collected, condition)
         yield process, master
     finally:
         dispose_all(lambda: stop_process(process, timeout=5) if process is not None else None,

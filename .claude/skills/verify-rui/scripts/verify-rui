@@ -2192,7 +2192,6 @@ class FrameTerminal:
         from terminal_screen import ScreenCapture
         self.run, self.state = run, state
         self.condition = threading.Condition()
-        self.error, self.collected = None, False
         self.pressed = None
         self.recording = recording
         self.log = run.evidence / "frames-pty" / state["name"]
@@ -2214,11 +2213,17 @@ class FrameTerminal:
             with self.condition:
                 self.process, self.master = setup.enter_context(terminal_process(
                     argv, env=env, cwd=run.project, columns=cols, rows=rows,
-                    feed=self._feed, collected=self._collected))
+                    feed=self._feed, collected=self._collected, condition=self.condition))
             self.scope = setup.pop_all()
 
     @property
+    def collected(self):
+        with self.condition:
+            return self.process.output.complete
+
+    @property
     def status(self):
+        self.process.output.check()
         # Child exit alone is not completed capture: let the owner deliver
         # its retained terminal tail before exposing an exited surface.
         return self.process.returncode if self.collected else None
@@ -2240,23 +2245,18 @@ class FrameTerminal:
             self.capture.feed(data)
 
     def _collected(self, error):
+        if error is not None:
+            raise error
         with self.condition:
-            self.error = error
-            try:
-                # The shared owner has reaped Rui and drained its retained
-                # terminal. No EOF is needed (or expected while the slave lives).
-                if error is None and not self.capture.synchronized:
-                    self.capture.commit()
-            except BaseException as caught:
-                self.error = caught
-            self.collected = True
-            self.condition.notify_all()
+            # The shared owner has reaped Rui and drained its retained
+            # terminal. Commit failures propagate back to that same owner.
+            if not self.capture.synchronized:
+                self.capture.commit()
 
     @property
     def frame(self):
         with self.condition:
-            if self.error:
-                raise FrameFailure(f"terminal observer: {self.error}")
+            self.process.output.check()
             if self.capture.frame is None:
                 raise FrameFailure("Rui produced no committed frame")
             return self.capture.frame
@@ -2275,8 +2275,7 @@ class FrameTerminal:
         deadline = time.monotonic() + timeout
         with self.condition:
             while True:
-                if self.error:
-                    raise FrameFailure(f"terminal observer: {self.error}")
+                self.process.output.check()
                 if not allow_exit and self.status is not None:
                     raise FrameFailure(f"Rui exited with status {self.status} before {description}")
                 if self.capture.frame is not None and predicate(self.capture):
@@ -2348,6 +2347,7 @@ class FrameTerminal:
         # Shared disposal stops/reaps the foreground job, joins its collector,
         # and only then releases the master and retained slave.
         self.scope.close()
+        self.process.output.check()
 
 
 def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False):
@@ -2501,6 +2501,7 @@ def cmd_frames(args):
             exiting = False
             opened = False
             failure_capture = None
+            first_record = len(records)
             try:
                 seed_cast(run, state.get("cast", []))
                 recording = FrameRecording(out, f"{state['name']}@{size_name(state_sizes[0])}") if (
@@ -2557,10 +2558,23 @@ def cmd_frames(args):
                         if not record["ok"] and reason is None:
                             print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
                         records.append(record)
-                    frames_index(out, records, False)
             finally:
                 if opened:
-                    target.close()
+                    try:
+                        target.close()
+                    except (Exception, SystemExit) as error:
+                        if state["name"] in selected:
+                            failed = True
+                            # Disposal can discover an error after the last
+                            # capture. Keep its files, but never publish ok.
+                            for record in records[first_record:]:
+                                record.update(ok=False, status="failed", reason=record["reason"] or str(error))
+                            print(f"verify-rui: {state['name']}: disposal failed: {error}", file=sys.stderr)
+                        else:
+                            print(f"verify-rui: warning: {state['name']}: disposal failed: {error} "
+                                  "(not selected; its failure does not fail this run)", file=sys.stderr)
+                if state["name"] in selected:
+                    frames_index(out, records, False)
         if not args.no_png:
             result = subprocess.run(["node", str(HERE.with_name("frames_png.js")), str(out)], capture_output=True, text=True)
             if result.returncode:

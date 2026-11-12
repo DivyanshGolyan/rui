@@ -172,7 +172,7 @@ class FramesTest(unittest.TestCase):
             with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temp:
                 terminal = owner.__new__(owner)
                 terminal.condition = threading.Condition()
-                terminal.error = None
+                terminal.process = types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None))
                 terminal.pressed = None
                 terminal.log = Path(temp)
                 events, writes = [], []
@@ -323,6 +323,111 @@ while True:
                 terminal.close()
             with self.assertRaises(OSError):
                 os.fstat(terminal.master)
+
+    def assert_collector_failure_marks_state(self, phase):
+        from host_process import wait_for
+        command = self.helper["cmd_frames"]
+        terminal_type = self.helper["FrameTerminal"]
+        capture = self.helper["frame_capture"]
+        feed, collected = terminal_type._feed, terminal_type._collected
+        failure = RuntimeError("final commit failed" if phase == "final-commit" else "collection failed")
+        seen = []
+        program = r"""
+import os, signal, tty
+tty.setraw(0)
+def draw():
+    os.write(1, 'ESC[?2026hESC[2JESC[H› ReadyESC[?2026l'.replace('ESC', chr(27)).encode())
+signal.signal(signal.SIGWINCH, lambda *_args: draw())
+draw()
+while True:
+    data = os.read(0, 1)
+    if data == b'f':
+        os.write(1, b'x')
+    elif data == b'q':
+        break
+"""
+
+        def failing_feed(terminal, data):
+            if getattr(terminal, "fail_feed", False):
+                raise failure
+            return feed(terminal, data)
+
+        def failing_commit(terminal, error):
+            if terminal.state["name"] == "failing" and phase == "final-commit":
+                with patch.object(terminal.capture, "commit", side_effect=failure):
+                    return collected(terminal, error)
+            return collected(terminal, error)
+
+        def fail_collection(terminal):
+            terminal.fail_feed = phase != "final-commit"
+            terminal.write(b"q" if phase == "final-commit" else b"f")
+            wait_for(lambda: terminal.collected, "injected collector outcome", drain=False)
+            self.assertNotIn("error", vars(terminal))  # There is no adapter-owned copy.
+            for read in (lambda: terminal.frame,
+                         lambda: terminal.wait(lambda _capture: True, "already visible", timeout=0, allow_exit=True)):
+                with self.assertRaises(RuntimeError) as raised:
+                    read()
+                self.assertIs(raised.exception, failure)
+
+        def capture_with_failure(run, terminal, out, state, size, reason):
+            last = state["name"] == "failing" and size == state["sizes"][-1]
+            if last and phase == "before-capture":
+                fail_collection(terminal)
+            record = capture(run, terminal, out, state, size, reason)
+            seen.append((state["name"], size))
+            if last and phase != "before-capture":
+                fail_collection(terminal)
+            return record
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "scenario.json"
+            source.write_text(json.dumps({"sizes": ["80x8", "60x6"], "states": [
+                {"name": name, "open": "overview", "steps": [], "expect": "Ready"}
+                for name in ("failing", "healthy")]}))
+            run = types.SimpleNamespace(root=root, home=root / "home", store=root / "store",
+                                        project=root, evidence=root / "evidence", meta={"sha": "a" * 40},
+                                        env=lambda **_extra: dict(os.environ))
+            args = types.SimpleNamespace(sha="a" * 40, scenario=source, sizes=None, only=None,
+                                         no_png=True, record=False, keep=False, out=str(root / "out"))
+            replacements = {"Run": lambda _path: run, "cmd_new": lambda _args: print(root),
+                            "cmd_cleanup": lambda _args: None,
+                            "load_build": lambda _sha: {"screen_library": os.environ["RUI_TEST_GHOSTTY_VT"]},
+                            "session_argv": lambda *_args: [sys.executable, "-c", program],
+                            "frame_capture": capture_with_failure}
+            with patch.dict(command.__globals__, replacements), patch.dict(os.environ), \
+                    patch.object(terminal_type, "_feed", failing_feed), \
+                    patch.object(terminal_type, "_collected", failing_commit), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as result:
+                command(args)
+            self.assertEqual(result.exception.code, 1)
+            records = json.loads((root / "out/frames.json").read_text())
+            self.assertIn("failed: " + str(failure), (root / "out/index.html").read_text())
+            failed = [record for record in records if record["name"] == "failing"]
+            healthy = [record for record in records if record["name"] == "healthy"]
+            self.assertEqual(len(failed), 2)
+            self.assertTrue(all(not record["ok"] and record["status"] == "failed"
+                                and record["reason"] == str(failure) for record in failed))
+            self.assertEqual(len(healthy), 2)
+            self.assertTrue(all(record["ok"] for record in healthy))
+            if phase == "before-capture":
+                self.assertNotIn(("failing", (60, 6)), seen)
+            else:
+                self.assertIn(("failing", (60, 6)), seen)
+                self.assertTrue(all("html" in record["files"] for record in failed))
+
+    @unittest.skipUnless(os.environ.get("RUI_TEST_GHOSTTY_VT"), "native observer library not selected")
+    def test_collection_failure_before_last_capture_fails_state(self):
+        self.assert_collector_failure_marks_state("before-capture")
+
+    @unittest.skipUnless(os.environ.get("RUI_TEST_GHOSTTY_VT"), "native observer library not selected")
+    def test_collection_failure_after_last_capture_fails_state(self):
+        self.assert_collector_failure_marks_state("after-capture")
+
+    @unittest.skipUnless(os.environ.get("RUI_TEST_GHOSTTY_VT"), "native observer library not selected")
+    def test_final_commit_failure_fails_state(self):
+        self.assert_collector_failure_marks_state("final-commit")
 
     def test_sizes(self):
         parse = self.helper["parse_sizes"]
