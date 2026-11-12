@@ -188,7 +188,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const style = if (selected) self.selection else self.ground;
             fillRow(surface, row, style);
             _ = paintTo(ctx, surface, field.label, 3, row, style, @min(19, size.width));
-            const end = paint(ctx, surface, field.value, 19, row, style);
+            // Status/failure words belong to the field, even beside a long
+            // saved value. Reserve them here for every Panel consumer.
+            const limit: u16 = @intCast(size.width -| ctx.stringWidth(field.tail orelse ""));
+            const end = paintTo(ctx, surface, field.value, 19, row, style, limit);
             if (field.tail) |tail| {
                 var quiet = self.quiet;
                 quiet.bg = style.bg;
@@ -297,7 +300,8 @@ test "Panel draws bounded text ground selection and quiet tails without wrapping
     try std.testing.expect(surface.readCell(1, 1).style.bold);
     try std.testing.expectEqualStrings("F", surface.readCell(3, 2).char.grapheme);
     try std.testing.expectEqualStrings("l", surface.readCell(19, 2).char.grapheme);
-    try std.testing.expectEqualStrings("a", surface.readCell(25, 2).char.grapheme);
+    try std.testing.expectEqualStrings("t", surface.readCell(25, 2).char.grapheme);
+    try std.testing.expectEqual(panel.quiet.fg, surface.readCell(25, 2).style.fg);
     try std.testing.expectEqualStrings("O", surface.readCell(3, 3).char.grapheme);
     try std.testing.expectEqualStrings("t", surface.readCell(21, 3).char.grapheme);
     try std.testing.expectEqual(panel.quiet.fg, surface.readCell(21, 3).style.fg);
@@ -461,5 +465,18 @@ test "Panel stacked actions retain independent navigation and mouse targets" {
     for (0..10) |width| for (0..8) |height| {
         const drawn = try panel.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
         for (drawn.buffer, 0..) |cell, at| try std.testing.expect(at % @max(width, 1) + cell.char.width <= width);
+    };
+}
+
+test "Panel reserves failure words beside long ASCII and Unicode field values" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ &(@as([100]u8, @splat('n'))), "界界界界界界界界界界界界界界界界界界界界界界" }) |value| for ([_]u16{ 99, 46 }) |width| {
+        var panel: Self = .{ .title = "Title", .fields = &.{.{ .label = "Model", .value = value, .tail = " · couldn't save" }} };
+        const drawn = try panel.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 4 }, .cell_size = .{} });
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (0..width) |x| try text.writer.writeAll(drawn.readCell(@intCast(x), 2).char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, text.written(), "couldn't save") != null);
+        try std.testing.expectEqualStrings(value, panel.fields[0].value);
     };
 }

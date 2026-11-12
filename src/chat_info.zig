@@ -360,21 +360,6 @@ fn drawContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
         try status.writeGrouped(&context.writer, self.session.compaction_trigger orelse client_defaults.compactionTrigger(self.session.provider, self.session.model.slice()));
         self.fields[5].value = context.written();
     } else self.fields[5].value = "unavailable";
-    // Keep failure words visible even when a long saved value would fill the
-    // narrow row. This affects presentation only, never the inspected value.
-    for (&self.fields) |*field| if (field.tail) |tail| {
-        const room = size.width -| 19 -| ctx.stringWidth(tail);
-        var iter = ctx.graphemeIterator(field.value);
-        var end: usize = 0;
-        var cells: usize = 0;
-        while (iter.next()) |part| {
-            const width = ctx.stringWidth(part.bytes(field.value));
-            if (cells + width > room) break;
-            cells += width;
-            end += part.len;
-        }
-        field.value = field.value[0..end];
-    };
     const actions = try ctx.arena.alloc([]const u8, 3);
     var action_width: usize = 3 + 2 * 5;
     for (self.panel.actions, 6..) |label, row| {
