@@ -922,7 +922,7 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(self.state.order.items.len -| (first -| 1));
+        return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
     }
 
     fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
@@ -935,7 +935,7 @@ const SessionRows = struct {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         const item = view.listItem(self.state, index).?;
         const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = 2, .heading = built.heading, .target = view.clickOf(self.state, item) };
+        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = if (item == .row) 2 else 1, .heading = built.heading, .target = view.clickOf(self.state, item) };
     }
 };
 
@@ -2485,6 +2485,36 @@ test "App overview paints its ground and both selvedge rows" {
         try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 22).?.style.bg);
         try std.testing.expectEqual(case.band, shown.screen.readCell(79, 23).?.style.bg);
     }
+}
+
+test "a blank line on the ground sits under New Session, selected or not, at narrow and wide widths" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(overview.state.order.items.len != 0);
+    overview.caps = .{};
+    const ground = @import("widget_style.zig").of(overview.caps, .{}).bg;
+    const highlight = @import("widget_style.zig").of(overview.caps, .{ .background = .selection }).bg;
+    const first: view.Selection = .{ .session = overview.state.rows.items[overview.state.order.items[0]].reference };
+    for ([_]view.Selection{ .new_session, first }) |selection| for ([_]u16{ 46, 140 }) |width| {
+        errdefer std.debug.print("selection={s}, width={d}\n", .{ @tagName(selection), width });
+        overview.state.selected = selection;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
+        // The gap is blank ground in every column of the list, never part
+        // of the New Session row's highlight.
+        for (0..30) |col| {
+            const cell = shown.screen.readCell(@intCast(col), 1).?;
+            try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
+            try std.testing.expectEqual(ground, cell.style.bg);
+        }
+        try std.testing.expect((try shown.line(2)).len != 0);
+    };
 }
 
 test "App cursor contrasts with the painted ground after terminal theme reports" {
