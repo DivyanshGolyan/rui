@@ -192,7 +192,20 @@ def install_hook():
     print(f"Installed {hook}: each push runs python3 tests/ci/prepush.py --quick.")
 
 
+# Git runs a hook with these naming the pushing repository, and in a linked
+# worktree they outrank `git -C`: a check's scratch repository would commit
+# to the pushing branch. Every git this script starts finds its repository
+# from its directory.
+HOOK_REPOSITORY = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_PREFIX")
+
+
+def leave_hook_repository():
+    for name in HOOK_REPOSITORY:
+        os.environ.pop(name, None)
+
+
 def main():
+    leave_hook_repository()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/main")
     parser.add_argument("--plan", action="store_true", help="print selected commands without executing them")
