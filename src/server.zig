@@ -75,14 +75,15 @@ fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, r
 // Only the two shared workers reserve these stacks, independent of exchanges.
 const intake_worker_stack_bytes = 1024 * 1024;
 
-/// SIGINT and SIGTERM ask the Host to stop, as `host-stop` does: Ctrl-C on a
-/// foreground Host or `kill <pid>` is a stop someone meant. The handler only
+/// SIGINT, SIGTERM and SIGHUP ask the Host to stop, as `host-stop` does:
+/// Ctrl-C on a foreground Host, closing its terminal or `kill <pid>` is a
+/// stop someone meant. The handler only
 /// records the ask and writes intake's wake socket; intake's loop applies it
 /// through `Host.stopAsked`, the one owner of the stop record. SIGKILL and a
 /// crash leave no record. Bash children start with every signal at its
 /// default (`rui_bash_spawn`), and exec resets a caught signal anyway.
 const StopSignals = struct {
-    const signals = .{ std.posix.SIG.INT, std.posix.SIG.TERM };
+    const signals = .{ std.posix.SIG.INT, std.posix.SIG.TERM, std.posix.SIG.HUP };
 
     var asked: std.atomic.Value(bool) = .init(false);
     /// Intake's wake socket while it is open, else -1.
@@ -4959,7 +4960,7 @@ test "configure parent inherits the Host environment only after a fresh creation
     try std.testing.expectEqual(count, environments.len);
 }
 
-test "SIGINT and SIGTERM ask the Host to stop once through intake's loop, in every phase" {
+test "SIGINT, SIGTERM and SIGHUP ask the Host to stop once through intake's loop, in every phase" {
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

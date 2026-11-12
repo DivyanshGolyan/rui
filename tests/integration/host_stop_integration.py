@@ -211,11 +211,11 @@ def mixed_effect_drain(provider_first):
 
 
 def signal_stop():
-    """SIGINT and SIGTERM stop the Host as host-stop does; SIGKILL is a crash."""
+    """SIGINT, SIGTERM and SIGHUP stop the Host as host-stop does; SIGKILL is a crash."""
     with tempfile.TemporaryDirectory(prefix="rui-host-signal-") as root:
         state = canonical_fixture_root(root)
         endings = {}
-        for ending in ("host-stop", signal.SIGTERM, signal.SIGINT, signal.SIGKILL):
+        for ending in ("host-stop", signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGKILL):
             name = ending if isinstance(ending, str) else ending.name
             store = state / name
             host = fixture.start_host(store, None)
@@ -237,9 +237,9 @@ def signal_stop():
             endings[name] = endings[name], (store / "host.stopped").exists()
         asked = endings["host-stop"]
         assert asked[1], endings
-        assert endings["SIGTERM"] == asked and endings["SIGINT"] == asked, endings
+        assert all(endings[name] == asked for name in ("SIGTERM", "SIGINT", "SIGHUP")), endings
         assert endings["SIGKILL"] == (-signal.SIGKILL, False), endings
-        print(f"host signal stop passed: SIGTERM and SIGINT end as host-stop {asked}; SIGKILL {endings['SIGKILL']}")
+        print(f"host signal stop passed: SIGTERM, SIGINT and SIGHUP end as host-stop {asked}; SIGKILL {endings['SIGKILL']}")
 
 
 def main():

@@ -3316,9 +3316,9 @@ def main(selected="all"):
                         lambda: stop_process(entered, timeout=5),
                         lambda: proxy.close() if proxy is not None else None,
                         lambda: close_pty(master), lambda: close_pty(slave))
-        # SIGTERM and SIGINT to the Host are a stop someone asked for, as
+        # SIGTERM, SIGINT and SIGHUP to the Host are a stop someone asked for, as
         # host-stop is: the open conversation says so and leaves it to r.
-        for stop_signal in (signal.SIGTERM, signal.SIGINT):
+        for stop_signal in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             master, slave = open_pty()
             entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
                 "--", empty_session], env={**os.environ, "HOME": str(home)},
