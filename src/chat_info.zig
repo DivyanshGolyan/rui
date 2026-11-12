@@ -54,7 +54,7 @@ narrow: bool = false,
 session: status.Session = undefined,
 ready: bool = false,
 read_failed: bool = false,
-panel: Panel = .{ .title = "Chat", .action_gap = 1 },
+panel: Panel = .{ .title = "Chat", .action_gap = 1, .natural_height = true },
 fields: [6]Panel.Field = undefined,
 failures: [9]?[]const u8 = @splat(null),
 pending: ?usize = null,
@@ -343,8 +343,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
     children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.bodyWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
-    children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try self.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
-    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
+    children[1] = .{ .origin = .{ .row = children[0].surface.size.height, .col = 0 }, .surface = try self.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
+    return .{ .widget = self.widget(), .size = .{ .width = size.width, .height = children[0].surface.size.height + 1 }, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
 }
 
 fn drawBody(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -569,7 +569,7 @@ fn dumpWidget(widget_: vxfw.Widget, arena: std.mem.Allocator, width: u16, height
     var screen = try vaxis.Screen.init(arena, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
     surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, widget_);
     var out: std.Io.Writer.Allocating = .init(arena);
-    for (0..height) |row| {
+    for (0..surface.size.height) |row| {
         var line: std.Io.Writer.Allocating = .init(arena);
         var col: u16 = 0;
         while (col < width) {
@@ -968,11 +968,11 @@ test "Chat info action failures persist after navigation and fit narrow rows tog
         fixture.state_value = .failed;
         try page.widget().handleEvent(&ctx, .tick);
         for ([_]u16{ 99, 46 }) |width| {
-            const text = try dump(&page, arena.allocator(), width, 13);
+            const text = try dump(&page, arena.allocator(), width, 14);
             try std.testing.expect(std.mem.indexOf(u8, text, if (row == 7) "Archive: couldn't archive" else "Copy: couldn't copy") != null);
         }
     }
-    const text = try dump(&page, arena.allocator(), 46, 13);
+    const text = try dump(&page, arena.allocator(), 46, 14);
     try std.testing.expect(std.mem.indexOf(u8, text, "Archive: couldn't archive") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Copy: couldn't copy") != null);
 }
@@ -1307,4 +1307,57 @@ test "Chat info Rename recovers refused input without reopening its field" {
         try std.testing.expectEqualStrings(corrected, fixture.edit.?.label);
         try std.testing.expectEqual(@as(?[]const u8, null), page.failures[6]);
     }
+}
+
+test "Chat info natural body matches the mock grows by actual Model rows and shrinks on filtering or cancel" {
+    const picker = @import("model_picker.zig");
+    const entries = comptime blk: {
+        var result: [10]picker.Entry = undefined;
+        for (&result, 0..) |*entry, index| entry.* = .{ .id = std.fmt.comptimePrint("model-{d}", .{index}), .known = false, .catalogued = false, .providers = .initOne(.codex) };
+        break :blk result;
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    for ([_]bool{ false, true }) |context| for ([_]bool{ false, true }) |unicode| for ([_]u16{ 46, 99 }) |width| {
+        var fixture: Fixture = .{ .unicode = unicode };
+        fixture.init();
+        if (!context) fixture.session.context_estimate = null;
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 40 }, .cell_size = .{} };
+        const base_height: u16 = if (context) 11 else 10;
+        const body = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(base_height, body.size.height);
+        const complete = try page.widget().draw(ctx);
+        try std.testing.expectEqual(base_height + 1, complete.size.height);
+        try std.testing.expectEqual(@as(i17, base_height), complete.children[1].origin.row);
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
+        try std.testing.expect(std.mem.endsWith(u8, text, "   Rename     Archive     Copy last answer\n\n"));
+        page.panel.selected = 4;
+        page.model_choice.open(&menu, .codex, "model-0");
+        const all = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(base_height + 8, all.size.height);
+        try std.testing.expectEqual(@as(u16, 8), page.panel.custom_height);
+        try std.testing.expectEqual(@as(u16, 6), all.cursor.?.row);
+        try std.testing.expectEqual(@as(usize, 7), page.model_choice.hits.len);
+        try typeText(&page, &events, "9");
+        const narrowed = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(base_height + 1, narrowed.size.height);
+        try std.testing.expectEqual(@as(u16, 1), page.panel.custom_height);
+        try std.testing.expectEqual(@as(usize, 1), page.model_choice.hits.len);
+        try std.testing.expectEqual(@as(u16, 6), narrowed.cursor.?.row);
+        try std.testing.expectEqual(@as(u16, 20), narrowed.cursor.?.col);
+        const narrowed_text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 40);
+        try std.testing.expect(std.mem.indexOf(u8, narrowed_text, "model-9") != null);
+        try std.testing.expect(std.mem.indexOf(u8, narrowed_text, "Filter:") == null);
+        try press(&page, &events, vaxis.Key.escape);
+        try std.testing.expectEqual(base_height, (try page.bodyWidget().draw(ctx)).size.height);
+        page.failures[7] = " · couldn't archive";
+        page.failures[8] = " · couldn't copy";
+        const failed = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqual(base_height + @as(u16, if (width == 46) 2 else 0), failed.size.height);
+        try std.testing.expectEqual(width == 46, page.panel.stacked_actions);
+    };
 }

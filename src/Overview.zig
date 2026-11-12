@@ -732,12 +732,8 @@ fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerro
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
     switch (next orelse return) {
         .leave => ctx.quit = true,
-        .open_settings => {
-            self.ensureModels();
-            try self.root.openSettings(ctx);
-        },
+        .open_settings => try self.root.openSettings(ctx),
         .open => |reference| {
-            self.ensureModels();
             try self.root.showMain(ctx);
             if (self.root.session != null) {
                 try self.app_session.?.frontend.?.openPeer(ctx, &reference);
@@ -1742,13 +1738,6 @@ fn quiesceUpgrade(self: *Self) !bool {
         }
     }
     return self.worker.thread == null and self.job_count == 0;
-}
-
-/// Opening settings or a conversation requests the shared live choices once.
-fn ensureModels(self: *Self) void {
-    if (self.state.menu_read == .read or self.state.asking_models or self.job_count == max_jobs or self.state.left) return;
-    self.state.asking_models = true;
-    self.queue(.models);
 }
 
 /// One borrowed source for app settings and the open conversation's choices.
@@ -6513,15 +6502,16 @@ test "App settings Model filters live choices and saves the next Session at both
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = provider, .model = "gpt-5.5" }, fake_operations, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        // Both semantic entry points share one read; snapshots never enqueue.
-        overview.ensureModels();
+        // Core opening intents share one read; snapshots never enqueue.
+        try std.testing.expect((try overview.event(.{ .clicked = .settings })).? == .open_settings);
         const initial = modelsSnapshot(overview);
         try std.testing.expect(initial.menu == null);
         _ = modelsSnapshot(overview);
-        overview.ensureModels();
+        try std.testing.expect((try overview.event(.{ .clicked = .settings })).? == .open_settings);
         try std.testing.expectEqual(@as(usize, 1), overview.job_count);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
+        try std.testing.expect(try overview.event(.{ .clicked = .new_session }) == null);
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
             .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
             .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },

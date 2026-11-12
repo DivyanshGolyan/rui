@@ -1065,9 +1065,15 @@
     },
     {
       "name": "chat-info",
-      "note": "Chat info above retained input; null estimate omits Context; one substituted footer",
-      "open": "Fix retry deadline",
+      "note": "Natural-height info leaves completed feed above retained input; null Context; one bottom footer",
+      "open": "Retry deadline info",
       "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "text": "keep this retry draft"
+        },
         {
           "keys": [
             "M-i"
@@ -1084,21 +1090,41 @@
         "Folder",
         "Model",
         "Copy last answer",
-        "Fix retry deadline \u00b7 info",
+        "Retry deadline info \u00b7 info",
         "esc close",
-        "~/code/rui"
+        "~/code/rui",
+        "Backoff stays within time left.",
+        "The retry draft is ready.",
+        "\u203a keep this retry draft"
       ],
       "absent": [
         "Context",
         "unknown of",
         "alt+i info"
+      ],
+      "cast": [
+        {
+          "label": "Retry deadline info",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Give a chat info specimen summarizing the retry deadline fix."
+          ]
+        }
       ]
     },
     {
       "name": "chat-info-model",
-      "note": "Chat info Model inline field and compact matches; null Context; one substituted footer",
-      "open": "Fix retry deadline",
+      "note": "Inline Model grows into feed, not input; completed feed remains above; null Context; one bottom footer",
+      "open": "Retry deadline info",
       "steps": [
+        {
+          "wait": "The retry draft is ready."
+        },
+        {
+          "text": "keep this retry draft"
+        },
         {
           "keys": [
             "M-i"
@@ -1122,9 +1148,12 @@
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "Fix retry deadline \u00b7 info",
+        "Retry deadline info \u00b7 info",
         "esc close",
-        "\u2713"
+        "\u2713",
+        "Backoff stays within time left.",
+        "The retry draft is ready.",
+        "\u203a keep this retry draft"
       ],
       "absent": [
         "Context",

@@ -229,6 +229,11 @@ def load_build(sha):
 def fixture_answer(text, n, answers="echo"):
     """One answer policy, shared by the echo and realistic fixture modes."""
     text = text or ""
+    if "chat info specimen" in text:
+        return """- Deadline checked before backoff.
+- Backoff stays within time left.
+- The retry draft is ready.
+"""
     if "compact rich answer" in text:
         return """## What I changed
 

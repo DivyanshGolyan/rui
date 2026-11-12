@@ -2907,8 +2907,12 @@ Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab
 
 `/requests` and `/help` render selected inspections without changing the draft.
 
-**Chat info.** Alt-I (`\x1bi`) or a click on `alt+i info` in the chat footer opens the chat info panel.
+**Chat info.** Alt-I (`\x1bi`), a click on `alt+i info`, or a click on the chat footer’s own Session/model/effort line opens the same chat info panel.
+Clicking that line while info is already open leaves it open, without resetting its choice or consuming the click as a field action.
 The panel sits in a Layer above the chat input on its own ground, never in the feed; opening, editing and closing leave the input's draft unchanged.
+It takes only its natural content height, leaving the latest feed rows visible above it whenever space remains.
+Opening Model adds only the match and overflow rows it needs; filtering gives their space back to the feed.
+If space runs short, the panel takes feed space, not the retained input or its bottom footer.
 Its title is the chat's label, with Effort, Permissions, Tools, Folder and Model below, and Context only while Current supplies a non-null estimate.
 A missing estimate omits the Context row: neither `unknown` nor an invented zero is a context measurement; an actual zero estimate is shown as zero.
 Folder and Context are read-only; Folder shortens HOME to `~` and fits long paths from the left, preserving the true right edge.
@@ -3075,7 +3079,7 @@ The input keeps the bottom rows of the screen in a conversation and in the overv
 The overview keeps its own key-hint rows. The chat footer is two rows: the composer's lower rule and one `src/widgets/Footer.zig` line.
 While chat info is open, its footer replaces that Footer line on the physical last row; it adds neither a second footer between the panel and input nor a notice row below the footer.
 Its left side identifies the chat: `Name · model · effort · N% left`, plus an archive state when present; permission settings belong in chat information, not this line.
-Its right side names `alt+i info` and other active keys, including recovery, discard, unarchive and stop when applicable; keys take space before identity. The info hint is clickable and shares Alt-I’s panel-opening action.
+Its right side names `alt+i info` and other active keys, including recovery, discard, unarchive and stop when applicable; keys take space before identity. The info hint and the chat’s own Session/model/effort line are clickable and share Alt-I’s panel-opening action; clicking again while info is open is safe and leaves the open choice intact.
 The chat shows `‹` only while `Root.listVisible()` is false; it has no separate width test.
 The empty chat composer shows its prompt without placeholder instructions; approval shows the request and its choices, not a key-help sentence.
 The chat footer shows `ctrl+x stop` only while there is work to stop (Divyansh approved this on 2026-10-31, front-end plan PR 5).

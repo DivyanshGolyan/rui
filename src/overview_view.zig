@@ -1698,8 +1698,16 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .start_upgrade => startUpgrade(state),
     }
-    // Opening a Session shows the person its outcome.
-    for (effects.slice()) |effect| if (effect == .open) if (state.entryOf(effect.open)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
+    // Semantic openings request the shared choices here, never in a shell.
+    // The same admission also owns a loading list's later retry.
+    for (effects.slice()) |effect| switch (effect) {
+        .open => |reference| {
+            if (state.entryOf(reference)) |entry| state.want(entry, attention.Status.opened(entry.status), false);
+            askModels(state, &effects);
+        },
+        .open_settings => askModels(state, &effects),
+        else => {},
+    };
     return effects;
 }
 
@@ -1786,7 +1794,8 @@ fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
 }
 
 fn askModels(state: *State, effects: *Effects) void {
-    if (state.asking_models) return;
+    if (state.left or state.holdsHost() or state.asking_models) return;
+    if (state.menu_read == .read and !state.menu.loading()) return;
     state.asking_models = true;
     effects.add(.list_models);
 }
@@ -4478,7 +4487,7 @@ test "enter on a row opens it" {
     defer state.deinit();
     // Needs you leads; the newest work follows.
     try expectEffects(&.{}, try press(&state, draft, .next));
-    try expectEffects(&.{.{ .open = "e5f6g7".* }}, try submit(&state, draft));
+    try expectEffects(&.{ .{ .open = "e5f6g7".* }, .list_models }, try submit(&state, draft));
     // A blank draft is no request: Enter still opens the row.
     draft = try typeText(&state, "  ");
     try expectEffects(&.{ .clear_draft, .{ .open = "e5f6g7".* } }, try submit(&state, draft));
@@ -4527,7 +4536,7 @@ test "the composer starts a Session with its text and opens it" {
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "Fix the flaky resize test" } }}, try submit(&state, draft));
     try std.testing.expect(state.starting());
-    try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* } }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
+    try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* }, .list_models }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
     try std.testing.expect(!state.starting());
     try expectSelected(&state, "z9y8x7");
     // The next tick lists at once, so the new row is there on return.
@@ -4864,7 +4873,7 @@ test "unbound overview input posts no notice and leaves draft alone" {
 test "session resume opens its Session through the overview, which then keeps it selected" {
     var state = try testState();
     defer state.deinit();
-    try expectEffects(&.{.{ .open = "c3d4e5".* }}, try step(&state, .{ .open = "c3d4e5".* }));
+    try expectEffects(&.{ .{ .open = "c3d4e5".* }, .list_models }, try step(&state, .{ .open = "c3d4e5".* }));
     // The first listing finds the row; the selection waited for it.
     try expectEffects(&.{.{ .list = null }}, try step(&state, .{ .tick = test_now_s * 1000 }));
     _ = try respond(&state, .full, testToken(1), &mixed);
@@ -5064,7 +5073,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     _ = try refresh(&state, .changed, testToken(2), &.{session("e5f6g7", .{ .finished = ago(0) }, .{ .label = "List unused build steps" })});
     try expectSelected(&state, "e5f6g7");
     try std.testing.expectEqual(OrderClass.done, orderClass(&state, state.find("e5f6g7".*).?));
-    try expectEffects(&.{.{ .open = "e5f6g7".* }}, try submit(&state, .{}));
+    try expectEffects(&.{ .{ .open = "e5f6g7".* }, .list_models }, try submit(&state, .{}));
     // It leads the finished, newest first.
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
@@ -5198,7 +5207,7 @@ test "overview selection walks both ends and every row without folding" {
 test "one click on a row opens it, under Enter's rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
     try expectSelected(&state, "b2c3d4");
     // While Host requests wait on an Upgrade, the click selects but does
     // not open, as Enter would not.
@@ -5215,13 +5224,13 @@ test "a click while a start waits changes nothing, as keys do, and the start the
     try std.testing.expectEqual(InputMode.frozen, state.inputMode());
     try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
     try expectSelected(&state, &selected);
-    try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* } }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
+    try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* }, .list_models }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
 }
 
 test "overview settings and New Session clicks follow Enter and draft rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .settings }));
+    try expectEffects(&.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .settings }));
     try std.testing.expectEqual(Selection.settings, state.selected);
     try expectEffects(&.{.open_settings}, try submit(&state, .{}));
     try expectEffects(&.{}, try step(&state, .{ .clicked = .new_session }));
@@ -5269,7 +5278,7 @@ test "a click on a Session while a panel shows opens it and closes the panel, as
     var state = try opened(&mixed);
     defer state.deinit();
     state.panel = .help;
-    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
     try std.testing.expectEqual(null, state.panel);
 }
 
@@ -5291,9 +5300,9 @@ test "every click obeys the input mode: a frozen screen takes none, whatever it 
             try std.testing.expectEqual(selected, state.selected);
             try std.testing.expect(state.archive == .active);
         } else switch (clicked) {
-            .open => try expectEffects(&.{.{ .open = ref.* }}, effects),
+            .open => try expectEffects(&.{ .{ .open = ref.* }, .list_models }, effects),
             .new_session => try std.testing.expectEqual(Selection.new_session, state.selected),
-            .settings => try expectEffects(&.{.open_settings}, effects),
+            .settings => try expectEffects(&.{ .open_settings, .list_models }, effects),
         }
     };
 }
@@ -5755,7 +5764,7 @@ test "a key that acts on a Session brings the Sessions back first, so it acts wh
     }
     // Enter on an empty draft opens the selected Session from under it.
     _ = try submit(&state, try typeText(&state, "/help"));
-    try expectEffects(&.{.{ .open = state.selected.session }}, try submit(&state, .{}));
+    try expectEffects(&.{ .{ .open = state.selected.session }, .list_models }, try submit(&state, .{}));
     try std.testing.expect(state.panel == null);
 }
 
@@ -6749,10 +6758,10 @@ test "the Footer names the Enter action submission takes, over every composer st
         .{ .setup = .typed, .draft = "", .action = .await_task, .right = "enter start", .effects = &.{} },
         .{ .setup = .typed, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
         .{ .setup = .typed, .draft = "//not a command", .action = .start, .right = "enter start", .effects = &.{.start} },
-        .{ .setup = .typed, .selection = k7, .draft = "", .action = .open_session, .right = "enter open", .effects = &.{.open} },
-        .{ .setup = .typed, .selection = k7, .draft = " \n", .action = .open_session, .right = "enter open", .effects = &.{ .clear_draft, .open } },
+        .{ .setup = .typed, .selection = k7, .draft = "", .action = .open_session, .right = "enter open", .effects = &.{ .open, .list_models } },
+        .{ .setup = .typed, .selection = k7, .draft = " \n", .action = .open_session, .right = "enter open", .effects = &.{ .clear_draft, .open, .list_models } },
         .{ .setup = .typed, .selection = k7, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
-        .{ .setup = .typed, .selection = .settings, .draft = "", .action = .open_settings, .right = "enter open", .effects = &.{.open_settings} },
+        .{ .setup = .typed, .selection = .settings, .draft = "", .action = .open_settings, .right = "enter open", .effects = &.{ .open_settings, .list_models } },
         .{ .setup = .typed, .selection = .settings, .draft = "a task", .action = .start, .right = "enter start", .effects = &.{.start} },
         // Command completion open: Enter takes the highlighted entry.
         .{ .setup = .typed, .draft = "/he", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.clear_draft} },
@@ -6822,4 +6831,89 @@ test "overview Footer reserves the Upgrade cancellation key before clipping prog
         state.upgrade.run = case.run;
         try std.testing.expectEqualStrings(case.right, footerRight(&state, .{}));
     }
+}
+
+const TestModelOpening = enum { settings_click, settings_enter, session_click, session_enter, resumed };
+
+fn openModelConsumer(state: *State, opening: TestModelOpening) !Effects {
+    return switch (opening) {
+        .settings_click => step(state, .{ .clicked = .settings }),
+        .settings_enter => blk: {
+            state.selected = .settings;
+            break :blk submit(state, .{});
+        },
+        .session_click => step(state, .{ .clicked = .{ .open = "models".* } }),
+        .session_enter => blk: {
+            state.selected = .{ .session = "models".* };
+            break :blk submit(state, .{});
+        },
+        .resumed => step(state, .{ .open = "models".* }),
+    };
+}
+
+test "shared model reads are admitted by core openings and deduplicated across failed loading and complete answers" {
+    for (std.enums.values(TestModelOpening)) |opening| {
+        var state = try opened(&.{session("models", .{ .finished = ago(1) }, .{})});
+        defer state.deinit();
+        const show: Effect = switch (opening) {
+            .settings_click, .settings_enter => .open_settings,
+            else => .{ .open = "models".* },
+        };
+        try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
+        try std.testing.expect(state.asking_models);
+        try expectEffects(&.{show}, try openModelConsumer(&state, opening));
+        for ([_]ModelsRead{ .invalid, .unanswered }) |answer| {
+            try expectEffects(&.{}, try step(&state, .{ .models = answer }));
+            try std.testing.expect(!state.asking_models);
+            try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
+            try expectEffects(&.{show}, try openModelConsumer(&state, opening));
+        }
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
+        try std.testing.expect(state.menu.loading() and !state.asking_models);
+        try expectEffects(&.{ show, .list_models }, try openModelConsumer(&state, opening));
+        try expectEffects(&.{show}, try openModelConsumer(&state, opening));
+        // A loading answer is retried on the next listing without any shell open.
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .pending }}) } }));
+        try expectEffects(&.{ .{ .list = testToken(1) }, .list_models }, try step(&state, .{ .tick = state.next_list_ms }));
+        try expectEffects(&.{show}, try openModelConsumer(&state, opening));
+        try expectEffects(&.{}, try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "model-a\n" } } }}) } }));
+        try std.testing.expect(!state.asking_models and !state.menu.loading());
+        try expectEffects(&.{show}, try openModelConsumer(&state, opening));
+        try expectEffects(&.{show}, try openModelConsumer(&state, opening));
+        const revision = state.menu_revision;
+        try expectEffects(&.{}, try step(&state, .leave));
+        try expectEffects(&.{.{ .open = "models".* }}, try step(&state, .{ .open = "models".* }));
+        try std.testing.expect(!state.asking_models and state.menu_revision > revision);
+    }
+}
+
+test "shared model reads respect every Upgrade hold for opening and loading retries then resume after reobservation" {
+    const Hold = enum { active, checking, reobserving, blocked };
+    const ReadState = enum { unread, invalid, unanswered, loading, complete };
+    for (std.enums.values(Hold)) |hold| for (std.enums.values(ReadState)) |answer| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        switch (answer) {
+            .unread => {},
+            .invalid => _ = try step(&state, .{ .models = .invalid }),
+            .unanswered => _ = try step(&state, .{ .models = .unanswered }),
+            .loading, .complete => _ = try step(&state, .{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = if (answer == .loading) .pending else .{ .live = .{ .bytes = "model-a\n" } } }}) } }),
+        }
+        if (hold != .active) {
+            try expectEffects(&.{}, try step(&state, .start_upgrade));
+            if (hold != .checking) try expectEffects(&.{}, try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = if (hold == .blocked) .incompatible else .unchanged } } }));
+        }
+        const wanted = hold == .active and answer != .complete;
+        try expectEffects(if (wanted) &.{ .open_settings, .list_models } else &.{.open_settings}, try step(&state, .{ .clicked = .settings }));
+        try std.testing.expectEqual(wanted, state.asking_models);
+        try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .settings }));
+        // Periodic loading retries must use exactly the same hold admission.
+        const ticked = try step(&state, .{ .tick = state.next_list_ms });
+        try expectEffects(&.{.{ .list = testToken(1) }}, ticked);
+        if (hold == .reobserving) {
+            _ = try respond(&state, .full, testToken(2), &.{});
+            try std.testing.expect(!state.holdsHost());
+            try expectEffects(if (answer == .complete) &.{.open_settings} else &.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .settings }));
+        }
+    };
 }

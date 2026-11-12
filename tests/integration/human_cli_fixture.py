@@ -273,6 +273,32 @@ def assert_chat_info_layout(screen, *, context=None):
         assert any(row.strip().startswith("Context") for row in contents) == context, screen
 
 
+
+def chat_info_geometry(screen):
+    """Visible natural-height body, measured independently of the feed widget."""
+    content = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    effort = next(index for index, row in enumerate(content) if row.startswith("   Effort"))
+    composer = next(index for index, row in enumerate(content) if row.startswith((" › ", " > ")))
+    actions = [index for index, row in enumerate(content)
+               if row.strip().startswith(("Rename", "Archive", "Copy last answer"))]
+    # The body's rule and title precede Effort. One deliberate ground row
+    # follows the last action, then the input's upper rule and prompt.
+    assert actions and actions[-1] == composer - 3, screen
+    return {"top": effort - 2, "input": composer, "footer": len(content) - 1,
+            "feed": content[:effort - 2], "rows": content}
+
+
+def footer_click(screen, *, column=None, marker=None, info=False):
+    """An SGR mouse click in the visible Session identity/footer line."""
+    content = screen.split("\n")
+    row = len(content) - (1 if info else 2)
+    line = content[row]
+    if marker is not None:
+        column = line.index(marker)
+    assert column is not None and 0 <= column < len(line), (column, line)
+    return f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode()
+
+
 def chat_info_open(master, timeout=15):
     """Open ready chat info through the footer; Context is optional."""
     screen = panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in

@@ -105,7 +105,7 @@ Typing `/` shows command names only, with fixed choices in quiet colour separate
 Stable handles from the product:
 - `›`: the composer prompt.
 - `Browsing · Esc returns`: an inspection or scrolled view.
-- `Effort`, `Permissions` and `Copy last answer`: chat info, opened with Alt-I (`--keys M-i` or `--hex 1b69`).
+- `Effort`, `Permissions` and `Copy last answer`: natural-height chat info above visible feed, opened with Alt-I (`--keys M-i` or `--hex 1b69`) or a click on the chat’s own Session/model/effort line or `alt+i info`.
 - `alt+d details`: separate submission repair/identity page while an original is held unresolved or rejected (`--keys M-d` or `--hex 1b64`).
 - `Start of conversation`.
 - `Detached. Host work continues.` and `Resume: rui session resume …`: shown after exit.

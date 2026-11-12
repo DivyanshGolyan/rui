@@ -818,12 +818,6 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
-            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_hooks.host) |host| {
-                if (try host.start(host.context, ctx)) {
-                    ctx.consumeEvent();
-                    return;
-                }
-            };
             self.shown_notice.dismiss();
             if (self.info_open) {
                 if (event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
@@ -843,6 +837,14 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 try self.afterInput(ctx);
                 return;
             }
+            // The empty-composer restart shortcut has no authority over a
+            // panel's input, including its Rename and Model editors.
+            if (event == .key_press and !pasting and self.input.composition().bytes.len == 0 and hostStartKey(event.key_press)) if (self.app_hooks.host) |host| {
+                if (try host.start(host.context, ctx)) {
+                    ctx.consumeEvent();
+                    return;
+                }
+            };
             if (event == .key_press and !pasting and event.key_press.matches('i', .{ .alt = true })) {
                 try self.openInfo(ctx);
                 ctx.consumeAndRedraw();
@@ -1057,6 +1059,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .overlay = if (self.info_open) self.app_info.bodyWidget() else palette,
         .width = ctx.max.width.?,
     });
+    self.app_screen.overlay_reserves_space = self.info_open;
     self.app_info.narrow = !list_visible;
     if (self.info_open) {
         // The panel supplies the one screen footer in the ordinary footer slot.
@@ -3739,6 +3742,18 @@ test "App Session drafts survive switching chats with their caret and sending re
     }
 }
 
+test "sending a Message drops a closed chat-info capture still waiting to start" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.keys("\x1bi\x1b");
+    try std.testing.expect(!held.self.info_open and held.self.inspection.status_requested);
+    try std.testing.expect(held.self.reader.thread == null);
+    try held.keys("hello\r");
+    try std.testing.expect(held.self.submission.intent.? == .message);
+    try std.testing.expect(!held.self.inspection.status_requested);
+    try std.testing.expect(held.self.reader.thread == null);
+}
+
 test "sending a Message from a browsed page returns the screen to the latest conversation" {
     const held = try HeldFrontend.create();
     defer held.destroy();
@@ -4390,7 +4405,7 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
         const base = surface.children[0].surface;
         const panel = surface.children[1];
         try std.testing.expectEqual(@as(u8, 2), panel.z_index);
-        try std.testing.expectEqual(base.children[1].origin.row, panel.origin.row + panel.surface.size.height);
+        try std.testing.expectEqual(base.children[base.children.len - 1].origin.row, panel.origin.row + panel.surface.size.height);
         try std.testing.expect((try rowWith(held, "Fix retry deadline")) != null);
         try std.testing.expect((try rowWith(held, "Folder")) != null);
         try std.testing.expect((try rowWith(held, "alt+i info")) == null);
@@ -4409,6 +4424,125 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
         try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
         try std.testing.expectEqual(Screen.ViewKind.feed, held.screen.view);
     }
+}
+
+test "chat identity click and Alt-I share natural panel opening and Escape restores the feed" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = width, .height = 40 };
+        try seedFeed(held.screen, "earlier feed line\nlatest feed line\n");
+        try captureInfo(held, "Fix retry deadline");
+        try held.keys("kept draft\x1b[D");
+        const cursor = held.self.input.composition().cursor;
+        const ordinary = try held.draw();
+        const input = ordinary.children[0].surface.children[1];
+        const facts = input.surface.children[1];
+        // The displayed name begins after the gutter/back control; locate it
+        // independently of whether the implementation installed a hit target.
+        const col: i16 = if (held.self.chrome.list_visible) 1 else 3;
+        const row: i16 = @intCast(input.origin.row + facts.origin.row);
+        var ctx = held.context();
+        defer ctx.cmds.deinit(held.arena.allocator());
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, ordinary, .{ .row = row, .col = col, .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(held.self.info_open and held.self.inspection.status_requested);
+        const clicked = try held.draw();
+        const panel = clicked.children[1];
+        const base = clicked.children[0].surface;
+        const draft = base.children[base.children.len - 1];
+        try std.testing.expect(panel.origin.row > 0);
+        try std.testing.expectEqual(base.children[0].surface.size.height, panel.origin.row);
+        try std.testing.expectEqual(draft.origin.row, panel.origin.row + panel.surface.size.height);
+        try std.testing.expect((try rowWith(held, "latest feed line")) != null);
+        // The open panel's footer cannot toggle or reset its owner.
+        const footer_row: i16 = @intCast(draft.origin.row + draft.surface.children[1].origin.row);
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, clicked, .{ .row = footer_row, .col = col, .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(held.self.info_open and !held.self.app_info.hasChoice());
+        try std.testing.expectEqual(@as(usize, 0), held.self.app_info.panel.selected);
+        try held.keys("\x1b");
+        try std.testing.expect(!held.self.info_open and held.left == null);
+        try held.keys("\x1bi");
+        const keyed = try held.draw();
+        try std.testing.expect(held.self.info_open);
+        try std.testing.expectEqual(panel.origin, keyed.children[1].origin);
+        try std.testing.expectEqual(panel.surface.size, keyed.children[1].surface.size);
+        try held.keys("\x1b");
+        try std.testing.expect(!held.self.info_open and held.left == null);
+        try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, held.self.input.composition().cursor);
+        try std.testing.expect((try rowWith(held, "latest feed line")) != null);
+    }
+}
+
+test "chat info owns typed keys before Host restart across every modal editor and choice" {
+    const Host = struct {
+        stopped: bool,
+        starts: usize = 0,
+        fn held(raw: *anyopaque) bool {
+            return @as(*@This(), @ptrCast(@alignCast(raw))).stopped;
+        }
+        fn lost(_: *anyopaque) void {
+            @panic("modal input must not touch Host custody");
+        }
+        fn start(raw: *anyopaque, _: *vxfw.EventContext) !bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.starts += 1;
+            return self.stopped;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    const Mode = enum { rows, effort, permissions, tools, rename, model };
+    for ([_]bool{ false, true }) |stopped| for ([_]bool{ false, true }) |draft| for (std.enums.values(Mode)) |mode| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try captureInfo(held, "Before");
+        if (draft) try held.keys("kept draft");
+        var host: Host = .{ .stopped = stopped };
+        held.self.app_hooks.host = .{ .context = &host, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice };
+        defer held.self.app_hooks.host = null;
+        try held.keys("\x1bi");
+        const page = &held.self.app_info;
+        page.panel.selected = switch (mode) {
+            .rows, .effort => 0,
+            .permissions => 1,
+            .tools => 2,
+            .model => 4,
+            .rename => 6,
+        };
+        if (mode != .rows) try held.keys("\r");
+        const selected = page.panel.selected;
+        // Each successive query is listed (terra), so refusal rollback is
+        // independent of the routing boundary under test.
+        for ("rra") |key| {
+            try held.keys(&.{key});
+            try std.testing.expectEqual(@as(usize, 0), host.starts);
+            try std.testing.expectEqual(stopped, host.stopped);
+            try std.testing.expect(held.self.info_open and held.left == null);
+            try std.testing.expect(held.self.submission.intent == null and held.self.info_edit == null);
+            try std.testing.expectEqual(selected, page.panel.selected);
+            try std.testing.expectEqualStrings(if (draft) "kept draft" else "", held.self.input.composition().bytes);
+        }
+        switch (mode) {
+            .rename => {
+                try std.testing.expect(page.renaming);
+                try std.testing.expectEqualStrings("Beforerra", page.rename_editor.buffer[0..page.rename_editor.length]);
+            },
+            .model => {
+                try std.testing.expect(page.model_choice.active);
+                try std.testing.expectEqualStrings("rra", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+            },
+            .rows => try std.testing.expect(!page.hasChoice()),
+            .effort, .permissions, .tools => try std.testing.expect(page.panel.choice != null),
+        }
+        // Once the panel is closed, only an empty composer delegates r to Host.
+        page.cancelChoice();
+        try held.keys("\x1b");
+        try held.keys("r");
+        try std.testing.expectEqual(@as(usize, @intFromBool(!draft)), host.starts);
+        try std.testing.expectEqualStrings(if (draft) "kept draftr" else if (stopped) "" else "r", held.self.input.composition().bytes);
+    };
 }
 
 test "chat info inspection refresh preserves a choice and late captures never reopen a closed panel" {
@@ -8284,7 +8418,7 @@ test "chat info supplies the one bottom footer after the input and both dividers
         }
         const surface = try held.draw();
         const base = surface.children[0].surface;
-        const input = base.children[1];
+        const input = base.children[base.children.len - 1];
         try std.testing.expectEqual(@as(usize, 2), input.surface.children.len);
         const footer = input.surface.children[1];
         try std.testing.expectEqual(@as(i17, size.height - 1), input.origin.row + footer.origin.row);

@@ -23,6 +23,9 @@ from human_cli_fixture import (
     assert_chat_info_layout,
     chat_content_row,
     chat_info_open,
+    chat_info_geometry,
+    footer_click,
+    assert_model_choice,
     keyed_frame,
     model_choice_frame,
     model_choice_shown,
@@ -398,6 +401,72 @@ def pages_case():
     print("session chrome: chat info has one substituted footer; Esc returns its draft and the live work stop hint; help remains a page", flush=True)
 
 
+
+def info_natural_height_case():
+    """The actual feed donates only the rows the open info body needs."""
+    answer = "\n".join(f"FEED-{index:02d}" for index in range(1, 25))
+    with Chrome("rui-chrome-info-height.", [fixture.sse_answer("feed", "r", "m", answer)[0]]) as chrome:
+        session = chrome.session()
+        run(chrome.home, "session", "configure", "--store", chrome.store, "--session", session,
+            "--label", "Natural height")
+        chrome.answered(session, "Show the saved feed")
+        for width, height in ((140, 40), (46, 30), (46, 18)):
+            master, slave = open_pty(width, height)
+            chrome.descriptors += [master, slave]
+            caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
+                env={**os.environ, "HOME": str(chrome.home)}, cwd=str(chrome.workspace),
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            chrome.callers.append(caller)
+            chrome.frame(master, b"", lambda screen: "FEED-24" in screen and "Opening…" not in screen)
+            live = chrome.frame(master, b"kept draft", lambda screen:
+                                "FEED-24" in screen and "kept draft" in screen)
+            # Wide identity sections are separate probes of the same transition;
+            # the narrow label and its explicit info hint use the same path.
+            columns = ([live.split("\n")[-2].index(marker) for marker in
+                        ("Natural height", "gpt-6-sol", "low")] if width == 140 else
+                       [live.split("\n")[-2].index(marker) for marker in ("Natural", "alt+i")])
+            opened = None
+            for column in columns:
+                opened = chrome.frame(master, footer_click(live, column=column),
+                                      lambda screen: "Copy last answer" in screen and " · info" in screen)
+                assert_chat_info_layout(opened, context=True)
+                base = chat_info_geometry(opened)
+                if height >= 30:
+                    assert base["top"] > 0 and any("FEED-" in row for row in base["feed"]), opened
+                # A click on the substituted footer is safe and idempotent.
+                clicked = chrome.frame(master, footer_click(opened, marker=" · info", info=True) + b"\x1b[B\x1b[A",
+                                       lambda screen: "Copy last answer" in screen)
+                assert chat_info_geometry(clicked) == base, clicked
+                live = chrome.frame(master, b"\x1b", lambda screen:
+                                    "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
+            alt = chat_info_open(master)
+            assert chat_info_geometry(alt) == base, (opened, alt)
+            choice = model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
+            grown = assert_model_choice(choice, query="")
+            if height >= 30:
+                expanded = chat_info_geometry(choice)
+                growth = len(grown["matches"]) + (grown["more"] is not None)
+                assert base["top"] - expanded["top"] == growth, (alt, choice)
+                assert expanded["input"] == base["input"] and expanded["footer"] == base["footer"], choice
+                assert any("FEED-" in row for row in expanded["feed"]), choice
+                filtered = model_choice_frame(master, b"luna", query="luna", more=False)
+                shrunk = assert_model_choice(filtered, query="luna", more=False)
+                short = chat_info_geometry(filtered)
+                assert len(shrunk["matches"]) == 2, filtered
+                assert short["top"] - expanded["top"] == growth - 2, (choice, filtered)
+                assert short["input"] == base["input"], filtered
+            else:
+                assert "kept draft" in choice and rows(choice)[-1].endswith("esc close"), choice
+            closed = chrome.frame(master, b"\x1b", lambda screen:
+                                  not model_choice_shown(screen) and "Copy last answer" in screen)
+            assert chat_info_geometry(closed) == base, closed
+            chrome.frame(master, b"\x1b", lambda screen:
+                         "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
+            chrome.leave(master, caller)
+        assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
+    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; footer clicks and Alt-I share one draft-preserving transition", flush=True)
+
+
 def approval_overflow_case():
     """A clipped request reports its omitted rows; both open gestures reveal
     them in the same panel, keeping the decision and any draft intact."""
@@ -518,6 +587,7 @@ def main():
     activity_case()
     scroll_marker_case()
     pages_case()
+    info_natural_height_case()
     approval_overflow_case()
     opening_case()
     notice_case()

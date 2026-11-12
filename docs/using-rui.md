@@ -33,8 +33,11 @@ It reports installation separately from activation, including when an applicatio
 
 ## Chat info
 
-Press **Alt+I** in a conversation, or click **alt+i info** on the line naming the chat, to open its info panel above the input.
+Press **Alt+I** in a conversation, or click its Session/model/effort line or **alt+i info**, to open the same info panel above the input.
+Clicking that line again while info is open leaves the panel and any open choice alone.
 The panel has its own ground and never becomes part of the feed; your draft stays below it unchanged.
+It uses only the height it needs, leaving recent messages visible above it.
+Opening Model grows the panel into that feed space, and filtering gives space back; the input and bottom footer stay in place.
 Its one footer replaces the usual chat footer below the input’s lower divider, on the physical last row; there is no second footer inside the panel or blank notice row below it.
 Up and Down select Effort, Permissions, Tools or Model, and Enter opens the field's choices.
 Folder is read-only: HOME is shown as `~`, and a long path keeps its right edge with a leading ellipsis.

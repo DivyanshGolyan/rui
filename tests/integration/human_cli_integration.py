@@ -3241,6 +3241,18 @@ def main(selected="all"):
             assert "× Host stopped · " in stopped, stopped
             assert "TruncatedResponse" not in stopped and "Not confirmed" not in stopped and "rui host start" not in stopped, stopped
             assert entered.poll() is None, "the Host's stop ended the TUI"
+            # With the chat draft empty, Host recovery's `r` must still defer
+            # to the modal editor. No Configure is submitted by these probes.
+            chat_info_open(master)
+            panel_frame(master, lambda frame: any(row.strip() == "r" for row in frame.split("\n")),
+                        b"\x1b[B\x1b[B\x1b[B\x1b[B\r\x01\x0br")
+            panel_frame(master, lambda frame: "Copy last answer" in frame
+                        and not any(row.strip() == "r" for row in frame.split("\n")), b"\x1b")
+            model_choice_frame(master, b"\x1b[A\r", query="")
+            model_choice_frame(master, b"r", query="r")
+            panel_frame(master, lambda frame: not model_choice_shown(frame) and "Copy last answer" in frame, b"\x1b")
+            restored = panel_frame(master, lambda frame: "Copy last answer" not in frame and " · r retry" in frame, b"\x1b")
+            assert "Host starting" not in restored, restored
             assert proxy.mutations == [("/v1/message", original)], "a lost observation retransmitted the Message"
             os.write(master, b"\x03")
             lost, errors = terminal_exit(entered, master)
