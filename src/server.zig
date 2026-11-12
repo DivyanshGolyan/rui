@@ -95,11 +95,13 @@ const StopSignals = struct {
     /// the handler sees -1.
     var writing: std.atomic.Value(u32) = .init(0);
 
-    previous: [signals.len]std.posix.Sigaction,
+    /// The handlers `install` replaced. Static, like the handlers themselves:
+    /// serve's frame stays resident for the Host's life.
+    var previous: [signals.len]std.posix.Sigaction = undefined;
 
     /// Installed before startup, so an ask during startup stops the Host
-    /// once intake runs. Restores the previous handlers on `deinit`.
-    fn install() StopSignals {
+    /// once intake runs. `restore` puts the previous handlers back.
+    noinline fn install() void {
         var blocked = std.posix.sigemptyset();
         inline for (signals) |signal| std.posix.sigaddset(&blocked, signal);
         var previous_mask: std.posix.sigset_t = undefined;
@@ -107,13 +109,11 @@ const StopSignals = struct {
         defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
         asked.store(false, .release);
         const action: std.posix.Sigaction = .{ .handler = .{ .handler = handle }, .mask = std.posix.sigemptyset(), .flags = 0 };
-        var scope: StopSignals = undefined;
-        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &action, &scope.previous[i]);
-        return scope;
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &action, &previous[i]);
     }
 
-    fn deinit(scope: *StopSignals) void {
-        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &scope.previous[i], null);
+    noinline fn restore() void {
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &previous[i], null);
     }
 
     fn handle(_: std.posix.SIG) callconv(.c) void {
@@ -1017,8 +1017,8 @@ pub fn serve(
         .flags = 0,
     };
     std.posix.sigaction(.CHLD, &child_action, null);
-    var stop_signals = StopSignals.install();
-    defer stop_signals.deinit();
+    StopSignals.install();
+    defer StopSignals.restore();
     var descriptor_observation = try descriptor_limit.observe(io);
     var descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
@@ -5030,14 +5030,14 @@ test "the Host's stop signals reach its handler until serve restores the previou
     var previous_mask: std.posix.sigset_t = undefined;
     std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &unblocked, &previous_mask);
     defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
-    var scope = StopSignals.install();
+    StopSignals.install();
     inline for (StopSignals.signals) |signal| {
         try std.testing.expect(!StopSignals.asked.load(.acquire));
         // raise delivers to this thread before it returns.
         try std.posix.raise(signal);
         try std.testing.expect(StopSignals.asked.swap(false, .acq_rel));
     }
-    scope.deinit();
+    StopSignals.restore();
     inline for (StopSignals.signals) |signal| {
         try std.posix.raise(signal);
         try std.testing.expect(!StopSignals.asked.load(.acquire));
