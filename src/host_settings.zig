@@ -127,7 +127,7 @@ pub const MysqlBytes = struct {
                 gpa.destroy(parsed);
             }
         }
-        self.* = .{};
+        resetVacant(MysqlBytes, self, .{});
     }
     pub fn set(self: *MysqlBytes, gpa: std.mem.Allocator, text: []const u8) Error!void {
         if (text.len > max_document_bytes) return error.SettingsInvalid;
@@ -192,7 +192,7 @@ pub const Settings = struct {
         wipeValue(Settings, self);
     }
     pub fn deinit(self: *Settings) void {
-        dispose(Settings, self);
+        vacate(Settings, self, .{});
     }
 };
 pub const Store = union(enum) {
@@ -277,7 +277,7 @@ pub const Presets = struct {
     memory: ?std.heap.ArenaAllocator = null,
     pub fn deinit(self: *Presets) void {
         if (self.memory) |*memory| memory.deinit();
-        self.* = .{};
+        resetVacant(Presets, self, .{});
     }
 };
 fn textDefault(comptime capacity: usize, comptime value: []const u8) Text(capacity) {
@@ -677,11 +677,10 @@ fn readValue(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, 
     if (@typeInfo(T) == .optional) {
         const Child = @typeInfo(T).optional.child;
         if (value == .null) {
-            if (dest.*) |*present| dispose(Child, present);
-            dest.* = null;
+            vacate(T, dest, null);
             return;
         }
-        if (dest.* == null) dest.* = .{};
+        if (dest.* == null) resetVacant(T, dest, .{});
         return readValue(Child, &dest.*.?, value, at, read);
     }
     if (comptime isKind(T)) return readKind(T, dest, value, at, read);
@@ -705,8 +704,7 @@ fn readValue(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, 
             inline for (info.field_names, info.field_types) |name, Field| {
                 if (std.mem.eql(u8, entry.key_ptr.*, comptime camel(name))) {
                     if (std.meta.activeTag(dest.*) != @field(std.meta.Tag(T), name)) {
-                        dispose(T, dest);
-                        dest.* = @unionInit(T, name, .{});
+                        vacate(T, dest, @unionInit(T, name, .{}));
                     }
                     try readValue(Field, &@field(dest, name), entry.value_ptr.*, try childPath(read.arena, at, entry.key_ptr.*), read);
                     break;
@@ -758,8 +756,7 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
         },
         .secret => {
             if (value == .null) {
-                dest.bytes.wipe();
-                dest.source = .default;
+                vacate(T, dest, .{});
                 return;
             }
             const source = try object(value, at, read);
@@ -771,11 +768,11 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
             if (std.mem.eql(u8, name, "env")) {
                 const text = try string(input, at, read);
                 if (!validEnv(text)) return refuse(read.failure, at, "must name an environment variable");
-                dest.bytes.wipe();
+                vacate(T, dest, .{});
                 dest.source = .{ .env = .{} };
                 dest.source.env.set(text) catch return refuse(read.failure, at, "environment variable name exceeds its byte bound");
             } else if (std.mem.eql(u8, name, "file")) {
-                dest.bytes.wipe();
+                vacate(T, dest, .{});
                 dest.source = .{ .file = .{} };
                 if (input == .null) return refuse(read.failure, at, "secret file must name an absolute path");
                 try readKind(Path, &dest.source.file, input, at, read);
@@ -789,28 +786,27 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
                     };
                 } else {
                     if (!secret_value.valid(text)) return refuse(read.failure, at, "must be a bounded visible-ASCII credential");
-                    dest.bytes.wipe();
+                    vacate(T, dest, .{});
                     @memcpy(dest.bytes.bytes[0..text.len], text);
                     dest.bytes.len = text.len;
                 }
-                dest.source = .literal;
+                resetVacant(T.Source, &dest.source, .literal);
             } else if (std.mem.eql(u8, name, "owner")) {
                 if (input != .bool or !input.bool) return refuse(read.failure, at, "owner marker must be true");
-                dest.bytes.wipe();
+                vacate(T, dest, .{});
                 dest.source = .literal;
             } else return refuse(read.failure, at, "unknown secret source");
         },
         .named => {
             const entries = try object(value, at, read);
             if (entries.count() > T.max) return refuse(read.failure, at, "too many named entries");
-            dispose(T, dest);
-            dest.len = 0;
+            vacate(T, dest, .{});
             var iterator = entries.iterator();
             while (iterator.next()) |entry| {
                 const here = try childPath(read.arena, at, entry.key_ptr.*);
                 if (!validName(entry.key_ptr.*)) return refuse(read.failure, here, "invalid entry name");
                 const i = dest.len;
-                dest.values[i] = .{};
+                vacate(T.Child, &dest.values[i], .{});
                 try dest.names[i].set(entry.key_ptr.*);
                 dest.len += 1;
                 try readValue(T.Child, &dest.values[i], entry.value_ptr.*, here, read);
@@ -818,9 +814,9 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
         },
         .providers => {
             const entries = try object(value, at, read);
-            dispose(T, dest);
+            vacate(T, dest, .{});
             const info = @typeInfo(T.Table).@"struct";
-            inline for (info.field_names) |name| @field(dest.entries, name) = null;
+            inline for (info.field_names, info.field_types) |name, Field| vacate(Field, &@field(dest.entries, name), null);
             var iterator = entries.iterator();
             while (iterator.next()) |entry| {
                 inline for (info.field_names, info.field_types) |name, Field| {
@@ -905,7 +901,7 @@ fn cliValue(comptime T: type, input: []const u8, at: []const u8, read: *const Re
 fn assignAt(comptime T: type, dest: *T, remaining: []const u8, input: []const u8, full: []const u8, read: *const Read) Error!void {
     if (remaining.len == 0) return readValue(T, dest, try cliValue(T, input, full, read), full, read);
     if (@typeInfo(T) == .optional) {
-        if (dest.* == null) dest.* = .{};
+        if (dest.* == null) resetVacant(T, dest, .{});
         return assignAt(@typeInfo(T).optional.child, &dest.*.?, remaining, input, full, read);
     }
     const dot = std.mem.indexOfScalar(u8, remaining, '.');
@@ -927,23 +923,20 @@ fn assignAt(comptime T: type, dest: *T, remaining: []const u8, input: []const u8
                 while (index < dest.len and !std.mem.eql(u8, dest.names[index].slice(), head)) : (index += 1) {}
                 if (tail.len == 0 and std.mem.eql(u8, input, "null")) {
                     if (index < dest.len) {
-                        dispose(T.Child, &dest.values[index]);
-                        // Transfer ownership in place; never leave a duplicate
-                        // MySQL/arena handle in the vacated last slot.
+                        vacate(T.Child, &dest.values[index], .{});
+                        vacate(@TypeOf(dest.names[index]), &dest.names[index], .{});
                         var next = index + 1;
                         while (next < dest.len) : (next += 1) {
-                            dest.names[next - 1] = dest.names[next];
-                            @memcpy(std.mem.asBytes(&dest.values[next - 1]), std.mem.asBytes(&dest.values[next]));
+                            moveSlot(@TypeOf(dest.names[next]), &dest.names[next - 1], &dest.names[next]);
+                            moveSlot(T.Child, &dest.values[next - 1], &dest.values[next]);
                         }
                         dest.len -= 1;
-                        dest.names[dest.len] = .{};
-                        dest.values[dest.len] = .{};
                     }
                     return;
                 }
                 if (index == dest.len) {
                     if (dest.len == T.max) return refuse(read.failure, full, "too many named entries");
-                    dest.values[index] = .{};
+                    vacate(T.Child, &dest.values[index], .{});
                     try dest.names[index].set(head);
                     dest.len += 1;
                 }
@@ -971,8 +964,7 @@ fn assignAt(comptime T: type, dest: *T, remaining: []const u8, input: []const u8
             inline for (info.field_names, info.field_types) |name, Field| {
                 if (std.mem.eql(u8, head, comptime camel(name))) {
                     if (std.meta.activeTag(dest.*) != @field(std.meta.Tag(T), name)) {
-                        dispose(T, dest);
-                        dest.* = @unionInit(T, name, .{});
+                        vacate(T, dest, @unionInit(T, name, .{}));
                     }
                     return assignAt(Field, &@field(dest, name), tail, input, full, read);
                 }
@@ -1018,6 +1010,29 @@ fn editDistance(a: []const u8, b: []const u8) usize {
 }
 
 // ---- Lifetimes, anchoring and the proof --------------------------------------
+/// Reset storage only after its resources have been disposed or transferred.
+/// Defaults may contain undefined bytes: assigning them alone is not erasure.
+/// The replacement is comptime-only, never a by-value resolved credential.
+fn resetVacant(comptime T: type, value: *T, comptime replacement: T) void {
+    std.crypto.secureZero(u8, std.mem.asBytes(value));
+    value.* = replacement;
+    // Checked builds may poison undefined default Key storage. A vacant
+    // credential buffer still has the existing all-zero wipe guarantee.
+    wipeValue(T, value);
+}
+/// The sole destructive replacement path for an owned settings slot.
+fn vacate(comptime T: type, value: *T, comptime replacement: T) void {
+    dispose(T, value);
+    resetVacant(T, value, replacement);
+}
+/// Move, never clone, a slot. Source handles belong to the destination after
+/// memcpy, so resetting the source must not dispose them a second time.
+fn moveSlot(comptime T: type, dest: *T, source: *T) void {
+    std.debug.assert(dest != source);
+    vacate(T, dest, .{});
+    @memcpy(std.mem.asBytes(dest), std.mem.asBytes(source));
+    resetVacant(T, source, .{});
+}
 fn wipeValue(comptime T: type, value: *T) void {
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| wipeValue(@typeInfo(T).optional.child, present);
@@ -1040,7 +1055,9 @@ fn wipeValue(comptime T: type, value: *T) void {
         .@"union" => switch (value.*) {
             inline else => |*payload| wipeValue(@TypeOf(payload.*), payload),
         },
-        else => @compileError("not a Host settings kind"),
+        // Reset helpers also visit raw metadata and empty ownership handles.
+        // Only typed Secret values own bytes; pointers are never followed.
+        else => {},
     }
 }
 fn dispose(comptime T: type, value: *T) void {
@@ -1905,3 +1922,255 @@ test "Host settings retain the legacy empty CA path for transport refusal" {
     try std.testing.expect(settings.network.ca_file != null);
     try std.testing.expectEqualStrings("", settings.network.ca_file.?.slice());
 }
+
+/// Scan full backing storage, including inactive slots and bytes beyond len.
+/// Released blocks are observed too: a MySQL secret lives outside Settings.
+const VacancyWitness = struct {
+    const marker = "HOST_SETTINGS_SECRET_VACANCY_SENTINEL";
+    const mysql_login = "mysql://user:" ++ marker ++ "@localhost/database";
+    const Action = enum {
+        env,
+        file,
+        default,
+        owner,
+        shorter_literal,
+        entry_null,
+        entry_readd,
+        whole_empty,
+        whole_populated,
+        store_roundtrip,
+        presets_replace,
+        refusal_apply,
+        refusal_assign,
+        wipe,
+        deinit,
+    };
+    const Releases = struct {
+        child: std.mem.Allocator,
+        stale: usize = 0,
+        frees: usize = 0,
+        fn allocator(self: *@This()) std.mem.Allocator {
+            return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+        }
+        fn alloc(ptr: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return self.child.rawAlloc(len, alignment, ret);
+        }
+        fn free(ptr: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ret: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.stale += copies(bytes);
+            self.frees += 1;
+            self.child.rawFree(bytes, alignment, ret);
+        }
+    };
+    fn copies(bytes: []const u8) usize {
+        return std.mem.count(u8, bytes, marker);
+    }
+    fn mysqlCopies(bytes: *const MysqlBytes) usize {
+        return copies(bytes.raw) + if (bytes.parsed) |parsed| copies(std.mem.asBytes(parsed)) else @as(usize, 0);
+    }
+    fn expectCopies(settings: *const Settings, expected: usize) !void {
+        var count = copies(std.mem.asBytes(settings));
+        if (settings.store == .mysql) count += mysqlCopies(&settings.store.mysql.url.bytes);
+        try std.testing.expectEqual(expected, count);
+    }
+    fn markTails(comptime T: type, value: *T) void {
+        if (@typeInfo(T) == .optional) {
+            if (value.*) |*present| markTails(@typeInfo(T).optional.child, present);
+        } else if (comptime isKind(T)) {
+            switch (T.kind) {
+                .secret => if (T.default_source == .mysql) {
+                    if (value.bytes.parsed) |parsed| @memcpy(parsed.password.bytes[parsed.password.bytes.len - marker.len ..], marker);
+                } else if (value.bytes.len != 0) {
+                    @memcpy(value.bytes.bytes[value.bytes.bytes.len - marker.len ..], marker);
+                },
+                .providers => markTails(T.Table, &value.entries),
+                .named => for (&value.values) |*entry| markTails(T.Child, entry),
+                else => {},
+            }
+        } else switch (@typeInfo(T)) {
+            .@"struct" => |info| inline for (info.field_names, info.field_types) |name, Field| markTails(Field, &@field(value, name)),
+            .@"union" => switch (value.*) {
+                inline else => |*payload| markTails(@TypeOf(payload.*), payload),
+            },
+            else => unreachable,
+        }
+    }
+    fn checkedApply(settings: *Settings, gpa: std.mem.Allocator, doc: []const u8, failure: *start_report.Failure) !void {
+        apply(settings, gpa, doc, .pipe, checkSample, failure) catch |err| {
+            try expectCopies(settings, 0);
+            return err;
+        };
+    }
+    fn checkedAssign(settings: *Settings, gpa: std.mem.Allocator, at: []const u8, input: []const u8, failure: *start_report.Failure) !void {
+        assign(settings, gpa, at, input, checkSample, failure) catch |err| {
+            try expectCopies(settings, 0);
+            return err;
+        };
+    }
+    fn document(settings: *Settings, gpa: std.mem.Allocator, at: []const u8, input: []const u8, failure: *start_report.Failure) !void {
+        const doc = @constCast(try sampleDocument(std.testing.allocator, at, input, false));
+        defer {
+            std.crypto.secureZero(u8, doc);
+            std.testing.allocator.free(doc);
+        }
+        try checkedApply(settings, gpa, doc, failure);
+    }
+    fn exercise(comptime leaf: Leaf, action: Action, seed_gpa: std.mem.Allocator, operation_gpa: std.mem.Allocator) !void {
+        const settings = try seed_gpa.create(Settings);
+        defer seed_gpa.destroy(settings);
+        std.crypto.secureZero(u8, std.mem.asBytes(settings));
+        settings.* = .{};
+        defer settings.deinit();
+        const at = try concrete(std.testing.allocator, leaf.pattern);
+        defer std.testing.allocator.free(at);
+        const parent = at[0..std.mem.lastIndexOfScalar(u8, at, '.').?];
+        const set = parent[0..std.mem.lastIndexOfScalar(u8, parent, '.').?];
+        const name = parent[set.len + 1 ..];
+        const is_mysql = comptime std.mem.eql(u8, leaf.json_schema.format.?, "mysql-login-source");
+        const literal = if (is_mysql) "{\"value\":\"" ++ mysql_login ++ "\"}" else "{\"value\":\"" ++ marker ++ "\"}";
+        var failure: start_report.Failure = undefined;
+        try document(settings, seed_gpa, at, literal, &failure);
+        markTails(Settings, settings);
+        const live_copies: usize = if (is_mysql) 3 else 2;
+        try expectCopies(settings, live_copies);
+        switch (action) {
+            .env => try checkedAssign(settings, operation_gpa, at, "env:NEW_CREDENTIAL", &failure),
+            .file => try checkedAssign(settings, operation_gpa, at, "file:/tmp/new-credential", &failure),
+            .default => try checkedAssign(settings, operation_gpa, at, "null", &failure),
+            .owner => try checkedAssign(settings, operation_gpa, at, "{\"owner\":true}", &failure),
+            .shorter_literal => try document(settings, operation_gpa, at, if (is_mysql) "{\"value\":\"mysql://u:x@localhost/db\"}" else "{\"value\":\"x\"}", &failure),
+            .entry_null, .entry_readd, .store_roundtrip => {
+                if (is_mysql) {
+                    if (action == .entry_null) {
+                        try document(settings, operation_gpa, "store", "{\"sqlite\":{}}", &failure);
+                    } else try checkedAssign(settings, operation_gpa, "store.sqlite", "{}", &failure);
+                } else try checkedAssign(settings, operation_gpa, parent, "null", &failure);
+                try expectCopies(settings, 0);
+                if (action != .entry_null) try checkedAssign(settings, operation_gpa, at, "env:NEW_CREDENTIAL", &failure);
+            },
+            .whole_empty => if (is_mysql) {
+                try checkedAssign(settings, operation_gpa, "store.sqlite", "{}", &failure);
+            } else try document(settings, operation_gpa, set, "{}", &failure),
+            .whole_populated => if (is_mysql) {
+                try document(settings, operation_gpa, at, "{\"value\":\"mysql://u:x@localhost/db\"}", &failure);
+            } else {
+                const replacement = try std.fmt.allocPrint(std.testing.allocator, "{{\"{s}\":{{}}}}", .{name});
+                defer std.testing.allocator.free(replacement);
+                try document(settings, operation_gpa, set, replacement, &failure);
+            },
+            .presets_replace => {
+                try checkedApply(settings, operation_gpa, "{\"presets\":{\"first\":{\"model\":\"retained\"}}}", &failure);
+                try checkedApply(settings, operation_gpa, "{\"presets\":{\"second\":{\"model\":\"replacement\"}}}", &failure);
+                try checkedApply(settings, operation_gpa, "{\"presets\":{}}", &failure);
+                try expectCopies(settings, live_copies);
+                settings.wipe();
+            },
+            .refusal_apply => {
+                const outcome = checkedApply(settings, operation_gpa, "{\"execution\":{\"unknown\":true}}", &failure);
+                if (outcome) |_| return error.ExpectedRefusal else |err| if (err != error.SettingsInvalid) return err;
+            },
+            .refusal_assign => {
+                const outcome = checkedAssign(settings, operation_gpa, "unknown", "true", &failure);
+                if (outcome) |_| return error.ExpectedRefusal else |err| if (err != error.SettingsInvalid) return err;
+            },
+            .wipe => settings.wipe(),
+            .deinit => settings.deinit(),
+        }
+        try expectCopies(settings, 0);
+    }
+    fn runActions(seed_gpa: std.mem.Allocator, operation_gpa: std.mem.Allocator) !void {
+        inline for (leaves) |leaf| if (leaf.secret) {
+            for (std.enums.values(Action)) |action| try exercise(leaf, action, seed_gpa, operation_gpa);
+        };
+    }
+    fn namedMoves(comptime Child: type, releases: *Releases) !void {
+        const Set = if (Child == McpServer) @FieldType(Tools, "mcp") else Named(3, Child);
+        const Owner = if (Child == McpServer) Settings else Set;
+        const gpa = releases.allocator();
+        for ([_]usize{ 1, 2, 3, Set.max }) |population| for (0..population) |removed| {
+            const owner = try gpa.create(Owner);
+            defer gpa.destroy(owner);
+            std.crypto.secureZero(u8, std.mem.asBytes(owner));
+            owner.* = .{};
+            defer dispose(Owner, owner);
+            const values = if (Child == McpServer) &owner.tools.mcp else owner;
+            var failure: start_report.Failure = undefined;
+            var memory: std.heap.ArenaAllocator = .init(gpa);
+            defer memory.deinit();
+            const read: Read = .{ .arena = memory.allocator(), .gpa = gpa, .origin = .pipe, .check = checkSample, .failure = &failure };
+            for (0..population) |i| {
+                var name: [32]u8 = undefined;
+                try values.names[i].set(try std.fmt.bufPrint(&name, "entry{d}", .{i}));
+                values.len += 1;
+                const key = if (Child == McpServer) &values.values[i].bearer_token else &values.values[i].key;
+                @memcpy(key.bytes.bytes[0..marker.len], marker);
+                key.bytes.len = marker.len;
+                key.source = .literal;
+                if (Child != McpServer) {
+                    try values.values[i].login.bytes.set(gpa, mysql_login);
+                    values.values[i].retained.memory = .init(gpa);
+                    _ = try values.values[i].retained.memory.?.allocator().dupe(u8, "retained preset allocation");
+                }
+            }
+            markTails(Set, values);
+            var name: [32]u8 = undefined;
+            const at = try std.fmt.bufPrint(&name, "entry{d}", .{removed});
+            if (Child == McpServer) {
+                var path_buffer: [64]u8 = undefined;
+                try checkedAssign(owner, gpa, try std.fmt.bufPrint(&path_buffer, "tools.mcp.{s}", .{at}), "null", &failure);
+            } else try assignAt(Set, values, at, "null", at, &read);
+            try std.testing.expectEqual(population - 1, values.len);
+            var total = copies(std.mem.asBytes(owner));
+            for (values.values[0..values.len], 0..) |*entry, i| {
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&name, "entry{d}", .{if (i < removed) i else i + 1}), values.names[i].slice());
+                const key = if (Child == McpServer) &entry.bearer_token else &entry.key;
+                try std.testing.expectEqualStrings(marker, key.value());
+                if (Child != McpServer) {
+                    try std.testing.expectEqualStrings(mysql_login, entry.login.value());
+                    try std.testing.expectEqualStrings(marker, entry.login.bytes.parsed.?.password.slice());
+                    total += mysqlCopies(&entry.login.bytes);
+                }
+            }
+            try std.testing.expectEqual((population - 1) * @as(usize, if (Child == McpServer) 2 else 5), total);
+            // Reuse vacated capacity, then replace and empty the whole set.
+            const key_name = if (Child == McpServer) "bearerToken" else "key";
+            try assignAt(Set, values, "replacement." ++ key_name, "env:NEW_CREDENTIAL", "replacement." ++ key_name, &read);
+            try std.testing.expectEqual(population, values.len);
+            try readValue(Set, values, try parseJson(&read, "{\"new\":{}}", "set"), "set", &read);
+            try std.testing.expectEqual(@as(usize, 0), copies(std.mem.asBytes(owner)));
+            try readValue(Set, values, .{ .object = .{} }, "set", &read);
+            try std.testing.expectEqual(@as(usize, 0), copies(std.mem.asBytes(owner)));
+            try std.testing.expectEqual(@as(usize, 0), values.len);
+        };
+    }
+};
+
+test "Host settings every secret vacancy erases all stored copies" {
+    var releases: VacancyWitness.Releases = .{ .child = std.testing.allocator };
+    try VacancyWitness.runActions(releases.allocator(), releases.allocator());
+    try VacancyWitness.namedMoves(McpServer, &releases);
+    // Exercise the generic transfer with resource-owning V as well as MCP.
+    try VacancyWitness.namedMoves(struct {
+        key: Secret(.required) = .{},
+        login: Secret(.mysql) = .{},
+        retained: Presets = .{},
+    }, &releases);
+    try std.testing.expect(releases.frees > 0);
+    try std.testing.expectEqual(@as(usize, 0), releases.stale);
+}
+
+/// Cross-root witnesses only; no testing surface is present in production.
+/// The non-core test root owns the allocation-failure injector.
+pub const testing = if (@import("builtin").is_test) struct {
+    pub fn secretVacancyAllocationFailures(gpa: std.mem.Allocator) !void {
+        // Seed outside injection: even operation allocation zero starts with
+        // resolved credentials. Observe both old and new allocation release.
+        var seed: VacancyWitness.Releases = .{ .child = std.testing.allocator };
+        var operation: VacancyWitness.Releases = .{ .child = gpa };
+        const outcome = VacancyWitness.runActions(seed.allocator(), operation.allocator());
+        try std.testing.expectEqual(@as(usize, 0), seed.stale);
+        try std.testing.expectEqual(@as(usize, 0), operation.stale);
+        return outcome;
+    }
+} else struct {};

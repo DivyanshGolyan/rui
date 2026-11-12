@@ -165,3 +165,7 @@ fn allocationFailureCase(gpa: std.mem.Allocator) !void {
 test "Host settings real preset mixed secret allocation failures clean every owner" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFailureCase, .{});
 }
+
+test "Host settings secret vacancy allocation failures erase every copy" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, hs.testing.secretVacancyAllocationFailures, .{});
+}
