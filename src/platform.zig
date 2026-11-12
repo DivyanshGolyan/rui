@@ -371,9 +371,16 @@ pub fn mysqlClientPaths(io: std.Io, store: []const u8, runtime: []const u8) !Pat
 /// must fit after canonicalizing their nearest existing parent. Serving still
 /// checks the actual created directory and acquires its lease against races.
 pub fn validateStoreDestination(io: std.Io, supplied_path: []const u8) !void {
+    var buffer: [protocol.max_store_bytes]u8 = undefined;
+    _ = try canonicalStoreDestination(io, supplied_path, &buffer);
+}
+
+/// Return the same read-only destination proof to callers that retain its
+/// canonical value. Creation/lease acquisition still rechecks against races.
+pub noinline fn canonicalStoreDestination(io: std.Io, supplied_path: []const u8, buffer: *[protocol.max_store_bytes]u8) ![]const u8 {
     if (supplied_path.len == 0 or !std.unicode.utf8ValidateSlice(supplied_path)) return error.InvalidStorePath;
     for (supplied_path) |byte| if (byte < 0x20 or byte == 0x7f) return error.InvalidStorePath;
-    _ = resolveClientPaths(io, supplied_path) catch |err| switch (err) {
+    const paths = resolveClientPaths(io, supplied_path) catch |err| switch (err) {
         error.FileNotFound => {
             var parent = supplied_path;
             while (true) {
@@ -433,11 +440,14 @@ pub fn validateStoreDestination(io: std.Io, supplied_path: []const u8) !void {
                 }
                 if (missing_depth == 0) try validatePrivateDirectory(directory.?, io);
                 try validateCanonicalPath(canonical[0..length]);
-                return;
+                @memcpy(buffer[0..length], canonical[0..length]);
+                return buffer[0..length];
             }
         },
         else => return err,
     };
+    @memcpy(buffer[0..paths.store.len], paths.store.slice());
+    return buffer[0..paths.store.len];
 }
 
 fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {

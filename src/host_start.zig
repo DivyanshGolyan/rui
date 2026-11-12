@@ -11,7 +11,64 @@ const provider_login = @import("provider_login.zig");
 const credentials = @import("codex_credentials.zig");
 const core_tools = @import("core_tools.zig");
 const wire_request = @import("wire_request.zig");
+const platform = @import("platform.zig");
+const caller_error = @import("caller_error.zig");
 const stderr = @import("stderr.zig");
+
+// Only bounded flag values are listed here. Provider labels are a closed enum
+// owned by the argv grammar; launch-frame is a source switch, not a value leaf.
+const FlagLeaf = struct { flag: []const u8, leaf: hs.Leaf, normalized: bool = false, direct: bool = false };
+fn flagLeaf(comptime name: []const u8, comptime path: []const u8, comptime normalized: bool, comptime direct: bool) FlagLeaf {
+    for (hs.leaves) |leaf| if (std.mem.eql(u8, path, leaf.pattern)) return .{ .flag = name, .leaf = leaf, .normalized = normalized, .direct = direct };
+    @compileError("flag must name a derived settings leaf");
+}
+pub const flag_leaves = .{
+    flagLeaf("store", "store.sqlite.dir", true, false),
+    flagLeaf("store-hex", "store.sqlite.dir", true, false),
+    flagLeaf("bash-path", "tools.bash.path", false, true),
+    flagLeaf("provider-ca-file", "network.caFile", false, true),
+    flagLeaf("bash-timeout-ms", "tools.bash.timeoutMs", false, false),
+    flagLeaf("active-capacity", "execution.activeCapacity", false, false),
+    flagLeaf("provider-endpoint", "providers.codex.endpoint", false, false),
+    flagLeaf("test-codex-fixture-endpoint", "providers.codex.endpoint", false, false),
+    flagLeaf("test-openai-fixture-endpoint", "providers.openai.endpoint", false, false),
+    flagLeaf("test-chatgpt-fixture-endpoint", "providers.chatgpt.endpoint", false, false),
+};
+fn flagPath(comptime name: []const u8) []const u8 {
+    inline for (flag_leaves) |entry| if (comptime std.mem.eql(u8, name, entry.flag)) return entry.leaf.pattern;
+    @compileError("unknown leaf flag");
+}
+
+/// One classification/rendering owner. Only the static flag and derived bound
+/// enter the caller error; never argv bytes, even when they contain secrets.
+fn flagProblem(entry: FlagLeaf, value: []const u8, reason: *[128]u8) ?cli_args.Refusal {
+    const schema = entry.leaf.json_schema;
+    const message = if (schema.max_bytes) |limit| blk: {
+        if (value.len <= limit) return null;
+        break :blk std.fmt.bufPrint(reason, "not longer than {d} bytes", .{limit}) catch unreachable;
+    } else blk: {
+        const number = std.fmt.parseInt(u64, value, 10) catch break :blk std.fmt.bufPrint(reason, "an integer from {d} through {d}", .{ schema.min.?, schema.max.? }) catch unreachable;
+        if (number >= schema.min.? and number <= schema.max.?) return null;
+        break :blk std.fmt.bufPrint(reason, "an integer from {d} through {d}", .{ schema.min.?, schema.max.? }) catch unreachable;
+    };
+    return .{ .code = .invocation_invalid, .token = entry.flag, .accepted = .{ .grammar = message } };
+}
+fn rejectFlag(problem: cli_args.Refusal) error{InvalidInvocation} {
+    var buffer: [1024]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    caller_error.writeLine(&out, problem.code, problem.held("host", "serve")) catch unreachable;
+    stderr.diagnosticBytes(out.buffered());
+    return error.InvalidInvocation;
+}
+fn checkFlag(entry: FlagLeaf, value: []const u8) error{InvalidInvocation}!void {
+    var reason: [128]u8 = undefined;
+    if (flagProblem(entry, value, &reason)) |problem| return rejectFlag(problem);
+}
+pub fn checkFlags(parsed: *const cli_args.Parsed) !void {
+    inline for (flag_leaves) |entry| {
+        if (!entry.normalized) if (parsed.get(entry.flag)) |value| try checkFlag(entry, value);
+    }
+}
 
 fn checkPreset(gpa: std.mem.Allocator, spec: std.json.ObjectMap) error{OutOfMemory}!?[]const u8 {
     const configuration = try gpa.create(wire_request.Configuration);
@@ -30,6 +87,7 @@ const start_report = @import("start_report.zig");
 
 // Quote text explicitly: a path beginning with '{', '[' or '"' is not JSON.
 fn text(settings: *hs.Settings, gpa: std.mem.Allocator, path: []const u8, value: []const u8, failure: *start_report.Failure) !void {
+    for (hs.leaves) |leaf| if (std.mem.eql(u8, leaf.pattern, path) and std.mem.eql(u8, leaf.kind, "path")) return assign(settings, gpa, path, value, failure);
     const json = try std.json.Stringify.valueAlloc(gpa, value, .{});
     defer gpa.free(json);
     try assign(settings, gpa, path, json, failure);
@@ -40,20 +98,19 @@ fn text(settings: *hs.Settings, gpa: std.mem.Allocator, path: []const u8, value:
 /// copied into Settings and both owners wipe their own copy on disposal.
 pub fn fill(init: std.process.Init, parsed: *const cli_args.Parsed, frame: ?*const launch_frame.Frame, settings: *hs.Settings, fixtures: *providers.Fixtures, failure: *start_report.Failure) !void {
     const gpa = init.arena.allocator();
+    try checkFlags(parsed);
     try hs.apply(settings, gpa, "{\"providers\":{}}", .file, checkPreset, failure);
     const bash_path = parsed.get("bash-path") orelse hs.default_bash_path;
     if (bash_path.len == 0) return error.InvalidBashPath;
     const timeout = try parsed.number(u64, "bash-timeout-ms") orelse hs.default_bash_timeout_ms;
     if (timeout == 0 or timeout > std.math.maxInt(i64)) return error.InvalidBashTimeout;
-    const mapping = .{
-        .{ "bash-path", hs.path("tools.bash.path") },
-        .{ "provider-ca-file", hs.path("network.caFile") },
+    inline for (flag_leaves) |entry| if (entry.direct) {
+        if (parsed.get(entry.flag)) |value| try text(settings, gpa, entry.leaf.pattern, value, failure);
     };
-    inline for (mapping) |entry| if (parsed.get(entry[0])) |value| try text(settings, gpa, entry[1], value, failure);
     var number: [32]u8 = undefined;
-    try assign(settings, gpa, hs.path("tools.bash.timeoutMs"), try std.fmt.bufPrint(&number, "{d}", .{timeout}), failure);
+    try assign(settings, gpa, flagPath("bash-timeout-ms"), try std.fmt.bufPrint(&number, "{d}", .{timeout}), failure);
     const capacity = (if (frame) |value| value.active_capacity else try parsed.number(usize, "active-capacity"));
-    if (capacity) |value| try assign(settings, gpa, hs.path("execution.activeCapacity"), try std.fmt.bufPrint(&number, "{d}", .{value}), failure);
+    if (capacity) |value| try assign(settings, gpa, flagPath("active-capacity"), try std.fmt.bufPrint(&number, "{d}", .{value}), failure);
 
     for (parsed.all("provider")) |label| {
         const provider = std.meta.stringToEnum(protocol.Provider, label) orelse {
@@ -82,19 +139,19 @@ pub fn fill(init: std.process.Init, parsed: *const cli_args.Parsed, frame: ?*con
 
     if (parsed.get("test-openai-fixture-endpoint")) |endpoint| {
         if (settings.providers.entries.openai != null) return error.ConflictingArguments;
-        try text(settings, gpa, "providers.openai.endpoint", endpoint, failure);
+        try text(settings, gpa, flagPath("test-openai-fixture-endpoint"), endpoint, failure);
         try assign(settings, gpa, "providers.openai.unauthenticated", "true", failure);
         fixtures.openai = true;
     }
     if (parsed.get("test-codex-fixture-endpoint")) |endpoint| {
-        try text(settings, gpa, "providers.codex.endpoint", endpoint, failure);
+        try text(settings, gpa, flagPath("test-codex-fixture-endpoint"), endpoint, failure);
         try assign(settings, gpa, "providers.codex.unauthenticated", "true", failure);
         fixtures.codex = true;
     }
     if (parsed.get("test-chatgpt-fixture-endpoint")) |endpoint| {
         if (settings.providers.entries.chatgpt != null) return error.ConflictingArguments;
         const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
-        try text(settings, gpa, "providers.chatgpt.endpoint", endpoint, failure);
+        try text(settings, gpa, flagPath("test-chatgpt-fixture-endpoint"), endpoint, failure);
         try assign(settings, gpa, "providers.chatgpt.unauthenticated", "true", failure);
         fixtures.chatgpt_token_endpoint = try std.fmt.allocPrint(gpa, "{s}/oauth/token", .{base});
     }
@@ -222,8 +279,23 @@ fn resolve(init: std.process.Init, secret: anytype) !void {
 }
 
 /// Keep selection/remembered-default policy in the CLI, but fill its leaf here.
-pub fn selectStore(gpa: std.mem.Allocator, settings: *hs.Settings, selected: []const u8, failure: *start_report.Failure) !void {
-    try text(settings, gpa, hs.path("store.sqlite.dir"), selected, failure);
+pub noinline fn selectStore(init: std.process.Init, settings: *hs.Settings, selected: []const u8, from_frame: bool, failure: *start_report.Failure) !void {
+    var canonical: [protocol.max_store_bytes]u8 = undefined;
+    const value = platform.canonicalStoreDestination(init.io, selected, &canonical) catch |err| switch (err) {
+        error.StorePathTooLong, error.NameTooLong => {
+            if (from_frame) {
+                failure.* = .init(.launch_frame_invalid, "store is too long");
+                return error.LaunchFrameInvalid;
+            }
+            // The platform owner bounds the canonical identity, not aliases.
+            const entry = flag_leaves[0];
+            var reason: [128]u8 = undefined;
+            const message = try std.fmt.bufPrint(&reason, "a canonical Store path not longer than {d} bytes and platform-sized components", .{protocol.max_store_bytes});
+            return rejectFlag(.{ .code = .invocation_invalid, .token = entry.flag, .accepted = .{ .grammar = message } });
+        },
+        else => return err,
+    };
+    try text(settings, init.arena.allocator(), flagPath("store"), value, failure);
 }
 
 fn parseForTest(gpa: std.mem.Allocator, args: []const []const u8) !cli_args.Parsed {
@@ -252,6 +324,8 @@ test "Host start fill maps every ordinary serve flag and fixture fact to its own
         .{ .args = &.{ "--bash-timeout-ms", "17" }, .leaf = "tools.bash.timeoutMs", .expected = "17" },
         .{ .args = &.{ "--active-capacity", "0" }, .leaf = "execution.activeCapacity", .expected = "0" },
         .{ .args = &.{ "--provider-ca-file", "relative/ca.pem" }, .leaf = "network.caFile", .expected = "relative/ca.pem" },
+        .{ .args = &.{ "--bash-path", "/tmp/bash-\xff" }, .leaf = "tools.bash.path", .expected = "/tmp/bash-\xff" },
+        .{ .args = &.{ "--provider-ca-file", "/tmp/ca-\xff" }, .leaf = "network.caFile", .expected = "/tmp/ca-\xff" },
     }) |case| {
         settings.* = .{};
         defer settings.deinit();
@@ -267,9 +341,11 @@ test "Host start fill maps every ordinary serve flag and fixture fact to its own
         settings.* = .{};
         defer settings.deinit();
         const parsed = try parseForTest(arena.allocator(), args);
-        try selectStore(arena.allocator(), settings, parsed.get("store").?, &failure);
-        try std.testing.expectEqualStrings("relative/store", settings.store.sqlite.dir.slice());
+        try selectStore(init, settings, parsed.get("store").?, false, &failure);
+        var canonical: [protocol.max_store_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(try platform.canonicalStoreDestination(init.io, "relative/store", &canonical), settings.store.sqlite.dir.slice());
     }
+    try environment.put(providers.openai_base_url_variable, "https://proxy.example/v1///");
     inline for (std.enums.values(protocol.Provider)) |provider| {
         settings.* = .{};
         defer settings.deinit();
@@ -277,6 +353,7 @@ test "Host start fill maps every ordinary serve flag and fixture fact to its own
         var fixtures: providers.Fixtures = .{};
         try fill(init, &parsed, null, settings, &fixtures, &failure);
         inline for (std.enums.values(protocol.Provider)) |other| try std.testing.expectEqual(provider == other, @field(settings.providers.entries, @tagName(other)) != null);
+        if (provider == .openai) try std.testing.expectEqualStrings("https://proxy.example/v1/responses", settings.providers.entries.openai.?.endpoint.?.slice());
     }
     const endpoint = "http://127.0.0.1:9/responses";
     for ([_][]const u8{ "--provider-endpoint", "--test-codex-fixture-endpoint", "--test-openai-fixture-endpoint", "--test-chatgpt-fixture-endpoint" }, 0..) |flag, i| {
@@ -315,7 +392,7 @@ test "Host start fill preserves every launch frame field on SQLite and MySQL" {
         frame.* = .{};
         defer frame.deinit();
         var failure: start_report.Failure = undefined;
-        const json = try std.fmt.allocPrint(gpa, "{{\"v\":1,\"store\":\"{s}\",\"provider\":{{\"kind\":\"openai_key\",\"baseUrl\":\"https://proxy.example/v1\",\"key\":\"frame-key\",\"caFile\":\"relative/ca.pem\"}},\"runtimeDir\":\"/tmp/r\",\"activeCapacity\":3,\"paused\":true,\"mcpServers\":[{{\"name\":\"docs\",\"url\":\"http://127.0.0.1:9/mcp\",\"bearerToken\":\"mcp-key\",\"callTimeoutMs\":17}}],\"presets\":{{\"reader\":{{\"workspace\":\"/tmp/workspace\",\"provider\":\"openai\",\"model\":\"model-a\",\"effort\":null,\"compactAt\":1000,\"permissionMode\":\"ask\",\"instructions\":\"Read carefully\",\"tools\":[\"bash\"]}}}}}}", .{store});
+        const json = try std.fmt.allocPrint(gpa, "{{\"v\":1,\"store\":\"{s}\",\"provider\":{{\"kind\":\"openai_key\",\"baseUrl\":\"https://proxy.example/v1///\",\"key\":\"frame-key\",\"caFile\":\"relative/ca.pem\"}},\"runtimeDir\":\"/tmp/r///\",\"activeCapacity\":3,\"paused\":true,\"mcpServers\":[{{\"name\":\"docs\",\"url\":\"http://127.0.0.1:9/mcp\",\"bearerToken\":\"mcp-key\",\"callTimeoutMs\":17}}],\"presets\":{{\"reader\":{{\"workspace\":\"/tmp/workspace\",\"provider\":\"openai\",\"model\":\"model-a\",\"effort\":null,\"compactAt\":1000,\"permissionMode\":\"ask\",\"instructions\":\"Read carefully\",\"tools\":[\"bash\"]}}}}}}", .{store});
         defer {
             std.crypto.secureZero(u8, json);
             gpa.free(json);
@@ -327,10 +404,14 @@ test "Host start fill preserves every launch frame field on SQLite and MySQL" {
         const parsed = try parseForTest(arena.allocator(), &.{ "--launch-frame", "--bash-path", "/custom/bash", "--bash-timeout-ms", "99" });
         var fixtures: providers.Fixtures = .{};
         try fill(init, &parsed, frame, settings, &fixtures, &failure);
-        if (i == 0) try selectStore(arena.allocator(), settings, frame.store.sqlite_dir.slice(), &failure);
+        if (i == 0) try selectStore(init, settings, frame.store.sqlite_dir.slice(), true, &failure);
         _ = try prepare(init, settings, fixtures, &failure);
         try std.testing.expectEqual(i == 1, settings.store == .mysql);
-        if (i == 0) try std.testing.expectEqualStrings(store, settings.store.sqlite.dir.slice()) else {
+        if (i == 0) {
+            var canonical: [protocol.max_store_bytes]u8 = undefined;
+            const expected = try platform.canonicalStoreDestination(init.io, store, &canonical);
+            try std.testing.expectEqualStrings(expected, settings.store.sqlite.dir.slice());
+        } else {
             try std.testing.expectEqualStrings("user", settings.store.mysql.url.bytes.parsed.?.user.slice());
             try std.testing.expectEqualStrings("password", settings.store.mysql.url.bytes.parsed.?.password.slice());
             try std.testing.expectEqualStrings("localhost", settings.store.mysql.url.bytes.parsed.?.host.slice());
@@ -367,7 +448,7 @@ test "Host start resolves environment private file and saved credential sources"
     const gpa = std.testing.allocator;
     var environment: std.process.Environ.Map = .init(gpa);
     defer environment.deinit();
-    try environment.put("HOST_START_TEST_KEY", "env-key");
+    try environment.put("HOST_START_TEST_\xff", "env-key");
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const init = initForTest(&arena, &environment);
@@ -376,7 +457,8 @@ test "Host start resolves environment private file and saved credential sources"
     settings.* = .{};
     defer settings.deinit();
     var failure: start_report.Failure = undefined;
-    try hs.apply(settings, gpa, "{\"providers\":{\"openai\":{\"key\":{\"env\":\"HOST_START_TEST_KEY\"}}}}", .file, checkPreset, &failure);
+    try hs.apply(settings, gpa, "{\"providers\":{}}", .file, checkPreset, &failure);
+    try assign(settings, gpa, "providers.openai.key", "env:HOST_START_TEST_\xff", &failure);
     _ = try prepare(init, settings, .{}, &failure);
     try std.testing.expectEqualStrings("env-key", settings.providers.entries.openai.?.key.value());
     var tmp = std.testing.tmpDir(.{});
@@ -384,20 +466,20 @@ test "Host start resolves environment private file and saved credential sources"
     var private = try tmp.dir.createDirPathOpen(std.testing.io, "private", .{ .permissions = .fromMode(0o700) });
     defer private.close(std.testing.io);
     var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/private/key", .{root[0..try tmp.dir.realPath(std.testing.io, &root)]});
+    const path = try std.fmt.allocPrint(arena.allocator(), "{s}/private/key-\xff", .{root[0..try tmp.dir.realPath(std.testing.io, &root)]});
     try api_key.install(path, "file-key");
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
     try environment.put(api_key.path_variable, path);
-    try environment.put("RUI_CODEX_CREDENTIAL_FILE", "/tmp/codex.json");
-    try environment.put("RUI_CHATGPT_CREDENTIAL_FILE", "/tmp/chatgpt.json");
+    try environment.put("RUI_CODEX_CREDENTIAL_FILE", "/tmp/./codex-\xff.json");
+    try environment.put("RUI_CHATGPT_CREDENTIAL_FILE", "/tmp/./chatgpt-\xff.json");
     try assign(settings, arena.allocator(), "providers.codex", "{}", &failure);
     try assign(settings, arena.allocator(), "providers.chatgpt", "{}", &failure);
     _ = try prepare(init, settings, .{}, &failure);
     try std.testing.expectEqualStrings("file-key", settings.providers.entries.openai.?.key.value());
     try std.testing.expectEqualStrings(path, settings.providers.entries.openai.?.key.source.file.slice());
-    try std.testing.expectEqualStrings("/tmp/codex.json", settings.providers.entries.codex.?.credential_file.?.slice());
-    try std.testing.expectEqualStrings("/tmp/chatgpt.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
-    try private.setFilePermissions(std.testing.io, "key", .fromMode(0o644), .{});
+    try std.testing.expectEqualStrings("/tmp/./codex-\xff.json", settings.providers.entries.codex.?.credential_file.?.slice());
+    try std.testing.expectEqualStrings("/tmp/./chatgpt-\xff.json", settings.providers.entries.chatgpt.?.credential_file.?.slice());
+    try private.setFilePermissions(std.testing.io, "key-\xff", .fromMode(0o644), .{});
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
     try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, .{}, &failure));
 }
@@ -418,6 +500,71 @@ test "Host start retains development endpoint validation until sealing" {
     const parsed = try parseForTest(arena.allocator(), &.{ "--provider-endpoint", "http://remote.example/responses" });
     try fill(init, &parsed, null, settings, &fixtures, &failure);
     try std.testing.expectEqualStrings("http://remote.example/responses", settings.providers.entries.codex.?.endpoint.?.slice());
-    try selectStore(arena.allocator(), settings, "/tmp/store", &failure);
+    try selectStore(init, settings, "/tmp/store", false, &failure);
     try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, fixtures, &failure));
+}
+
+test "Host start canonical Store leaf accepts a long raw alias" {
+    const gpa = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &env);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var private = try tmp.dir.createDirPathOpen(std.testing.io, "store", .{ .permissions = .fromMode(0o700) });
+    defer private.close(std.testing.io);
+    const canonical = root[0..try private.realPath(std.testing.io, &root)];
+    const alias = try arena.allocator().alloc(u8, canonical.len + 540);
+    @memcpy(alias[0..canonical.len], canonical);
+    for (0..180) |i| @memcpy(alias[canonical.len + i * 3 ..][0..3], "/./");
+    try std.testing.expect(alias.len >= 580);
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    try selectStore(init, settings, alias, false, &failure);
+    try std.testing.expectEqualStrings(canonical, settings.store.sqlite.dir.slice());
+}
+
+test "Host start every derived flag leaf refuses over-bound input as a redacted usage error" {
+    const gpa = std.testing.allocator;
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    inline for (flag_leaves) |entry| {
+        const limit = entry.leaf.json_schema.max_bytes;
+        const value = if (limit) |max| try arena.allocator().alloc(u8, max + 1) else try arena.allocator().dupe(u8, "184467440737095516160");
+        if (limit != null) @memset(value, 'x');
+        var reason: [128]u8 = undefined;
+        const problem = flagProblem(entry, value, &reason).?;
+        try std.testing.expectEqual(caller_error.Code.invocation_invalid, problem.code);
+        try std.testing.expectEqualStrings(entry.flag, problem.token);
+        try std.testing.expect(problem.value == null);
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        try caller_error.writeLine(&out.writer, problem.code, problem.held("host", "serve"));
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), entry.flag) != null);
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), value) == null);
+        try std.testing.expect(std.mem.indexOf(u8, out.written(), "internal_unexpected") == null);
+        try std.testing.expectEqual(@import("caller_exit.zig").Status.invalid, @import("caller_exit.zig").forCode(.not_sent, problem.code));
+        try std.testing.expectError(error.InvalidInvocation, checkFlag(entry, value));
+        if (!entry.normalized) {
+            // Numeric argv values are already bounded by the grammar. Exercise
+            // this owner independently with a post-parse invalid leaf value.
+            var parsed = try parseForTest(arena.allocator(), &.{ "--" ++ entry.flag, if (limit != null) value else "1" });
+            parsed.values[parsed.definition.indexOf(entry.flag).?] = value;
+            const settings = try gpa.create(hs.Settings);
+            defer gpa.destroy(settings);
+            settings.* = .{};
+            defer settings.deinit();
+            var failure: start_report.Failure = undefined;
+            var fixtures: providers.Fixtures = .{};
+            try std.testing.expectError(error.InvalidInvocation, fill(initForTest(&arena, &env), &parsed, null, settings, &fixtures, &failure));
+        }
+    }
 }

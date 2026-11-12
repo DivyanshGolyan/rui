@@ -1865,6 +1865,7 @@ test "the Host line names a login only for an unserved provider that has one" {
 
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const io = init.io;
+    try host_start.checkFlags(parsed);
     const frame: ?*launch_frame.Frame = if (parsed.has("launch-frame")) try readLaunchFrame(init) else null;
     defer if (frame) |value| {
         value.deinit();
@@ -1904,7 +1905,10 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         .mysql_url => value.runtime_dir.slice(),
     } else parsed.get("store");
     const selected = try selectedStore(init, supplied, &selected_buffer);
-    if (settings.store == .sqlite) try host_start.selectStore(init.arena.allocator(), settings, selected, &preparation_failure);
+    if (settings.store == .sqlite) host_start.selectStore(init, settings, selected, frame != null, &preparation_failure) catch |err| {
+        if (err == error.LaunchFrameInvalid) return writeRefusal(io, &preparation_failure);
+        return storeFailure(err);
+    };
     const prepared = try host_start.prepare(init, settings, tuning.fixtures, &preparation_failure);
     var failure: ?start_report.Failure = null;
     return finishServe(io, if (frame != null) (if (settings.store == .mysql) .mysql else .sqlite) else null, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));

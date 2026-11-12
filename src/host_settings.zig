@@ -7,16 +7,18 @@ const provider_name = @import("provider_name.zig");
 const secret_value = @import("secret_value.zig");
 const preset_value = @import("preset_value.zig");
 const start_report = @import("start_report.zig");
+const hex_value = @import("hex_value.zig");
 const defaults = @import("product_defaults.zig");
 const http = @import("http1/request.zig");
 const endpoint_value = @import("endpoint_value.zig");
 const mysql_value = @import("mysql_url_value.zig");
-const MysqlValue = mysql_value.ValueWith(max_ca_file_bytes);
+const MysqlValue = mysql_value.ValueWith(max_path_bytes);
 
 // Moved, not copied, from the retiring launch frame and its platform shell.
 pub const max_document_bytes = 1024 * 1024;
 pub const max_base_url_bytes = endpoint_value.max_endpoint_bytes;
-pub const max_ca_file_bytes = std.posix.PATH_MAX - 1;
+pub const max_path_bytes = std.posix.PATH_MAX - 1;
+pub const max_ca_file_bytes = max_path_bytes; // Retiring frame/URL compatibility alias.
 pub const max_mcp_servers = 8;
 pub const max_mcp_name_bytes = 64;
 pub const max_secret_env_name_bytes = 128;
@@ -51,6 +53,23 @@ pub fn Text(comptime capacity: usize) type {
     };
 }
 
+/// POSIX path/name storage: bounded non-NUL bytes, not Unicode text.
+pub fn OsBytes(comptime capacity: usize) type {
+    return struct {
+        pub const max_bytes = capacity;
+        bytes: [capacity]u8 = undefined,
+        len: usize = 0,
+        pub fn slice(self: *const @This()) []const u8 {
+            return self.bytes[0..self.len];
+        }
+        pub fn set(self: *@This(), bytes: []const u8) error{SettingsInvalid}!void {
+            if (bytes.len > capacity or std.mem.indexOfScalar(u8, bytes, 0) != null) return error.SettingsInvalid;
+            @memcpy(self.bytes[0..bytes.len], bytes);
+            self.len = bytes.len;
+        }
+    };
+}
+
 pub fn PathWith(comptime capacity: usize) type {
     return PathKind(capacity, .absolute);
 }
@@ -64,7 +83,7 @@ fn PathKind(comptime capacity: usize, comptime rule: PathRule) type {
         pub const absolute = rule == .absolute or rule == .interface;
         pub const allow_empty = rule == .trust;
         pub const max_bytes = capacity;
-        text: Text(capacity) = .{},
+        text: OsBytes(capacity) = .{},
         /// Default routing is relative to the Host directory. For interface.dir
         /// this selects the platform-derived socket, not an explicit runtime dir.
         anchored: bool = false,
@@ -73,7 +92,7 @@ fn PathKind(comptime capacity: usize, comptime rule: PathRule) type {
         }
     };
 }
-pub const Path = PathWith(max_ca_file_bytes);
+pub const Path = PathWith(max_path_bytes);
 const UrlRule = enum { https_endpoint, loopback_http };
 pub fn Url(comptime rule: UrlRule) type {
     return struct {
@@ -151,7 +170,7 @@ pub fn Secret(comptime initial: SecretDefault) type {
         pub const Bytes = if (initial == .mysql) MysqlBytes else secret_value.Key;
         source: Source = .default,
         bytes: Bytes = .{},
-        pub const Source = union(enum) { default, env: Text(max_secret_env_name_bytes), file: Path, literal };
+        pub const Source = union(enum) { default, env: OsBytes(max_secret_env_name_bytes), file: Path, literal };
         pub fn value(self: *const @This()) []const u8 {
             return self.bytes.slice();
         }
@@ -242,12 +261,12 @@ pub fn ProviderEntry(comptime credential: provider_name.Facts.Credential) type {
     };
 }
 pub const Network = struct {
-    ca_file: ?PathKind(max_ca_file_bytes, .trust) = null,
+    ca_file: ?PathKind(max_path_bytes, .trust) = null,
     pub const doc = .{ .ca_file = "Trust only this PEM file; absent uses system trust. Applies to every provider." };
 };
 pub const Tools = struct {
     bash: struct {
-        path: PathKind(max_ca_file_bytes, .adapter) = .{ .text = textDefault(Path.max_bytes, default_bash_path) },
+        path: PathKind(max_path_bytes, .adapter) = .{ .text = pathDefault(default_bash_path) },
         timeout_ms: Count(u64, 1, std.math.maxInt(i64), default_bash_timeout_ms) = .{},
         pub const doc = .{ .path = "The Bash executable.", .timeout_ms = "The longest one Bash call may run." };
     } = .{},
@@ -280,6 +299,11 @@ pub const Presets = struct {
         resetVacant(Presets, self, .{});
     }
 };
+fn pathDefault(comptime text: []const u8) OsBytes(max_path_bytes) {
+    var result: OsBytes(max_path_bytes) = .{};
+    result.set(text) catch @compileError("invalid default path");
+    return result;
+}
 fn textDefault(comptime capacity: usize, comptime value: []const u8) Text(capacity) {
     var text: Text(capacity) = .{};
     text.set(value) catch @compileError("invalid default text");
@@ -291,6 +315,14 @@ fn textDefault(comptime capacity: usize, comptime value: []const u8) Text(capaci
 pub const Schema = struct {
     type: enum { string, integer, boolean, object },
     nullable: bool = false,
+    path_accepts_empty: bool = false,
+    /// Complete byte-string alternatives; hex is a closed {hex: string}
+    /// object with an even lowercase spelling and no additional properties.
+    one_of: []const enum { string, hex_object } = &.{},
+    hex_pattern: ?[]const u8 = null,
+    hex_max_length: ?usize = null,
+    source_paths_are_bytes: bool = false,
+    source_env_is_bytes: bool = false,
     min: ?u64 = null,
     max: ?u64 = null,
     max_bytes: ?usize = null,
@@ -404,6 +436,10 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
             row.default = if (value.anchored) "(Host directory)" else value.slice();
             row.json_schema.max_bytes = T.max_bytes;
             row.json_schema.format = if (T.absolute) "absolute-path" else null;
+            row.json_schema.path_accepts_empty = T.allow_empty;
+            row.json_schema.one_of = &.{ .string, .hex_object };
+            row.json_schema.hex_pattern = "^([0-9a-f]{2})*$";
+            row.json_schema.hex_max_length = 2 * T.max_bytes;
             row.json_schema.nullable = true;
             row.sample_json = "\"/tmp/host-settings\"";
             row.sample_text = "/tmp/host-settings";
@@ -445,6 +481,8 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
             row.json_schema.exactly_one_source = true;
             row.json_schema.literal_origin = .pipe;
             row.json_schema.source_env_max_bytes = max_secret_env_name_bytes;
+            row.json_schema.source_paths_are_bytes = true;
+            row.json_schema.source_env_is_bytes = true;
             row.json_schema.source_file_max_bytes = Path.max_bytes;
             row.json_schema.max_bytes = if (T.default_source == .mysql) max_document_bytes else secret_value.max_key_bytes;
             row.json_schema.format = if (T.default_source == .mysql) "mysql-login-source" else "credential-source";
@@ -723,10 +761,10 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
                 dest.anchored = true;
                 return;
             }
-            const raw = try string(value, at, read);
+            const raw = try readOsBytes(T.max_bytes, value, at, read);
             const text = if (T.path_rule == .interface) std.mem.trimEnd(u8, raw, "/") else raw;
             if ((text.len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
-            dest.text.set(text) catch return refuse(read.failure, at, "path exceeds its byte bound or contains invalid text");
+            dest.text.set(text) catch return refuse(read.failure, at, "path exceeds its byte bound or contains NUL");
             dest.anchored = false;
         },
         .url => {
@@ -766,7 +804,7 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
             const name = entry.key_ptr.*;
             const input = entry.value_ptr.*;
             if (std.mem.eql(u8, name, "env")) {
-                const text = try string(input, at, read);
+                const text = try readOsBytes(max_secret_env_name_bytes, input, at, read);
                 if (!validEnv(text)) return refuse(read.failure, at, "must name an environment variable");
                 vacate(T, dest, .{});
                 dest.source = .{ .env = .{} };
@@ -831,10 +869,18 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
     }
 }
 fn validEnv(text: []const u8) bool {
-    if (text.len == 0) return false;
-    for (text, 0..) |byte, i| if (!(std.ascii.isAlphabetic(byte) or byte == '_' or (i > 0 and std.ascii.isDigit(byte)))) return false;
-    return true;
+    return text.len != 0 and std.mem.indexOfAny(u8, text, "=\x00") == null;
 }
+fn readOsBytes(comptime capacity: usize, value: std.json.Value, at: []const u8, read: *const Read) Error![]const u8 {
+    if (value == .string) return value.string;
+    const fields = try object(value, at, read);
+    if (fields.count() != 1 or !fields.contains("hex")) return refuse(read.failure, at, "must be a string or an object containing only hex");
+    const encoded = try string(fields.get("hex").?, at, read);
+    if (encoded.len / 2 > capacity) return refuse(read.failure, at, "hex exceeds the byte bound");
+    const buffer = try read.arena.alloc(u8, encoded.len / 2);
+    return hex_value.decodeInto(buffer, encoded, .lower) catch return refuse(read.failure, at, "hex must have even length and lowercase hex digits");
+}
+
 pub fn validName(text: []const u8) bool {
     if (text.len == 0 or text.len > max_mcp_name_bytes) return false;
     for (text) |byte| if (!(std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '-')) return false;
@@ -884,6 +930,8 @@ pub fn assign(settings: *Settings, gpa: std.mem.Allocator, leaf_path: []const u8
     try assignAt(Settings, settings, leaf_path, value, leaf_path, &read);
 }
 fn cliValue(comptime T: type, input: []const u8, at: []const u8, read: *const Read) Error!std.json.Value {
+    const Bare = if (@typeInfo(T) == .optional) @typeInfo(T).optional.child else T;
+    if (comptime isKind(Bare) and Bare.kind == .path) return .{ .string = input };
     if (std.mem.eql(u8, input, "null") or std.mem.startsWith(u8, input, "\"") or std.mem.startsWith(u8, input, "{") or std.mem.startsWith(u8, input, "[")) return parseJson(read, input, at);
     if (@typeInfo(T) == .optional) return cliValue(@typeInfo(T).optional.child, input, at, read);
     if (comptime isKind(T)) switch (T.kind) {
@@ -1179,6 +1227,12 @@ pub fn write(settings: *const Settings, out: *std.Io.Writer) std.Io.Writer.Error
 fn quoted(text: []const u8, out: *std.Io.Writer) std.Io.Writer.Error!void {
     try std.json.Stringify.encodeJsonString(text, .{}, out);
 }
+fn writeOsBytes(bytes: []const u8, out: *std.Io.Writer) std.Io.Writer.Error!void {
+    if (std.unicode.utf8ValidateSlice(bytes)) return quoted(bytes, out);
+    try out.writeAll("{\"hex\":\"");
+    try hex_value.write(bytes, out);
+    try out.writeAll("\"}");
+}
 fn writeValue(comptime T: type, value: *const T, out: *std.Io.Writer) std.Io.Writer.Error!void {
     if (@typeInfo(T) == .optional) {
         if (value.*) |*present| return writeValue(@typeInfo(T).optional.child, present, out);
@@ -1187,7 +1241,7 @@ fn writeValue(comptime T: type, value: *const T, out: *std.Io.Writer) std.Io.Wri
     if (comptime isKind(T)) {
         switch (T.kind) {
             .text => try quoted(value.slice(), out),
-            .path => if (value.anchored) try out.writeAll("null") else try quoted(value.slice(), out),
+            .path => if (value.anchored) try out.writeAll("null") else try writeOsBytes(value.slice(), out),
             .url => if (value.slice().len == 0) try out.writeAll("null") else try quoted(value.slice(), out),
             .count => try out.print("{d}", .{value.value}),
             .flag => try out.writeAll(if (value.value) "true" else "false"),
@@ -1197,12 +1251,12 @@ fn writeValue(comptime T: type, value: *const T, out: *std.Io.Writer) std.Io.Wri
                 .literal => try out.writeAll("{\"owner\":true}"),
                 .env => |*name| {
                     try out.writeAll("{\"env\":");
-                    try quoted(name.slice(), out);
+                    try writeOsBytes(name.slice(), out);
                     try out.writeByte('}');
                 },
                 .file => |*file| {
                     try out.writeAll("{\"file\":");
-                    try quoted(file.slice(), out);
+                    try writeOsBytes(file.slice(), out);
                     try out.writeByte('}');
                 },
             },
@@ -1484,7 +1538,7 @@ fn validateShape(comptime T: type, value: *const T, at: []const u8, failure: *st
                 // An anchored interface uses the platform-derived Host socket,
                 // not a literal runtime directory (whose path has a smaller bound).
                 if (T.path_rule == .interface and value.anchored) return;
-                if (value.text.len > T.max_bytes or value.anchored or (value.slice().len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
+                if (value.text.len > T.max_bytes or std.mem.indexOfScalar(u8, value.slice(), 0) != null or value.anchored or (value.slice().len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
             },
             .url => {
                 if (value.text.len > T.max_bytes) return refuse(failure, at, "URL exceeds its byte bound");
@@ -2030,13 +2084,17 @@ const VacancyWitness = struct {
         const is_mysql = comptime std.mem.eql(u8, leaf.json_schema.format.?, "mysql-login-source");
         const literal = if (is_mysql) "{\"value\":\"" ++ mysql_login ++ "\"}" else "{\"value\":\"" ++ marker ++ "\"}";
         var failure: start_report.Failure = undefined;
+        // Secret vacancy must be independent of the new path rules. Seed
+        // relative/empty paths through apply, then an OS-byte path via assign.
+        try apply(settings, seed_gpa, "{\"tools\":{\"bash\":{\"path\":\"relative/bash\"}},\"network\":{\"caFile\":\"\"}}", .file, checkSample, &failure);
+        try assign(settings, seed_gpa, "tools.bash.path", "relative/bash-\xff", checkSample, &failure);
         try document(settings, seed_gpa, at, literal, &failure);
         markTails(Settings, settings);
         const live_copies: usize = if (is_mysql) 3 else 2;
         try expectCopies(settings, live_copies);
         switch (action) {
-            .env => try checkedAssign(settings, operation_gpa, at, "env:NEW_CREDENTIAL", &failure),
-            .file => try checkedAssign(settings, operation_gpa, at, "file:/tmp/new-credential", &failure),
+            .env => try checkedAssign(settings, operation_gpa, at, "env:NEW_\xff", &failure),
+            .file => try checkedAssign(settings, operation_gpa, at, "file:/tmp/new-\xff", &failure),
             .default => try checkedAssign(settings, operation_gpa, at, "null", &failure),
             .owner => try checkedAssign(settings, operation_gpa, at, "{\"owner\":true}", &failure),
             .shorter_literal => try document(settings, operation_gpa, at, if (is_mysql) "{\"value\":\"mysql://u:x@localhost/db\"}" else "{\"value\":\"x\"}", &failure),
@@ -2047,7 +2105,7 @@ const VacancyWitness = struct {
                     } else try checkedAssign(settings, operation_gpa, "store.sqlite", "{}", &failure);
                 } else try checkedAssign(settings, operation_gpa, parent, "null", &failure);
                 try expectCopies(settings, 0);
-                if (action != .entry_null) try checkedAssign(settings, operation_gpa, at, "env:NEW_CREDENTIAL", &failure);
+                if (action != .entry_null) try checkedAssign(settings, operation_gpa, at, "env:NEW_\xff", &failure);
             },
             .whole_empty => if (is_mysql) {
                 try checkedAssign(settings, operation_gpa, "store.sqlite", "{}", &failure);
@@ -2135,7 +2193,7 @@ const VacancyWitness = struct {
             try std.testing.expectEqual((population - 1) * @as(usize, if (Child == McpServer) 2 else 5), total);
             // Reuse vacated capacity, then replace and empty the whole set.
             const key_name = if (Child == McpServer) "bearerToken" else "key";
-            try assignAt(Set, values, "replacement." ++ key_name, "env:NEW_CREDENTIAL", "replacement." ++ key_name, &read);
+            try assignAt(Set, values, "replacement." ++ key_name, "env:NEW_\xff", "replacement." ++ key_name, &read);
             try std.testing.expectEqual(population, values.len);
             try readValue(Set, values, try parseJson(&read, "{\"new\":{}}", "set"), "set", &read);
             try std.testing.expectEqual(@as(usize, 0), copies(std.mem.asBytes(owner)));
@@ -2174,3 +2232,77 @@ pub const testing = if (@import("builtin").is_test) struct {
         return outcome;
     }
 } else struct {};
+
+// The generated path domain includes optional provider credential paths, not
+// just the few paths currently exposed as flags.
+test "Host settings every Path leaf round trips OS bytes and allowed path rules" {
+    const gpa = std.testing.allocator;
+    const a = try gpa.create(Settings);
+    defer gpa.destroy(a);
+    const b = try gpa.create(Settings);
+    defer gpa.destroy(b);
+    for (leaves) |leaf| {
+        if (!std.mem.eql(u8, leaf.kind, "path")) continue;
+        try std.testing.expectEqual(@as(usize, 2), leaf.json_schema.one_of.len);
+        try std.testing.expectEqual(leaf.json_schema.max_bytes.? * 2, leaf.json_schema.hex_max_length.?);
+        const at = try concrete(gpa, leaf.pattern);
+        defer gpa.free(at);
+        const candidates = [_][]const u8{ "/tmp/utf8", "/tmp/\xff", "relative/path", "", "{raw-path", "null" };
+        for (candidates, 0..) |candidate, index| {
+            if (index >= 2 and leaf.json_schema.format != null) continue;
+            if (candidate.len == 0 and !leaf.json_schema.path_accepts_empty) continue;
+            a.* = .{};
+            defer a.deinit();
+            b.* = .{};
+            defer b.deinit();
+            var failure: start_report.Failure = undefined;
+            try apply(a, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
+            try assign(a, gpa, at, candidate, checkSample, &failure);
+            try anchor(a, "/tmp/path-roundtrip");
+            _ = try seal(a, &failure);
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try write(a, &out.writer);
+            if (index == 1) try std.testing.expect(std.mem.indexOf(u8, out.written(), "{\"hex\":\"2f746d702fff\"}") != null);
+            try apply(b, gpa, out.written(), .file, checkSample, &failure);
+            try expectSame(Settings, a, b);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(out.written()));
+        }
+        for ([_][]const u8{ "{\"hex\":\"FF\"}", "{\"hex\":\"0\"}", "{\"hex\":\"gg\"}", "{\"hex\":\"00\"}", "{\"hex\":\"2fff\",\"unknown\":true}" }) |bad| {
+            a.* = .{};
+            defer a.deinit();
+            var failure: start_report.Failure = undefined;
+            const document = try sampleDocument(gpa, at, bad, false);
+            defer gpa.free(document);
+            try std.testing.expectError(error.SettingsInvalid, apply(a, gpa, document, .file, checkSample, &failure));
+            try std.testing.expect(std.mem.indexOf(u8, failure.message.slice(), at) != null);
+        }
+    }
+}
+
+test "Host settings secret file and environment sources preserve OS bytes" {
+    const gpa = std.testing.allocator;
+    const a = try gpa.create(Settings);
+    defer gpa.destroy(a);
+    const b = try gpa.create(Settings);
+    defer gpa.destroy(b);
+    for (leaves) |leaf| {
+        if (!leaf.secret) continue;
+        const at = try concrete(gpa, leaf.pattern);
+        defer gpa.free(at);
+        for ([_][]const u8{ "file:/tmp/\xff", "env:KEY_\xff" }) |source| {
+            a.* = .{};
+            defer a.deinit();
+            b.* = .{};
+            defer b.deinit();
+            var failure: start_report.Failure = undefined;
+            try assign(a, gpa, at, source, checkSample, &failure);
+            var out: std.Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            try write(a, &out.writer);
+            try std.testing.expect(std.unicode.utf8ValidateSlice(out.written()));
+            try apply(b, gpa, out.written(), .file, checkSample, &failure);
+            try expectSame(Settings, a, b);
+        }
+    }
+}
