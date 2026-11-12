@@ -456,16 +456,26 @@ const last_line = rsql.Read(.{
     .cardinality = .optional,
 });
 
-pub noinline fn readLastLine(a: *ReadAccess, session: []const u8, first_action: ?u64, out: *?session_list.SavedLastLine) !void {
-    var row: last_line.Row = undefined;
-    var found: store_access.Found = undefined;
-    a.readInto(last_line, .{ .session = session, .first_action = first_action }, &row, &found);
-    try store_access.runAs(a, error.SessionReadFailed);
-    if (!found.get()) return error.CorruptStore;
-    var text: Bounded(session_list.max_last_line_bytes) = undefined;
-    out.* = if (lastLine(&row, &text)) |line| .{ .position = line.position, .text = if (line.text) |bytes| blk: {
-        var owned: Bounded(session_list.max_last_line_bytes) = .{};
-        try owned.set(bytes);
-        break :blk owned;
-    } else null } else null;
-}
+pub const last_line_failures = .{.{ last_line, error.SessionReadFailed }};
+
+/// The canonical preview queued into an activity page's existing item round.
+/// Its row stays in the caller's frame until that round has completed; no
+/// standalone Access.run or second approval-selection rule is needed.
+pub const LastLineRead = struct {
+    row: last_line.Row = undefined,
+    found: store_access.Found = undefined,
+
+    pub fn queue(self: *LastLineRead, a: *ReadAccess, session: []const u8, first_action: ?u64) void {
+        a.readInto(last_line, .{ .session = session, .first_action = first_action }, &self.row, &self.found);
+    }
+
+    pub fn finish(self: *const LastLineRead, out: *?session_list.SavedLastLine) !void {
+        if (!self.found.get()) return error.CorruptStore;
+        var text: Bounded(session_list.max_last_line_bytes) = undefined;
+        out.* = if (lastLine(&self.row, &text)) |line| .{ .position = line.position, .text = if (line.text) |bytes| blk: {
+            var owned: Bounded(session_list.max_last_line_bytes) = .{};
+            try owned.set(bytes);
+            break :blk owned;
+        } else null } else null;
+    }
+};
