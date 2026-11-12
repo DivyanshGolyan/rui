@@ -377,7 +377,7 @@ pub const Event = union(enum) {
     /// The command `step` asked the shell to run ended.
     ran: Ran,
     /// A pointer press on something a click acts on.
-    clicked: Click,
+    clicked: struct { target: Click, draft: Draft = .{}, pasting: bool = false },
     /// Esc left a conversation whose original is unconfirmed. The shell
     /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
@@ -1659,20 +1659,23 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .first_line => |result| try firstLine(state, result),
         // A click is input as a key is: the screen that takes no key takes
         // no click, wherever it lands.
-        .clicked => |clicked| if (state.inputMode() != .frozen) switch (clicked) {
+        .clicked => |input| if (state.inputMode() != .frozen) switch (input.target) {
             .open => |reference| try clickOpen(state, reference, &effects),
             .model => |model| model: {
-                if (state.shownPicker() == null) break :model;
-                // Resolve the identity the frame captured, never a stale menu
-                // index. A refresh may change positions or offered controls.
-                const words = model.choice.id.slice();
-                const defaults = pickerDefaults(state);
-                const current = model_picker_view.select(&state.menu, words, defaults, state.menu.find(words)) orelse break :model;
-                if (!current.id.eql(words)) break :model;
-                state.picker.?.choice = model_picker_view.retain(current, state.picker.?.choice orelse model.choice);
-                if (model_picker_view.step(&state.menu, words, defaults, &state.picker.?.choice, .{ .click = .{ .index = current.index(&state.menu), .target = model.target } }) != null) pick(state, &effects);
+                if (state.shownPicker() == null or input.pasting) break :model;
+                syncPicker(state, input.draft);
+                // Resolve the drawn identity in the live menu, then let the
+                // picker select using the same draft/query as the arrows.
+                const index = model.choice.index(&state.menu);
+                if (index == state.menu.entries.len and
+                    (state.picker.?.choice == null or !state.picker.?.choice.?.id.eql(model.choice.id.slice()))) break :model;
+                if (model_picker_view.step(&state.menu, pickerWords(input.draft.bytes), pickerDefaults(state), &state.picker.?.choice, .{ .click = .{ .index = index, .target = model.target } }) != null)
+                    try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
             },
-            .new_session => state.selected = .new_session,
+            .new_session => {
+                state.selected = .new_session;
+                if (!input.pasting) try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
+            },
             .settings => {
                 state.selected = .settings;
                 effects.add(.open_settings);
@@ -5478,12 +5481,12 @@ test "overview selection walks both ends and every row without folding" {
 test "one click on a row opens it, under Enter's rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
     try expectSelected(&state, "b2c3d4");
     // While Host requests wait on an Upgrade, the click selects but does
     // not open, as Enter would not.
     state.upgrade.run = .checking;
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "g7h8j9".* } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "g7h8j9".* } } }));
     try expectSelected(&state, "g7h8j9");
 }
 
@@ -5493,7 +5496,7 @@ test "a click while a start waits changes nothing, as keys do, and the start the
     const selected = state.selected.session;
     _ = try submit(&state, try typeText(&state, "go"));
     try std.testing.expectEqual(InputMode.frozen, state.inputMode());
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
     try expectSelected(&state, &selected);
     try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* } }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
 }
@@ -5501,10 +5504,10 @@ test "a click while a start waits changes nothing, as keys do, and the start the
 test "overview settings and New Session clicks follow Enter and draft rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .settings }));
+    try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
     try std.testing.expectEqual(Selection.settings, state.selected);
     try expectEffects(&.{.open_settings}, try submit(&state, .{}));
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .new_session }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .new_session } }));
     try std.testing.expectEqual(Selection.new_session, state.selected);
     try expectEffects(&.{}, try submit(&state, .{}));
     for ([_]Selection{ .new_session, .settings }) |selection| {
@@ -5541,7 +5544,7 @@ test "a click that names a Session gone from the list since it was drawn changes
     var state = try opened(&mixed);
     defer state.deinit();
     const selected = state.selected.session;
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "n0n0n0".* } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "n0n0n0".* } } }));
     try expectSelected(&state, &selected);
 }
 
@@ -5549,7 +5552,7 @@ test "a click on a Session while a panel shows opens it and closes the panel, as
     var state = try opened(&mixed);
     defer state.deinit();
     state.panel = .help;
-    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{.{ .open = "b2c3d4".* }}, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
     try std.testing.expectEqual(null, state.panel);
 }
 
@@ -5567,7 +5570,7 @@ test "every click obeys the input mode: a frozen screen takes none, whatever it 
             try std.testing.expectEqual(InputMode.frozen, state.inputMode());
         }
         const selected = state.selected;
-        const effects = try step(&state, .{ .clicked = clicked });
+        const effects = try step(&state, .{ .clicked = .{ .target = clicked } });
         if (frozen) {
             // No key moves a frozen screen, and no click does.
             try expectEffects(&.{}, effects);
@@ -6072,7 +6075,7 @@ test "/model reconciles owned choices across absent listed and changed sign-ins"
                 defer arena.deinit();
                 const plan = try model_picker_view.rows(arena.allocator(), &state.menu, pickerWords(draft.bytes), pickerDefaults(&state), choice, 100, .unicode, true, .read);
                 const line = try plan.row(arena.allocator(), plan.selected.?);
-                try std.testing.expectEqual(state.menu.find(id) orelse state.menu.entries.len, line.model.?);
+                try std.testing.expectEqual(state.menu.find(id) orelse state.menu.entries.len, line.model.?.index(&state.menu));
                 try std.testing.expect(std.mem.indexOf(u8, line.text, id) != null);
                 try std.testing.expect(std.mem.indexOf(u8, line.text, "‹ medium ›") != null);
                 syncPicker(&state, draft);
@@ -6123,7 +6126,7 @@ test "/model pending typed choices yield only to listed matches after a menu rep
                     try std.testing.expectEqual(case.matches == 0, plan.typed_row);
                     for (0..plan.count) |at| {
                         const line = try plan.row(arena.allocator(), at);
-                        try std.testing.expectEqual(case.matches == 0, line.model.? == state.menu.entries.len);
+                        try std.testing.expectEqual(case.matches == 0, line.model.?.index(&state.menu) == state.menu.entries.len);
                     }
                 }
             }
@@ -6434,7 +6437,7 @@ test "a long model list identifies the highlighted row for the list widget" {
     defer arena.deinit();
     const rows = try model_picker_view.rows(arena.allocator(), &state.menu, "", pickerDefaults(&state), state.picker.?.choice, 60, .unicode, true, .read);
     const selected = try rows.row(arena.allocator(), rows.selected.?);
-    try std.testing.expectEqualStrings("o4", state.menu.entries[selected.model.?].id);
+    try std.testing.expectEqualStrings("o4", selected.model.?.id.slice());
     try std.testing.expect(rows.count > 10);
 }
 
@@ -6449,7 +6452,7 @@ test "picker retains highlighted model across narrow widths" {
     for ([_]usize{ 10, 20, 40, 60 }) |width| {
         const rows = try model_picker_view.rows(arena.allocator(), &state.menu, "", pickerDefaults(&state), state.picker.?.choice, width, .unicode, true, .read);
         const selected = try rows.row(arena.allocator(), rows.selected.?);
-        try std.testing.expectEqualStrings("unlisted-z", state.menu.entries[selected.model.?].id);
+        try std.testing.expectEqualStrings("unlisted-z", selected.model.?.id.slice());
     }
 }
 
@@ -7727,7 +7730,7 @@ test "overview model mouse choices match Enter and control keys without changing
         const draft = try typeText(&keyed, "/model gpt-6-luna");
         const selection = clicked.selected;
         const choice = clicked.picker.?.choice.?;
-        const effects = try step(&clicked, .{ .clicked = .{ .model = .{ .choice = choice, .target = case.target } } });
+        const effects = try step(&clicked, .{ .clicked = .{ .target = .{ .model = .{ .choice = choice, .target = case.target } }, .draft = draft } });
         if (case.key == .save) {
             _ = try submit(&keyed, draft);
             try std.testing.expectEqual(@as(usize, 2), effects.len);
@@ -7753,13 +7756,86 @@ test "overview model mouse choice keeps its identity across menu reorder and sup
         defer state.deinit();
         try openPicker(&state, &both);
         var bytes: [128]u8 = undefined;
-        _ = try typeText(&state, try std.fmt.bufPrint(&bytes, "/model {s}", .{id}));
+        const draft = try typeText(&state, try std.fmt.bufPrint(&bytes, "/model {s}", .{id}));
         const choice = state.picker.?.choice.?;
         try answerModels(&state, &.{ chatgpt, .{ .provider = .openai, .list = .{ .live = .{ .bytes = "aaa-mouse\ngpt-6-luna\ngpt-5.5\n" } } } });
-        const effects = try step(&state, .{ .clicked = .{ .model = .{ .choice = choice } } });
+        const effects = try step(&state, .{ .clicked = .{ .target = .{ .model = .{ .choice = choice } }, .draft = draft } });
         try std.testing.expectEqual(@as(usize, 2), effects.len);
         try std.testing.expectEqualStrings(id, effects.items[1].save_default.model.slice());
         // A captured target cannot reopen a picker after the pick closed it.
-        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .model = .{ .choice = choice } } }));
+        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .model = .{ .choice = choice } }, .draft = draft } }));
+    }
+}
+
+test "overview mouse New Session owns Enter policy for every draft frozen and paste state" {
+    const Case = struct { text: []const u8, tags: []const std.meta.Tag(Effect) };
+    for ([_]Case{
+        .{ .text = "", .tags = &.{} },
+        .{ .text = " \n", .tags = &.{.clear_draft} },
+        .{ .text = "a mouse task", .tags = &.{.start} },
+        .{ .text = "/help", .tags = &.{.clear_draft} },
+        .{ .text = "/exit", .tags = &.{.exit} },
+    }) |case| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |pasting| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .resized = .{ .width = 100, .height = 60 } });
+        const draft = try typeText(&state, case.text);
+        if (frozen) _ = try submit(&state, .{ .bytes = "already starting" });
+        state.selected = .{ .session = "b2c3d4".* };
+        const before = state.selected;
+        const effects = try step(&state, .{ .clicked = .{ .target = .new_session, .draft = draft, .pasting = pasting } });
+        try std.testing.expectEqual(if (frozen) before else Selection.new_session, state.selected);
+        const tags = if (frozen or pasting) &.{} else case.tags;
+        try std.testing.expectEqual(tags.len, effects.len);
+        for (tags, effects.slice()) |tag, effect| try std.testing.expectEqual(tag, std.meta.activeTag(effect));
+        if (!frozen and !pasting) {
+            if (std.mem.eql(u8, case.text, "a mouse task")) try std.testing.expectEqualStrings(case.text, effects.items[0].start.text);
+            if (std.mem.eql(u8, case.text, "/help")) try std.testing.expectEqual(Panel.help, state.panel.?);
+        }
+    };
+}
+
+test "overview mouse model query overrides match highlighted and arrow Enter choices through refresh" {
+    const lists = [_]model_list.Entry{
+        .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\n" } } },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\ngpt-6.1-terra\n" } } },
+    };
+    for ([_][]const u8{ "/model gpt-6.1 high", "/model gpt-6.1 high api", "/model gpt-6.1 low chatgpt" }) |text| {
+        for ([_]bool{ false, true }) |highlighted| for ([_]bool{ false, true }) |refreshed| {
+            var clicked = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+            defer clicked.deinit();
+            var keyed = try pickerState(Default.of("codex", "gpt-6.1-sol"));
+            defer keyed.deinit();
+            try openPicker(&clicked, &lists);
+            try openPicker(&keyed, &lists);
+            const draft = try typeText(&clicked, text);
+            const key_draft = try typeText(&keyed, text);
+            const id = if (highlighted) "gpt-6.1-sol" else "gpt-6.1-terra";
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const plan = try model_picker_view.rows(arena.allocator(), &clicked.menu, pickerWords(text), pickerDefaults(&clicked), clicked.picker.?.choice, 100, .unicode, true, .read);
+            const drawn = for (0..plan.count) |at| {
+                const line = try plan.row(arena.allocator(), at);
+                if (line.model) |model| if (model.id.eql(id)) break model;
+            } else return error.TestExpectedModelRow;
+            if (refreshed) for ([_]*State{ &clicked, &keyed }) |state| {
+                try answerModels(state, &.{
+                    .{ .provider = .codex, .list = .{ .live = .{ .bytes = "aaa-refresh\ngpt-6.1-sol\ngpt-6.1-terra\n" } } },
+                    .{ .provider = .openai, .list = .{ .live = .{ .bytes = "aaa-refresh\ngpt-6.1-sol\ngpt-6.1-terra\n" } } },
+                });
+            };
+            if (!highlighted) _ = try press(&keyed, key_draft, .next);
+            _ = try submit(&keyed, key_draft);
+            const effects = try step(&clicked, .{ .clicked = .{ .target = .{ .model = .{ .choice = drawn } }, .draft = draft } });
+            try std.testing.expectEqual(@as(usize, 2), effects.len);
+            try std.testing.expect(effects.items[0] == .clear_draft and effects.items[1] == .save_default);
+            try std.testing.expect(clicked.default.?.eql(&keyed.default.?));
+            try std.testing.expectEqualStrings(id, clicked.default.?.model.slice());
+            try std.testing.expectEqual(@as(?ReasoningEffort, if (std.mem.indexOf(u8, text, "low") != null) .low else .high), clicked.default.?.effort);
+            try std.testing.expectEqual(if (std.mem.indexOf(u8, text, "api") != null) Provider.openai else Provider.codex, clicked.default.?.provider);
+            // Hit data comes from the same choice that formatted the row.
+            try std.testing.expectEqual(drawn.row.effort, clicked.default.?.effort);
+            try std.testing.expectEqual(drawn.row.provider, clicked.default.?.provider);
+        };
     }
 }

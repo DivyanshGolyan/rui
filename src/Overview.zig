@@ -729,10 +729,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = click }));
-    if (click == .new_session and !self.root.pasting and self.state.inputMode() != .frozen and self.composerDraft().bytes.len != 0) {
-        try self.appNext(ctx, try self.event(.{ .composed = .{ .input = .{ .composer = .submit }, .draft = self.composerDraft() } }));
-    }
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.pasting } }));
     if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
 }
@@ -980,9 +977,7 @@ const PickerRows = struct {
         const built = try self.models.row(arena, index);
         var target: ?view.Click = null;
         const regions = try arena.alloc(GroupedList.Region, built.controls.len);
-        if (built.model) |model| {
-            var choice = model_picker_view.select(self.models.menu, self.models.query.words, self.models.defaults, model).?;
-            if (self.models.choice) |previous| choice = model_picker_view.retain(choice, previous);
+        if (built.model) |choice| {
             target = .{ .model = .{ .choice = choice } };
             for (built.controls, regions) |control, *region| region.* = .{ .start = control.start, .end = control.end, .target = .{ .model = .{ .choice = choice, .target = control.target } } };
         }
@@ -6582,7 +6577,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         ctx.redraw = false;
                         // The list's semantic selection has one presentation
                         // transition, independent of the later departure result.
-                        try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .open = target } }));
+                        try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .target = .{ .open = target } } }));
                         try std.testing.expect(!ctx.quit);
                         try std.testing.expect(ctx.redraw);
                         try std.testing.expect(!overview.root.settings_open);
@@ -6947,6 +6942,28 @@ test "App settings typed queued saves settle on departure and retain failures" {
     }
 }
 
+test "Overview mouse model row forwards the displayed typed effort and sign-in" {
+    for ([_][]const u8{ "/model gpt high api", "/model gpt low chatgpt" }) |draft| {
+        const rig = try openListed();
+        defer rig.close();
+        try std.testing.expect(try rig.press(draft) == null);
+        try std.testing.expect(try rig.settle() == null);
+        var shown = try rig.shown(100, 30);
+        defer shown.deinit();
+        const row: u16 = for (0..30) |y| {
+            if (std.mem.indexOf(u8, try shown.line(@intCast(y)), "gpt-6-luna") != null) break @intCast(y);
+        } else return error.TestExpectedModelRow;
+        try std.testing.expect(!rig.overview.state.picker.?.choice.?.id.eql("gpt-6-luna"));
+        try std.testing.expect(try rig.click(4, row, 100, 30) == null);
+        try std.testing.expect(try rig.settle() == null);
+        const saved = Seen.now.saved.?;
+        try std.testing.expectEqualStrings("gpt-6-luna", saved.model.slice());
+        const api = std.mem.indexOf(u8, draft, "api") != null;
+        try std.testing.expectEqual(if (api) model_picker.Provider.openai else model_picker.Provider.codex, saved.provider);
+        try std.testing.expectEqual(@as(?model_picker.ReasoningEffort, if (api) .high else .low), saved.effort);
+    }
+}
+
 test "Overview mouse model rows hover without selection or focus and click saves the drawn model" {
     for ([_]u16{ 36, 80, 140 }) |width| {
         const rig = try openListed();
@@ -7049,8 +7066,8 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/model"));
 }
 
-test "Overview mouse New Session matches Enter for blank whitespace task and paste drafts" {
-    for ([_][]const u8{ "", "   ", "a mouse task" }) |draft| for ([_]bool{ false, true }) |pasting| {
+test "Overview mouse New Session forwards blank whitespace task command and paste drafts" {
+    for ([_][]const u8{ "", "   ", "a mouse task", "/configure --reasoning-effort high" }) |draft| for ([_]bool{ false, true }) |pasting| {
         const rig = try openListed();
         defer rig.close();
         try std.testing.expect(try rig.press(draft) == null);
@@ -7062,10 +7079,18 @@ test "Overview mouse New Session matches Enter for blank whitespace task and pas
         rig.overview.root.pasting = pasting;
         try std.testing.expect(try rig.click(4, row, 80, 24) == null);
         try std.testing.expect(try rig.settle() == null);
-        const starts = !pasting and std.mem.trim(u8, draft, " ").len != 0;
+        const starts = !pasting and std.mem.eql(u8, draft, "a mouse task");
         try std.testing.expectEqual(@as(usize, if (starts) 1 else 0), Seen.now.starts);
         try std.testing.expectEqual(@as(usize, if (starts) 1 else 0), Seen.now.conversations);
         if (starts) try std.testing.expectEqualStrings(draft, Seen.now.start.text.slice());
+        if (!pasting and std.mem.startsWith(u8, draft, "/configure")) {
+            try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
+            var args: [2 * view.start_options.len][]const u8 = undefined;
+            const held = rig.overview.state.settings.args(&args);
+            try std.testing.expectEqual(@as(usize, 2), held.len);
+            try std.testing.expectEqualStrings("--reasoning-effort", held[0]);
+            try std.testing.expectEqualStrings("high", held[1]);
+        }
     };
 }
 
