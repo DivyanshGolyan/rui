@@ -2039,9 +2039,10 @@ test "store.mysql live single commit ownership loss refuses its write and fences
         var single: LiveSingle = .{ .input = .{ .storage = &storage, .write = .{ .insert = .{ .id = 9000402, .text = "single-lost-owner" } } } };
         // The commit's OwnershipLost cannot be rolled back with ownership
         // confirmed either, so the failed rollback takes its place at the
-        // same boundary used by ordinary writes.
+        // same boundary used by ordinary writes; the engine keeps the cause.
         const result = entry.finishTransaction(error{LiveGuard}, .{}, transition.run(&entry, LiveSingle, &single, .{}));
         try std.testing.expectError(error.CanonicalRollbackFailed, result);
+        try std.testing.expectEqual(@as(?@import("engine.zig").Failure, error.OwnershipLost), storage.engine.mysql.state.failure);
         try std.testing.expect(storage.isFenced());
         try std.testing.expectEqual(@as(u64, 0), try queryU64(&storage, "SELECT count(*) FROM content WHERE content_id=9000402", .{}));
     }
