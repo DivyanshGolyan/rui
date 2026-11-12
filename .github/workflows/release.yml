@@ -164,7 +164,8 @@ jobs:
           (needs.build.result == 'success' || needs.build.result == 'skipped') &&
           (needs.npm.result == 'success' || needs.npm.result == 'skipped') }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    # Ten for publication, seven for fetching and measuring Host memory.
+    timeout-minutes: 17
     permissions:
       contents: write
       actions: read
@@ -186,6 +187,30 @@ jobs:
           ref: ${{ needs.plan.outputs.sha }}
           path: .release-source
           persist-credentials: false
+      - name: Fetch the released Linux executable to measure
+        id: memory_fetch
+        if: ${{ needs.plan.outputs.version != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
+      - name: Measure the released Linux executable's Host memory
+        # Never holds back the release: the notes say "not measured" when this step does not finish.
+        # No token here: this step installs packages and runs fixture and product code.
+        if: ${{ needs.plan.outputs.version != '' && steps.memory_fetch.outcome == 'success' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          tar -xzf "$RUNNER_TEMP/memory/rui-$VERSION-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/memory"
+          python3 -m venv "$RUNNER_TEMP/memory-python"
+          "$RUNNER_TEMP/memory-python/bin/pip" --disable-pip-version-check install --retries 1 \
+            -r .release-source/tests/integration/requirements.txt
+          "$RUNNER_TEMP/memory-python/bin/python" -B .release-source/tests/ci/host_memory.py \
+            "$RUNNER_TEMP/memory/rui-$VERSION-linux-x86_64/bin/rui" > "$RUNNER_TEMP/host-memory.md"
       - name: Resume and publish archives, digests and installer
         if: ${{ needs.plan.outputs.version != '' }}
         env:
@@ -227,6 +252,12 @@ jobs:
             echo "curl -fsSL https://github.com/$GITHUB_REPOSITORY/releases/download/v$VERSION/rui-$VERSION-linux-x86_64-debug.tar.gz |"
             echo "  tar -xz --strip-components=1 -C \"\$(dirname \"\$(dirname \"\$(readlink -f ~/.local/bin/rui)\")\")\""
             echo '```'
+            echo
+            if [ -s "$RUNNER_TEMP/host-memory.md" ]; then
+              cat "$RUNNER_TEMP/host-memory.md"
+            else
+              printf '### Host memory\n\nNot measured: the measuring step did not finish; its log in this release run says why.\n'
+            fi
           } > notes.md
           python3 -B tests/ci/release.py publish "$VERSION" "$SHA" dist notes.md
   npm_publish:
