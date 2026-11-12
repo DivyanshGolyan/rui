@@ -55,6 +55,16 @@ pub const Key = struct {
     }
 };
 
+/// What a view's history reads are keyed by beside its Operation and
+/// anchor: its floor, the Session's first Message, its selected base's
+/// Operation and its frozen tool set. The Store names them.
+pub const View = struct {
+    floor: u64,
+    first_message: u64,
+    base: u64,
+    tool_set: u64,
+};
+
 /// One Session's index entry. The span bytes are in the slot's file.
 pub const Memo = struct {
     key: Key,
@@ -64,6 +74,9 @@ pub const Memo = struct {
     history_position: u64,
     /// The producing view's final tool-group scan cursor.
     tool_group_cursor: u64,
+    /// What the producing view read its history by, for the Session's next
+    /// request to read ahead from.
+    view: View,
     /// The codec's encoder state where the span ends.
     carry: codecs.Carry,
     /// Exact span length; the file must have exactly this length.
@@ -84,6 +97,7 @@ pub const Memo = struct {
             self.admission_position == other.admission_position and
             self.history_position == other.history_position and
             self.tool_group_cursor == other.tool_group_cursor and
+            std.meta.eql(self.view, other.view) and
             std.meta.eql(self.carry, other.carry) and
             self.length == other.length and
             self.digest == other.digest;
@@ -373,6 +387,7 @@ fn testMemo(session: []const u8, model: []const u8, anchor: ?u64, admission_posi
         .admission_position = admission_position,
         .history_position = admission_position - 1,
         .tool_group_cursor = 0,
+        .view = .{ .floor = 0, .first_message = 0, .base = 0, .tool_set = 1 },
         .carry = codecs.initialCarry(.@"openai-responses/2", null),
         .length = length,
         .digest = 0,
