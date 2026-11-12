@@ -333,8 +333,8 @@ fn failureLine(self: *Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]
 
 fn failureText(failure: core.Failure) []const u8 {
     return switch (failure) {
-        .expired => comptime core.Provider.codex.shown() ++ " sign-in expired",
-        .denied => comptime core.Provider.codex.shown() ++ " sign-in denied",
+        .expired => "ChatGPT sign-in expired",
+        .denied => "ChatGPT sign-in denied",
         .login => "Sign-in failed",
         .defaults => "Sign-in saved; couldn't save default",
         .host => "Sign-in saved; Host didn't start",
@@ -368,7 +368,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         self.task.mutex.unlock(self.init.?.io);
     } else code = self.code;
     const line: []const vaxis.Cell.Segment = switch (self.state.stage) {
-        .choice => try ctx.arena.dupe(vaxis.Cell.Segment, &choice_row.segments(.{ core.Provider.codex.signIn(), core.Provider.openai.signIn() }, .{ if (self.state.selected != .openai) .selected else .plain, if (self.state.selected == .openai) .selected else .plain }, self.style, .{}, true)),
+        .choice => try ctx.arena.dupe(vaxis.Cell.Segment, &choice_row.segments(.{ "ChatGPT", "API key" }, .{ if (self.state.selected != .openai) .selected else .plain, if (self.state.selected == .openai) .selected else .plain }, self.style, .{}, true)),
         .codex_waiting => if (code.len == 0) &.{.{ .text = "  Connecting to ChatGPT", .style = self.style }} else line: {
             const segments = try ctx.arena.alloc(vaxis.Cell.Segment, 3);
             segments[0] = .{ .text = "  ", .style = self.style };
@@ -560,13 +560,10 @@ test "Sign-in choices use approval background selection with and without colour"
             var text = std.Io.Writer.Allocating.init(arena.allocator());
             for (surface.children[1].surface.buffer, 0..) |cell, column| {
                 try text.writer.writeAll(cell.char.grapheme);
-                // Each label is selected with its mark or padding, as the provider facts name it.
-                const first = core.Provider.codex.signIn().len;
-                const second = core.Provider.openai.signIn().len;
-                const selected = if (column >= 2 and column <= first + 3) provider == .codex else if (column >= first + 6 and column <= first + second + 7) provider == .openai else false;
+                const selected = if (column >= 2 and column <= 10) provider == .codex else if (column >= 13 and column <= 21) provider == .openai else false;
                 try std.testing.expectEqual(selected, cell.style.reverse);
             }
-            try std.testing.expectEqualStrings(" › Device code    API key", std.mem.trimEnd(u8, text.written(), " "));
+            try std.testing.expectEqualStrings(" › ChatGPT    API key", std.mem.trimEnd(u8, text.written(), " "));
         }
     }
 }

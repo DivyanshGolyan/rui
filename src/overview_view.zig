@@ -6413,13 +6413,13 @@ test "the lines that name the next Session's model name the saved effort its sta
             .done => try std.testing.expect(state.notice == null),
             .failed => {
                 const next = if (case.held == null) " · low" else "";
-                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Default not saved (check ~/.config/rui/preferences); new Sessions here still use {s}{s} · Device code", .{ case.model, next }), state.notice.?.text());
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "Default not saved (check ~/.config/rui/preferences); new Sessions here still use {s}{s} · Codex", .{ case.model, next }), state.notice.?.text());
             },
             .unconfirmed => {
                 var departure: std.Io.Writer.Allocating = .init(std.testing.allocator);
                 defer departure.deinit();
                 try writeDeparture(&state, case.saved, &departure.writer);
-                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "rui: New Sessions use {s}{s} · Device code; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ case.model, case.later }), departure.written());
+                try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "rui: New Sessions use {s}{s} · Codex; durability unconfirmed, inspect ~/.config/rui/preferences.\n", .{ case.model, case.later }), departure.written());
             },
         }
     };

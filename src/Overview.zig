@@ -3456,7 +3456,7 @@ test "the departure names the effort saved now, even after a launch that named i
     var buffer: [1024]u8 = undefined;
     const guidance = try finishedGuidance(rig, &buffer);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.saves);
-    try std.testing.expectEqualStrings("rui: New Sessions use gpt-6-luna · max · Device code; durability unconfirmed, inspect ~/.config/rui/preferences.\n", guidance);
+    try std.testing.expectEqualStrings("rui: New Sessions use gpt-6-luna · max · Codex; durability unconfirmed, inspect ~/.config/rui/preferences.\n", guidance);
 }
 
 test "a failed save from unreadable preferences keeps the local pick for the next start" {
@@ -3477,7 +3477,7 @@ test "a failed save from unreadable preferences keeps the local pick for the nex
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[B\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("Default not saved (check ~/.config/rui/preferences); new Sessions here still use gpt-6-luna · low · Device code", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("Default not saved (check ~/.config/rui/preferences); new Sessions here still use gpt-6-luna · low · Codex", rig.overview.state.notice.?.text());
     try std.testing.expect(try rig.press("/configure --permission-mode bypass\rhello\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
@@ -7501,9 +7501,7 @@ test "Overview mouse model row forwards the displayed typed effort and sign-in" 
 }
 
 test "Overview mouse model rows hover without selection or focus and click saves the drawn model" {
-    // 40 is the narrowest width that draws gpt-6-luna whole beside the
-    // highlighted row's effort and "Device code" sign-in.
-    for ([_]u16{ 40, 80, 140 }) |width| {
+    for ([_]u16{ 36, 80, 140 }) |width| {
         const rig = try openListed();
         defer rig.close();
         try std.testing.expect(try rig.press("/model ") == null);

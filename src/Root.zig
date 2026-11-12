@@ -697,7 +697,7 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
             try std.testing.expect(std.mem.startsWith(u8, text, " rui"));
             try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
             switch (stage) {
-                .choice => try std.testing.expect(std.mem.indexOf(u8, text, "› Device code    API key") != null),
+                .choice => try std.testing.expect(std.mem.indexOf(u8, text, "› ChatGPT    API key") != null),
                 .codex_waiting => {
                     try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device · BDL9-KI88H") != null);
                     try std.testing.expectEqual(@as(usize, "auth.openai.com/codex/device".len), linked);

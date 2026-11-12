@@ -888,7 +888,7 @@ def persistent_copy_case():
 
 def provider_prompt(master):
     # First run is now a committed app frame, not a canonical line prompt.
-    return await_screen(master, "› Device code    API key")
+    return await_screen(master, "› ChatGPT    API key")
 
 
 def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
@@ -1807,7 +1807,7 @@ def provider_line_cases():
             cwd=state, env={**os.environ, "HOME": str(no_tty)}, input="script task",
             capture_output=True, text=True, timeout=5)
         assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
-        assert "› Device code    API key" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
+        assert "› ChatGPT    API key" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
         assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
         for choice in ("codex", "ready-key", "key", "device", "escape"):
             home = state / choice
@@ -1859,7 +1859,7 @@ def provider_line_cases():
                         assert "auth.openai.com/codex/device · BDL9-KI88H" in waiting, waiting
                         assert "Waiting for ChatGPT" in waiting, waiting
                         os.write(master, b"\x1b")
-                        read_terminal(master, "› Device code    API key", fresh=True)
+                        read_terminal(master, "› ChatGPT    API key", fresh=True)
                     else:
                         # Choice typing does nothing. Escape from key entry
                         # returns to a visibly different choice frame before
@@ -2260,7 +2260,7 @@ def main(selected="all"):
             raise
         try:
             offered = provider_prompt(master)
-            assert "› Device code    API key" in offered and "API key" in offered, offered
+            assert "› ChatGPT    API key" in offered and "API key" in offered, offered
             os.write(master, b"\x03")
             terminal_exit(deferred, master)
             assert deferred.wait(timeout=5) == 0
@@ -2284,7 +2284,7 @@ def main(selected="all"):
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "› Device code    API key" in provider_prompt(master)
+            assert "› ChatGPT    API key" in provider_prompt(master)
             # Another client installs a fixture credential while this caller
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
@@ -2311,7 +2311,7 @@ def main(selected="all"):
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "› Device code    API key" in provider_prompt(master)
+            assert "› ChatGPT    API key" in provider_prompt(master)
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
@@ -2342,7 +2342,7 @@ def main(selected="all"):
                     dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
                     raise
                 try:
-                    assert "› Device code    API key" in provider_prompt(master)
+                    assert "› ChatGPT    API key" in provider_prompt(master)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
                     welcome = overview_frame(master, overview_title, keys=b"\r")

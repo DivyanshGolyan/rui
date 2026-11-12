@@ -340,7 +340,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
         },
         .model => {
             try writeText(out, session.model.slice());
-            try out.print(" · {s}", .{session.provider.shown()});
+            try out.print(" · {s}", .{session.provider.signIn()});
             return null;
         },
         .store => {
@@ -352,7 +352,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
             const saved = facts.defaults.* catch |err| return unreadable(out, err);
             const provider = saved.provider catch |err| return unreadable(out, err);
             try writeText(out, if (saved.model.len != 0) saved.model.slice() else product_defaults.recommended_model);
-            try out.print(" · {s}", .{provider.shown()});
+            try out.print(" · {s}", .{provider.signIn()});
             if (saved.model.len == 0) return "Rui default";
         },
         .default_effort => {
@@ -530,11 +530,11 @@ test "the page shows the approved rows, `›` on the selected one, then the work
             "   Folder          ~/code/rui\n" ++
             "   Compact at      245,000 tokens · now 31,200" ++ grey ++ "model default" ++ end ++
             "   Headroom        0 tokens" ++ grey ++ "model default" ++ end ++
-            "   Model           gpt-6.1-sol · ChatGPT (device code)\n" ++
+            "   Model           gpt-6.1-sol · Codex\n" ++
             "   Store           ~/.local/share/rui/store" ++ grey ++ "fixed for this Session" ++ end ++
             "   Instructions    set from a shell\n" ++
             " New Sessions\n" ++
-            "   Model           gpt-6.1-sol · ChatGPT (device code)" ++ grey ++ "Rui default" ++ end ++
+            "   Model           gpt-6.1-sol · Codex" ++ grey ++ "Rui default" ++ end ++
             "   Effort          model default\n" ++
             "   Notifications   on\n" ++
             "   Store           ~/.rui/store\n" ++
@@ -648,9 +648,9 @@ test "each value stays on its row and says where it came from" {
         "Tools           bash\n",
         "Compact at      1,234,567 tokens  \x1b[90mSession override",
         "Headroom        999 tokens  \x1b[90mSession override",
-        "Model           model-a · ChatGPT",
+        "Model           model-a · Codex",
         "Instructions    none\n",
-        "Model           gpt-x · OpenAI\n",
+        "Model           gpt-x · API key\n",
         "Effort          low\n",
         "Notifications   off\n",
         "Store           /srv/store\n",
