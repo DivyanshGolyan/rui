@@ -12,6 +12,11 @@ const Self = @This();
 pub const list_width = 40;
 pub const split_at = 100;
 
+pub const OverviewKeys = struct {
+    context: *anyopaque,
+    take: *const fn (*anyopaque, *vxfw.EventContext, vxfw.Event, app_input.Effects.Delivery) anyerror!void,
+};
+
 /// The composed main screen ends its presentation when Root changes panes.
 pub const MainPresentation = struct {
     context: *anyopaque,
@@ -20,6 +25,11 @@ pub const MainPresentation = struct {
 main_presentation: ?MainPresentation = null,
 
 overview: vxfw.Widget,
+/// The overview's key owner: Root hands it each key, paste mark and
+/// malformed key `app_input.step` routes to the overview, with what it
+/// arrived under. A Root with no overview core (UI-only tests and native
+/// probes) hands those events to the `overview` widget instead.
+overview_keys: ?OverviewKeys = null,
 list: vxfw.Widget,
 divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
@@ -106,12 +116,13 @@ fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !voi
     try self.apply(ctx, effects, null);
 }
 
-/// The settings page's answers for this event, read by value, and only
-/// while the page is open.
+/// Whether a Session is open and, only while the settings page is open,
+/// the page's answers for this event, read by value.
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
-    if (!self.input.layer.settingsOpen()) return .{};
+    const session_open = self.session != null;
+    if (!self.input.layer.settingsOpen()) return .{ .session_open = session_open };
     const page = &self.settings_page;
-    return .{ .settings = .{
+    return .{ .session_open = session_open, .settings = .{
         .keys_open = page.keys_open,
         .choice_open = page.hasChoice(),
         .takes_key = if (key) |pressed| page.takesKey(pressed) else false,
@@ -144,7 +155,11 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
             try self.sign_in.?.handleEvent(ctx, routed.?);
             ctx.consumeEvent();
         },
-        .app_keys, .colors => {
+        .overview => |delivery| {
+            if (self.overview_keys) |keys| try keys.take(keys.context, ctx, routed.?, delivery) else try self.overview.handleEvent(ctx, routed.?);
+            ctx.consumeEvent();
+        },
+        .colors => {
             try self.overview.handleEvent(ctx, routed.?);
             ctx.consumeEvent();
         },
@@ -482,7 +497,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         // With no page open, Escape is the focused screen's.
         ctx.consume_event = false;
         try root.widget().captureEvent(&ctx, escape);
-        try std.testing.expect(!ctx.consume_event);
+        try std.testing.expect(ctx.consume_event and !root.input.layer.settingsOpen());
 
         try root.openSettings(&ctx);
         try root.openSession(&ctx, session.widget());
@@ -637,13 +652,21 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     try page.openSettings(&events);
     try page.widget().captureEvent(&events, escape);
     try std.testing.expect(!page.input.layer.settingsOpen());
-    // With settings closed Root leaves Escape to the focused screen.
+    // With settings closed Escape is the overview's to decide: Root hands
+    // it over once and stops it, and leaves a Session's to the focused
+    // screen.
     var fixture: Fixture = .{ .run = .checking };
     var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget() };
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
     try root.widget().captureEvent(&ctx, escape);
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expectEqual(@as(usize, 1), fixture.escapes);
+    var session: Fixture = .{};
+    root.session = session.widget();
+    ctx.consume_event = false;
+    try root.widget().captureEvent(&ctx, escape);
     try std.testing.expect(!ctx.consume_event);
-    try std.testing.expectEqual(@as(usize, 0), fixture.escapes);
+    try std.testing.expectEqual(@as(usize, 1), fixture.escapes);
 }
 
 test "App root keeps settings focus while a hidden Session ticks and retains other commands" {

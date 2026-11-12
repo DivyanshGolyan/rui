@@ -3,9 +3,10 @@ the last row, the `↓` marker, pages without a heading and the send state.
 
 human_cli_integration.py runs these cases in its full and renderer modes, and
 alone as `session-chrome`. Each case judges the screen the person sees, at
-80×24 unless it says otherwise: the feed fills rows 0–17, row 18 is
-reserved for the marker even at the end, and the input sits
-between rules on rows 19–21, the identity/keys footer is 22 and the state slot is 23.
+80×24 unless it says otherwise. Feed capacity and the permanently reserved
+marker row come from the composer's rendered upper rule, not a fixed footer
+height. The chat footer follows input; persistent state can take rows below
+it. Short replies replace the Footer's right slot without adding a row.
 Feed/page/activity rows have one gutter column; input, footer and state
 retain their own margins."""
 import json
@@ -27,6 +28,8 @@ from human_cli_fixture import (
     footer_click,
     assert_model_choice,
     composer_line,
+    composer_bounds,
+    chat_footer_row,
     conversation_text,
     keyed_frame,
     model_choice_frame,
@@ -39,24 +42,37 @@ from human_cli_fixture import (
 from terminal_process import close_pty, open_pty, spawn
 
 ROWS = 24
-BOTTOM = ROWS - 6  # The permanently reserved marker row below the feed.
-FOOTER = ROWS - 2
-NOTICE = ROWS - 1
 
 
 def rows(screen):
     return screen.split("\n")
 
 
+def feed_bottom(screen):
+    """Reserved marker row, immediately above the rendered input's top rule."""
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    return bounds[0] - 1
+
+
+def status(screen):
+    """Persistent state only, below the chat's one facts/keys row."""
+    return "\n".join(composer_line(screen, index) for index in range(chat_footer_row(screen) + 1, len(rows(screen)))).strip()
+
+
+def footer(screen):
+    return composer_line(screen, chat_footer_row(screen))
+
+
 def transcript_rows(screen):
     """Content coordinates, excluding only the feed gutter, above the input."""
-    return [chat_content_row(row) for row in rows(screen)[:BOTTOM + 1]]
+    return [chat_content_row(composer_line(screen, index)) for index in range(feed_bottom(screen) + 1)]
 
 
 def tail_rows(screen):
     """The feed's final block, excluding the permanently reserved chip row.
     The activity tail is an entry in that same feed, not separate chrome."""
-    shown = transcript_rows(screen)[:BOTTOM]
+    shown = transcript_rows(screen)[:-1]
     start = max((n for n, row in enumerate(shown) if not row.strip()), default=-1) + 1
     return shown[start:]
 
@@ -64,7 +80,7 @@ def tail_rows(screen):
 def marker(screen):
     """The chip in its reserved row below the feed, or None."""
     shown = rows(screen)
-    row = shown[BOTTOM].rstrip() if len(shown) == ROWS else ""
+    row = shown[feed_bottom(screen)].rstrip() if len(shown) == ROWS else ""
     if row.endswith(" new") and "↓ " in row:
         return row[row.rindex("↓ "):]
     return "↓" if row.endswith("↓") else None
@@ -144,10 +160,14 @@ class Chrome:
 
 
 def composing(screen, draft):
-    """The composer shows `draft` on its row between the rules."""
+    """The composer shows `draft`; an empty editor may show its placeholder."""
     shown = [composer_line(screen, index) for index in range(len(rows(screen)))]
-    return len(shown) == ROWS and (set(shown[ROWS - 5]) == {"─"} and set(shown[ROWS - 3]) == {"─"}
-            and shown[ROWS - 4].rstrip() == (" › " + draft).rstrip())
+    bounds = composer_bounds(screen)
+    expected = {(" › " + draft).rstrip()}
+    if not draft:
+        expected.add(" › Type a task")
+    return (len(shown) == ROWS and bounds is not None and bounds[1] == bounds[0] + 2
+            and shown[bounds[0] + 1].rstrip() in expected)
 
 
 def latest(screen, text):
@@ -193,19 +213,20 @@ def activity_case():
         try:
             # Idle: no tail or stop key; the footer keeps the chat identity.
             idle = settle_screen(master, quiet=0.5)
-            assert rows(idle)[FOOTER].strip().startswith("‹ ") and "ctrl+x stop" not in rows(idle)[FOOTER] and "⠹" not in idle, idle
+            assert footer(idle).strip().startswith("‹ ") and "ctrl+x stop" not in footer(idle) and "⠹" not in idle, idle
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             running = chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             # The activity block is the feed's final entry, directly after
             # the person's row; no blank separator owns a separate tail pane.
-            tail = transcript_rows(running)[BOTTOM - 1:BOTTOM]
-            assert [line for line in transcript_rows(running)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, running
+            bottom = feed_bottom(running)
+            tail = transcript_rows(running)[bottom - 1:bottom]
+            assert [line for line in transcript_rows(running)[:bottom] if line.startswith(("⠹", "◌"))] == tail, running
             assert tail == [tail[-1]] and tail[-1].startswith("⠹ Held call · "), running
-            assert transcript_rows(running)[BOTTOM - 1].startswith("⠹ Held call · ") and not rows(running)[BOTTOM].strip(), running
+            assert transcript_rows(running)[bottom - 1].startswith("⠹ Held call · ") and not rows(running)[bottom].strip(), running
             assert tail[-1].removeprefix("⠹ Held call · ").rstrip("s").isdigit(), running
             # At the right of the footer, beside the chat identity.
-            last = rows(running)[FOOTER]
+            last = footer(running)
             assert last.strip().startswith("‹ ") and last.endswith("ctrl+x stop") and len(last.rstrip()) == 80, running
             # Waiting Messages: one row, the newest's first line, counted, never called queued.
             for index in range(3):
@@ -213,17 +234,18 @@ def activity_case():
                 count = f"{index + 1} · " if index else ""
                 waiting = chrome.frame(master, b"", lambda screen, count=count, index=index:
                     f"◌ {count}WAITING-{index}" in screen and composing(screen, ""))
-            tail = transcript_rows(waiting)[BOTTOM - 2:BOTTOM]
-            assert [line for line in transcript_rows(waiting)[:BOTTOM] if line.startswith(("⠹", "◌"))] == tail, waiting
+            bottom = feed_bottom(waiting)
+            tail = transcript_rows(waiting)[bottom - 2:bottom]
+            assert [line for line in transcript_rows(waiting)[:bottom] if line.startswith(("⠹", "◌"))] == tail, waiting
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 3 · WAITING-2", waiting
-            assert transcript_rows(waiting)[BOTTOM - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[BOTTOM].strip(), waiting
+            assert transcript_rows(waiting)[bottom - 1] == "◌ 3 · WAITING-2" and not rows(waiting)[bottom].strip(), waiting
             assert "second line" not in waiting and "queued" not in waiting.lower(), waiting
-            assert rows(waiting)[FOOTER].endswith("ctrl+x stop"), waiting
+            assert footer(waiting).endswith("ctrl+x stop"), waiting
             (chrome.workspace / "release").write_text("")
             # The waiting Messages join the turn when its call ends.
             done = chrome.frame(master, b"", lambda screen: "HELD-DONE" in screen
                 and "◌" not in screen and "⠹" not in screen, timeout=30)
-            assert rows(done)[FOOTER].strip().startswith("‹ ") and "ctrl+x stop" not in rows(done)[FOOTER], done
+            assert footer(done).strip().startswith("‹ ") and "ctrl+x stop" not in footer(done), done
             # Each waiting Message is its own row once, in the order sent.
             order = [done.count(f"› WAITING-{i}") for i in range(3)]
             assert order == [1, 1, 1], done
@@ -247,10 +269,10 @@ def send_state_case():
         frames = frames_until(master, b"\r", lambda screen: "SENT-ANSWER" in screen)
         cleared = [frame for frame in frames if composing(frame, "")]
         assert cleared, frames
-        assert rows(cleared[0])[NOTICE] == "Sending…", cleared[0]
+        assert status(cleared[0]) == "Sending…", cleared[0]
         seen = set()
         for frame in cleared:
-            last, shown = rows(frame)[NOTICE].strip(), "\n".join(transcript_rows(frame))
+            last, shown = status(frame), "\n".join(transcript_rows(frame))
             seen.add(last)
             if "› SEND-ME" in shown:
                 break
@@ -289,24 +311,25 @@ def scroll_marker_case():
         requests = len(chrome.endpoint.requests)
         os.write(master, b"keep")
         end = chrome.frame(master, b"", lambda screen: composing(screen, "keep"))
-        assert not rows(end)[BOTTOM].strip(), end
+        bottom = feed_bottom(end)
+        assert not rows(end)[bottom].strip(), end
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
             # The chip has not stolen a row: every overlapping unique content
             # line moves by exactly half the feed height, not by half plus one.
             # Rows above the loaded ones join first, so judge the frame where
             # the whole move has landed.
-            end_rows = rows(end)[:BOTTOM]
+            end_rows = rows(end)[:bottom]
             before = {line: n for n, line in enumerate(end_rows) if line.strip() and end_rows.count(line) == 1}
 
             def moved(screen):
-                held_rows = rows(screen)[:BOTTOM]
+                held_rows = rows(screen)[:feed_bottom(screen)]
                 after = {line: n for n, line in enumerate(held_rows) if line.strip() and held_rows.count(line) == 1}
                 shared = before.keys() & after.keys()
-                return bool(shared) and all(after[line] - before[line] == BOTTOM // 2 for line in shared)
+                return bool(shared) and all(after[line] - before[line] == bottom // 2 for line in shared)
 
             scrolled = chrome.frame(master, keys, lambda screen: marker(screen) == "↓" and moved(screen))
             assert "second row 07" not in scrolled and composing(scrolled, "keep"), (keys, scrolled)
-            assert rows(scrolled)[NOTICE].strip() == "" and rows(scrolled)[FOOTER].strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
+            assert status(scrolled) == "" and footer(scrolled).strip().startswith("‹ "), (keys, "no heading or hint", scrolled)
             assert not any(row.startswith("Browsing") for row in transcript_rows(scrolled)), scrolled
             # End edits this nonempty draft without moving the feed. Empty-
             # draft End and Ctrl-End delegate to the conversation's end action.
@@ -318,7 +341,12 @@ def scroll_marker_case():
             back = b"\x1b[1;5F" if keys == b"\x1b[1;2A" else b"\x1b"
             live = chrome.frame(master, back, lambda screen: latest(screen, "second row 07"))
             assert composing(live, "keep"), live
-            assert rows(live)[:BOTTOM + 1] == rows(end)[:BOTTOM + 1], (end, live)
+            assert feed_bottom(live) == bottom, (end, live)
+            # Scrolling can load earlier history into the initially blank
+            # prefix. Every already loaded end row (including its gaps and
+            # marker slot) must return at the identical coordinate.
+            first_known = next(index for index, row in enumerate(end_rows) if row.strip())
+            assert rows(live)[first_known:bottom + 1] == rows(end)[first_known:bottom + 1], (end, live)
         assert len(chrome.endpoint.requests) == requests, "scrolling sent input"
         # Work arrives below a scrolled-back view: the marker counts it.
         os.write(master, b"\x15HOLD-QUESTION\r")
@@ -329,7 +357,7 @@ def scroll_marker_case():
         counted = chrome.frame(master, b"", lambda screen: (marker(screen) or "").endswith(" new"), timeout=30)
         assert marker(counted)[2:-4].isdigit() and int(marker(counted)[2:-4]) >= 1, counted
         assert "ARRIVED-ANSWER" not in counted, counted
-        assert rows(counted)[:BOTTOM] == rows(held)[:BOTTOM], (held, counted)
+        assert rows(counted)[:feed_bottom(counted)] == rows(held)[:feed_bottom(held)], (held, counted)
         assert composing(counted, ""), counted
         chrome.frame(master, b"\x1b", lambda screen: latest(screen, "ARRIVED-ANSWER"), timeout=30)
         chrome.leave(master, caller)
@@ -395,9 +423,9 @@ def pages_case():
             assert rows(working)[-1].endswith("esc close"), working
             returned = chrome.frame(master, b"\x1b", lambda screen:
                                     "⠹ Held call · " in screen and marker(screen) is None
-                                    and rows(screen)[FOOTER].endswith("ctrl+x stop")
+                                    and footer(screen).endswith("ctrl+x stop")
                                     and "esc close" not in screen)
-            assert rows(returned)[FOOTER].endswith("ctrl+x stop"), returned
+            assert footer(returned).endswith("ctrl+x stop"), returned
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "PAGES-DONE"), timeout=30)
             chrome.leave(master, caller)
@@ -441,7 +469,7 @@ def info_natural_height_case():
                                     "✓" not in conversation_text(screen) and "FEED-24" in screen and "kept draft" in screen)
             # Chat info remains available through its actual hint and Alt-I,
             # rather than treating every identity word as the same action.
-            columns = [live.split("\n")[-2].index("alt+i")]
+            columns = [rows(live)[chat_footer_row(live)].index("alt+i")]
             opened = None
             for column in columns:
                 opened = chrome.frame(master, footer_click(live, column=column),
@@ -451,7 +479,7 @@ def info_natural_height_case():
                 if height >= 30:
                     assert base["top"] > 0 and any("FEED-" in row for row in base["feed"]), opened
                 # A click on the substituted footer is safe and idempotent.
-                chrome.frame(master, footer_click(opened, marker=" · info", info=True) + b"\x1b[B\r",
+                chrome.frame(master, footer_click(opened, marker=" · info") + b"\x1b[B\r",
                              lambda screen: "ask first" in screen and "run without asking" in screen)
                 clicked = chrome.frame(master, b"\x1b",
                                        lambda screen: "ask first" not in screen and "Copy last answer" in screen)
@@ -552,7 +580,7 @@ def opening_case():
             master, caller, opened = chrome.open(session, lambda screen: "◌ 2 · WAITING-1" in screen and "⠹ Held call · " in screen)
             tail = tail_rows(opened)
             assert tail[-2].startswith("⠹ Held call · ") and tail[-1] == "◌ 2 · WAITING-1", opened
-            assert rows(opened)[FOOTER].endswith("ctrl+x stop"), opened
+            assert footer(opened).endswith("ctrl+x stop"), opened
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "HELD-DONE") and "◌" not in screen, timeout=30)
             chrome.leave(master, caller)
@@ -602,7 +630,7 @@ def keys_case():
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
             expected = (
-                ("enter", "send"), ("esc", "back"), ("⇧enter", "new line"),
+                ("enter", "open / send"), ("esc", "back"), ("⇧enter", "new line"),
                 ("tab", "next footer field"), ("⇧tab", "previous footer field"),
                 ("ctrl+x", "stop"), ("↑↓", "scroll"), ("ctrl+o", "tool output"),
                 ("ctrl+p", "earlier message"), ("ctrl+r", "retry"),
@@ -649,15 +677,15 @@ def keys_case():
 
 
 def notice_case():
-    """A notice shows in the bottom state slot until the next key; question
+    """A notice replaces the Footer's right slot until the next key; question
     marks are ordinary draft text, even on an empty draft."""
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
-        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: rows(screen)[NOTICE].startswith("! Unknown command /nosuch"))
+        unknown = chrome.frame(master, b"/nosuch\r", lambda screen: footer(screen).endswith("! Unknown command /nosuch"))
         assert composing(unknown, ""), unknown
         gone = chrome.frame(master, b"a", lambda screen: composing(screen, "a"))
-        assert rows(gone)[NOTICE].strip() == "" and rows(gone)[FOOTER].strip().startswith("‹ "), gone
+        assert status(gone) == "" and "Unknown command" not in footer(gone) and footer(gone).strip().startswith("‹ "), gone
         os.write(master, b"\x15")
         chrome.frame(master, b"", lambda screen: composing(screen, ""))
         question = chrome.frame(master, b"?", lambda screen: composing(screen, "?"))

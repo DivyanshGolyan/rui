@@ -549,6 +549,15 @@ pub const Connection = struct {
     }
 };
 
+/// Server access denials share one classification at authentication and at
+/// Store admission, including table- and column-level privilege failures.
+pub fn accessDenied(code: u16) bool {
+    return switch (code) {
+        1044, 1045, 1130, 1698, 1142, 1143 => true,
+        else => false,
+    };
+}
+
 /// Classify once, where the connection still has both the server code and
 /// whether it sent credentials. Even an access error instead of a greeting
 /// cannot mean credentials were checked. During auth, 1130 is LoginRefused:
@@ -556,8 +565,8 @@ pub const Connection = struct {
 /// host (or 1040's capacity limit), which credentials cannot fix.
 fn loginError(code: u16, login_sent: bool) error{ LoginRefused, ServerRefused } {
     if (!login_sent) return error.ServerRefused;
+    if (accessDenied(code)) return error.LoginRefused;
     return switch (code) {
-        1044, 1045, 1130, 1698 => error.LoginRefused, // Database/user/host access.
         1251, 1524 => error.LoginRefused, // Unsupported/unloaded auth plugin.
         else => error.ServerRefused,
     };
@@ -818,9 +827,13 @@ test "handshake server errors distinguish connection refusals from login refusal
     const cases = [_]Case{
         .{ .code = 1040, .login_sent = false, .expected = error.ServerRefused },
         .{ .code = 1045, .login_sent = false, .expected = error.ServerRefused },
+        .{ .code = 1142, .login_sent = false, .expected = error.ServerRefused },
+        .{ .code = 1143, .login_sent = false, .expected = error.ServerRefused },
         .{ .code = 1130, .login_sent = false, .expected = error.ServerRefused },
         .{ .code = 1045, .login_sent = true, .expected = error.LoginRefused },
         .{ .code = 1044, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1142, .login_sent = true, .expected = error.LoginRefused },
+        .{ .code = 1143, .login_sent = true, .expected = error.LoginRefused },
         .{ .code = 1698, .login_sent = true, .expected = error.LoginRefused },
         .{ .code = 1251, .login_sent = true, .expected = error.LoginRefused },
         .{ .code = 1524, .login_sent = true, .expected = error.LoginRefused },

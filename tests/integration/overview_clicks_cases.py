@@ -211,8 +211,11 @@ def empty_list():
                 screen.contains("› first task")
                 screen.keys(b"\r")
                 screen.contains("first task answered")
+                wait_for_host(w, [created], finished, "the chat Message finishes")
                 assert len(w.endpoint.requests) == 1, w.endpoint.requests
-                assert w.inspect(created)["selected_message"] is not None, created
+                report = w.inspect(created)
+                sent, = report["recent_messages"]
+                assert sent["outcome"] == "completed", report
             frame = back_to_overview(screen)
     print("overview clicks: click and Enter each Configure one empty Session; only chat typing sends a Message", flush=True)
 

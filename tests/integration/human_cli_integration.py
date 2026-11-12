@@ -71,9 +71,10 @@ def time_limit(milliseconds):
 
 from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_process
 import model_fixture as fixture
+from session_list_fixture import session_values
 import codex_fixture
 import os_semantics
-from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, chat_footer_row, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -865,7 +866,8 @@ def persistent_copy_case():
             def sent(command):
                 before = len(capture.clipboard)
                 frame = terminal_step(master, command, "Sent to clipboard", composer=True)
-                assert "Sent to clipboard" in frame.split("\n"), frame
+                assert frame.split("\n")[chat_footer_row(frame)].endswith("Sent to clipboard"), frame
+                assert frame.count("Sent to clipboard") == 1, frame
                 assert len(capture.clipboard) == before + 1, capture.clipboard
                 return capture.clipboard[-1]
 
@@ -1036,8 +1038,9 @@ def saved_capture_cases(state, store, workspace):
         recovered = json.loads(run(home, "request", "recover", rejected_handle, success=False))
         assert recovered["answer"] == {**rejected_answer, "replayed": True}, recovered
         assert rejected_record.read_bytes() == rejected_bytes
-        # The saved rejection is a commit, so only the listing's token moves.
-        assert json.loads(run(home, "session", "list", "--store", store, "--all"))["sessions"] == json.loads(sessions_before)["sessions"]
+        # The rejected record advances Store freshness, not Session facts.
+        after = json.loads(run(home, "session", "list", "--store", store, "--all"))
+        assert session_values(after) == session_values(json.loads(sessions_before))
 
     # Later capture faults update that same allocated Session, so /requests
     # must retain all of its recoverable configuration handles together.

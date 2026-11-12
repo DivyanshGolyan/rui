@@ -5,6 +5,72 @@
   ],
   "states": [
     {
+      "name": "archive-state",
+      "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, with no blank row below Footer",
+      "cast": [
+        {
+          "label": "Archive audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Seed history"
+          ]
+        }
+      ],
+      "open": "Archive audit",
+      "steps": [
+        {
+          "text": "/archive"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "· Archived"
+        }
+      ],
+      "expect": [
+        "Seed history",
+        "low",
+        "· Archived"
+      ],
+      "absent": [
+        "[Archived]",
+        "/unarchive",
+        "{session:Archive audit}",
+        "Archived Archive audit"
+      ]
+    },
+    {
+      "name": "transient-chat",
+      "note": "A chat copy reply appears once on Footer, alongside durable archive state",
+      "open": "Archive audit",
+      "steps": [
+        {
+          "text": "/copy"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Sent to clipboard"
+        }
+      ],
+      "expect": [
+        "Sent to clipboard",
+        "· Archived"
+      ],
+      "absent": [
+        "Archived Archive audit",
+        "/unarchive",
+        "{session:Archive audit}"
+      ]
+    },
+    {
       "name": "first-run",
       "note": "No credentials: sign-in choice occupies the input row",
       "open": "overview",
@@ -1385,7 +1451,7 @@
     },
     {
       "name": "stop",
-      "note": "14c-stop-asked: after stop, no stale Stopping line; owns its slow Bash call",
+      "note": "The first settled chat frame and its list row agree: Stopped, with no old answer preview",
       "open": "Stop the slow job",
       "cast": [
         {
@@ -1419,10 +1485,66 @@
           "timeout": 60
         }
       ],
-      "expect": "■ Stopped",
+      "expect": [
+        "■ Stopped",
+        "   Stopped"
+      ],
       "absent": [
         "Stopping"
-      ]
+      ],
+      "sizes": [
+        "140x40"
+      ],
+      "first_frame": true,
+      "expect_next": {
+        "■ Stop the slow job": "   Stopped"
+      }
+    },
+    {
+      "name": "stop-narrow",
+      "note": "A fresh settled stop in the narrow chat; its list pane is hidden",
+      "open": "Stop the narrow job",
+      "cast": [
+        {
+          "label": "Stop the narrow job",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "send": {
+            "to": "Stop the narrow job",
+            "text": "long bash",
+            "wait": false
+          }
+        },
+        {
+          "wait": "⠹ Sleep eight seconds"
+        },
+        {
+          "keys": [
+            "C-x"
+          ]
+        },
+        {
+          "wait": "■ Stopped",
+          "timeout": 60
+        }
+      ],
+      "expect": "■ Stopped",
+      "absent": [
+        "Stopping",
+        "ctrl+x stop"
+      ],
+      "sizes": [
+        "46x30"
+      ],
+      "first_frame": true
     },
     {
       "name": "stopped",
