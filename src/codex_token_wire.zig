@@ -4,6 +4,8 @@
 //! pinned device-code flow and refresh, and builds the login and refresh
 //! records those exchanges produce. Callers own the transport, the clock and the
 //! polling loop; selection and admission live in `codex_credential_policy.zig`.
+//! The ChatGPT plan sign-in (`chatgpt_plan_wire.zig`) talks to the same
+//! issuer, so it reuses the token response, refresh and form encoding here.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 const Text = @import("json_scalar.zig").Text;
@@ -14,7 +16,7 @@ pub const response_limit = 64 * 1024;
 pub const token_limit = policy.max_token_bytes;
 const Required = policy.Required;
 const json_content = "application/json";
-const form_content = "application/x-www-form-urlencoded";
+pub const form_content = "application/x-www-form-urlencoded";
 const token_url = issuer ++ "/oauth/token";
 
 /// One POST to the issuer. The body may borrow caller-owned secret bytes.
@@ -269,7 +271,9 @@ fn formEncode(buffer: []u8, code: []const u8, verifier: []const u8) ![]const u8 
     return stream.buffered();
 }
 
-fn percentEncode(writer: *std.Io.Writer, value: []const u8) !void {
+/// Writes `value` with every byte outside RFC 3986's unreserved set as `%XX`,
+/// which suits both a form body and a URL query.
+pub fn percentEncode(writer: *std.Io.Writer, value: []const u8) !void {
     const hex = "0123456789ABCDEF";
     for (value) |byte| switch (byte) {
         'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => try writer.writeByte(byte),

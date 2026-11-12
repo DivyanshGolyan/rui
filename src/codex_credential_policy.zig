@@ -2,7 +2,9 @@
 //!
 //! Records, their file format, decoded routing claims, the refresh, launch
 //! and replacement decisions and the user-facing failure class live here as
-//! values and pure functions.
+//! values and pure functions. One record serves both sign-ins: a Codex
+//! device login, whose client is fixed, and a ChatGPT plan sign-in
+//! (`chatgpt_plan_wire.zig`), which also keeps the client id it was issued.
 //! The caller supplies the clock reading and the record it read. File
 //! ownership, the cross-process lock, publication and the token exchange
 //! stay in `codex_credentials.zig` and `codex_auth.zig`. See ARCHITECTURE.md,
@@ -12,6 +14,7 @@ const json_scalar = @import("json_scalar.zig");
 const failure_class = @import("failure_class.zig");
 
 pub const max_account_id_bytes = 1024;
+pub const max_client_id_bytes = 256;
 pub const max_token_bytes = 16 * 1024;
 pub const max_file_bytes = 64 * 1024;
 
@@ -97,6 +100,9 @@ pub const Record = struct {
     version: u32 = 3,
     generation: u64,
     account_id: Bounded(max_account_id_bytes),
+    /// The client id a ChatGPT plan sign-in was issued; empty for a Codex
+    /// login, whose client is fixed. A refresh keeps it.
+    client_id: Bounded(max_client_id_bytes) = .{},
     fedramp: bool = false,
     id_token: Bounded(max_token_bytes),
     access_token: Bounded(max_token_bytes),
@@ -108,6 +114,7 @@ pub const Record = struct {
     /// Zeroes the account and token bytes the record holds.
     pub fn wipe(self: *Record) void {
         self.account_id.wipe();
+        self.client_id.wipe();
         self.id_token.wipe();
         self.access_token.wipe();
         self.refresh_token.wipe();
@@ -228,7 +235,7 @@ pub fn validateReplacement(record: *const Record) !void {
 /// `expected_generation == null` is an explicit login: it may replace any
 /// existing record, including another account, and advances its generation.
 /// A non-null value completes the pending refresh at that generation and must
-/// preserve the account ID and FedRAMP routing claim.
+/// preserve the account ID, the issued client id and the FedRAMP routing claim.
 pub fn admitReplacement(current: ?*const Record, replacement: *const Record, expected_generation: ?u64) !u64 {
     try validateReplacement(replacement);
     const expected = expected_generation orelse {
@@ -238,6 +245,7 @@ pub fn admitReplacement(current: ?*const Record, replacement: *const Record, exp
     const old = current orelse return error.GenerationMismatch;
     if (old.generation != expected or old.state != .refresh_pending) return error.GenerationMismatch;
     if (!std.mem.eql(u8, old.account_id.slice(), replacement.account_id.slice()) or
+        !std.mem.eql(u8, old.client_id.slice(), replacement.client_id.slice()) or
         old.fedramp != replacement.fedramp)
         return error.AccountMismatch;
     return std.math.add(u64, expected, 1) catch error.GenerationExhausted;
@@ -251,6 +259,7 @@ fn validateText(value: []const u8, empty_allowed: bool) !void {
 pub fn validateRecord(record: *const Record) !void {
     if (record.version != 3) return error.UnsupportedCredentialVersion;
     try validateText(record.account_id.slice(), false);
+    try validateText(record.client_id.slice(), true);
     try validateText(record.id_token.slice(), false);
     try validateText(record.access_token.slice(), false);
     try validateText(record.refresh_token.slice(), false);
@@ -264,10 +273,19 @@ pub fn validateRecord(record: *const Record) !void {
     if (count != 1 and count != 3) return error.InvalidAccessToken;
 }
 
+/// A `client_id=` line follows `account_id=` only when the record has one, so
+/// a Codex record keeps the bytes it always had.
 pub fn encode(record: *const Record, destination: []u8) ![]const u8 {
     try validateRecord(record);
-    return std.fmt.bufPrint(destination, "version=3\ngeneration={d}\naccount_id={s}\nfedramp={d}\nid_token={s}\naccess_token={s}\nrefresh_token={s}\nexpires_at={d}\nrefreshed_at={d}\nstate={s}\n", .{ record.generation, record.account_id.slice(), @intFromBool(record.fedramp), record.id_token.slice(), record.access_token.slice(), record.refresh_token.slice(), record.expires_at, record.refreshed_at, @tagName(record.state) }) catch
-        return error.CredentialFileTooLarge;
+    var writer = std.Io.Writer.fixed(destination);
+    writeFields(&writer, record) catch return error.CredentialFileTooLarge;
+    return writer.buffered();
+}
+
+fn writeFields(writer: *std.Io.Writer, record: *const Record) !void {
+    try writer.print("version=3\ngeneration={d}\naccount_id={s}\n", .{ record.generation, record.account_id.slice() });
+    if (record.client_id.len != 0) try writer.print("client_id={s}\n", .{record.client_id.slice()});
+    try writer.print("fedramp={d}\nid_token={s}\naccess_token={s}\nrefresh_token={s}\nexpires_at={d}\nrefreshed_at={d}\nstate={s}\n", .{ @intFromBool(record.fedramp), record.id_token.slice(), record.access_token.slice(), record.refresh_token.slice(), record.expires_at, record.refreshed_at, @tagName(record.state) });
 }
 
 pub fn parseInto(bytes: []const u8, record: *Record) !void {
@@ -277,6 +295,12 @@ pub fn parseInto(bytes: []const u8, record: *Record) !void {
     record.* = .{ .generation = try decimal(u64, field(lines.next(), "generation=")), .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = 0 };
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
     try record.account_id.set(try field(lines.next(), "account_id="));
+    if (lines.peek()) |line| if (std.mem.startsWith(u8, line, "client_id=")) {
+        // An empty client id is written as no line, so this spelling is not one.
+        const client_id = try field(lines.next(), "client_id=");
+        if (client_id.len == 0) return error.InvalidCredentialFile;
+        try record.client_id.set(client_id);
+    };
     const fedramp = try field(lines.next(), "fedramp=");
     if (std.mem.eql(u8, fedramp, "1")) record.fedramp = true else if (!std.mem.eql(u8, fedramp, "0")) return error.InvalidCredentialFile;
     try record.id_token.set(try field(lines.next(), "id_token="));
@@ -354,7 +378,7 @@ test "chunked base64url validation agrees with one decode at every length" {
 
 /// Decodes the payload into a prefix of `destination` and returns it. On
 /// failure nothing decoded remains there.
-fn tokenPayload(token: []const u8, destination: []u8) ![]u8 {
+pub fn tokenPayload(token: []const u8, destination: []u8) ![]u8 {
     var parts = std.mem.splitScalar(u8, token, '.');
     const header = parts.next() orelse return error.InvalidCompactToken;
     const payload = parts.next() orelse return error.InvalidCompactToken;
@@ -425,6 +449,7 @@ fn expectSameRecord(expected: *const Record, actual: *const Record) !void {
     try std.testing.expectEqual(expected.version, actual.version);
     try std.testing.expectEqual(expected.generation, actual.generation);
     try std.testing.expectEqualStrings(expected.account_id.slice(), actual.account_id.slice());
+    try std.testing.expectEqualStrings(expected.client_id.slice(), actual.client_id.slice());
     try std.testing.expectEqual(expected.fedramp, actual.fedramp);
     try std.testing.expectEqualStrings(expected.id_token.slice(), actual.id_token.slice());
     try std.testing.expectEqualStrings(expected.access_token.slice(), actual.access_token.slice());
@@ -493,6 +518,50 @@ test "format is bounded and strictly consumed" {
     try std.testing.expectError(error.InvalidAccessToken, encode(&record, &bytes));
     try record.refresh_token.set("");
     try std.testing.expectError(error.EmptyCredentialField, encode(&record, &bytes));
+}
+
+test "a Codex file keeps its bytes and an issued client id adds one line" {
+    // The file a Codex login has always written, spelled out rather than encoded.
+    const codex = "version=3\ngeneration=5\naccount_id=" ++ fixture_account_id ++ "\nfedramp=0\nid_token=" ++ fixture_id_token ++
+        "\naccess_token=" ++ fixture_access_token ++ "\nrefresh_token=synthetic-refresh\nexpires_at=4102444800\nrefreshed_at=100\nstate=ready\n";
+    var decoded: Record = undefined;
+    try parseInto(codex, &decoded);
+    var expected: Record = undefined;
+    try fixtureRecord(&expected);
+    try expectSameRecord(&expected, &decoded);
+    var bytes: [max_file_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings(codex, try encode(&decoded, &bytes));
+
+    // A plan sign-in's record carries its issued client id after the account.
+    try expected.client_id.set("oaiapp_test_client");
+    const plan = try encode(&expected, &bytes);
+    const at = comptime std.mem.indexOf(u8, codex, "fedramp=").?;
+    try std.testing.expectEqualStrings(codex[0..at] ++ "client_id=oaiapp_test_client\n" ++ codex[at..], plan);
+    try parseInto(plan, &decoded);
+    try expectSameRecord(&expected, &decoded);
+
+    // An empty or late client id line is not a spelling of any record.
+    try std.testing.expectError(error.InvalidCredentialFile, parseInto(codex[0..at] ++ "client_id=\n" ++ codex[at..], &decoded));
+    try std.testing.expectError(error.TrailingCredentialData, parseInto(codex ++ "client_id=x\n", &decoded));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&decoded), 0));
+    try expected.client_id.set("oaiapp\x7f");
+    try std.testing.expectError(error.InvalidCredentialByte, encode(&expected, &bytes));
+}
+
+test "a refresh keeps the issued client id and a login may change it" {
+    var current: Record = undefined;
+    try fixtureRecord(&current);
+    try current.client_id.set("oaiapp_one");
+    current.state = .refresh_pending;
+    var replacement: Record = undefined;
+    try fixtureRecord(&replacement);
+    try replacement.client_id.set("oaiapp_one");
+    try std.testing.expectEqual(@as(u64, 6), try admitReplacement(&current, &replacement, 5));
+    for ([_][]const u8{ "oaiapp_two", "" }) |other| {
+        try replacement.client_id.set(other);
+        try std.testing.expectError(error.AccountMismatch, admitReplacement(&current, &replacement, 5));
+        try std.testing.expectEqual(@as(u64, 6), try admitReplacement(&current, &replacement, null));
+    }
 }
 
 test "extracts both pinned account claim spellings and rejects malformed compact tokens" {
