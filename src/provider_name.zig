@@ -4,6 +4,11 @@
 //! a provider too.
 const std = @import("std");
 
+/// The subscription backend endpoint.
+pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
+/// The API Responses endpoint.
+pub const api_endpoint = "https://api.openai.com/v1/responses";
+
 /// A provider a Host can serve.
 pub const Provider = enum {
     codex,
@@ -46,9 +51,9 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
-            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
-            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .codex => .{ .endpoint = managed_endpoint, .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Codex", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .openai => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
+            .chatgpt => .{ .endpoint = api_endpoint, .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
         };
     }
 
@@ -70,6 +75,8 @@ pub const Provider = enum {
 
 /// What a provider fixes for every Host that serves it.
 pub const Facts = struct {
+    /// The provider-owned destination for its credential.
+    endpoint: []const u8,
     codec: Codec,
     shown: []const u8,
     sign_in: []const u8,
@@ -126,4 +133,11 @@ test "every provider's name and sign-in read apart from the others', and only a 
 
 fn firstWord(text: []const u8) []const u8 {
     return text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
+}
+
+test "every provider owns an HTTPS endpoint" {
+    for (std.enums.values(Provider)) |provider| {
+        try std.testing.expect(std.mem.startsWith(u8, provider.facts().endpoint, "https://"));
+        try std.testing.expect(std.mem.endsWith(u8, provider.facts().endpoint, "/responses"));
+    }
 }

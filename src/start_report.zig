@@ -10,6 +10,7 @@ pub const Store = enum { sqlite, mysql };
 /// A refusal at open, as `RuiStartError.code` names it (D136).
 pub const StartError = enum {
     launch_frame_invalid,
+    settings_invalid,
     invalid_preset,
     store_locked,
     store_schema_missing,

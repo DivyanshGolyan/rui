@@ -17,11 +17,11 @@ const Provider = protocol.Provider;
 
 /// The ChatGPT subscription's Responses endpoint, the only one a signed-in
 /// account's token goes to (a fixture's loopback aside).
-pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
+pub const managed_endpoint = @import("provider_name.zig").managed_endpoint;
 
 /// OpenAI's own Responses endpoint: an API key's default, and the only one
 /// a ChatGPT plan sign-in's token goes to (a fixture's loopback aside).
-pub const api_endpoint = "https://api.openai.com/v1/responses";
+pub const api_endpoint = @import("provider_name.zig").api_endpoint;
 
 /// A sign-in the Host serves: its credential file, the token wire its
 /// refresh speaks and where that refresh goes. The Host's sign-in worker runs
@@ -70,10 +70,7 @@ pub fn acceptsOutputSchema(route: protocol.Route) bool {
 
 /// A provider's own endpoint, the only one its credential is sent to.
 pub fn endpoint(provider: Provider) []const u8 {
-    return switch (provider) {
-        .codex => managed_endpoint,
-        .openai, .chatgpt => api_endpoint,
-    };
+    return provider.facts().endpoint;
 }
 
 /// The environment variable naming an OpenAI-compatible base URL, such as
@@ -89,18 +86,7 @@ pub fn openAiEndpoint(environ: *const std.process.Environ.Map, allocator: std.me
 
 /// The Responses endpoint under `base`, allocated with `allocator`, which
 /// both endpoint and key rules admit. Trailing slashes are dropped.
-pub fn endpointUnder(allocator: std.mem.Allocator, base: []const u8) ![]const u8 {
-    // `/responses` is appended to the path: with no host the path would
-    // become one, and a query would swallow it.
-    const uri = std.Uri.parse(base) catch return error.InvalidBaseUrl;
-    if (uri.host == null or uri.host.?.isEmpty() or uri.query != null) return error.InvalidBaseUrl;
-    const trimmed = std.mem.trimEnd(u8, base, "/");
-    const under = try std.fmt.allocPrint(allocator, "{s}/responses", .{trimmed});
-    errdefer allocator.free(under);
-    provider_transport.validateEndpoint(under) catch return error.InvalidBaseUrl;
-    validateKeyEndpoint(under, null, false) catch return error.InvalidBaseUrl;
-    return under;
-}
+pub const endpointUnder = @import("endpoint_value.zig").endpointUnder;
 
 /// The base a Responses endpoint sits under (`BASE` of `BASE/responses`),
 /// whose model list (`BASE/models`) its key may also reach, or null when
@@ -218,11 +204,7 @@ pub const Credential = union(enum) {
     }
 };
 
-fn fixtureEndpoint(target: []const u8, ca_file: ?[]const u8) bool {
-    return std.mem.startsWith(u8, target, "http://127.0.0.1:") or
-        std.mem.startsWith(u8, target, "http://[::1]:") or
-        (std.mem.startsWith(u8, target, "https://localhost:") and ca_file != null);
-}
+const fixtureEndpoint = @import("endpoint_value.zig").fixtureEndpoint;
 
 /// A fixture sign-in goes only to loopback: its requests, and the token
 /// endpoint that stands in for its issuer.
@@ -235,12 +217,7 @@ fn validateAuthenticationEndpoint(target: []const u8, ca_file: ?[]const u8, auth
     }
 }
 
-/// An API key goes over https, or to a loopback fixture when `fixture`.
-fn validateKeyEndpoint(target: []const u8, ca_file: ?[]const u8, fixture: bool) !void {
-    if (fixture) {
-        if (!fixtureEndpoint(target, ca_file)) return error.InvalidKeyFixtureEndpoint;
-    } else if (!std.mem.startsWith(u8, target, "https://")) return error.InsecureKeyEndpoint;
-}
+const validateKeyEndpoint = @import("endpoint_value.zig").validateKeyEndpoint;
 
 /// The fields the Host writes after the codec's headers: the credential's,
 /// which its sign-in source writes (`Credential.fields`), and user-agent,
@@ -597,27 +574,6 @@ test "a sign-in's routing owner is its account and FedRAMP binding, which a refr
     try std.testing.expect(!std.mem.eql(u8, &owners[0], &owners[3]));
     const keyed: Credential = .{ .key_file = .{ .key = "sk-test" } };
     try std.testing.expectEqualSlices(u8, &keyed.routingOwner(null), &Credential.routingOwner(.none, null));
-}
-
-test "a base URL names the https Responses endpoint under it, or nothing" {
-    const allocator = std.testing.allocator;
-    for ([_][2][]const u8{
-        .{ "https://api.openai.com/v1", "https://api.openai.com/v1/responses" },
-        .{ "https://proxy.example:8443/openai/v1/", "https://proxy.example:8443/openai/v1/responses" },
-        .{ "https://host//", "https://host/responses" },
-        .{ "https://[::1]/v1", "https://[::1]/v1/responses" },
-    }) |case| {
-        const under = try endpointUnder(allocator, case[0]);
-        defer allocator.free(under);
-        try std.testing.expectEqualStrings(case[1], under);
-    }
-    for ([_][]const u8{
-        "http://api.openai.com/v1", "http://127.0.0.1:9/v1",   "https://",            "https:///v1",
-        "https://:443/v1",          "https://user:pw@host/v1", "https://host/v1?x=1", "https://host/v1#f",
-        "ftp://host",               "api.openai.com/v1",
-    }) |bad| try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, bad));
-    const long = "https://h/" ++ @as([provider_transport.max_endpoint_bytes]u8, @splat('a'));
-    try std.testing.expectError(error.InvalidBaseUrl, endpointUnder(allocator, long));
 }
 
 test "the model list sits beside the Responses endpoint" {

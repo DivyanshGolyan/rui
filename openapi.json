@@ -11430,6 +11430,7 @@
                 "type": "string",
                 "enum": [
                   "launch_frame_invalid",
+                  "settings_invalid",
                   "invalid_preset",
                   "store_locked",
                   "store_schema_missing",
