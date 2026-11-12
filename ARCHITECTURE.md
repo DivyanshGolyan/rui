@@ -471,7 +471,7 @@ Only the rejection code is durable; direct replies derive the advisory message f
 Other request refusals have a null advisory message.
 An admitted MCP call that cannot reach its server continues to return `mcp_server_unavailable` as a tool result (A-D116).
 
-The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and `/status`) on `session start`, `session configure` and interactive `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
+The CLI spells a Label `--label TEXT` (the Session's name or title, shown in lists and chat info) on `session start`, `session configure` and the overview’s `/configure`, and clears it with `--label ""`: the empty string is the one spelling that can never be a Label.
 A Session can label itself from Bash with `--store "$RUI_STORE" --session "$RUI_ADDRESS"`, and its collaboration context names that command so a model asked to rename its Session finds it.
 Every Label change is a revision like any other configuration change.
 A Label-only revision adds no Conversation entry and changes no model input.
@@ -495,7 +495,7 @@ A listed model with effort levels takes one of those values; explicit `null` is 
 On an existing Session, omission preserves the saved effort and an accepted explicit `null` leaves provider effort unspecified, without a catalog fallback.
 Configuration validates the effective requested-or-retained effort against the effective requested-or-current model, including null effort on a model revision.
 The pinned `openai-responses/2` codec cannot encode a boundary back to unspecified effort, so clearing an assigned value rejects atomically as `unsupported_reasoning_effort`; a client reset sends a concrete supported effort instead (D165).
-The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and interactive `/configure`.
+The CLI resolves `--reasoning-effort default` on the client to the client's product effort choice or explicit null; `--reasoning-effort VALUE` selects a value for `session configure`, initial `session start` and the overview’s `/configure`; chat info’s Effort field submits the equivalent typed edit.
 Current inspection reports the effective `reasoning_effort` and saved nullable `reasoning_effort_override`; an explicit saved value wins.
 For an admitted pre-D111 Session with null settings, the configuration owner carries forward its latest Operation's frozen effort, so continuation never clears that historical value; it does not infer a catalog or product default.
 Fresh explicit-null specs have no earlier concrete effort and remain unspecified.
@@ -760,11 +760,11 @@ Session configuration stores only nullable overrides for `compaction_trigger` an
 An omitted update preserves the override.
 Explicit `null` resets it to provider/model policy, spelled `default` in the CLI.
 Triggers are positive token counts; output reservation is nonnegative extra heuristic headroom, not a provider output limit.
-Current inspection and `/status` show effective values and whether each value is a Session override.
+Current inspection shows effective values and whether each value is a Session override.
 Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (eligible accepted usage, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
 It is null without a trigger and when the next call's purpose does not depend on it: a Session's first call, the call after a compaction, a recovery compaction and context unchanged since the last compaction.
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
-`/status` shows it beside the trigger, and the conversation's Session line shows the share of the trigger it leaves.
+When non-null, chat info’s Context field shows it beside the trigger, and the conversation’s Session line shows the share of the trigger it leaves.
 Resolve policy once before purpose selection and freeze the effective values on the admitted Operation.
 The Operation INSERT also freezes its model's effective context window from the selected saved-or-shipped catalog, in the same statement and Store hold, with no additional Store round.
 Only absence of a catalog source selects shipped facts; an authoritative saved generation with a missing model or null window uses the 128,000-token unlisted estimate, and a non-null window, including zero, is preserved.
@@ -2373,7 +2373,7 @@ Current/attention and Full remain separate report families.
 
 #### Store selection and defaults
 
-Human `rui session resume` enters an already configured Session and retains its address within the interactive process; `/status` displays its effective Workspace, permission mode and Label.
+Human `rui session resume` enters an already configured Session and retains its address within the interactive process; chat info displays its effective Folder, Permissions and label.
 Every destination-bearing command selects its Store by explicit `--store`, then the private saved default, then `$HOME/.local/share/rui/store`.
 Explicit selection does not read preferences.
 Scripts can pin destinations with `--store`.
@@ -2385,8 +2385,8 @@ Captured requests retain their recorded Store across preference edits.
 `rui defaults inspect` reads defaults without writing; `rui defaults configure` saves explicit Store/provider/model, notification, effort and permission edits.
 A saved Store is the global default for commands without `--store` (captured requests keep their recorded Store), so `defaults configure --store` names it on stderr; stdout and exit status are unchanged.
 Interactive `/setup` keeps the same future-default capability.
-After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; that conversation's `/status` shows the saved defaults themselves.
-The overview's `/setup`, which has no such page, keeps the full report.
+After a successful change in a conversation it prints one line, `Saved defaults for future Sessions. Active Session unchanged.`, and follows it with the Store, provider and sign-in report only when the next Session cannot start as saved; app settings shows the saved defaults themselves.
+The overview’s `/setup` keeps the full report.
 `--notifications on|off` on either saves whether an open overview or conversation sends [desktop notifications](#desktop-notifications); it is on by default and changes no Session.
 `--reasoning-effort LEVEL` on either saves the effort new Sessions start at, and `default` clears it.
 A new Session that takes the saved defaults (its start leaves out `--provider` or `--model`) and whose model offers the saved effort starts with it as its override; one whose model does not, or a start that names its own effort, keeps the model's default or the named one.
@@ -2400,7 +2400,7 @@ Enter opens those two choices, and picking publishes through the same preference
 A `/setup` that runs in an overview also moves the provider and model its next Session starts on: the shell resolves them again from the launch's own `--provider` and `--model`, as given, and the saved defaults, through the same `new_session_selection` owner the launch used, so a selector the launch named still wins and `--clear-model` falls back to the provider's recommended model, as a fresh launch would.
 That resolution counts every sign-in as ready, as a caller that cannot ask does, since the Host answers readiness at the start; when no saved or named provider decides, the default in force stays.
 An overview opened with all three selectors never changes its default this way, and what `/configure` holds still leads, as `nextBinding` says.
-`/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; `/configure --reasoning-effort` changes only its Session.
+`/effort LEVEL` in a conversation saves LEVEL the same way once the Session accepts it, because the effort a person picks is the one they want next time; chat info’s Effort field changes only its Session.
 These edits never change an existing Session's saved binding or permission mode.
 An explicitly edited Store is validated and canonicalized before publication, allowing replacement of a deleted saved Store.
 An unchanged saved Store retains syntax validation but its availability is checked only when selected for work.
@@ -2408,7 +2408,7 @@ Independent provider/model inspection or publication does not require an unused 
 Inspection reports unavailable prospective destinations without selecting an alternate.
 HOME and the private preference path must still be valid.
 Interactive defaults output escapes dynamic fields without changing stored bytes.
-`/setup` and `/configure` accept double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
+`/setup` and the overview’s `/configure` accept double-quoted values and escaped quotes, backslashes or spaces without shell expansion; invalid quoting rejects before mutation.
 
 The versioned private file under `$HOME/.config/rui/preferences` contains only these three optional values, the notification choice, the new-Session effort and permission mode, not credentials, Session lists or work status.
 Versions 1–3 have no saved permission mode.
@@ -2459,7 +2459,7 @@ Marks hold still: `?` needs you, in the attention colour, `●` active, `◌` qu
 The overview's top line is the counts line: the wordmark, then each mark's count where it is not zero, `? 1  ● 2  ◌ 3 · slots 2/2  × 1`, with only `?` and `×` coloured and the model slots only while a Session waits for one.
 On its right sits live memory in plain text, `rui 42 MB · tools 1.8 GB`: `rui` is this TUI plus its Host (the TUI alone with no Host), and `tools` the processes below the Host, shown only while one runs; a narrow screen drops memory before the counts, `rui` before `tools`.
 Memory is each process's physical footprint, `phys_footprint` on macOS and `RssAnon + RssShmem + VmSwap` on Linux, summed over the Host's process tree, which one pure core, `process_memory`, walks; a tool that leaves that tree is not counted.
-The counts line replaces the headline and the Host health line; uptime and slots are `/status`'s.
+The counts line replaces the headline and the Host health line; full Host facts remain available through `rui host status`.
 Divyansh chose the counts line and totals-only memory on 2026-11-09 (TUI rework plan, "What changes" O1 to O4 and "Live memory on the overview").
 Only your own Session at work (an active mark under Yours) turns a spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`, one frame per 200 ms of the monotonic clock, every spinner in step.
 Only a Unicode, colour screen spins, and a row faded while the Host does not answer holds still.
@@ -2506,7 +2506,7 @@ Each frame clears every line to the skin's ground, draws its spans in 24-bit col
 Typing in the overview's composer and pressing Enter starts a new Session with that text as its first Message, through one captured `session start` command: atomic configuration plus Message admission with the full Workspace, exact provider/model, Bash and the saved permission mode (or `bypass` when absent), unless the composer's `/configure` start settings select otherwise.
 The Store returns the allocated ID, and the overview opens that Session.
 The same enumerable handle recovers that ID after a lost reply; a second Enter is a new intent, so a start whose reply is lost clears the composer, says in the overview that the start is unconfirmed, and names its recovery command after the terminal is restored.
-Successful Host startup and request receipts stay out of normal output; `/status` and `/requests` in a conversation expose binding and recovery records.
+Successful Host startup and request receipts stay out of normal output; chat info exposes chat settings, `/requests` exposes recovery records, and `rui session inspect` retains full machine-readable inspection.
 A capture failure creates no transmissible intent and keeps the composer's text.
 Non-TTY entry rejects before Store, Host or request mutation.
 Existing explicit Session entry and scripted commands retain their saved permission modes.
@@ -2522,24 +2522,23 @@ Bare `rui` accepts no initial Message operand.
 Terminal input goes through the overview composer, which is a conversation's line editor: it edits, rejects and ends lines as a draft does.
 The overview keeps Esc, Ctrl-C and Ctrl-X, and the arrows, Home and End select rows while the composer is empty; Up and Down past a draft's lines select rows too.
 Before Enter, its `/configure` edits only the start settings of the Session that Enter will start.
-Its `/model` opens the model picker right above the input: every model the Host's [`/v1/model-list`](#public-session-activity) offers for a served sign-in, the next Session's model first (the saved default, unless `/configure` holds a model), then the models Rui's catalog knows in catalog order, then the others by name under "Other models", tagged "default limits".
-The overview's worker reads the list and builds the menu, so the screen never waits, and the menu is freed when the picker closes.
-A list still loading says so and is read again with the next listing, a fallback list says the live one is unavailable, and each sign-in the Host does not serve shows one line naming its login command.
-A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
-On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
-When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
-The sign-ins are labelled by their provider facts: "Codex" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`), short enough that the list pane keeps the chosen one whole; a label's first word (`codex`, `chatgpt`, `api`) is the word that chooses it.
-Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.
-Esc steps back from the choice to the models, then closes the picker, and typing or a paste leaves it for the draft.
-Every pick saves the person's default, the one `/setup` and `rui defaults configure --provider --model` write, through the worker, and later starts use it (Divyansh, 2026-11-02, picker plan "Answered" 2 and 3).
-A pick clears the provider and model `/configure` held, since it is the newer choice; one core function, `nextBinding`, names what the next start uses, and the start, the picker's `default` tag and the `New Sessions use` line all read it.
-An overview left without a pick writes nothing, and a failed save is not retried; picking again saves again.
-An Other model is picked like any other and runs with default limits.
-A save that fails says why in `/setup`'s words; one whose directory sync failed still changes the default and says its durability is unconfirmed.
-A save queued or running as the overview ends finishes first: on the way out the shell runs each save the core asked for through the worker's own job path, and the departure text reports one that ended after the person left.
-The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · Codex`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
-The departure speaks for later launches, so it names the effort saved as the overview ends, whatever this launch named; one rule, `StartEffort`, decides the effort for the start and for both lines.
-The Session rows keep their highlight while the picker is open, so Ctrl-X acts on a row the person can see.
+The Model field of app settings opens the shared `model_choice.zig` inline field editor and match list, also used by chat info.
+The filter replaces the field’s value at the normal value column; there is no separate `Filter:` row.
+Matches start under the field at the shared panel indent (current mark, one-cell gap, then the model name), shrinking to the number of matches within the viewport.
+Only models below the viewport get a quiet final `↓ N more` row (`v` in ASCII), never an upward overflow hint.
+The compact context-size column follows the longest model name actually shown, not hidden matches or the terminal’s right edge.
+`panel_editor.zig` is the sole shared refusal/recovery transition for the model filter and Rename: refused text remains editable, failures stay on the field, and correction or submission clears the failure through that owner.
+The overview's worker reads the Host's [`/v1/model-list`](#public-session-activity), so the screen never blocks on a model list.
+The choice uses a revisioned snapshot and validates it before drawing or handling an event; replacing or releasing a list closes the old choice before it can use retired storage.
+It falls back to the compiled model catalog when no live list is available.
+The short sign-in labels come from provider facts: "Codex" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`), distinct from their longer prose names.
+The selected sign-in scopes the models offered; typing filters, Up and Down move, and Enter picks a model through app settings' typed backend.
+An empty match keeps the field's choice open with feedback rather than saving an invalid model.
+Every successful pick saves the default for future Sessions through the same preferences writer as `rui defaults configure`; existing Sessions keep their settings.
+Esc closes the choice before app settings, and leaving without a pick writes nothing.
+A pending or failed save is shown on the Model field; a failed save is not silently retried.
+The overview's `/configure` remains a per-start override; `nextBinding` owns what the next start uses, and explicit launch selectors still take precedence over saved defaults.
+The saved effort applies to the next start unless a per-start override or fully explicit launch binding supplies its own choice; `StartEffort` owns that decision.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
 Scripts use `session start` with stdin.
 A first word naming a former top-level command (for example `configure`, `message` or `recover`) is refused with its resource-first replacement before capture, Host contact or terminal entry.
@@ -2558,7 +2557,7 @@ An unavailable saved provider stays selected for repair, never falls back.
 Within the selected provider an explicit valid model wins over its saved pin, then its recommended exact model.
 Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes, including `=`.
 Syntax validation is the only model check: an ID Rui's [list](#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
-A bad ID fails at the provider's first request, whose remedy is `/model` in the overview.
+A bad ID fails at the provider’s first request, whose remedy is the Model field in app settings.
 Old pins remain readable and clearable, never substituted.
 The built-in providers are Codex, OpenAI and ChatGPT; they share one catalog and the recommended model `gpt-6.1-sol`.
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
@@ -2603,9 +2602,9 @@ Permission presents one exact Action above an Allow once / Deny choice that a fr
 Queued chat, typeahead and marked paste authorize nothing.
 The durable decision retains that exact target for Host revalidation.
 One-shot `action inspect` JSON retains the Action ID, opaque call ID and complete arguments, escaping every non-ASCII code point so control and bidirectional characters cannot disguise the proposal on a terminal.
-`/configure` changes settings for this Session (including its immutable Workspace check).
+Chat info changes the exposed Session settings through typed configuration; `rui session configure` retains the full shell interface and immutable Workspace check.
 Instructions require a separate one-shot `session configure --instructions -`; schema input uses a file path rather than terminal stdin.
-`/status` shows the Session's settings, its Store and the defaults new Sessions start from, the work with its current message and the recent messages whose answers `/result KEY` shows; `/requests` lists this machine's local recovery handles; `/setup` edits only future defaults.
+Chat info shows Session settings; app settings shows defaults for new Sessions. `/requests` lists this machine’s local recovery handles, `/result KEY` reads an answer, and `/setup` edits only future defaults.
 Explicit operator authentication remains separate from the conversation.
 Re-entry uses Host facts, not local saved-request guesses.
 An unknown Session requires explicit configuration before entry.
@@ -2878,7 +2877,7 @@ A User Message is a block: `›` at the margin, dim body text, and its Host-writ
 Assistant prose starts at column 0 without speaker labels.
 A Message over 1,024 bytes, 4 non-blank lines or 12 lines from its first to its last non-blank line shows its first two non-blank lines and a dim `┄ N more lines` row; Ctrl-O or a click on its summary opens it whole.
 Tool activity follows the conversation's last line as the activity tail, whose rows `ActivityBlock` alone decides.
-It shows at most the three oldest calls awaiting permanent presentation, oldest first and fewer on short terminals, then `+N more running · /status`, `+N · /status` on a narrow row, counting every call not drawn; a click on that row opens `/status`.
+It shows at most the three oldest calls awaiting permanent presentation, oldest first and fewer on short terminals, then `+N more running · info`, `+N · info` on a narrow row, counting every call not drawn; a click on that row opens chat info.
 Each call takes one row, so a retry or the next call replaces a row in place rather than stacking: words that do not fit end in `…` and a running call's clock stays.
 This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
@@ -2917,7 +2916,7 @@ Opening adds no configuration banner or command tutorial.
 Bash bypass mode retains its safety warning.
 Routine capture, reserved keys, proposal fields, resize notices and repeated attention prose stay out of the transcript.
 Unconfirmed or rejected submissions retain actionable notices.
-Explicit `/status` keeps the current reserved recovery key under the page, even before publication, and `/requests` lists recovery handles; reservation does not prove capture or acceptance.
+`/requests` lists recovery handles; reservation does not prove capture or acceptance. Opening chat info does not release the current reserved recovery key.
 
 The interface preserves the shell's previous screen; conversation output does not enter native scrollback or remain after exit, so terminal search covers only the shell.
 This trade-off is accepted for one library-owned renderer.
@@ -3008,23 +3007,40 @@ Standalone zero-width output clusters, clusters wider than eight cells and clust
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
 
-`/status` and `/requests` render selected inspections without changing the draft.
-`/status` is rendered by the next settled live read from that read's own Current capture, and shows in the same step as that read's history and composer status, so the page never disagrees with them.
-While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
-A live read's failure is the same failure with or without `/status`.
-A requested `/status` is a read, not a command: until it shows, a visible Action choice still takes its fresh decision, and a later inspection request replaces it.
-`/status` is also where settings change.
-Divyansh approved the page on 2026-11-02 (mock at 12:44Z, changes through #814's list at 13:23Z).
-Its title names the Session and its ID; a row for each of this Session's settings follows (effort, permissions, tools, name, Folder, compaction trigger, headroom, and the fixed model, Store and instructions, `none` or `set from a shell`), then a row for each default new Sessions start from (model, effort, notifications, Store), then the work: its state and Actions awaiting approval, its current message, every Action awaiting approval by ID, any indeterminate Action, and the recent messages with their outcomes, whose answers `/result KEY` shows.
-Each row is one line, its value followed by a quiet note on where the value comes from.
-A default that cannot be read says why on its row (`unreadable · ` and the error's name), never a blank; with no saved provider, the defaults' model row shows the provider and model a new Session gets from Rui's defaults, with the note `Rui default`.
-With no automatic threshold the compaction row reads `off`, and its own change sets one; the page names no separate command for it.
-The read takes the Session's facts from its Current capture into one of two slots that alternate between the shown page and the next read, so no read copies them, and lists the Actions awaiting approval in that slot's file; it replaces the page only when those facts differ from the shown ones.
-The saved defaults are read when the page opens and again after a command run over it finishes, not on every read.
-The page is text rendered from those facts and the selected row, so moving `›` renders it again with no read.
-Up and Down move `›` over the rows that can change from the page (the Session's model, Store and instructions cannot), while the draft is empty and no list shows; Page Up and Page Down still scroll, and each `/status` starts at the first row.
-Enter on an empty draft puts the row's own command in the draft: `/configure` or `/setup` with the option, whose list then offers a fixed choice (the compaction trigger and headroom offer `default` and take a typed number, so Enter resolves the chosen client default into an explicit token count), or with the current value to edit.
-The page has no second way to change a setting; the command runs as typed over the page, which stays shown: a saved change replies in one line as a notice, and the page's next read shows the new value with `›` on the same row, while a longer reply, such as a failure with its usage, opens as any command's does.
+`/requests` renders its selected inspection without changing the draft.
+
+**Chat info.** Alt-I (`\x1bi`), a click on `alt+i info`, or a click on the chat footer’s own Session/model/effort line opens the same chat info panel.
+Clicking that line while info is already open leaves it open, without resetting its choice or consuming the click as a field action.
+The panel sits in a Layer above the chat input on its own ground, never in the feed; opening, editing and closing leave the input's draft unchanged.
+It takes only its natural content height, leaving the latest feed rows visible above it whenever space remains.
+Opening Model adds only the match and overflow rows it needs; filtering gives their space back to the feed.
+If space runs short, the panel takes feed space, not the retained input or its bottom footer.
+Its title is the chat's label, with Effort, Permissions, Tools, Folder and Model below, and Context only while Current supplies a non-null estimate.
+A missing estimate omits the Context row: neither `unknown` nor an invented zero is a context measurement; an actual zero estimate is shown as zero.
+Folder and Context are read-only; Folder shortens HOME to `~` and fits long paths from the left, preserving the true right edge.
+It first keeps a suffix of whole path components with a leading ellipsis; when the basename itself is too wide, it keeps the longest grapheme-aligned basename suffix that fits after that ellipsis.
+It never arbitrarily cuts the right edge or shows an ellipsis alone instead of all the name.
+A blank row separates the fields from Rename, Archive and Copy last answer, even when the actions stack.
+Up and Down visit selectable fields and actions, and Enter opens a choice or runs the action.
+The panel contributes no internal footer: its one footer substitutes for the normal chat footer after the input’s lower divider on the physical last row, leaving the draft between panel and footer and no blank notice row below it.
+Permissions names `run without asking` and `ask first`; Tools selects from the built-in tool set.
+Model opens that shared inline editor and compact match list for this Session’s provider, with type-to-filter, Up/Down and Enter to save.
+A change applies to subsequent model requests through the existing typed Session configure request; it does not send composer text or change the Session's provider.
+Esc closes only the topmost edit or choice first, then the panel.
+
+`chat_info.zig` owns only the widget and its borrowed typed backend; it never imports `SessionFrontend`.
+`SessionFrontend` supplies inspection facts from its Current capture and submits typed configure edits, Archive and Copy last answer through their existing owners.
+New reads refresh the panel without resetting a choice or reopening a panel that the person closed.
+Pending changes show on their own field until a definite answer; refusal stays on that field rather than consuming the draft or pretending a save succeeded.
+The panel contains no Session IDs, Store paths, recovery records, raw errors or process counters.
+While an original submission is held unresolved or rejected, Alt-D (`\x1bd`) and the footer’s clickable `alt+d details` open its separate repair and identity page.
+That UI-owned repair scratch is independent of the reader’s staging file, so opening details cannot overwrite in-flight feed rows or unshown command recovery output.
+Session-wide detach, stop, archive and original-recovery keys retain their conversation owner while the panel or a nested choice is open; navigation and editing never reach the hidden draft.
+An environment-too-large notice also has clickable `details`; that page, not info, owns the refused capture and its repair instructions.
+Scripts retain `rui session inspect` and `rui session configure` for full inspection and settings not exposed in the panel, including compaction overrides.
+`/status`, `/configure` and `/model` are absent from conversation parsing, the slash list and completion; the overview also has no `/model`.
+The default model is the Model field of app settings, not a second command path.
+
 Complete Action inspection is staged in an independent unlinked file before choice readiness.
 Approval requires every Action row to have been displayed since adoption or the last resize or width-mode change.
 A request starts at its top. If it exceeds the viewport, its last row quietly reports `… N more lines`, with no key hint.
@@ -3037,13 +3053,13 @@ Nothing typed while paused can authorize.
 Reading the final page requires fresh input after the completed prompt.
 A preview over 256 KiB cannot authorize an Action in this UI; exact one-shot inspection and decision commands remain available, including in the restored main-screen detach or fatal-renderer notice.
 Marked paste never grants permission.
-`/configure`, `/setup` and `/result KEY` run on the reader worker once the current read finishes; editing continues, but a Message waits for the command.
-Their unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
+Typed chat info configuration and the `/setup` and `/result KEY` commands run on the reader worker once the current read finishes; editing continues, but a Message waits for the command.
+The slash commands’ unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
 `/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
 
-A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
+A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename submit the corresponding Session configuration edits. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
 `slash_commands.zig` holds one table per screen of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too.
 `/requests`, `/recover`, `/result` and `/discard` are for recovery: they work, but the list leaves them out (Divyansh, 2026-11-02).
@@ -3055,21 +3071,21 @@ Up and Down move the highlight, Enter runs the row's line and Tab puts it in the
 Rows that change under an unchanged draft are a new list, which no key acts on until a frame draws it.
 Typed `/recover`, like Ctrl-R, retries nothing while an Action waits.
 The list shows while the draft is one line that starts with one `/`: while it holds no space, a row for each command the word starts; after a command's name, a row for each choice the word being typed starts.
-The choices are fixed words, never free text: `/copy`'s `code` and `file`; `/effort`'s levels, those the screen's model offers, the one in force marked `current` (the Session's model in a conversation, the next Session's in the overview, none before a read names it); and for `/configure` and `/setup` each option, then after an option the lowercase words its shape names, so `--permission-mode` offers `bypass` and `ask`, `--compaction-trigger` offers `default`, and `--reasoning-effort` offers the model's levels and `default`; `/setup`'s saves a default for any model, so it offers every level (Divyansh, 2026-11-02: "every fixed choice").
+The choices are fixed words, never free text: `/copy`'s `code` and `file`; `/effort`'s levels, those the screen's model offers, the one in force marked `current` (the Session's model in a conversation, the next Session's in the overview, none before a read names it); and for `/setup` (plus `/configure` in the overview) each option, then after an option the lowercase words its shape names, so `--permission-mode` offers `bypass` and `ask`, `--compaction-trigger` offers `default`, and `--reasoning-effort` offers the model's levels and `default`; `/setup`'s saves a default for any model, so it offers every level (Divyansh, 2026-11-02: "every fixed choice").
 A quote or a backslash in the words ends the list: that text is the shell grammar's to read.
 The rows sit right above the input, in the rows a growing draft would take, under the rule, so the input never moves; at most a third of the screen, less the input's own row.
 When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the highlighted match.
 It goes when nothing matches.
 One row is highlighted, reversed as the Action's choice is: the first, until Up or Down moves it; any edit, a word Enter adds among them, returns it to the first, the rows follow it, and a list that narrows under it (another model, say) highlights its last row.
-Tab adds the rest of the highlighted word, and a space when another word may follow, also after Esc closed the list; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
+Tab adds the rest of the highlighted word, and a space when another word may follow; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
-Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
+Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, or the overview’s `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
 Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
 `command_input.zig` owns that ending rule for both screens; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G cancel a command whose list the latest frame showed, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+The overview lists its own commands, `/archive`, `/configure`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G cancel a command whose list the latest frame showed, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
 Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
 There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
 The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
@@ -3085,8 +3101,7 @@ A result a conversation shows as a notice (two lines and 256 bytes at most, `sla
 After `/rename` the next listing, which shows the new label, goes at once.
 A command that could not start says `! /NAME unavailable.`, as a conversation says of an inspection that could not start; one that fails while it runs ends the overview, as a conversation ends, with its own failure, and the way out prints its output, as it does for output that came after the person left, unless stderr did not come back from the scratch file; one still queued then says `rui: /NAME did not run.`
 `/effort` needs a level: alone it states its usage, and the list offers the levels.
-`/model` shows the Session's model and sign-in, first, then that another model needs a new Session from the overview's `/model`; a Session's provider and model never change, so it offers no pick (Divyansh, 2026-11-02, picker plan "Answered" 1).
-`/effort LEVEL` runs `/configure --reasoning-effort LEVEL` and `/rename NAME` runs `/configure --label` with the rest of the line as one value, each decoded as `/configure` decodes its words, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
+`/effort LEVEL` submits the reasoning-effort configuration edit and `/rename NAME` submits the label edit with the rest of the line as one value, using the configuration argument decoder, so `/rename "lane four"` and `/rename lane four` both name the Session `lane four`.
 They have the same checks and the same messages, except that a line that does not parse shows the usage of the command typed.
 Once the Session accepts `/effort LEVEL`, LEVEL is also saved as the effort new Sessions start at, as `rui defaults configure --reasoning-effort` saves it.
 
@@ -3159,7 +3174,7 @@ A live read renders its page into scratch; after a successful join, the UI appen
 The opening is such a read, so a failed opening draws none of its content.
 Each page carries the Session's work from the same Store read as its items, so a page and its work always agree and no read repeats to pair them: its [Session work](#work-state-and-wait-conditions) state, with `since` and that state's facts (a running Bash call's saved description, a waiting retry's due time, cause and ordinal, or a quota failure's saved reset time), the latest Turn and Operation, the first actionable Action, revision and workspace.
 Session listing rows carry the same work value from the same derivation.
-Current is read for `/status` and for the Session line: on opening, and again whenever a page's revision or end position differs from the one the line was read with, in the same read as that page, so the line changes with the page that caused it.
+Current is read for chat info and for the Session line: on opening, and again whenever a page's revision or end position differs from the one the line was read with, in the same read as that page, so the line changes with the page that caused it.
 Every input of the estimate (accepted output and usage, Tool Results, queued and admitted Messages, stops, compactions) takes a Session position and every settings change a revision, so the line follows each of them without reading Current on reads where nothing changed.
 A page delivered after a later change, such as another client's decision, still applies whole, and the next page supersedes it; a decision sent from its prompt for an already decided Action is refused by the Store.
 Accepted: decisions bind to the exact Action shown, so a stale prompt can only produce a rejected decision (`action_not_pending`), never one retargeted to another Action.
@@ -3170,8 +3185,9 @@ The Store assigns admission IDs in Session position order, so a page that ends b
 The composer uses the same `› ` marker as submitted User messages.
 The input keeps the bottom rows of the screen in a conversation and in the overview: a rule, then the draft, which grows to ten rows or a third of the screen, whichever is fewer, and then scrolls inside itself, keeping the same text first until its caret leaves the shown lines.
 The overview keeps its own key-hint rows. The chat footer is two rows: the composer's lower rule and one `src/widgets/Footer.zig` line.
+While chat info is open, its footer replaces that Footer line on the physical last row; it adds neither a second footer between the panel and input nor a notice row below the footer.
 Its left side identifies the chat: `Name · model · effort · N% left`, plus an archive state when present; permission settings belong in chat information, not this line.
-Its right side contains only active keys, including recovery, discard, unarchive and stop when applicable; keys take space before identity.
+Its right side names `alt+i info` and other active keys, including recovery, discard, unarchive and stop when applicable; keys take space before identity. The info hint and the chat’s own Session/model/effort line are clickable and share Alt-I’s panel-opening action; clicking again while info is open is safe and leaves the open choice intact.
 The chat shows `‹` only while `Root.listVisible()` is false; it has no separate width test.
 The empty chat composer shows its prompt without placeholder instructions; approval shows the request and its choices, not a key-help sentence.
 The chat footer shows `ctrl+x stop` only while there is work to stop (Divyansh approved this on 2026-10-31, front-end plan PR 5).
@@ -3181,10 +3197,10 @@ The name is the Label, else the first line of the first Message, else the refere
 The chat footer reserves its one-space input gutter even beside the list; the hidden-list variant adds `‹ ` after that gutter.
 Identity fits whole items before its right-aligned keys, marking omitted items with ` · …`; only an oversized name is shortened at a word boundary.
 The overview keeps its own line-fitting policy.
-The footer keeps its previous placement above the bottom single-row state slot, which is blank while idle.
+The ordinary chat footer keeps its previous placement above the bottom single-row state slot, which is blank while idle; chat info suppresses that slot and puts its replacement footer on the physical last row.
 A chat notice occupies that bottom state slot and never replaces identity; it uses the failure colour when it starts with `!`. An unresolved send takes priority there, then the newest local notice, send progress and the overview's state. A transient notice goes after five seconds or the next key; an unresolved send remains. Overview notices keep their own policy.
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
-The chat state slot stays below the footer; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+Outside chat info, the chat state slot stays below the ordinary footer; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
 The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
 Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
@@ -3663,7 +3679,7 @@ Attention does not create a Session phase or imply that progressing siblings are
 
 On permission return, an adapter caller can read every actionable ID through a separate bounded-memory Current snapshot.
 Later hints/results may reflect newer commits; only a decision revalidated against the Host's exact target authorizes an Action.
-`/status` likewise lists every actionable ID, one line each, and flags indeterminate resolved Actions in the active Turn.
+Full actionable IDs and indeterminate resolved Actions remain available in Session inspection, not in chat info.
 Such commands may have run and were not replayed.
 Older Turns require historical inspection.
 
@@ -3746,7 +3762,7 @@ Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
 Bash and `bypass`, the default, stay quiet: no notice or banner announces them. Permission mode is a setting and never appears as a chat-footer suffix.
-`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it.
+Chat info’s Permissions field states `run without asking` or `ask first`; `session list` JSON retains the exact mode.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).

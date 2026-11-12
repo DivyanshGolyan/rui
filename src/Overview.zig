@@ -38,7 +38,6 @@ const protocol = @import("protocol.zig");
 const protocol_reply = @import("protocol_reply.zig");
 const model_list = @import("model_list.zig");
 const model_picker = @import("model_picker.zig");
-const model_picker_view = @import("model_picker_view.zig");
 const stderr = @import("stderr.zig");
 const test_poll = @import("test_poll");
 const app_events = @import("testing/app_events.zig");
@@ -121,6 +120,7 @@ pub const Relaunch = struct {
 pub const Hooks = struct {
     scratch: *const fn (std.process.Init) anyerror!std.Io.File,
     command: SessionFrontend.Command,
+    configure: ?session_reads.Configure = null,
     requests: SessionFrontend.Requests,
     status: SessionFrontend.Status,
     /// Runs between a start's capture and its send, as the CLI's other
@@ -201,8 +201,6 @@ pub const Operations = struct {
     /// The skills of `workspace` whose names start `prefix`, owned by the
     /// allocator.
     skills: *const fn (*Self, client.Requests, std.mem.Allocator, []const u8, []const u8) anyerror!skill_suggestions.Page,
-    /// Saves the person's default for new Sessions.
-    save_default: *const fn (*Self, view.Default) anyerror!void,
     /// Runs a command line for a Session, or for none when it is empty,
     /// keeping what it printed in `output`.
     command: *const fn (*Self, client.ReadContext, []const u8, []u8) anyerror!void,
@@ -210,7 +208,7 @@ pub const Operations = struct {
     open: *const fn (*Self, *vxfw.EventContext) anyerror!void,
 };
 
-pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .save_default = saveDefault, .command = runCommand, .open = openSession };
+pub const client_operations: Operations = .{ .host = hostFacts, .start_host = startHost, .list = listPage, .first_line = firstLine, .action_command = actionCommand, .start = startSession, .stop = stopSession, .archive = archiveSession, .models = listModels, .skills = skillSuggestions, .command = runCommand, .open = openSession };
 
 /// A conversation the person left from. Until the terminal is restored it
 /// holds its borrowers; `frontend` is null when it never started.
@@ -366,7 +364,6 @@ const Job = union(enum) {
     /// A skill suggestions read, numbered by the core, for its own copy of
     /// the Workspace and the name.
     skills: struct { read: u64, workspace: protocol.Bounded(protocol.max_workspace_bytes), prefix: protocol.Bounded(skill_completion.max_prefix_bytes) },
-    save: view.Default,
     defaults: DefaultsEdit,
     /// Owns its line, as a start owns its text.
     command: struct { name: view.commands.Name, session: ?view.Reference, line: []u8 },
@@ -378,7 +375,7 @@ const Job = union(enum) {
     fn quiescence(self: Job) Quiescence {
         return switch (self) {
             .host, .list, .lines, .commands, .models, .skills => .cancel_read,
-            .start_host, .start, .stop, .archive, .save, .defaults, .command => .settle_effect,
+            .start_host, .start, .stop, .archive, .defaults, .command => .settle_effect,
         };
     }
 
@@ -427,7 +424,7 @@ const Answer = union(enum) {
 };
 
 /// One host read and list page, at most one first-line batch, one
-/// command-read batch, one model-list read, one skills read, one picker save,
+/// command-read batch, one model-list read, one skills read,
 /// one settings save, one Host start, one command and the requests the core's
 /// ledger allows can wait at once.
 const max_jobs = 10 + view.max_requests;
@@ -475,7 +472,6 @@ app_input: InputArea = undefined,
 app_sessions: GroupedList = .{},
 session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_panel: GroupedList = .{},
-app_picker: GroupedList = .{},
 app_settings_line: OverviewLines.Settings = undefined,
 /// The counts line and its bands, which take the view-name click.
 app_header: OverviewLines.Header = undefined,
@@ -685,34 +681,24 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
-            if (self.root.settings_open) {
+            if (self.root.input.layer.settingsOpen()) {
                 // Under the settings page only the keys that are the whole
                 // app's stay live: leaving, and Esc for an Upgrade it can
                 // still cancel. Nothing edits the hidden draft or the list.
-                const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
+                const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
                 const live = selected == .action and (selected.action == .exit or (selected.action == .clear and self.state.upgrade.takesEscape()));
                 if (!live) {
                     ctx.consumeEvent();
                     return;
                 }
             }
-            if (input == .key_press and !self.root.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and try requestHostStart(self, ctx)) {
+            if (input == .key_press and !self.root.input.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and try requestHostStart(self, ctx)) {
                 ctx.consumeEvent();
                 return;
             }
-            if (self.state.picker != null and !self.root.pasting and input == .key_press) {
-                const key = input.key_press;
-                const action: ?model_picker_view.Action = if (key.matchExact(vaxis.Key.left, .{})) .lower_effort else if (key.matchExact(vaxis.Key.right, .{})) .higher_effort else if (key.matchExact(vaxis.Key.tab, .{})) .next_sign_in else null;
-                if (action) |chosen| {
-                    try self.appNext(ctx, try self.event(.{ .picker_action = .{ .action = chosen, .draft = self.composerDraft() } }));
-                    ctx.consumeEvent();
-                    ctx.redraw = true;
-                    return;
-                }
-            }
-            const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
+            const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
             const composed: view.Input = switch (self.state.route(selected)) {
-                .edit => .{ .composer = self.composer.appEvent(view.keys, input, self.root.pasting) },
+                .edit => .{ .composer = self.composer.appEvent(view.keys, input, self.root.input.pasting) },
                 .frozen => .{ .composer = if (selected == .action) .{ .action = selected.action } else .none },
             };
             try self.appNext(ctx, try self.event(.{ .composed = .{ .input = composed, .draft = self.composerDraft() } }));
@@ -726,7 +712,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.pasting } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.input.pasting } }));
     if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
 }
@@ -775,11 +761,11 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
         file.* = try self.hooks.scratch(self.init);
         count += 1;
     }
-    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .status = opened[3], .actions = opened[4..6].* };
+    const files: SessionFrontend.Files = .{ .scratch = opened[0], .action = opened[1], .inspection = opened[2], .details = opened[3], .actions = opened[4..6].* };
     const frontend = try self.init.gpa.create(SessionFrontend);
-    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue };
+    const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .start = requestHostStart, .notice = hostNotice } }, self.caps);
+    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
@@ -797,8 +783,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
         .ended => |ended| left.ended = ended,
         .overview => |recovery| {
             if (recovery != .none) _ = try self.event(.{ .unconfirmed = .{ .reference = left.session, .recovery = recovery } });
-            const local = self.state.localEffort();
-            if (self.options.selectors.needsPreferences() and (local == null or local.?.only_when_explicit)) {
+            if (self.options.selectors.needsPreferences()) {
                 if (self.savedEffort()) |effort| {
                     if (self.state.default) |*binding| binding.effort = effort;
                 } else |_| {}
@@ -872,7 +857,7 @@ fn leaveForUpgrade(self: *Self, ctx: *vxfw.EventContext, outcome: session_upgrad
 /// Do not leave the screen automatically when guidance is already known.
 /// The settled departure is still authoritative for failures found on leave.
 noinline fn pendingDepartureGuidance(self: *const Self) bool {
-    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var bytes: [view.max_requests * 512 + view.max_late_command_bytes]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
     self.departureText(&text);
     if (text.buffered().len != 0) return true;
@@ -912,7 +897,7 @@ fn keepUpgrade(self: *Self) !void {
 
 fn disposeSession(self: *Self, left: Left) void {
     if (left.files) |files| {
-        inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(self.init.io);
+        inline for (.{ "scratch", "action", "inspection", "details" }) |name| @field(files, name).close(self.init.io);
         for (files.actions) |file| file.close(self.init.io);
     }
     if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
@@ -957,7 +942,7 @@ fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
 /// One rendered departure supplies both the pure decision and fallback output.
 /// Keep its bounded scratch off the ordinary finish frame.
 noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerror!?Next, saved: anyerror!void, kept: anyerror!void, sign_in_ended: anyerror!void, left: ?Left, departure: ?SessionFrontend.Departure) !?Relaunch {
-    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var bytes: [view.max_requests * 512 + view.max_late_command_bytes]u8 = undefined;
     var text = std.Io.Writer.fixed(&bytes);
     self.departureText(&text);
     const has_failure = std.meta.isError(ended) or std.meta.isError(answered) or std.meta.isError(saved) or std.meta.isError(kept) or std.meta.isError(sign_in_ended);
@@ -1067,23 +1052,6 @@ const PanelRows = struct {
     }
 };
 
-/// The model picker's rows for one frame.
-const PickerRows = struct {
-    models: model_picker_view.Rows,
-
-    fn row(raw: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!GroupedList.Row {
-        const self: *const PickerRows = @ptrCast(@alignCast(raw));
-        const built = try self.models.row(arena, index);
-        var target: ?view.Click = null;
-        const regions = try arena.alloc(GroupedList.Region, built.controls.len);
-        if (built.model) |choice| {
-            target = .{ .model = .{ .choice = choice } };
-            for (built.controls, regions) |control, *region| region.* = .{ .start = control.start, .end = control.end, .target = .{ .model = .{ .choice = choice, .target = control.target } } };
-        }
-        return .{ .segments = built.segments, .heading = built.heading, .target = target, .regions = regions };
-    }
-};
-
 fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) !vxfw.Widget {
     const spans = try ctx.arena.alloc(vaxis.Segment, segments.len);
     for (segments, spans) |segment, *span| span.* = .{ .text = segment.text, .style = @import("widget_style.zig").of(caps, segment.style) };
@@ -1163,19 +1131,8 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         _ = try view.step(&self.state, .{ .resized = .{ .width = size.width, .height = size.height } });
         const frame = self.animationFrame();
         self.app_frame = frame;
-        if (self.state.picker != null) view.syncPicker(&self.state, self.composerDraft());
         // The core says what fills the list; this frame draws that widget.
         const prepared: *GroupedList = switch (self.state.listArea()) {
-            .picker => picker: {
-                const defaults = view.pickerDefaults(&self.state);
-                const words = view.pickerWords(self.composerDraft().bytes);
-                const choice = self.state.picker.?.choice orelse model_picker_view.open(&self.state.menu, words, defaults);
-                const rows = try ctx.arena.create(PickerRows);
-                rows.* = .{ .models = try model_picker_view.rowsIn(ctx.arena, &self.state.menu, words, defaults, choice, size.width, view.layout(&self.state).list.len(), self.caps.width, self.caps.unicode, self.state.menu_read) };
-                self.app_picker.selected = rows.models.selected;
-                self.app_picker.rows = .{ .userdata = rows, .count = @intCast(rows.models.count), .rowFn = PickerRows.row };
-                break :picker &self.app_picker;
-            },
             .panel => panel: {
                 const rows = try ctx.arena.create(PanelRows);
                 rows.* = .{ .items = (try view.panelItems(ctx.arena, &self.state, size.width, self.caps)).? };
@@ -1288,7 +1245,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .sign_in_open = options.sign_in };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
@@ -1298,7 +1255,6 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_header = .{ .state = &self.state };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
-    self.app_picker.on_press = .{ .userdata = self, .pressed = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
     if (self.state.default) |*binding| binding.effort = self.savedEffort() catch null;
@@ -1307,13 +1263,11 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
 
 fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.sign_in.task.thread != null) return;
-    if (!view.admitsDefaultsEdit(&self.state) or self.state.save.running != null or self.defaults_save == .pending) return error.DefaultsUnavailable;
+    if (!view.admitsDefaultsEdit(&self.state) or self.defaults_save == .pending) return error.DefaultsUnavailable;
     self.sign_in.reset();
     self.sign_in.selectors = self.options.selectors;
     self.sign_in.selectors.store = self.options.store;
-    self.root.sign_in_open = true;
-    try ctx.requestFocus(self.sign_in.widget());
-    ctx.redraw = true;
+    try self.root.openSignIn(ctx);
 }
 
 fn listVisible(raw: *anyopaque) bool {
@@ -1324,17 +1278,13 @@ fn listVisible(raw: *anyopaque) bool {
 /// The first-run screen is the only thing the app can do, so it stays until
 /// sign-in gives a default; a screen opened from Settings always returns there.
 fn signInIsFirstRun(self: *const Self) bool {
-    return self.root.sign_in_open and !self.root.settings_open and self.state.default == null;
+    return self.root.input.layer.signInOpen() and !self.root.input.layer.settingsOpen() and self.state.default == null;
 }
 
 fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.signInIsFirstRun()) return;
-    self.root.sign_in_open = false;
-    if (self.root.settings_open) {
-        try ctx.requestFocus(self.root.settings_page.widget());
-    } else try self.root.showMain(ctx);
-    ctx.redraw = true;
+    try self.root.closeSignIn(ctx);
 }
 
 fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
@@ -1362,8 +1312,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         notice.len = writer.buffered().len;
         self.state.notice = notice;
     }
-    self.root.sign_in_open = false;
-    try self.root.showMain(ctx);
+    try self.root.signedIn(ctx);
     if (self.root.session == null) try ctx.requestFocus(self.app_input.composer.widget());
 }
 
@@ -1408,10 +1357,6 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
         fn run(raw: *anyopaque) ?upgrade_status.Run {
             return owner(raw).state.upgrade.run;
         }
-        fn models(raw: *anyopaque) @import("model_choice.zig").Snapshot {
-            const state = &owner(raw).state;
-            return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision };
-        }
         fn signIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
             try owner(raw).openSignIn(ctx);
         }
@@ -1419,7 +1364,7 @@ fn settingsBackend(self: *Self) AppSettings.Backend {
             return owner(raw).caps;
         }
     };
-    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = Callbacks.models, .sign_in = Callbacks.signIn };
+    return .{ .context = self, .read = Callbacks.read, .save = Callbacks.save, .save_state = Callbacks.saveState, .upgrade = Callbacks.upgrade, .run = Callbacks.run, .caps = Callbacks.caps, .models = modelsSnapshot, .sign_in = Callbacks.signIn };
 }
 
 fn destroy(self: *Self) void {
@@ -1445,6 +1390,13 @@ const Next = union(enum) { leave, open: view.Reference, open_settings };
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
+    return (try self.eventResult(value)).next;
+}
+
+const EventResult = struct { next: ?Next = null, archive_admission: view.ArchiveAdmission = .refused };
+
+/// Keep the core's synchronous admission with the jobs this exact step queued.
+fn eventResult(self: *Self, value: view.Event) !EventResult {
     const held_host = self.state.holdsHost();
     const effects = try view.step(&self.state, value);
     if (held_host and !self.state.holdsHost()) {
@@ -1470,7 +1422,6 @@ fn event(self: *Self, value: view.Event) !?Next {
         .cancel_upgrade => self.upgrade_job.cancel(),
         .archive => |request| self.queue(.{ .archive = request }),
         .list_models => self.queue(.models),
-        .save_default => |binding| self.queue(.{ .save = binding }),
         .command => |command| self.queue(.{ .command = .{ .name = command.name, .session = command.session, .line = try self.init.gpa.dupe(u8, command.text) } }),
         .open => |reference| next = .{ .open = reference },
         .clear_draft => self.composer = self.emptyComposer(self.composer.edits +% 1),
@@ -1479,12 +1430,15 @@ fn event(self: *Self, value: view.Event) !?Next {
             .refused => |why| refused = why,
             else => {},
         },
-        .exit => return .leave,
+        .exit => return .{ .next = .leave, .archive_admission = effects.archive_admission },
     };
-    if (refused) |why| if (next == null) return self.event(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
+    if (refused) |why| if (next == null) {
+        const settled = try self.eventResult(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
+        return .{ .next = settled.next, .archive_admission = effects.archive_admission };
+    };
     self.askSkills();
     self.sendStatuses();
-    return next;
+    return .{ .next = next, .archive_admission = effects.archive_admission };
 }
 
 /// Brings the terminal's program status records to what the core wants:
@@ -1636,7 +1590,6 @@ fn runJob(self: *Self, context: client.ReadContext) !void {
             self.answer = .{ .menu = try model_picker.read(gpa, try protocol_reply.modelListProviders(body)) };
         },
         .skills => |*read| self.answer = .{ .skills = try self.ops.skills(self, requests, self.init.gpa, read.workspace.slice(), read.prefix.slice()) },
-        .save => |binding| try self.ops.save_default(self, binding),
         .defaults => |edit| {
             // These are explicit field choices, not recommendations inferred
             // from credential readiness. Validation/publication has one owner.
@@ -1659,7 +1612,7 @@ fn flushSaves(self: *Self) !void {
     const requests: client.ReadContext = .{ .io = self.init.io, .origin = &origin };
     var failure: ?anyerror = null;
     while (for (self.jobs[0..self.job_count], 0..) |job, index| {
-        if (job == .save or job == .defaults) break index;
+        if (job == .defaults) break index;
     } else null) |index| {
         self.job.deinit(self.init.gpa);
         self.job = self.take(index);
@@ -1725,7 +1678,13 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             return self.event(.{ .start = answer.reply.start() });
         },
         .stop => |reference| return self.event(.{ .stop = .{ .reference = reference, .outcome = answer.reply.stop() } }),
-        .archive => |request| return self.event(.{ .archive = answer.reply.archive(request) }),
+        .archive => |request| {
+            const result = answer.reply.archive(request);
+            if (self.app_session) |attached| if (attached.frontend) |frontend| {
+                if (std.mem.eql(u8, &result.request.reference, &attached.session)) frontend.archiveAnswered(result);
+            };
+            return self.event(.{ .archive = result });
+        },
         .skills => |read| {
             // The core owns the page it is given.
             const page: ?skill_suggestions.Page = if (outcome) |_| answer.skills else |_| null;
@@ -1741,15 +1700,6 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
             answer.* = .none;
             return self.event(.{ .models = .{ .menu = menu } });
         },
-        .save => |binding| return self.event(.{
-            .saved = .{
-                .ended = .{ .binding = binding, .outcome = savedAs(outcome) },
-                // An unreadable file only leaves the effort out of the notice:
-                // the save that wrote it reports its own failure, and the next
-                // start reads the file again and is refused with the error.
-                .saved_effort = self.savedEffort() catch null,
-            },
-        }),
         .defaults => {
             const written = if (outcome) |_| true else |err| preferences.failure(err).saved;
             // As setup does, respect launch selectors and leave any local
@@ -1826,9 +1776,7 @@ fn startInput(self: *const Self, start: *const view.OwnedStart, compaction_buffe
     const start_effort: view.StartEffort = .{ .held = held_effort, .model = start.binding().model };
     // An unsaved pick takes precedence. Once saved, read at each start so
     // a later /effort applies, unless explicit selectors bypass preferences.
-    const local = start.local_effort;
-    const use_local = if (local) |value| value.applies(self.options.selectors.needsPreferences()) else false;
-    const saved_effort = start_effort.applied(if (!start_effort.readsSaved()) null else if (use_local) local.?.value else try self.savedEffort());
+    const saved_effort = start_effort.applied(if (start_effort.readsSaved()) try self.savedEffort() else null);
     var configuration: configure_input.ConfigureInput = .{
         .store = self.options.store,
         .session = .create,
@@ -1857,15 +1805,6 @@ fn listModels(self: *Self, requests: client.Requests, gpa: std.mem.Allocator) ![
     return requests.modelList(self.options.store, gpa);
 }
 
-/// How a save ended, in the words `/setup` uses for the same failure.
-fn savedAs(outcome: anyerror!void) view.Saved {
-    outcome catch |err| {
-        const said = preferences.failure(err);
-        return if (said.saved) .unconfirmed else .{ .failed = said.reason };
-    };
-    return .done;
-}
-
 /// Runs a command line through the CLI's hook, as a conversation runs it,
 /// and keeps what it printed.
 fn runCommand(self: *Self, requests: client.ReadContext, session: []const u8, line: []u8) !void {
@@ -1887,17 +1826,6 @@ fn runCommand(self: *Self, requests: client.ReadContext, session: []const u8, li
         return err;
     };
     return ended.outcome;
-}
-
-/// Saves the pick as `rui defaults configure --provider --model` would.
-fn saveDefault(self: *Self, binding: view.Default) !void {
-    // Both are named, so no sign-in's readiness decides anything.
-    const readiness: preferences.Readinesses = .initFill(.configured);
-    _ = try preferences.update(self.options.home, .{
-        .provider = .{ .set = @tagName(binding.provider) },
-        .model = .{ .set = binding.model.slice() },
-        .reasoning_effort = if (binding.effort) |effort| .{ .set = effort } else .clear,
-    }, &readiness);
 }
 
 /// The wall clock in Unix milliseconds, as the core's times are.
@@ -1927,12 +1855,13 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8, caret: usize) ?Te
 /// An input in the opened Session's conversation, whose work shows as
 /// `kind`, stepped as the overview's own: a stop it asks for is sent at
 /// once.
-fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !void {
+fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !view.ArchiveAdmission {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .conversed = .{ .reference = self.opened, .work = kind, .input = input } });
-    std.debug.assert(next == null);
+    const result = try self.eventResult(.{ .conversed = .{ .reference = self.opened, .work = kind, .input = input } });
+    std.debug.assert(result.next == null);
     try self.dispatch(.lent);
+    return result.archive_admission;
 }
 
 /// A read the opened Session's conversation applied: the outcome it opened
@@ -1997,6 +1926,30 @@ fn quiesceUpgrade(self: *Self) !bool {
     return self.worker.thread == null and self.job_count == 0;
 }
 
+/// One borrowed source for app settings and the open conversation's choices.
+fn modelsSnapshot(raw: *anyopaque) @import("model_choice.zig").Snapshot {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const state = &self.state;
+    return .{ .menu = if (state.menu_read == .read or state.menu.entries.len > 0) &state.menu else null, .revision = state.menu_revision };
+}
+
+/// Project the latest archive request for this exact conversation.
+fn archiveState(raw: *anyopaque) @import("chat_info.zig").SaveState {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    var at = self.state.request_count;
+    while (at > 0) {
+        at -= 1;
+        const request = self.state.requests[at];
+        if (request.kind != .archive or request.session == null or !std.mem.eql(u8, &request.session.?, &self.opened)) continue;
+        return switch (request.status) {
+            .pending => .pending,
+            .done => .saved,
+            .failed, .unknown => .failed,
+        };
+    }
+    return .idle;
+}
+
 /// The Upgrade, as the open conversation reads it.
 fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
     const self: *Self = @ptrCast(@alignCast(raw));
@@ -2010,11 +1963,9 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
     return .{ .text = said.text, .stoppable = said.stoppable };
 }
 
-/// Writes the core's departure to stderr in one write. Never inlined: its
-/// buffer stays off `finish`'s frame.
+/// Render the core departure into the caller's bounded finish scratch.
 fn departureText(self: *const Self, out: *std.Io.Writer) void {
-    const saved_effort = if (self.options.home.len == 0) null else if (preferences.load(self.options.home)) |values| values.reasoning_effort else |_| null;
-    view.writeDeparture(&self.state, saved_effort, out) catch unreachable;
+    view.writeDeparture(&self.state, null, out) catch unreachable;
 }
 
 /// Lets the conversation the person left join its borrowers and write its
@@ -2379,8 +2330,6 @@ const Seen = struct {
     conversations: usize = 0,
     conversed: view.Reference = @splat(0),
     model_lists: usize = 0,
-    saved: ?struct { provider: view.Provider, model: protocol.Bounded(64), effort: ?model_capability.ReasoningEffort } = null,
-    saves: usize = 0,
     /// How many Sessions the fake listing returns, from `listed_references`.
     listed: usize = 1,
     /// How many of them are at work; the rest are idle.
@@ -2522,13 +2471,6 @@ const fake_operations: Operations = .{
             return reply.toOwnedSlice();
         }
     }.models,
-    .save_default = struct {
-        fn save(_: *Self, binding: view.Default) !void {
-            Seen.now.saved = .{ .provider = binding.provider, .model = Seen.bounded(binding.model.slice()), .effort = binding.effort };
-            Seen.now.saves += 1;
-        }
-    }.save,
-    // Through the hooks `Printing` gives.
     .command = runCommand,
     .open = struct {
         fn open(self: *Self, _: *vxfw.EventContext) !void {
@@ -2901,250 +2843,7 @@ test "each effect runs its client operation and each result reaches the core" {
     try std.testing.expect(ending == .overview);
 }
 
-test "/model filters choices as the composer is edited" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna") == null);
-    // Typing a filter must keep the model list open.
-    try std.testing.expectEqual(true, rig.overview.state.picker != null);
-    var shown = try rig.shown(80, 24);
-    defer shown.deinit();
-    const screen = try shown.text();
-    try std.testing.expect(std.mem.indexOf(u8, screen, "gpt-6-luna") != null);
-    // The saved model remains in the facts row, but no longer in the list.
-    for (0..20) |row| {
-        try std.testing.expectEqual(null, std.mem.indexOf(u8, try shown.line(@intCast(row)), "gpt-5.5"));
-    }
-}
-
-test "/model keeps unread and unanswered lists empty without shell instructions" {
-    const Check = struct {
-        fn screen(rig: *Rig, read: model_picker_view.Read) !void {
-            const state = &rig.overview.state;
-            try std.testing.expectEqual(read, state.menu_read);
-            var shown = try rig.shown(80, 24);
-            defer shown.deinit();
-            const rows = try model_picker_view.rows(shown.arena.allocator(), &state.menu, "", view.pickerDefaults(state), state.picker.?.choice, 80, .unicode, true, read);
-            try std.testing.expectEqual(@as(usize, 0), rows.count);
-            try std.testing.expect(rows.selected == null);
-            const text = try shown.text();
-            try std.testing.expect(std.mem.indexOf(u8, text, "/model") != null);
-            for ([_][]const u8{ "Loading models", "Models unavailable", "Known to Rui", "From your API key" }) |prose|
-                try std.testing.expect(std.mem.indexOf(u8, text, prose) == null);
-            for (std.enums.values(model_picker.Provider)) |provider|
-                if (provider.login()) |command| try std.testing.expect(std.mem.indexOf(u8, text, command) == null);
-        }
-    };
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try Check.screen(rig, .unread);
-    _ = try view.step(&rig.overview.state, .{ .models = .unanswered });
-    try Check.screen(rig, .unanswered);
-}
-
-test "/model opens while typing its filter without submitting" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model luna") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
-    try std.testing.expectEqualStrings("/model luna", rig.overview.composerDraft().bytes);
-    var shown = try rig.shown(80, 24);
-    defer shown.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "gpt-6-luna") != null);
-}
-
-test "completing /model opens the draft-backed picker and saves a filtered model" {
-    for ([_][]const u8{ "\r", "\t" }) |completion| {
-        var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-        defer rig.close();
-        try std.testing.expect(try rig.press("/m") == null);
-        var palette = try rig.shown(80, 24);
-        defer palette.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try palette.text(), "/model") != null);
-        try std.testing.expect(try rig.press(completion) == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expect(rig.overview.state.picker != null);
-        try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/model"));
-        if (std.mem.eql(u8, rig.overview.composerDraft().bytes, "/model")) try std.testing.expect(try rig.press(" ") == null);
-        try std.testing.expect(try rig.press("luna\r") == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-    }
-}
-
-test "/model escape closes the picker and clears the filter" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model luna") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x1b") == null);
-    try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
-    try std.testing.expectEqual(false, rig.overview.state.picker != null);
-}
-
-test "clearing /model returns ordinary text to Session creation" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x15hello\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
-    try std.testing.expectEqualStrings("hello", Seen.now.start.text.slice());
-}
-
-test "/model saves the filtered row and typed sign-in with one enter" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna api\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.saves);
-    try std.testing.expectEqual(view.Provider.openai, Seen.now.saved.?.provider);
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
-}
-
-test "/model shows ASCII marks and controls in a non-UTF-8 locale" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
-    defer rig.close();
-    rig.overview.caps = .of(.{ .lc_all = "C" });
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    var shown = try rig.shown(80, 24);
-    defer shown.deinit();
-    const screen = try shown.text();
-    try std.testing.expect(std.mem.indexOf(u8, screen, "+  gpt-6-luna") != null);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "< low >") != null);
-    for (screen) |byte| try std.testing.expect(byte < 128);
-}
-
-test "/model arrow and tab controls save effort and sign-in on the highlighted row" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna") == null);
-    try std.testing.expect(try rig.press("\x1b[C\t\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.saves);
-    try std.testing.expectEqual(view.Provider.openai, Seen.now.saved.?.provider);
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .medium), Seen.now.saved.?.effort);
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
-}
-
-test "/model persists all three defaults and shows them in facts" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna high api\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    const saved = try preferences.load(home);
-    try std.testing.expectEqualStrings("openai", saved.provider.slice());
-    try std.testing.expectEqualStrings("gpt-6-luna", saved.model.slice());
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), saved.reasoning_effort);
-    var shown = try rig.shown(80, 24);
-    defer shown.deinit();
-    const screen = try shown.text();
-    try std.testing.expect(std.mem.indexOf(u8, screen, "gpt-6-luna") != null);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "high") != null);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "high · /work") != null);
-}
-
-test "/model shows the effective effort and starts with it after a quiet save" {
-    for ([_]bool{ false, true }) |held| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-        var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
-        defer rig.close();
-        if (held) try std.testing.expect(try rig.press("/configure --reasoning-effort low\r") == null);
-        try std.testing.expect(try rig.press("/model ") == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expect(try rig.press("luna high\r") == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(@as(?view.Notice, null), rig.overview.state.notice);
-        const expected = if (held) "low" else "high";
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), expected) != null);
-        try std.testing.expect(try rig.press("hello\r") == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqualStrings(expected, Seen.now.start.reasoning_effort.?.slice());
-    }
-}
-
-test "/model keeps the selected effort for a start after a failed save" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .low } }, &.initFill(.configured));
-    var ops = fake_operations;
-    ops.save_default = struct {
-        fn save(_: *Self, _: view.Default) !void {
-            return error.AccessDenied;
-        }
-    }.save;
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna high\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    {
-        var shown = try rig.shown(161, 24);
-        defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Default not saved") != null);
-    }
-    try std.testing.expect(try rig.press("hello\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
-    try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
-}
-
-test "/model keeps the selected effort with explicit launch selectors" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5", .selectors = explicit_selectors }, file_saving_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna high\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("hello\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
-    try std.testing.expectEqualStrings("high", Seen.now.start.reasoning_effort.?.slice());
-}
-
-test "returning from a Session refreshes saved effort in facts and picker" {
+test "returning from a Session refreshes saved effort in facts and app settings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -3177,11 +2876,8 @@ test "returning from a Session refreshes saved effort in facts and picker" {
     defer ctx.cmds.deinit(std.testing.allocator);
     try appSessionLeft(rig.overview, &ctx, .returned);
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), rig.overview.state.default.?.effort);
-    try std.testing.expect(try rig.press("/model luna") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), Seen.now.saved.?.effort);
+    const values = try rig.overview.root.settings_page.backend.?.read(rig.overview);
+    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), values.reasoning_effort);
 }
 
 test "facts omit an unsupported saved effort that the next start will not use" {
@@ -3201,26 +2897,6 @@ test "facts omit an unsupported saved effort that the next start will not use" {
     try std.testing.expect(try rig.press("hello\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqualStrings(product_defaults.reasoning_effort, Seen.now.start.reasoning_effort.?.slice());
-}
-
-test "/model reads lists on the worker and the pick starts the next Session" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    const overview = rig.overview;
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
-    try std.testing.expect(try rig.press("luna\t\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(view.Provider.openai, Seen.now.saved.?.provider);
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
-    try std.testing.expect(overview.state.picker == null);
-    // The next Session takes the pick.
-    try std.testing.expect(try rig.press("hello\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("openai", Seen.now.start.provider.?.slice());
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
 }
 
 test "a /word reads the Workspace's skills on the worker, lists them over the draft, and Tab completes the caret's word" {
@@ -3326,67 +3002,6 @@ test "changing Workspace while a skills read waits keeps one skills read queued"
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&last, "/w{d}", .{2 * max_jobs - 1}), Seen.now.skill_workspace.slice());
 }
 
-test "/model takes the list area at every usable height" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    Seen.now.listed = listed_references.len;
-    try std.testing.expect(try rig.overview.event(.{ .tick = test_now_s * 1000 }) == null);
-    try std.testing.expect(try rig.settle() == null);
-    rig.overview.state.selected = .{ .session = shownRow(rig, 4) };
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    for (10..25) |height| {
-        errdefer std.debug.print("height={d}\n", .{height});
-        var shown = try rig.shown(60, @intCast(height));
-        defer shown.deinit();
-        const screen = try shown.text();
-        try std.testing.expect(std.mem.indexOf(u8, screen, "gpt-5.5") != null);
-        try std.testing.expect(std.mem.indexOf(u8, screen, "Fix the flaky test") == null);
-    }
-}
-
-test "/model does not act on hidden Session rows" {
-    const rig = try openListed();
-    defer rig.close();
-    const selected = rig.overview.state.selected.session;
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x1b[1;2B\x18\x1ba") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualSlices(u8, &selected, &rig.overview.state.selected.session);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.stops);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
-}
-
-test "a save still queued as the overview ends runs, and the way out names it" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    // Down to gpt-6-luna, then save it with one Enter.
-    try std.testing.expect(try rig.press("\x1b[B\r") == null);
-    try std.testing.expectEqual(Job.save, std.meta.activeTag(rig.overview.jobs[rig.overview.job_count - 1]));
-    var buffer: [1024]u8 = undefined;
-    const guidance = try finishedGuidance(rig, &buffer);
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
-    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-6-luna") != null);
-}
-
-/// Fake operations whose saves write the preferences file under the
-/// overview's home, counted in `Seen.now.saves`.
-const file_saving_operations: Operations = blk: {
-    var ops = fake_operations;
-    ops.save_default = struct {
-        fn save(self: *Self, binding: view.Default) !void {
-            Seen.now.saves += 1;
-            try saveDefault(self, binding);
-        }
-    }.save;
-    break :blk ops;
-};
-
 /// Pins `provider` and `model` in the preferences file under `home`, as
 /// /setup or another terminal would.
 fn pin(home: []const u8, provider: []const u8, model: []const u8) !void {
@@ -3406,11 +3021,10 @@ test "an overview left without a pick writes no default, pinned or not" {
         if (pinned) try pin(home, "openai", "gpt-6-luna");
         var cancellation: client.Cancellation = .{};
         // Without a pin, the overview opens on the built-in default.
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = if (pinned) "openai" else "codex", .model = if (pinned) "gpt-6-luna" else "gpt-5.5" }, file_saving_operations, &cancellation);
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = if (pinned) "openai" else "codex", .model = if (pinned) "gpt-6-luna" else "gpt-5.5" }, fake_operations, &cancellation);
         defer rig.close();
         var buffer: [1024]u8 = undefined;
         const guidance = try finishedGuidance(rig, &buffer);
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
         try std.testing.expect(std.mem.indexOf(u8, guidance, "New Sessions use") == null);
         const values = try preferences.load(home);
         try std.testing.expectEqualStrings(if (pinned) "openai" else "", values.provider.slice());
@@ -3425,89 +3039,15 @@ test "a default saved elsewhere while the overview is open outlasts its exit wit
     const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
     try pin(home, "codex", "gpt-5.5");
     var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
     defer rig.close();
     try std.testing.expect(try rig.settle() == null);
     try pin(home, "openai", "gpt-6-luna");
     var buffer: [1024]u8 = undefined;
     _ = try finishedGuidance(rig, &buffer);
-    try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
     const values = try preferences.load(home);
     try std.testing.expectEqualStrings("openai", values.provider.slice());
     try std.testing.expectEqualStrings("gpt-6-luna", values.model.slice());
-}
-
-test "a pick made while a save runs is written before the departure, which names only it" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    const overview = rig.overview;
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    // Down to gpt-6-luna, then save with one Enter.
-    try std.testing.expect(try rig.press("\x1b[B\r") == null);
-    // Its save starts, and nothing answers it before the next pick.
-    try overview.dispatch(.all);
-    try std.testing.expect(overview.worker.thread != null and overview.job == .save);
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6-luna\ngpt-6.1-sol\n" } } }}) } }) == null);
-    try std.testing.expect(try rig.press("\x1b[B\r") == null);
-    try std.testing.expectEqualStrings("gpt-6.1-sol", overview.state.default.?.model.slice());
-    var buffer: [1024]u8 = undefined;
-    const guidance = try finishedGuidance(rig, &buffer);
-    try std.testing.expectEqual(@as(usize, 2), Seen.now.saves);
-    try std.testing.expectEqualStrings("gpt-6.1-sol", Seen.now.saved.?.model.slice());
-    try std.testing.expect(std.mem.indexOf(u8, guidance, "New Sessions use gpt-6.1-sol") != null);
-    try std.testing.expect(std.mem.indexOf(u8, guidance, "gpt-6-luna") == null);
-}
-
-test "a pick after /configure --model starts the pick, not the held model" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6.1-sol" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/configure --model gpt-5.5\r") == null);
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    // Move from the held model to gpt-6-luna and pick it.
-    try std.testing.expect(try rig.press("\x1b[B\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
-    try std.testing.expect(try rig.press("hello\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("codex", Seen.now.start.provider.?.slice());
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
-}
-
-test "a rejected paste leaves the model picker and draft intact" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    // At the start of the draft, the combining mark cannot join a cell.
-    try std.testing.expect(try rig.press("\x01") == null);
-    try std.testing.expect(try rig.press("\x1b[200~\xcc\x81\x1b[201~") == null);
-    try std.testing.expect(rig.overview.state.picker != null);
-    try std.testing.expectEqualStrings("/model ", rig.overview.composerDraft().bytes);
-    try std.testing.expect(try rig.press("\x05\x15") == null);
-    try std.testing.expect(try rig.press("hello\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
-    try std.testing.expectEqualStrings("hello", Seen.now.start.text.slice());
-    try std.testing.expect(Seen.now.saved == null);
-}
-
-test "a model list the Host cannot answer and one Rui cannot read reach the core apart" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
-    defer rig.close();
-    const overview = rig.overview;
-    try std.testing.expect(try rig.press("/model\r") == null);
-    overview.job = .models;
-    try std.testing.expect(try overview.deliver(error.ConnectionRefused) == null);
-    try std.testing.expect(overview.state.menu_read == .unanswered);
-    try std.testing.expect(try overview.deliver(error.InvalidModelList) == null);
-    try std.testing.expect(overview.state.menu_read == .invalid);
 }
 
 test "a start with no saved binding names no model, so the Host refuses it" {
@@ -3564,57 +3104,6 @@ test "a start with no held loaded tools sends none" {
     try std.testing.expect(try rig.press("hello\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(Seen.now.start.loaded_tools == null);
-}
-
-test "the departure names the effort saved now, even after a launch that named its binding" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    var ops = file_saving_operations;
-    ops.save_default = struct {
-        fn save(self: *Self, binding: view.Default) !void {
-            Seen.now.saves += 1;
-            try saveDefault(self, binding);
-            return error.PreferenceDirectorySyncFailed;
-        }
-    }.save;
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5", .selectors = .{ .store = "/store", .provider = "codex", .model = "gpt-5.5" } }, ops, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna max\r") == null);
-    var buffer: [1024]u8 = undefined;
-    const guidance = try finishedGuidance(rig, &buffer);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.saves);
-    try std.testing.expectEqualStrings("rui: New Sessions use gpt-6-luna · max · Codex; durability unconfirmed, inspect ~/.config/rui/preferences.\n", guidance);
-}
-
-test "a failed save from unreadable preferences keeps the local pick for the next start" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .max } }, &.initFill(.configured));
-    var config = try tmp.dir.openDir(std.testing.io, ".config/rui", .{});
-    defer config.close(std.testing.io);
-    const bad = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
-    try bad.writeStreamingAll(std.testing.io, "version=1\n");
-    bad.close(std.testing.io);
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
-    defer rig.close();
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("\x1b[B\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("Default not saved (check ~/.config/rui/preferences); new Sessions here still use gpt-6-luna · low · Codex", rig.overview.state.notice.?.text());
-    try std.testing.expect(try rig.press("/configure --permission-mode bypass\rhello\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
-    try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.start.model.?.slice());
-    try std.testing.expectEqualStrings("low", Seen.now.start.reasoning_effort.?.slice());
 }
 
 test "a start takes the saved effort only when the launch read saved defaults" {
@@ -3932,7 +3421,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     // The due Host read starts before the stop is asked for.
     try overview.dispatch(.lent);
     try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
-    try conversed(overview, .working, .stop);
+    _ = try conversed(overview, .working, .stop);
     // The Host read already running answers first; the stop goes before
     // the page queued ahead of it.
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
@@ -5658,10 +5147,10 @@ test "Settings Keys opens from the overview and Esc returns to settings" {
         try std.testing.expect(std.mem.indexOf(u8, text, "Ctrl-X twice") == null);
         try std.testing.expect(try rig.press("\x1b") == null);
         try std.testing.expect(!overview.root.settings_page.keys_open);
-        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
         try std.testing.expect(overview.root.session == null);
         try std.testing.expect(try rig.press("\x1b") == null);
-        try std.testing.expect(!overview.root.settings_open);
+        try std.testing.expect(!overview.root.input.layer.settingsOpen());
         try std.testing.expectEqual(selected, overview.state.selected);
     }
 }
@@ -5788,37 +5277,6 @@ test "a /setup that saves another model starts the next Session on it, unless th
         try std.testing.expectEqualStrings("codex", Seen.now.start.provider.?.slice());
         try std.testing.expectEqualStrings(case.model, Seen.now.start.model.?.slice());
     }
-}
-
-test "a model pick preserves the effort saved by setup" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
-    try pin(home, "codex", "gpt-5.5");
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, file_saving_operations, &cancellation);
-    defer rig.close();
-    Printing.use(rig, tmp.dir);
-    const Setup = struct {
-        var at: []const u8 = "";
-        fn command(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, _: []u8) anyerror!void {
-            _ = try preferences.update(at, .{ .reasoning_effort = .{ .set = .high } }, &.initFill(.configured));
-            const said = "Rui: Saved.\n";
-            if (std.c.write(1, said.ptr, said.len) != said.len) return error.TestUnexpectedResult;
-        }
-    };
-    Setup.at = home;
-    rig.overview.hooks.command = Setup.command;
-    try std.testing.expect(try rig.press("/setup --reasoning-effort high\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("/model ") == null);
-    try std.testing.expect(try rig.settle() == null);
-    try std.testing.expect(try rig.press("luna\r") == null);
-    try std.testing.expect(try rig.settle() == null);
-    const saved = try preferences.load(home);
-    try std.testing.expectEqualStrings("gpt-6-luna", saved.model.slice());
-    try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), saved.reasoning_effort);
 }
 
 test "a command that cannot start says why, and one that fails while it runs ends the overview, whose way out prints its output" {
@@ -5990,12 +5448,12 @@ test "conversation archive and restore use the exact unlisted opened reference t
     defer rig.close();
     rig.overview.opened = "x9y8z7".*;
     const selected = rig.overview.state.selected.session;
-    try conversed(rig.overview, .idle, .{ .archive = .active });
+    _ = try conversed(rig.overview, .idle, .{ .archive = .active });
     try rig.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
     try std.testing.expectEqualStrings("x9y8z7", &Seen.now.archive_session);
     try std.testing.expect(Seen.now.archive_requested);
-    try conversed(rig.overview, .idle, .unarchive);
+    _ = try conversed(rig.overview, .idle, .unarchive);
     try rig.lend();
     try std.testing.expectEqual(@as(usize, 2), Seen.now.archives);
     try std.testing.expect(!Seen.now.archive_requested);
@@ -6163,19 +5621,23 @@ test "a conversation's Upgrade waits for the conversation's running read, though
         for (overview.retired.items) |retired| overview.disposeSession(retired.left);
         overview.retired.deinit(std.testing.allocator);
     }
+    try std.testing.expect(try rig.settle() == null);
     const frontend = overview.app_session.?.frontend.?;
     try std.testing.expect(overview.root.session != null);
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    // Version's backend preserves command admission before starting a run.
+    // Version's backend preserves every admitted inspection before a run.
     const backend = overview.settingsBackend();
-    for ([_]bool{ false, true }) |queued| for ([_]bool{ false, true }) |running| {
-        if (!queued and !running) continue;
+    for ([_]bool{ false, true }) |typed| for ([_]bool{ false, true }) |queued| for ([_]bool{ false, true }) |running| {
+        if (!typed and !queued and !running) continue;
+        if (typed) frontend.info_edit = .{ .permission = .ask };
         if (queued) frontend.input.queueCommand("/requests");
         frontend.inspection.command_running = running;
         try std.testing.expectError(error.UpgradeUnavailable, backend.upgrade(backend.context));
         try std.testing.expect(!overview.state.upgrading());
+        if (typed) try std.testing.expectEqual(@as(@FieldType(@import("status_page.zig").Session, "permission"), .ask), frontend.info_edit.?.permission);
         if (queued) try std.testing.expectEqualStrings("/requests", frontend.input.takeCommand().?);
+        frontend.info_edit = null;
         frontend.inspection.command_running = false;
     };
     // A read the conversation still runs, then Upgrade before its tick.
@@ -6185,7 +5647,7 @@ test "a conversation's Upgrade waits for the conversation's running read, though
     for (0..3) |_| try overview.appUpgrade(&ctx);
     try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
     // Esc ends the run that never started, as on the overview.
-    try conversed(overview, .idle, .cancel_upgrade);
+    _ = try conversed(overview, .idle, .cancel_upgrade);
     frontend.reader.cancel();
     frontend.reader.join() catch {};
     var turns: usize = 0;
@@ -6250,10 +5712,9 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("/");
     var all = try rig.shown(80, 24);
     defer all.deinit();
-    try all.expectLines(13, &.{
+    try all.expectLines(14, &.{
         "/archive",
         "/configure",
-        "/model",
         "/rename",
         "/sessions   unarchived · archived · all",
         "/setup",
@@ -6262,23 +5723,22 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         " › /",
     });
     try std.testing.expect(std.mem.endsWith(u8, try all.line(23), "enter pick / esc close"));
-    // Ten rows leave five commands and a count of the rest.
-    var short = try rig.shown(80, 10);
+    // Nine rows leave four commands and a count of the rest.
+    var short = try rig.shown(80, 9);
     defer short.deinit();
     try short.expectLines(0, &.{
         "/archive",
         "/configure",
-        "/model",
         "/rename",
         "/sessions   unarchived · archived · all",
         "+2 more · type to narrow",
         "────────────────────────────────────────────────────────────────────────────────",
     });
     // Typing narrows it; Esc closes it and consumes the command draft.
-    _ = try rig.press("m");
+    _ = try rig.press("r");
     var narrowed = try rig.shown(80, 24);
     defer narrowed.deinit();
-    try narrowed.expectLines(19, &.{ "/model", "────────────────────────────────────────────────────────────────────────────────", " › /m" });
+    try narrowed.expectLines(19, &.{ "/rename", "────────────────────────────────────────────────────────────────────────────────", " › /r" });
     _ = try rig.press("\x1b");
     var closed = try rig.shown(80, 24);
     defer closed.deinit();
@@ -6363,23 +5823,16 @@ test "a click on New Session, as a terminal sends it, selects the composer" {
     try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
 }
 
-test "a click on a panel's lines, as a terminal sends it, opens no Session" {
-    // A model picker row takes its own click; see the Overview mouse model tests.
-    for ([_]bool{false}) |picker| {
-        const rig = try openListed();
-        defer rig.close();
-        if (picker) {
-            try std.testing.expect(try rig.press("/model ") == null);
-        } else try showOutputPanel(rig);
-        try std.testing.expect(rig.overview.state.listArea() != .sessions);
-        const selected = rig.overview.state.selected.session;
-        // Every row the list's place holds, the ones Sessions showed on
-        // included.
-        for (0..18) |row| try std.testing.expect(try rig.click(10, @intCast(row), 80, 24) == null);
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-        try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.session);
-        try std.testing.expect(rig.overview.state.listArea() != .sessions);
-    }
+test "a click on an output panel opens no Session because only the Sessions hear a press" {
+    const rig = try openListed();
+    defer rig.close();
+    try showOutputPanel(rig);
+    try std.testing.expect(rig.overview.state.listArea() != .sessions);
+    const selected = rig.overview.state.selected.session;
+    for (0..18) |row| try std.testing.expect(try rig.click(10, @intCast(row), 80, 24) == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    try std.testing.expectEqualStrings(&selected, &rig.overview.state.selected.session);
+    try std.testing.expect(rig.overview.state.listArea() != .sessions);
 }
 
 test "a followed Session link opens the peer, Esc reopens the Session it left, then the overview" {
@@ -6485,57 +5938,6 @@ test "App overview schedules spinning rows only while Root shows the list" {
                 try std.testing.expectEqual(spinning and layout.visible, ctx.redraw);
             }
         }
-    }
-}
-
-test "App overview accepts picker keys immediately after the first wide frame" {
-    const Keys = struct {
-        // Follow the drawn focus ancestry: the Composer deliberately ignores
-        // keys; the screen enclosing it must receive them through bubbling.
-        fn bubble(surface: vxfw.Surface, target: vxfw.Widget, ctx: *vxfw.EventContext, input: vxfw.Event) !bool {
-            if (surface.widget.eql(target)) {
-                try target.handleEvent(ctx, input);
-                return true;
-            }
-            for (surface.children) |child| if (try bubble(child.surface, target, ctx, input)) {
-                if (!ctx.consume_event) {
-                    ctx.phase = .bubbling;
-                    try surface.widget.handleEvent(ctx, input);
-                }
-                return true;
-            };
-            return false;
-        }
-    };
-    for ([_]u16{ 100, 120, 140 }) |width| {
-        const rig = try openComposer();
-        defer rig.close();
-        const overview = rig.overview;
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        try overview.widget().handleEvent(&ctx, .focus_in);
-        const focused = ctx.cmds.items[0].request_focus;
-        try std.testing.expect(focused.eql(overview.app_input.composer.widget()));
-        const first = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
-        var keys: app_events.Events = .init("/model luna");
-        while (keys.next()) |input| {
-            ctx.redraw = false;
-            ctx.consume_event = false;
-            ctx.phase = .capturing;
-            try overview.root.widget().captureEvent(&ctx, input);
-            ctx.phase = .at_target;
-            try std.testing.expect(try Keys.bubble(first, focused, &ctx, input));
-            try std.testing.expectEqual(true, ctx.redraw);
-            try std.testing.expect(ctx.consume_event);
-        }
-        try std.testing.expectEqualStrings("/model luna", overview.composerDraft().bytes);
-        try std.testing.expect(overview.state.picker != null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
-        var shown = try rig.shown(width, 24);
-        defer shown.deinit();
-        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "gpt-6-luna") != null);
     }
 }
 
@@ -6871,7 +6273,7 @@ test "App root navigation shows and focuses the main pane before every Session s
         }
         fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
             try std.testing.expect(overview.root.session == null);
-            try std.testing.expect(!overview.root.settings_open);
+            try std.testing.expect(!overview.root.input.layer.settingsOpen());
             try std.testing.expect((try focus(ctx)).eql(overview.widget()));
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
@@ -6975,7 +6377,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .target = .{ .open = target } } }));
                         try std.testing.expect(!ctx.quit);
                         try std.testing.expect(ctx.redraw);
-                        try std.testing.expect(!overview.root.settings_open);
+                        try std.testing.expect(!overview.root.input.layer.settingsOpen());
                         try std.testing.expect(!overview.root.settings_page.hasChoice());
                         try std.testing.expect(overview.follow.pending == null);
                         const kept = retained and (same or guard != .allowed);
@@ -7090,9 +6492,9 @@ test "App settings Enter reaches Root at both widths with and without a retained
             // do not synthesize a core click or set selected directly.
             try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
             try std.testing.expect(overview.state.selected == .settings);
-            try std.testing.expect(!overview.root.settings_open);
+            try std.testing.expect(!overview.root.input.layer.settingsOpen());
             try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
-            try std.testing.expect(overview.root.settings_open);
+            try std.testing.expect(overview.root.input.layer.settingsOpen());
             try std.testing.expect(overview.state.selected == .settings);
             try std.testing.expect(!ctx.quit);
             try std.testing.expect(ctx.redraw);
@@ -7242,10 +6644,6 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     overview.job_count = overview.jobs.len;
     try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
     overview.job_count = 0;
-    // A pick waiting outside the queue would be written after this edit.
-    overview.state.save.wanted = view.Default.of("codex", "gpt-5.5");
-    try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
-    overview.state.save.wanted = null;
     try overview.startUpgrade();
     try std.testing.expectEqual(@as(?upgrade_status.Run, .checking), backend.run(backend.context));
     try std.testing.expect(!overview.upgrade_job.started);
@@ -7260,7 +6658,7 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     ctx.phase = .capturing;
     try overview.root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expect(overview.upgrade_job.cancelling);
-    try std.testing.expect(overview.root.settings_open);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
     // Under the page nothing reaches the hidden draft or moves the list,
     // and leaving works as on the overview.
     const page = overview.root.settings_page.widget();
@@ -7268,39 +6666,13 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     try app_events.send(&ctx, "x\x1b[H\x18", overview.root.widget(), page);
     try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
     try std.testing.expectEqual(selected, overview.state.selected);
-    try std.testing.expect(!ctx.quit and overview.root.settings_open);
+    try std.testing.expect(!ctx.quit and overview.root.input.layer.settingsOpen());
     try app_events.send(&ctx, "\x03", overview.root.widget(), page);
     try std.testing.expect(ctx.quit);
     ctx.quit = false;
     _ = try overview.event(.leave);
     try std.testing.expectError(error.UpgradeUnavailable, overview.startUpgrade());
     try std.testing.expectError(error.DefaultsUnavailable, overview.saveDefaults(.{ .notifications = false }));
-}
-
-test "App settings saves and model picks leave the default asked for last in either order" {
-    for ([_]bool{ false, true }) |pick_first| {
-        var tmp = std.testing.tmpDir(.{});
-        defer tmp.cleanup();
-        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
-        var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-5.5" }, fake_operations, &cancellation);
-        defer rig.close();
-        const overview = rig.overview;
-        try std.testing.expect(try rig.press("/model ") == null);
-        try std.testing.expect(try rig.settle() == null);
-        const edit: preferences.Edit = .{ .provider = .{ .set = "codex" }, .model = .{ .set = "gpt-6.1-sol" } };
-        if (!pick_first) try overview.saveDefaults(edit);
-        try std.testing.expect(try rig.press("luna max\r") == null);
-        try std.testing.expect(overview.state.save.running != null);
-        if (pick_first) try overview.saveDefaults(edit);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expect(overview.defaults_save == .saved);
-        // The fake pick save writes no file, so the file holds the edit in
-        // both orders; the default in force is the one asked for last.
-        try std.testing.expectEqualStrings("gpt-6.1-sol", (try preferences.load(home)).model.slice());
-        try std.testing.expectEqualStrings(if (pick_first) "gpt-6.1-sol" else "gpt-6-luna", overview.state.default.?.model.slice());
-    }
 }
 
 test "App settings typed queued saves settle on departure and retain failures" {
@@ -7313,20 +6685,10 @@ test "App settings typed queued saves settle on departure and retain failures" {
         const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests" }, fake_operations, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        if (fail) {
-            // Admit a picker save through its real core transition as well:
-            // failure of the typed save must not strand that accepted effect.
-            try std.testing.expect(try rig.press("/model ") == null);
-            try std.testing.expect(try rig.settle() == null);
-            try overview.saveDefaults(.{ .provider = .{ .set = "not-a-provider" } });
-            try std.testing.expect(try rig.press("luna max\r") == null);
-            try std.testing.expect(overview.state.save.running != null);
-        } else try overview.saveDefaults(.{ .notifications = false });
+        if (fail) try overview.saveDefaults(.{ .provider = .{ .set = "not-a-provider" } }) else try overview.saveDefaults(.{ .notifications = false });
         _ = try overview.event(.leave);
-        const saves = Seen.now.saves;
         if (fail) {
             try std.testing.expectError(error.UnsupportedPreferenceProvider, overview.flushSaves());
-            try std.testing.expectEqual(saves + 1, Seen.now.saves);
             try std.testing.expect(overview.defaults_save == .failed);
         } else {
             try overview.flushSaves();
@@ -7507,7 +6869,6 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         const rig = try openComposer();
         defer rig.close();
         const overview = rig.overview;
-        try std.testing.expect(try rig.press("/model") == null);
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "future-chat\ngpt-5.5\n" } } }}) } }) == null);
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
@@ -7520,7 +6881,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         try std.testing.expect(try overview.event(.{ .models = .unanswered }) == null);
         try std.testing.expect(page.model_choice.active);
         if (release) {
-            try std.testing.expect(try overview.event(.{ .composed = .{ .input = .{ .composer = .{ .action = .clear } }, .draft = overview.composerDraft() } }) == null);
+            try std.testing.expect(try overview.event(.leave) == null);
         } else {
             try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{.{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\n" } } }}) } }) == null);
         }
@@ -7528,7 +6889,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(!page.hasChoice());
         try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
-        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
     }
 }
 
@@ -7552,406 +6913,216 @@ test "App settings Model keeps every named app binding live while filter text st
         try std.testing.expectEqual(action == .exit, ctx.quit);
         try std.testing.expectEqual(selected, overview.state.selected);
         try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
-        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
         try std.testing.expectEqual(key != .escape and key != .ctrl_g, page.hasChoice());
     };
 }
 
-test "App settings Sign-in Enter and click use the Overview owner and return to settings" {
-    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| for ([_]bool{ false, true }) |busy| {
-        errdefer std.debug.print("settings sign-in width={d} click={} busy={}\n", .{ width, click, busy });
-        const rig = try openComposer();
-        defer rig.close();
-        const overview = rig.overview;
-        var ctx = rig.context();
-        defer ctx.cmds.deinit(std.testing.allocator);
-        try overview.root.openSettings(&ctx);
-        const page = &overview.root.settings_page;
-        try std.testing.expect(page.backend.?.models != null);
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
-        if (busy) overview.defaults_save = .pending;
-        ctx.cmds.clearRetainingCapacity();
-        if (click) {
-            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 3, .row = 2 + @backingInt(AppSettings.Row.sign_in), .button = .left, .type = .press, .mods = .{} } });
-        } else {
-            page.select(.sign_in);
-            try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());
-        }
-        try std.testing.expectEqual(!busy, overview.root.sign_in_open);
-        try std.testing.expect(overview.root.settings_open);
-        try std.testing.expect(!page.hasChoice());
-        if (busy) {
-            try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
-            for (ctx.cmds.items) |command| try std.testing.expect(command != .request_focus);
-            continue;
-        }
-        try std.testing.expect(overview.root.sign_in.?.eql(overview.sign_in.widget()));
-        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(overview.sign_in.widget()));
-        // Defaultless Settings is not first-run: its owner returns here on Esc.
-        try std.testing.expect(!overview.signInIsFirstRun());
-        try app_events.send(&ctx, "\x1b", overview.root.widget(), overview.sign_in.widget());
-        try std.testing.expect(!overview.root.sign_in_open);
-        try std.testing.expect(overview.root.settings_open and !ctx.quit);
-        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(page.widget()));
-    };
-}
-
-test "Sign-in completion applies the core default and restores only a visible focus target" {
-    for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |warning| for ([_]bool{ false, true }) |default_failed| {
+test "App settings Model filters live choices and saves the next Session at both widths" {
+    for ([_]u16{ 140, 46 }) |width| for ([_][]const u8{ "codex", "openai" }) |provider| for ([_][]const u8{ "gpt-6-luna", "future-chat" }) |id| {
+        errdefer std.debug.print("Model width={d} provider={s} id={s}\n", .{ width, provider, id });
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
-        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .low } }, &.initFill(.configured));
+        try pin(home, provider, "gpt-5.5");
+        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .high }, .permission_mode = .{ .set = .ask } }, &.initFill(.configured));
         var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = provider, .model = "gpt-5.5" }, fake_operations, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        const session: vxfw.Text = .{ .text = "Retained Session" };
-        if (session_open) overview.root.session = session.widget();
-        overview.root.settings_open = true;
-        overview.root.sign_in_open = true;
-        var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
-        try activation.binding.provider.set("openai");
-        try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
-        try activation.store.set("/store");
-        activation.default_failed = default_failed;
-        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
+        // Core opening intents share one read; snapshots never enqueue.
+        try std.testing.expect((try overview.event(.{ .clicked = .{ .target = .settings } })).? == .open_settings);
+        const initial = modelsSnapshot(overview);
+        try std.testing.expect(initial.menu == null);
+        _ = modelsSnapshot(overview);
+        try std.testing.expect((try overview.event(.{ .clicked = .{ .target = .settings } })).? == .open_settings);
+        try std.testing.expectEqual(@as(usize, 1), overview.job_count);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
+        try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .new_session } }) == null);
+        try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
+            .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+            .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
+        }) } }) == null);
+        try std.testing.expect(try rig.press("kept draft") == null);
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
-        try signedIn(overview, &ctx, activation);
-        if (warning or default_failed) {
-            try std.testing.expectEqual(true, overview.state.notice != null);
-            const text = overview.state.notice.?.text();
-            try std.testing.expectEqual(warning, std.mem.indexOf(u8, text, "OpenAI URL invalid") != null);
-            try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, text, if (warning) "default not saved" else "couldn't save default") != null);
-            try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
+        try overview.root.openSettings(&ctx);
+        const page = &overview.root.settings_page;
+        try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(page.model_choice.active);
+        try std.testing.expectEqual(&overview.state.menu, page.model_choice.menu);
+        try app_events.send(&ctx, id, overview.root.widget(), page.widget());
+        var filtered = try rig.shown(width, 24);
+        defer filtered.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try filtered.text(), id) != null);
+        try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
+        try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());
+        try std.testing.expect(!page.hasChoice());
+        try std.testing.expectEqual(AppSettings.SaveState.pending, overview.defaults_save);
+        try std.testing.expect(try rig.settle() == null);
+        try page.widget().handleEvent(&ctx, .tick);
+        const saved = try preferences.load(home);
+        try std.testing.expectEqualStrings(id, saved.model.slice());
+        try std.testing.expectEqualStrings(provider, saved.provider.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), saved.reasoning_effort);
+        try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), saved.permission_mode);
+        try std.testing.expectEqualStrings(id, overview.state.default.?.model.slice());
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        try std.testing.expect(!overview.root.input.layer.settingsOpen());
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("kept draft", Seen.now.start.text.slice());
+        try std.testing.expectEqualStrings(id, Seen.now.start.model.?.slice());
+        try std.testing.expectEqualStrings(provider, Seen.now.start.provider.?.slice());
+    };
+}
+
+test "chat info archive status projects only the latest exact Session ledger request" {
+    const rig = try openComposer();
+    defer rig.close();
+    const overview = rig.overview;
+    overview.opened = "k7m2qx".*;
+    try std.testing.expectEqual(@import("chat_info.zig").SaveState.idle, archiveState(overview));
+    overview.state.requests[0] = .{ .kind = .archive, .session = overview.opened, .status = .done };
+    overview.state.requests[1] = .{ .kind = .archive, .session = "b4n8wd".*, .status = .pending };
+    overview.state.requests[2] = .{ .kind = .stop, .session = overview.opened, .status = .pending };
+    overview.state.requests[3] = .{ .kind = .unarchive, .session = overview.opened, .status = .pending };
+    overview.state.request_count = 4;
+    try std.testing.expectEqual(@import("chat_info.zig").SaveState.saved, archiveState(overview));
+    for ([_]@FieldType(view.Request, "status"){ .pending, .done, .failed, .unknown }) |status| {
+        overview.state.requests[4] = .{ .kind = .archive, .session = overview.opened, .status = status };
+        overview.state.request_count = 5;
+        const expected: @import("chat_info.zig").SaveState = switch (status) {
+            .pending => .pending,
+            .done => .saved,
+            .failed, .unknown => .failed,
+        };
+        try std.testing.expectEqual(expected, archiveState(overview));
+    }
+}
+
+test "chat info Archive receives its worker answer after the ordinary ledger entry retires" {
+    const Archive = struct {
+        const Outcome = enum { completed, pending, failed, unknown };
+        var outcome: Outcome = .completed;
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
         }
-        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
-        try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
-        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
-        try std.testing.expect(overview.state.login_at != null);
-        try std.testing.expect(!overview.root.sign_in_open and !overview.root.settings_open);
-        const expected = if (session_open) session.widget() else overview.app_input.composer.widget();
-        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(expected));
-        if (session_open) {
-            for (ctx.cmds.items) |command| if (command == .request_focus) {
-                try std.testing.expect(command.request_focus.eql(session.widget()));
+        fn archive(_: *Self, _: client.Requests, _: client.SessionArchiveInput, reply: *Reply) !void {
+            reply.* = switch (outcome) {
+                .completed => .{ .outcome = .accepted },
+                .pending => .{ .outcome = .accepted, .archive_pending = true },
+                .failed => .refused("archive_refused"),
+                .unknown => .unconfirmed("archive-handle"),
             };
         }
     };
-}
-
-test "Sign-in admission waits for every pending default writer and Host upgrade" {
-    var cancellation: client.Cancellation = .{};
-    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
-    defer rig.close();
-    const overview = rig.overview;
-    var ctx = rig.context();
-    defer ctx.cmds.deinit(std.testing.allocator);
-    for (0..4) |busy| {
-        switch (busy) {
-            0 => overview.defaults_save = .pending,
-            1 => overview.state.save.running = overview.state.default,
-            2 => overview.state.save.wanted = overview.state.default,
-            3 => overview.state.upgrade = .{ .run = .checking },
-            else => unreachable,
-        }
-        try std.testing.expectError(error.DefaultsUnavailable, overview.openSignIn(&ctx));
-        try std.testing.expect(!overview.root.sign_in_open);
-        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
-        overview.defaults_save = .idle;
-        overview.state.save = .{};
-        overview.state.upgrade = .{};
-    }
-    try overview.openSignIn(&ctx);
-    try std.testing.expect(overview.root.sign_in_open);
-}
-
-test "Sign-in keeps the pane through Session and Settings clicks with and without a Session" {
-    const Origin = enum { first_run, settings };
-    const Click = enum { session, settings };
-    const Nav = struct {
-        var dir: std.Io.Dir = undefined;
-        var files: u8 = 0;
-        var opens: usize = 0;
-        fn scratch(init: std.process.Init) !std.Io.File {
-            files += 1;
-            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
-        }
-        fn open(_: *Self, _: *vxfw.EventContext) !void {
-            opens += 1;
-        }
-        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
-            if (surface.widget.eql(target)) return at;
-            for (surface.children) |child| {
-                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
-            }
-            return null;
-        }
-        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
-            var i = ctx.cmds.items.len;
-            while (i > 0) {
-                i -= 1;
-                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
-            }
-            return null;
-        }
-    };
-    const Stage = @import("sign_in.zig").Stage;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    Nav.dir = tmp.dir;
-    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |retained| for ([_]Stage{ .choice, .key_entry }) |stage| for (std.enums.values(Click)) |click| {
-        errdefer std.debug.print("sign-in click: from={s} retained={} stage={s} click={s}\n", .{ @tagName(from), retained, @tagName(stage), @tagName(click) });
-        Nav.files = 0;
-        Nav.opens = 0;
+    for (std.enums.values(Archive.Outcome)) |outcome| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        Archive.dir = tmp.dir;
+        Archive.files = 0;
+        Archive.outcome = outcome;
+        var ops = fake_operations;
+        ops.open = openSession;
+        ops.archive = Archive.archive;
         var cancellation: client.Cancellation = .{};
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .sign_in = from == .first_run }, fake_operations, &cancellation);
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        Seen.now.listed = 2;
-        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-        try std.testing.expect(try rig.settle() == null);
+        overview.hooks.scratch = Archive.scratch;
+        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
         defer {
             if (overview.app_session) |left| {
-                if (left.frontend) |frontend| frontend.stop();
+                left.frontend.?.stop();
                 overview.disposeSession(left);
                 overview.app_session = null;
             }
-            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
-            overview.retired.deinit(std.testing.allocator);
         }
-        if (retained) {
-            overview.hooks.scratch = Nav.scratch;
-            overview.ops.open = openSession;
-            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
-            overview.app_session.?.frontend.?.reading.opening = false;
-        }
-        overview.ops.open = Nav.open;
-        var ctx = rig.context();
-        defer ctx.cmds.deinit(std.testing.allocator);
-        const page = &overview.sign_in;
-        // The rig gives no launch hooks; nothing here begins an attempt.
-        page.activate = null;
-        page.ready = null;
-        if (from == .settings) {
-            try overview.root.openSettings(&ctx);
-            try overview.openSignIn(&ctx);
-        }
-        try std.testing.expect(overview.root.sign_in_open);
-        const typed = "sk-typed-before-click";
-        if (stage == .key_entry) try app_events.send(&ctx, "\x1b[C\r" ++ typed, overview.root.widget(), page.widget());
-        try std.testing.expectEqual(stage, page.state.stage);
-        const session = overview.root.session;
-        const frontend = if (overview.app_session) |held| held.frontend else null;
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
-        try std.testing.expect(overview.root.listVisible());
-        const at: vxfw.RelativePoint = switch (click) {
-            .session => session: {
-                const list = Nav.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
-                const row = for (overview.app_sessions.shown_at) |span| {
-                    if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
-                } else return error.TestMissingSessionHit;
-                break :session .{ .row = list.row + row, .col = 4 };
-            },
-            .settings => .{ .row = 39, .col = 4 },
-        };
-        ctx.cmds.clearRetainingCapacity();
-        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
-            try app_events.mouse(&ctx, frame, .{ .col = @intCast(at.col), .row = @intCast(at.row), .button = .left, .type = kind, .mods = .{} });
-        }
-        try std.testing.expect(!ctx.quit);
-        try std.testing.expect(overview.root.sign_in_open);
-        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
-        try std.testing.expectEqual(session != null, overview.root.session != null);
-        if (session) |kept| try std.testing.expect(overview.root.session.?.eql(kept));
-        if (frontend) |held| try std.testing.expect(overview.app_session.?.frontend.? == held);
-        try std.testing.expectEqual(@as(usize, 0), Nav.opens);
-        try std.testing.expectEqual(stage, page.state.stage);
-        try std.testing.expectEqualStrings(if (stage == .key_entry) typed else "", page.key.slice());
-        for (ctx.cmds.items) |command| if (command == .request_focus) {
-            try std.testing.expect(command.request_focus.eql(page.widget()));
-        };
-        // The page names the app on its top row only when the list is hidden,
-        // as it was when Root set the page's title from its width.
-        for ([_]u16{ 140, 46 }) |width| {
-            var shown = try rig.shown(width, 40);
-            defer shown.deinit();
-            const top = try shown.line(0);
-            errdefer std.debug.print("top row at {d}: '{s}'\n", .{ width, top });
-            try std.testing.expectEqual(@as(usize, @intFromBool(width < Root.split_at)), std.mem.count(u8, top, "rui"));
-        }
-        // Esc leaves as before: from the key back to the choice, then out.
-        ctx.cmds.clearRetainingCapacity();
-        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
-        if (stage == .key_entry) {
-            try std.testing.expect(overview.root.sign_in_open);
-            try std.testing.expectEqual(Stage.choice, page.state.stage);
-            try std.testing.expectEqual(@as(usize, 0), page.key.len);
-            try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
-        }
-        try std.testing.expect(!overview.root.sign_in_open);
-        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
-        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
-        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
-    };
+        try std.testing.expect(try rig.settle() == null);
+        const frontend = overview.app_session.?.frontend.?;
+        // Opening has settled; invoke the panel's wired typed Archive action.
+        frontend.reading.opening = false;
+        const backend = frontend.app_info.backend;
+        _ = try backend.archive(backend.context);
+        try std.testing.expectEqual(@import("chat_info.zig").SaveState.pending, backend.state(backend.context));
+        try std.testing.expect(try rig.settle() == null);
+        const accepted = outcome == .completed or outcome == .pending;
+        try std.testing.expectEqual(if (accepted) @import("chat_info.zig").SaveState.saved else .failed, backend.state(backend.context));
+        // Definite answers retire; only uncertainty remains in the ledger.
+        try std.testing.expectEqual(@as(usize, @intFromBool(outcome == .unknown)), overview.state.request_count);
+    }
 }
 
-test "Sign-in Esc at the choice leaves unless the first-run screen has no default, and only that screen holds the overview's tick" {
-    const Origin = enum { first_run, settings };
-    const Nav = struct {
+test "chat info Archive backend forwards exact core ledger admission through the real Overview lender" {
+    const Files = struct {
         var dir: std.Io.Dir = undefined;
-        var files: u8 = 0;
+        var count: u8 = 0;
         fn scratch(init: std.process.Init) !std.Io.File {
-            files += 1;
-            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
-        }
-        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
-            var i = ctx.cmds.items.len;
-            while (i > 0) {
-                i -= 1;
-                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
-            }
-            return null;
-        }
-        fn titled(ctx: *vxfw.EventContext) bool {
-            for (ctx.cmds.items) |command| if (command == .set_title) return true;
-            return false;
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
         }
     };
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    Nav.dir = tmp.dir;
-    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |default| for ([_]bool{ false, true }) |retained| {
-        errdefer std.debug.print("sign-in escape: from={s} default={} retained={}\n", .{ @tagName(from), default, retained });
-        Nav.files = 0;
+    const Held = enum { none, pending, unknown };
+    for ([_]bool{ false, true }) |full| for (std.enums.values(Held)) |held| for ([_]view.ArchiveState{ .active, .archiving, .archived }) |archive| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var ops = fake_operations;
+        ops.open = openSession;
         var cancellation: client.Cancellation = .{};
-        // A resumed Session with unreadable saved defaults has no default
-        // and reaches sign-in only from Settings.
-        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = if (default) "codex" else null, .model = if (default) "gpt-6-luna" else null, .sign_in = from == .first_run }, fake_operations, &cancellation);
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
         defer rig.close();
         const overview = rig.overview;
-        try std.testing.expectEqual(default, overview.state.default != null);
-        Seen.now.listed = 2;
-        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
-        try std.testing.expect(try rig.settle() == null);
+        overview.hooks.scratch = Files.scratch;
+        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
         defer {
             if (overview.app_session) |left| {
-                if (left.frontend) |frontend| frontend.stop();
+                left.frontend.?.stop();
                 overview.disposeSession(left);
                 overview.app_session = null;
             }
-            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
-            overview.retired.deinit(std.testing.allocator);
         }
-        if (retained) {
-            overview.hooks.scratch = Nav.scratch;
-            overview.ops.open = openSession;
-            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
-            overview.app_session.?.frontend.?.reading.opening = false;
+        try std.testing.expect(try rig.settle() == null);
+        const frontend = overview.app_session.?.frontend.?;
+        frontend.reading.opening = false;
+        frontend.line.archive_state = archive;
+        if (held != .none) {
+            overview.state.requests[0] = .{ .kind = .archive, .session = overview.opened, .status = if (held == .pending) .pending else .unknown };
+            overview.state.request_count = 1;
         }
-        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-        defer arena.deinit();
-        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        const page = &overview.sign_in;
-        // The rig gives no launch hooks; nothing here begins an attempt.
-        page.activate = null;
-        page.ready = null;
-        if (from == .settings) {
-            try overview.root.openSettings(&ctx);
-            try overview.openSignIn(&ctx);
+        if (full) while (overview.state.request_count < view.max_requests) {
+            overview.state.requests[overview.state.request_count] = .{ .kind = .stop, .session = "other0".*, .status = .unknown };
+            overview.state.request_count += 1;
+        };
+        const before = overview.state.request_count;
+        const retained = overview.state.requests;
+        const backend = frontend.app_info.backend;
+        if (full or held != .none or archive != .active) {
+            try std.testing.expectEqual(view.ArchiveAdmission.refused, try backend.archive(backend.context));
+            try std.testing.expectEqual(@import("chat_info.zig").SaveState.idle, backend.state(backend.context));
+            try std.testing.expectEqual(before, overview.state.request_count);
+            try std.testing.expectEqualDeep(retained[0..before], overview.state.requests[0..before]);
+            try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
+            try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+        } else {
+            try std.testing.expectEqual(view.ArchiveAdmission.admitted, try backend.archive(backend.context));
+            try std.testing.expectEqual(@import("chat_info.zig").SaveState.pending, backend.state(backend.context));
+            try std.testing.expect(try rig.settle() == null);
+            try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+            try std.testing.expectEqual(@import("chat_info.zig").SaveState.saved, backend.state(backend.context));
         }
-        try std.testing.expect(overview.root.sign_in_open);
-        try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
-        const stays = from == .first_run and !default;
-        // Only the first-run screen with no default holds the overview's
-        // tick; under any other sign-in the overview and Session are served.
-        ctx.cmds.clearRetainingCapacity();
-        try appEvent(overview, &ctx, .tick);
-        try std.testing.expectEqual(!stays, Nav.titled(&ctx));
-        ctx.cmds.clearRetainingCapacity();
-        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
-        try std.testing.expect(!ctx.quit);
-        try std.testing.expectEqual(stays, overview.root.sign_in_open);
-        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
-        if (stays) {
-            try std.testing.expect(Nav.focus(&ctx) == null);
-            continue;
-        }
-        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
-        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
-        try std.testing.expectEqual(retained, overview.root.session != null);
     };
-}
-
-test "Overview mouse model row forwards the displayed typed effort and sign-in" {
-    for ([_][]const u8{ "/model gpt high api", "/model gpt low chatgpt" }) |draft| {
-        const rig = try openListed();
-        defer rig.close();
-        try std.testing.expect(try rig.press(draft) == null);
-        try std.testing.expect(try rig.settle() == null);
-        var shown = try rig.shown(100, 30);
-        defer shown.deinit();
-        const row: u16 = for (0..30) |y| {
-            if (std.mem.indexOf(u8, try shown.line(@intCast(y)), "gpt-6-luna") != null) break @intCast(y);
-        } else return error.TestExpectedModelRow;
-        try std.testing.expect(!rig.overview.state.picker.?.choice.?.id.eql("gpt-6-luna"));
-        try std.testing.expect(try rig.click(4, row, 100, 30) == null);
-        try std.testing.expect(try rig.settle() == null);
-        const saved = Seen.now.saved.?;
-        try std.testing.expectEqualStrings("gpt-6-luna", saved.model.slice());
-        const api = std.mem.indexOf(u8, draft, "api") != null;
-        try std.testing.expectEqual(if (api) model_picker.Provider.openai else model_picker.Provider.codex, saved.provider);
-        try std.testing.expectEqual(@as(?model_picker.ReasoningEffort, if (api) .high else .low), saved.effort);
-    }
-}
-
-test "Overview mouse model rows hover without selection or focus and click saves the drawn model" {
-    for ([_]u16{ 36, 80, 140 }) |width| {
-        const rig = try openListed();
-        defer rig.close();
-        try std.testing.expect(try rig.press("/model ") == null);
-        try std.testing.expect(try rig.settle() == null);
-        var plain = try rig.shown(width, 24);
-        defer plain.deinit();
-        const row: u16 = for (0..24) |y| {
-            if (std.mem.indexOf(u8, try plain.line(@intCast(y)), "gpt-6-luna") != null) break @intCast(y);
-        } else return error.TestExpectedModelRow;
-        const choice = rig.overview.state.picker.?.choice.?;
-        const selection = rig.overview.state.selected;
-        var ctx = rig.context();
-        defer ctx.cmds.deinit(std.testing.allocator);
-        try rig.overview.app_picker.widget().handleEvent(&ctx, .mouse_enter);
-        try rig.overview.app_picker.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = @intCast(row), .button = .none, .type = .motion, .mods = .{} } });
-        var hovered = try rig.shown(width, 24);
-        defer hovered.deinit();
-        const hover = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover });
-        const highlight = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .selection }).bg;
-        try std.testing.expectEqual(hover.bg, hovered.screen.readCell(4, row).?.style.bg);
-        try std.testing.expectEqual(hover.reverse, hovered.screen.readCell(4, row).?.style.reverse);
-        // The keyboard's row keeps the selection while another row is hovered.
-        const chosen: u16 = for (0..24) |y| {
-            if (y != row and std.meta.eql(plain.screen.readCell(4, @intCast(y)).?.style.bg, highlight)) break @intCast(y);
-        } else return error.TestExpectedSelectedRow;
-        try std.testing.expectEqual(highlight, hovered.screen.readCell(4, chosen).?.style.bg);
-        try std.testing.expectEqualStrings(choice.id.slice(), rig.overview.state.picker.?.choice.?.id.slice());
-        try std.testing.expectEqual(selection, rig.overview.state.selected);
-        for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
-        try rig.overview.app_picker.widget().handleEvent(&ctx, .mouse_leave);
-        var left = try rig.shown(width, 24);
-        defer left.deinit();
-        try std.testing.expectEqual(plain.screen.readCell(4, row).?.style, left.screen.readCell(4, row).?.style);
-        try std.testing.expect(try rig.click(4, row, width, 24) == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expect(Seen.now.saved != null);
-        try std.testing.expectEqualStrings("gpt-6-luna", Seen.now.saved.?.model.slice());
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
-    }
 }
 
 test "Overview mouse Settings hover persists across frames and never changes selection or focus" {
@@ -7978,7 +7149,7 @@ test "Overview mouse Settings hover persists across frames and never changes sel
     defer left.deinit();
     try std.testing.expectEqual(plain.screen.readCell(4, row).?.style, left.screen.readCell(4, row).?.style);
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
-    try std.testing.expect(rig.overview.root.settings_open);
+    try std.testing.expect(rig.overview.root.input.layer.settingsOpen());
 }
 
 test "Overview mouse Palette hover survives redraw and a click follows Enter except during paste" {
@@ -7988,11 +7159,11 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     var plain = try rig.shown(80, 24);
     defer plain.deinit();
     const row: u16 = for (0..24) |y| {
-        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "/model")) break @intCast(y);
+        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "/rename")) break @intCast(y);
     } else return error.TestExpectedPaletteRow;
     const index = for (rig.overview.state.commands.?.list.shown(), 0..) |entry, i| {
-        if (std.mem.startsWith(u8, entry.shown, "/model")) break i;
-    } else return error.TestExpectedModelCommand;
+        if (std.mem.startsWith(u8, entry.shown, "/rename")) break i;
+    } else return error.TestExpectedRenameCommand;
     const highlight = rig.overview.state.commands.?.highlight;
     const selection = rig.overview.state.selected;
     var ctx = rig.context();
@@ -8013,14 +7184,14 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     var left = try rig.shown(80, 24);
     defer left.deinit();
     try std.testing.expectEqual(plain.screen.readCell(4, row).?.style, left.screen.readCell(4, row).?.style);
-    rig.overview.root.pasting = true;
+    rig.overview.root.input.pasting = true;
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
     try std.testing.expectEqualStrings("/", rig.overview.composerDraft().bytes);
-    try std.testing.expect(rig.overview.state.picker == null);
-    rig.overview.root.pasting = false;
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    rig.overview.root.input.pasting = false;
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
-    try std.testing.expect(rig.overview.state.picker != null);
-    try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/model"));
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/rename"));
 }
 
 test "Overview mouse Palette click on a row drawn before the draft changed runs nothing" {
@@ -8058,7 +7229,7 @@ test "Overview mouse New Session forwards blank whitespace task command and past
         const row: u16 = for (0..24) |y| {
             if (std.mem.indexOf(u8, try shown.line(@intCast(y)), "+ New Session") != null) break @intCast(y);
         } else return error.TestExpectedNewRow;
-        rig.overview.root.pasting = pasting;
+        rig.overview.root.input.pasting = pasting;
         try std.testing.expect(try rig.click(4, row, 80, 24) == null);
         try std.testing.expect(try rig.settle() == null);
         const starts = !pasting and std.mem.eql(u8, draft, "a mouse task");
@@ -8074,45 +7245,6 @@ test "Overview mouse New Session forwards blank whitespace task command and past
             try std.testing.expectEqualStrings("high", held[1]);
         }
     };
-}
-
-test "Overview mouse model control columns change effort and sign-in without saving" {
-    for ([_]model_picker_view.Click.Target{ .lower_effort, .higher_effort, .{ .sign_in = .openai }, .{ .sign_in = .codex } }) |target| {
-        const rig = try openListed();
-        defer rig.close();
-        try std.testing.expect(try rig.press("/model gpt-6-luna") == null);
-        try std.testing.expect(try rig.settle() == null);
-        var shown = try rig.shown(80, 24);
-        defer shown.deinit();
-        const row: u16 = for (0..24) |y| {
-            if (std.mem.indexOf(u8, try shown.line(@intCast(y)), "gpt-6-luna") != null) break @intCast(y);
-        } else return error.TestExpectedModelRow;
-        const state = &rig.overview.state;
-        const before = state.picker.?.choice.?;
-        const plan = try model_picker_view.rows(shown.arena.allocator(), &state.menu, "gpt-6-luna", view.pickerDefaults(state), before, 80, rig.overview.caps.width, rig.overview.caps.unicode, state.menu_read);
-        const line = try plan.row(shown.arena.allocator(), plan.selected.?);
-        const column = for (line.controls) |control| {
-            if (std.meta.eql(control.target, target)) break control.start;
-        } else return error.TestExpectedControl;
-        const expected = switch (target) {
-            .lower_effort => before.row.stepEffort(.lower),
-            .higher_effort => before.row.stepEffort(.higher),
-            .sign_in => |provider| changed: {
-                var changed = before.row;
-                changed.provider = provider;
-                break :changed changed;
-            },
-            .model => unreachable,
-        };
-        try std.testing.expect(try rig.click(column, row, 80, 24) == null);
-        try std.testing.expect(state.picker != null);
-        try std.testing.expect(std.meta.eql(expected, state.picker.?.choice.?.row));
-        try std.testing.expectEqual(@as(usize, 0), Seen.now.saves);
-        try std.testing.expect(try rig.click(4, row, 80, 24) == null);
-        try std.testing.expect(try rig.settle() == null);
-        try std.testing.expectEqual(expected.provider, Seen.now.saved.?.provider);
-        try std.testing.expectEqual(expected.effort, Seen.now.saved.?.effort);
-    }
 }
 
 test "Overview mouse Palette activates fixed choices and skills through the same Enter policy" {
@@ -8252,4 +7384,336 @@ test "Overview mouse Host line without a start or retry has no hover or click ac
         try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
         for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
     }
+}
+
+test "App settings Sign-in Enter and click use the Overview owner and return to settings" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| for ([_]bool{ false, true }) |busy| {
+        errdefer std.debug.print("settings sign-in width={d} click={} busy={}\n", .{ width, click, busy });
+        const rig = try openComposer();
+        defer rig.close();
+        const overview = rig.overview;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        const page = &overview.root.settings_page;
+        try std.testing.expect(page.backend.?.models != null);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
+        if (busy) overview.defaults_save = .pending;
+        ctx.cmds.clearRetainingCapacity();
+        if (click) {
+            try page.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 3, .row = 2 + @backingInt(AppSettings.Row.sign_in), .button = .left, .type = .press, .mods = .{} } });
+        } else {
+            page.select(.sign_in);
+            try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());
+        }
+        try std.testing.expectEqual(!busy, overview.root.input.layer.signInOpen());
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
+        try std.testing.expect(!page.hasChoice());
+        if (busy) {
+            try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
+            for (ctx.cmds.items) |command| try std.testing.expect(command != .request_focus);
+            continue;
+        }
+        try std.testing.expect(overview.root.sign_in.?.eql(overview.sign_in.widget()));
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(overview.sign_in.widget()));
+        // Defaultless Settings is not first-run: its owner returns here on Esc.
+        try std.testing.expect(!overview.signInIsFirstRun());
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), overview.sign_in.widget());
+        try std.testing.expect(!overview.root.input.layer.signInOpen());
+        try std.testing.expect(overview.root.input.layer.settingsOpen() and !ctx.quit);
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(page.widget()));
+    };
+}
+
+test "Sign-in completion applies the core default and restores only a visible focus target" {
+    for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |warning| for ([_]bool{ false, true }) |default_failed| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        _ = try preferences.update(home, .{ .reasoning_effort = .{ .set = .low } }, &.initFill(.configured));
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        const session: vxfw.Text = .{ .text = "Retained Session" };
+        if (session_open) overview.root.session = session.widget();
+        overview.root.input.layer = .{ .sign_in = .{ .over = .settings } };
+        var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
+        try activation.binding.provider.set("openai");
+        try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
+        try activation.store.set("/store");
+        activation.default_failed = default_failed;
+        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try signedIn(overview, &ctx, activation);
+        if (warning or default_failed) {
+            try std.testing.expectEqual(true, overview.state.notice != null);
+            const text = overview.state.notice.?.text();
+            try std.testing.expectEqual(warning, std.mem.indexOf(u8, text, "OpenAI URL invalid") != null);
+            try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, text, if (warning) "default not saved" else "couldn't save default") != null);
+            try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
+        }
+        try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
+        try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
+        try std.testing.expect(overview.state.login_at != null);
+        try std.testing.expect(!overview.root.input.layer.signInOpen() and !overview.root.input.layer.settingsOpen());
+        const expected = if (session_open) session.widget() else overview.app_input.composer.widget();
+        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(expected));
+        if (session_open) {
+            for (ctx.cmds.items) |command| if (command == .request_focus) {
+                try std.testing.expect(command.request_focus.eql(session.widget()));
+            };
+        }
+    };
+}
+
+test "Sign-in admission waits for every pending default writer and Host upgrade" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    const Busy = enum { defaults_pending, departed, upgrade_checking, upgrade_reobserving, upgrade_blocked };
+    for (std.enums.values(Busy)) |busy| {
+        switch (busy) {
+            .defaults_pending => overview.defaults_save = .pending,
+            .departed => overview.state.left = true,
+            .upgrade_checking => overview.state.upgrade = .{ .run = .checking },
+            .upgrade_reobserving => overview.state.upgrade = .{ .after = .reobserving },
+            .upgrade_blocked => overview.state.upgrade = .{ .after = .blocked },
+        }
+        try std.testing.expectError(error.DefaultsUnavailable, overview.openSignIn(&ctx));
+        try std.testing.expect(!overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        overview.defaults_save = .idle;
+        overview.state.left = false;
+        overview.state.upgrade = .{};
+    }
+    try overview.openSignIn(&ctx);
+    try std.testing.expect(overview.root.input.layer.signInOpen());
+}
+
+test "Sign-in keeps the pane through Session and Settings clicks with and without a Session" {
+    const Origin = enum { first_run, settings };
+    const Click = enum { session, settings };
+    const Nav = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        var opens: usize = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn open(_: *Self, _: *vxfw.EventContext) !void {
+            opens += 1;
+        }
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
+            var i = ctx.cmds.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
+            }
+            return null;
+        }
+    };
+    const Stage = @import("sign_in.zig").Stage;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Nav.dir = tmp.dir;
+    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |retained| for ([_]Stage{ .choice, .key_entry }) |stage| for (std.enums.values(Click)) |click| {
+        errdefer std.debug.print("sign-in click: from={s} retained={} stage={s} click={s}\n", .{ @tagName(from), retained, @tagName(stage), @tagName(click) });
+        Nav.files = 0;
+        Nav.opens = 0;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .sign_in = from == .first_run }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        Seen.now.listed = 2;
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        defer {
+            if (overview.app_session) |left| {
+                if (left.frontend) |frontend| frontend.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        if (retained) {
+            overview.hooks.scratch = Nav.scratch;
+            overview.ops.open = openSession;
+            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            overview.app_session.?.frontend.?.reading.opening = false;
+        }
+        overview.ops.open = Nav.open;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        const page = &overview.sign_in;
+        // The rig gives no launch hooks; nothing here begins an attempt.
+        page.activate = null;
+        page.ready = null;
+        if (from == .settings) {
+            try overview.root.openSettings(&ctx);
+            try overview.openSignIn(&ctx);
+        }
+        try std.testing.expect(overview.root.input.layer.signInOpen());
+        const typed = "sk-typed-before-click";
+        if (stage == .key_entry) try app_events.send(&ctx, "\x1b[C\r" ++ typed, overview.root.widget(), page.widget());
+        try std.testing.expectEqual(stage, page.state.stage);
+        const session = overview.root.session;
+        const frontend = if (overview.app_session) |held| held.frontend else null;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const frame = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} });
+        try std.testing.expect(overview.root.listVisible());
+        const at: vxfw.RelativePoint = switch (click) {
+            .session => session: {
+                const list = Nav.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
+                const row = for (overview.app_sessions.shown_at) |span| {
+                    if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
+                } else return error.TestMissingSessionHit;
+                break :session .{ .row = list.row + row, .col = 4 };
+            },
+            .settings => .{ .row = 39, .col = 4 },
+        };
+        ctx.cmds.clearRetainingCapacity();
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+            try app_events.mouse(&ctx, frame, .{ .col = @intCast(at.col), .row = @intCast(at.row), .button = .left, .type = kind, .mods = .{} });
+        }
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expect(overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
+        try std.testing.expectEqual(session != null, overview.root.session != null);
+        if (session) |kept| try std.testing.expect(overview.root.session.?.eql(kept));
+        if (frontend) |held| try std.testing.expect(overview.app_session.?.frontend.? == held);
+        try std.testing.expectEqual(@as(usize, 0), Nav.opens);
+        try std.testing.expectEqual(stage, page.state.stage);
+        try std.testing.expectEqualStrings(if (stage == .key_entry) typed else "", page.key.slice());
+        for (ctx.cmds.items) |command| if (command == .request_focus) {
+            try std.testing.expect(command.request_focus.eql(page.widget()));
+        };
+        // The page names the app on its top row only when the list is hidden,
+        // as it was when Root set the page's title from its width.
+        for ([_]u16{ 140, 46 }) |width| {
+            var shown = try rig.shown(width, 40);
+            defer shown.deinit();
+            const top = try shown.line(0);
+            errdefer std.debug.print("top row at {d}: '{s}'\n", .{ width, top });
+            try std.testing.expectEqual(@as(usize, @intFromBool(width < Root.split_at)), std.mem.count(u8, top, "rui"));
+        }
+        // Esc leaves as before: from the key back to the choice, then out.
+        ctx.cmds.clearRetainingCapacity();
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        if (stage == .key_entry) {
+            try std.testing.expect(overview.root.input.layer.signInOpen());
+            try std.testing.expectEqual(Stage.choice, page.state.stage);
+            try std.testing.expectEqual(@as(usize, 0), page.key.len);
+            try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        }
+        try std.testing.expect(!overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
+        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
+        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
+    };
+}
+
+test "Sign-in Esc at the choice leaves unless the first-run screen has no default, and only that screen holds the overview's tick" {
+    const Origin = enum { first_run, settings };
+    const Nav = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn focus(ctx: *vxfw.EventContext) ?vxfw.Widget {
+            var i = ctx.cmds.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
+            }
+            return null;
+        }
+        fn titled(ctx: *vxfw.EventContext) bool {
+            for (ctx.cmds.items) |command| if (command == .set_title) return true;
+            return false;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Nav.dir = tmp.dir;
+    for (std.enums.values(Origin)) |from| for ([_]bool{ false, true }) |default| for ([_]bool{ false, true }) |retained| {
+        errdefer std.debug.print("sign-in escape: from={s} default={} retained={}\n", .{ @tagName(from), default, retained });
+        Nav.files = 0;
+        var cancellation: client.Cancellation = .{};
+        // A resumed Session with unreadable saved defaults has no default
+        // and reaches sign-in only from Settings.
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests", .provider = if (default) "codex" else null, .model = if (default) "gpt-6-luna" else null, .sign_in = from == .first_run }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        try std.testing.expectEqual(default, overview.state.default != null);
+        Seen.now.listed = 2;
+        try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+        try std.testing.expect(try rig.settle() == null);
+        defer {
+            if (overview.app_session) |left| {
+                if (left.frontend) |frontend| frontend.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        if (retained) {
+            overview.hooks.scratch = Nav.scratch;
+            overview.ops.open = openSession;
+            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            overview.app_session.?.frontend.?.reading.opening = false;
+        }
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const page = &overview.sign_in;
+        // The rig gives no launch hooks; nothing here begins an attempt.
+        page.activate = null;
+        page.ready = null;
+        if (from == .settings) {
+            try overview.root.openSettings(&ctx);
+            try overview.openSignIn(&ctx);
+        }
+        try std.testing.expect(overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
+        const stays = from == .first_run and !default;
+        // Only the first-run screen with no default holds the overview's
+        // tick; under any other sign-in the overview and Session are served.
+        ctx.cmds.clearRetainingCapacity();
+        try appEvent(overview, &ctx, .tick);
+        try std.testing.expectEqual(!stays, Nav.titled(&ctx));
+        ctx.cmds.clearRetainingCapacity();
+        try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
+        try std.testing.expect(!ctx.quit);
+        try std.testing.expectEqual(stays, overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
+        if (stays) {
+            try std.testing.expect(Nav.focus(&ctx) == null);
+            continue;
+        }
+        const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
+        try std.testing.expect(Nav.focus(&ctx).?.eql(back));
+        try std.testing.expectEqual(retained, overview.root.session != null);
+    };
 }

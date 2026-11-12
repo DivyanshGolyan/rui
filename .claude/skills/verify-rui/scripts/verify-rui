@@ -230,6 +230,11 @@ def load_build(sha):
 def fixture_answer(text, n, answers="echo"):
     """One answer policy, shared by the echo and realistic fixture modes."""
     text = text or ""
+    if "chat info specimen" in text:
+        return """- Deadline checked before backoff.
+- Backoff stays within time left.
+- The retry draft is ready.
+"""
     if "compact rich answer" in text:
         return """## What I changed
 
@@ -1008,7 +1013,7 @@ def term_record(run, name):
 
 EXIT_KEY = "C-c"
 
-KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
+KEYS = {"M-i": b"\x1bi", "M-d": b"\x1bd", "Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
         "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-PgUp": b"\x1b[5;2~",
         # Exact SGR wheel reports for L2 injection; terminal tracking determines
@@ -1383,7 +1388,7 @@ PHYSICAL_STEPS = [
 TMUX_STEPS = [
     ("tmux-type", "In the NEW tmux window: click inside it, TYPE  hello tmux  and press  Enter.", "tmux_submit", 90),
     ("tmux-wheel", "Over the tmux window, scroll the wheel UP a few notches, then press  Control-G.", "tmux_wheel", 60),
-    ("tmux-status", "TYPE  /status  and press  Enter.", "tmux_status", 40),
+    ("tmux-info", "Press  Alt-I  to open chat info.", "tmux_info", 40),
     ("tmux-exit", "Press  Esc, then  Control-C.", "tmux_exit", 40),
 ]
 UP = (b"\x1b[A", b"\x1bOA")
@@ -1538,9 +1543,9 @@ class Grader:
         return ups >= 1 and moved and b"\x07" in data and bool(self.live(last)), {
             "arrow_up_sequences": ups, "scrolled": moved, "back_live": bool(self.live(last)), "bytes": data.hex()[:400]}
 
-    def tmux_status(self):
-        page = [f for f in self.new_frames() if "Session: demo" in f["screen"] and "Work:" in f["screen"]]
-        return bool(page) and not self.provider(), {"status_frame_gen": page[0]["gen"] if page else None,
+    def tmux_info(self):
+        page = [f for f in self.new_frames() if "Permissions" in f["screen"] and "Copy last answer" in f["screen"]]
+        return bool(page) and not self.provider(), {"info_frame_gen": page[0]["gen"] if page else None,
                                                     "provider_requests": len(self.provider())}
 
     def tmux_exit(self):
@@ -1573,7 +1578,7 @@ REHEARSAL_INPUT = {
     "esc": [b"\x1b[5~", b"\x1b"], "consent": [b"consent check", b"\r"], "read": [b"\x1b[6~"] * 4,
     "allow": [b"a", b"\r"], "deny": [b"consent check", b"\r", b"WAIT:Run Bash"] + [b"\x1b[6~"] * 4 + [b"d", b"\r"],
     "ctrl-c": [b"\x03"], "tmux-type": [b"hello tmux", b"\r"], "tmux-wheel": [b"\x1b[A"] * 3 + [b"\x07"],
-    "tmux-status": [b"/status", b"\r"], "tmux-exit": [b"\x1b", b"\x03"],
+    "tmux-info": [b"\x1bi"], "tmux-exit": [b"\x1b", b"\x03"],
 }
 
 

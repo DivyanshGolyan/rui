@@ -21,6 +21,7 @@ const empty_marker: vxfw.Text = .{ .text = "" };
 /// The screen's actions a click runs.
 pub const Actions = struct {
     userdata: *anyopaque,
+    details: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
     /// `ctrl+r retries`, or whatever key the needs text ends with.
     key: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     /// `ctrl+x stop`.
@@ -31,7 +32,7 @@ pub const Actions = struct {
     unarchive: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     /// `↓`: the latest view, as Esc.
     latest: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
-    /// `+N more running · /status`.
+    /// The chat info panel.
     status_page: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
 };
 
@@ -69,6 +70,7 @@ pub const View = struct {
     /// Where a send stands (`chrome.Send.progress`).
     progress: ?[]const u8 = null,
     stoppable: bool = false,
+    details: bool = false,
     /// Identity after the narrow back control, or the wide input gutter.
     facts: Identity = .{},
     /// The reply to the last key that shows now (`Notice.current`), and
@@ -87,12 +89,15 @@ facts: struct {
     style: vaxis.Style = .{},
     method: vaxis.gwidth.Method = .unicode,
     back: Chip,
+    open: Chip,
 },
 activity: ActivityBlock,
 marker: Chip,
 marker_text: [chrome.marker_bytes]u8 = undefined,
 state: vxfw.Text = .{ .text = "", .softwrap = false, .overflow = .clip, .width_basis = .parent },
 unarchive: Chip,
+info: Chip,
+details: Chip,
 list_visible: bool = false,
 stoppable: bool = false,
 
@@ -104,10 +109,12 @@ pub fn init(actions: Actions) Self {
     }.of;
     return .{
         .status = .{ .key = chip(actions.key, actions.userdata), .stop = chip(actions.stop, actions.userdata) },
-        .facts = .{ .back = chip(actions.back, actions.userdata) },
+        .facts = .{ .back = chip(actions.back, actions.userdata), .open = chip(actions.status_page, actions.userdata) },
         .activity = .{ .more = chip(actions.status_page, actions.userdata) },
         .marker = chip(actions.latest, actions.userdata),
         .unarchive = chip(actions.unarchive, actions.userdata),
+        .info = chip(actions.status_page, actions.userdata),
+        .details = chip(actions.details orelse actions.key, actions.userdata),
     };
 }
 
@@ -125,6 +132,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     self.facts.identity = view.facts;
     self.list_visible = view.list_visible;
     self.stoppable = view.stoppable;
+    self.details.label = if (view.details) "alt+d details" else "";
     self.state.text = stateText(self.status.bar.left, self.status.key.label);
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
     screen.input.facts = .{ .userdata = self, .drawFn = drawFooter };
@@ -151,7 +159,10 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const self: *Self = @ptrCast(@alignCast(raw));
     self.unarchive.label = if (self.facts.identity.archive == .archived) "/unarchive" else "";
     self.status.stop.label = if (self.stoppable) chrome.stop_key else "";
-    const keys = [_]*Chip{ &self.status.key, &self.unarchive, &self.status.stop };
+    self.info.label = "alt+i info";
+    const primary_width = self.info.width() + self.status.key.width() + self.unarchive.width() + self.status.stop.width() + 9;
+    if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
+    const keys = [_]*Chip{ &self.info, &self.details, &self.status.key, &self.unarchive, &self.status.stop };
     var right: std.ArrayList(u8) = .empty;
     for (keys) |key| if (key.label.len != 0) {
         if (right.items.len != 0) try right.appendSlice(ctx.arena, " · ");
@@ -171,11 +182,19 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     var surface = try footer.widget().draw(ctx);
     surface.widget = .{ .userdata = self, .drawFn = drawFooter };
     if (surface.size.width == 0 or surface.size.height == 0) return surface;
-    const children = try ctx.arena.alloc(vxfw.SubSurface, keys.len + 1);
+    const children = try ctx.arena.alloc(vxfw.SubSurface, keys.len + 2);
     var count: usize = 0;
     if (!self.list_visible and right_col > 1) {
         self.facts.back.label = "‹";
-        children[count] = try footerChip(&self.facts.back, self.facts.style, ctx, 1, 1);
+        children[count] = try footerChip(&self.facts.back, self.facts.style, self.facts.method, ctx, 1, 1);
+        count += 1;
+    }
+    // The visible Session identity is the same info control as Alt-I, not
+    // a second interpretation of the Session/model/effort facts.
+    self.facts.open.label = label;
+    const identity_col: u16 = @intCast(ctx.stringWidth(prefix));
+    if (label.len != 0 and identity_col < right_col) {
+        children[count] = try footerChip(&self.facts.open, self.facts.style, self.facts.method, ctx, identity_col, right_col - identity_col);
         count += 1;
     }
     var col: usize = right_col;
@@ -185,7 +204,7 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         first = false;
         if (col < surface.size.width) {
             const width: u16 = @intCast(@min(ctx.stringWidth(key.label), surface.size.width - col));
-            children[count] = try footerChip(key, self.facts.style, ctx, @intCast(col), width);
+            children[count] = try footerChip(key, self.facts.style, self.facts.method, ctx, @intCast(col), width);
             count += 1;
         }
         col += ctx.stringWidth(key.label);
@@ -194,7 +213,8 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     return surface;
 }
 
-fn footerChip(chip: *Chip, style: vaxis.Style, ctx: vxfw.DrawContext, col: u16, width: u16) !vxfw.SubSurface {
+fn footerChip(chip: *Chip, style: vaxis.Style, method: vaxis.gwidth.Method, ctx: vxfw.DrawContext, col: u16, width: u16) !vxfw.SubSurface {
+    chip.method = method;
     chip.style = style;
     chip.hover = style;
     chip.hover.ul_style = .single;
@@ -284,7 +304,7 @@ test "the status row shows the notice under what needs the person, and preserves
     var transcript: @import("DocumentView.zig") = .{ .document = document };
     var facade: AppScreen.Content = .{ .shown = transcript.widget() };
     var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
-    const palette: vxfw.Text = .{ .text = "/model" };
+    const palette: vxfw.Text = .{ .text = "/setup" };
 
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
     try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.left);
@@ -370,13 +390,15 @@ test "SessionChrome footer drops whole items with an ellipsis at narrow widths" 
         const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
         var text: std.Io.Writer.Allocating = .init(arena.allocator());
         for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-        try std.testing.expectEqualStrings(if (list_visible) " Fix retry deadline · gpt-6.1-sol · high · …" else " ‹ Fix retry deadline · gpt-6.1-sol · high · …", std.mem.trimEnd(u8, text.written(), " "));
+        try std.testing.expectEqualStrings(if (list_visible) " Fix retry deadline · …" else " ‹ Fix retry deadline · …", std.mem.trimEnd(u8, text.written()[0..std.mem.indexOf(u8, text.written(), "alt+i info").?], " "));
+        try std.testing.expect(std.mem.endsWith(u8, text.written(), "alt+i info"));
     };
     self.stoppable = true;
     const stopped = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
     var text: std.Io.Writer.Allocating = .init(arena.allocator());
     for (stopped.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-    try std.testing.expectEqualStrings(" Fix retry deadline · …            ctrl+x stop", text.written());
+    try std.testing.expect(std.mem.startsWith(u8, text.written(), " Fix retry deadline"));
+    try std.testing.expect(std.mem.endsWith(u8, text.written(), "alt+i info · ctrl+x stop"));
 }
 
 test "Session chrome back control exists only while the shell hides the list" {
@@ -395,7 +417,7 @@ test "Session chrome back control exists only while the shell hides the list" {
         const row = try input.facts.draw(draw);
         if (list_visible) {
             try std.testing.expectEqualStrings("d", row.readCell(1, 0).char.grapheme);
-            try std.testing.expectEqual(@as(usize, 0), row.children.len);
+            try std.testing.expectEqual(@as(usize, 2), row.children.len);
         } else {
             try std.testing.expectEqualStrings("d", row.readCell(3, 0).char.grapheme);
             try std.testing.expectEqualStrings("‹", row.children[0].surface.readCell(0, 0).char.grapheme);
@@ -410,6 +432,78 @@ test "Session chrome back control exists only while the shell hides the list" {
     }
 }
 
+test "SessionChrome makes every visible identity cell the same info action as its hint" {
+    for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |list_visible| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var recorder: Recorder = .{};
+        var self: Self = .init(recorder.actions());
+        self.list_visible = list_visible;
+        self.facts.identity = .{ .current = .{ .name = "Chat", .model = "gpt-6-luna", .effort = .low, .left = 62 } };
+        const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        defer ctx.cmds.deinit(arena.allocator());
+        var cells: usize = 0;
+        for (footer.children) |child| if (child.surface.widget.eql(self.facts.open.widget()) or child.surface.widget.eql(self.info.widget())) {
+            for (0..child.surface.size.width) |offset| {
+                const col: i16 = @intCast(child.origin.col + @as(i17, @intCast(offset)));
+                const before = recorder.clicked.get(.status_page);
+                for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = col, .button = .left, .mods = .{}, .type = kind });
+                try std.testing.expectEqual(before + 1, recorder.clicked.get(.status_page));
+                cells += 1;
+            }
+        };
+        try std.testing.expect(cells > "alt+i info".len);
+        try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.back));
+        if (!list_visible) {
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = 1, .button = .left, .mods = .{}, .type = kind });
+            try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.back));
+        }
+    };
+}
+
+test "SessionChrome identity chips preserve cells and clicks for every terminal width method" {
+    defer vxfw.DrawContext.init(.unicode);
+    const names = [_][]const u8{ "👩‍🚀X", "❤️X", "Retry 👩‍🚀 with ❤️" };
+    for ([_]vaxis.gwidth.Method{ .wcwidth, .unicode, .no_zwj }) |method| for (names) |name| for ([_]bool{ false, true }) |list_visible| for (0..66) |size| {
+        const width: u16 = if (size == 65) 140 else @intCast(size);
+        vxfw.DrawContext.init(method);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var recorder: Recorder = .{};
+        var self: Self = .init(recorder.actions());
+        self.list_visible = list_visible;
+        self.facts.method = method;
+        self.facts.identity = .{ .current = .{ .name = name, .model = "model", .effort = .low, .left = 62 } };
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+        const footer = try drawFooter(&self, draw);
+        var terminal: vaxis.Screen = .{ .width = width, .height = 1, .width_method = method, .buf = try arena.allocator().alloc(vaxis.Cell, width) };
+        @memset(terminal.buf, .{});
+        footer.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 1, .screen = &terminal }, self.facts.open.widget());
+        // Footer owns the text and its cell positions. Adding mouse targets
+        // must not move or repaint any glyph with a different terminal width.
+        for (footer.buffer, terminal.buf) |expected, actual| {
+            try std.testing.expectEqualStrings(expected.char.grapheme, actual.char.grapheme);
+            try std.testing.expectEqual(expected.char.width, actual.char.width);
+        }
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        defer events.cmds.deinit(arena.allocator());
+        for (footer.children) |child| {
+            try std.testing.expect(child.origin.col >= 0);
+            try std.testing.expect(child.origin.col + child.surface.size.width <= width);
+            for (child.surface.buffer, 0..) |cell, col| try std.testing.expect(col + cell.char.width <= child.surface.size.width);
+            if (!child.surface.widget.eql(self.facts.open.widget()) and !child.surface.widget.eql(self.info.widget())) continue;
+            for (0..child.surface.size.width) |offset| {
+                const col: i16 = @intCast(child.origin.col + @as(i17, @intCast(offset)));
+                const before = recorder.clicked.get(.status_page);
+                for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&events, footer, .{ .row = 0, .col = col, .button = .left, .mods = .{}, .type = kind });
+                try std.testing.expectEqual(before + 1, recorder.clicked.get(.status_page));
+            }
+        }
+        try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.back));
+    };
+}
+
 test "SessionChrome footer and new-entry chips underline on hover without acting" {
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
@@ -421,7 +515,7 @@ test "SessionChrome footer and new-entry chips underline on hover without acting
     defer arena.deinit();
     const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 1 }, .cell_size = .{} };
     const footer = try drawFooter(&self, draw_ctx);
-    try std.testing.expectEqual(@as(usize, 4), footer.children.len);
+    try std.testing.expectEqual(@as(usize, 6), footer.children.len);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]*Chip{ &self.facts.back, &self.status.key, &self.unarchive, &self.status.stop, &self.marker }) |chip| {
         try chip.widget().handleEvent(&ctx, .mouse_enter);
