@@ -51,7 +51,7 @@ RULES = (
         r"misalignment_policy_violation|invalid_prompt|model_not_found|refresh_token_expired|"
         r"refresh_token_reused|refresh_token_invalidated)\b")),
     ("names a ChatGPT endpoint", re.compile(r"chatgpt\.com")),
-    ("switches on a provider", re.compile(r"\bProvider\.(?:codex|openai)\b|\.(?:codex|openai)\s*=>")),
+    ("switches on a provider", re.compile(r"\bProvider\.(?:codex|openai|chatgpt)\b|\.(?:codex|openai|chatgpt)\s*=>")),
 )
 
 # What a codec's production code may not do: read the model's name, or name

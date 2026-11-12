@@ -549,7 +549,7 @@ def main():
             noncanonical = json.dumps({
                 "version": host_process.WIRE_VERSION, "type": "host_info", "store": str(store.resolve()),
                 "instance": "0" * 32, "active_capacity": "01", "started_at": "1792918800", "custody_occupied": "1",
-                "paused": False, "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}},
+                "paused": False, "capabilities": {"bash": True, "providers": {"codex": "unserved", "openai": "unserved", "chatgpt": "unserved"}},
             }).encode()
             valid_body = noncanonical.replace(b'"active_capacity": "01"', b'"active_capacity": "1"')
             ambiguous_bodies = (
@@ -689,7 +689,7 @@ def main():
                 "version": host_process.WIRE_VERSION, "type": "host_status", "status": "ready", "store": str(store.resolve()),
                 "instance": match.group(1), "active_capacity": "3", "intake_capacity": "100",
                 "descriptor_limit": fields["descriptor_limit"], "started_at": started_at, "custody_occupied": "0",
-                "paused": False, "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
+                "paused": False, "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}},
                 "diagnostics": f"{store.resolve()}/diagnostics",
             }, selected
             assert exchange("host_info", lambda: cli_status(home, "--store", alias)) == selected
@@ -709,7 +709,7 @@ def main():
                 "instance": match.group(1), "active_capacity": "3",
                 "intake_capacity": "100", "descriptor_limit": fields["descriptor_limit"],
                 "started_at": started_at, "custody_occupied": "0", "paused": False,
-                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved"}},
+                "capabilities": {"bash": True, "providers": {"codex": "chatgpt_device", "openai": "unserved", "chatgpt": "unserved"}},
             }
             assert b'"type":"host_info"' in exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)
             # Holding new Turns is Host memory: the reply and Host status say it.
@@ -756,7 +756,7 @@ def main():
             selected = exchange("host_info", lambda: cli_status(home))
             assert selected["status"] == "ready" and selected["store"] == str(store.resolve()), selected
             assert selected["active_capacity"] == "7", selected
-            assert selected["capabilities"] == {"bash": True, "providers": {"codex": "unserved", "openai": "unserved"}}, selected
+            assert selected["capabilities"] == {"bash": True, "providers": {"codex": "unserved", "openai": "unserved", "chatgpt": "unserved"}}, selected
             assert selected["instance"] == match_second.group(1), selected
             assert match_second.group(1) != match.group(1), "replacement reused instance identity"
             old_instance = exchange("host_info", lambda: raw_info(stale, store.resolve(), match.group(1)), 5)

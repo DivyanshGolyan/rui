@@ -9,6 +9,7 @@ const h2 = @import("h2");
 const api_key = @import("api_key.zig");
 const codex_auth = @import("codex_auth.zig");
 const codex_credentials = @import("codex_credentials.zig");
+const credential_policy = @import("codex_credential_policy.zig");
 const provider_transport = @import("provider.zig");
 const turn_states = @import("turn_states.zig");
 
@@ -18,27 +19,40 @@ const Provider = protocol.Provider;
 /// account's token goes to (a fixture's loopback aside).
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 
-/// A ChatGPT sign-in's credential file, and whether it is the test fixture.
-/// The Host's sign-in worker runs its jobs: a launch lease, or the one
-/// forced refresh after a model 401.
-pub const Authentication = struct {
+/// OpenAI's own Responses endpoint: an API key's default, and the only one
+/// a ChatGPT plan sign-in's token goes to (a fixture's loopback aside).
+pub const api_endpoint = "https://api.openai.com/v1/responses";
+
+/// A sign-in the Host serves: its credential file, the token wire its
+/// refresh speaks and where that refresh goes. The Host's sign-in worker runs
+/// each job for the source the job names: a launch lease, or the one forced
+/// refresh after a model 401.
+pub const Authentication = codex_auth.Source;
+
+/// A sign-in file a Host serves, and where its refresh goes. The
+/// `Credential` arm that holds it names the wire its refresh speaks.
+pub const SignIn = struct {
     path: []const u8,
-    fixture: bool = false,
+    refresh: Authentication.RefreshTarget = .issuer,
 
-    /// The storage an acquisition reads through, which the worker keeps.
-    pub const Work = codex_auth.Work;
-
-    /// Leases the current token into `lease`, refreshing it first when due.
-    pub fn acquire(self: Authentication, io: std.Io, work: *Work, lease: *Lease) !void {
-        try codex_auth.acquireInto(io, self.path, self.fixture, work, lease);
-    }
-
-    /// Refreshes the token a 401 rejected at `generation`; false when another
-    /// refresh already replaced it.
-    pub fn refresh(self: Authentication, io: std.Io, generation: u64) !bool {
-        return codex_auth.forceRefresh(io, self.path, self.fixture, generation);
+    fn source(self: SignIn, wire: codex_auth.Wire) Authentication {
+        return .{ .path = self.path, .wire = wire, .refresh = self.refresh };
     }
 };
+
+/// The storage an acquisition reads through, which the worker keeps.
+pub const Work = codex_auth.Work;
+
+/// Leases `source`'s current token into `lease`, refreshing it first when due.
+pub fn acquire(source: Authentication, io: std.Io, work: *Work, lease: *Lease) !void {
+    try codex_auth.acquireInto(io, source, work, lease);
+}
+
+/// Refreshes `source`'s token a 401 rejected at `generation`; false when
+/// another refresh already replaced it.
+pub fn refresh(source: Authentication, io: std.Io, generation: u64) !bool {
+    return codex_auth.forceRefresh(io, source, generation);
+}
 
 /// A sign-in's current token, which the Host's sign-in worker leases.
 pub const Lease = codex_credentials.Lease;
@@ -58,7 +72,7 @@ pub fn acceptsOutputSchema(route: protocol.Route) bool {
 pub fn endpoint(provider: Provider) []const u8 {
     return switch (provider) {
         .codex => managed_endpoint,
-        .openai => "https://api.openai.com/v1/responses",
+        .openai, .chatgpt => api_endpoint,
     };
 }
 
@@ -101,8 +115,12 @@ pub fn responsesBase(responses: []const u8) ?[]const u8 {
 pub const Credential = union(enum) {
     /// A development endpoint, which takes no credential.
     none,
-    /// A ChatGPT sign-in, whose token the Host's sign-in worker leases.
-    chatgpt_device: Authentication,
+    /// A ChatGPT device sign-in to the Codex backend, whose token the Host's
+    /// sign-in worker leases.
+    chatgpt_device: SignIn,
+    /// A ChatGPT plan sign-in to OpenAI's API, leased the same way. Its
+    /// token goes only to `api_endpoint`, as a bearer alone.
+    chatgpt_plan: SignIn,
     /// An API key, borrowed for the Host's life. It goes only to its entry's
     /// endpoint, over https; `fixture` admits a loopback endpoint instead.
     key_file: struct { key: []const u8, fixture: bool = false },
@@ -113,24 +131,36 @@ pub const Credential = union(enum) {
         /// The answer settles as it is.
         settle,
         /// The Operation may spend its one forced refresh of the lease
-        /// generation the transfer presented.
-        refresh_once: u64,
+        /// generation the transfer presented, from the sign-in that leased it.
+        refresh_once: Refresh,
         /// The answer saves `failure_class.api_key_rejected`: only a new
         /// key resolves it.
         key_rejected,
     };
 
+    /// A forced refresh: which sign-in, and the generation a 401 rejected.
+    pub const Refresh = struct { source: Authentication, generation: u64 };
+
     /// Whether a request waits for the sign-in worker's lease before it
     /// launches, and its launch then passes that lease to `fields`.
     pub fn leased(self: Credential) bool {
-        return self == .chatgpt_device;
+        return self.signIn() != null;
+    }
+
+    /// The sign-in the worker leases this credential from, if it is one.
+    pub fn signIn(self: Credential) ?Authentication {
+        return switch (self) {
+            .none, .key_file => null,
+            .chatgpt_device => |sign_in| sign_in.source(.codex_device),
+            .chatgpt_plan => |sign_in| sign_in.source(.chatgpt_plan),
+        };
     }
 
     /// Refuses an endpoint this credential may not go to, at Host start.
     pub fn validate(self: Credential, served_endpoint: []const u8, ca_file: ?[]const u8) !void {
         switch (self) {
             .none => {},
-            .chatgpt_device => |authentication| try validateAuthenticationEndpoint(served_endpoint, ca_file, authentication),
+            .chatgpt_device, .chatgpt_plan => try validateAuthenticationEndpoint(served_endpoint, ca_file, self.signIn().?),
             .key_file => |key| try validateKeyEndpoint(served_endpoint, ca_file, key.fixture),
         }
     }
@@ -142,7 +172,8 @@ pub const Credential = union(enum) {
         std.debug.assert(self.leased() == (lease != null));
         switch (self) {
             .none => {},
-            .chatgpt_device => |authentication| try headers.initSignIn(served_endpoint, ca_file, authentication, lease.?, shared),
+            .chatgpt_device => |sign_in| try headers.initDevice(served_endpoint, ca_file, sign_in, lease.?, shared),
+            .chatgpt_plan => |sign_in| try headers.initPlan(served_endpoint, ca_file, sign_in, lease.?, shared),
             .key_file => |key| try headers.initKey(served_endpoint, ca_file, key.key, key.fixture, shared),
         }
     }
@@ -153,7 +184,7 @@ pub const Credential = union(enum) {
     pub fn rejection(self: Credential, lease: ?*const Lease) Rejection {
         return switch (self) {
             .none => .settle,
-            .chatgpt_device => .{ .refresh_once = lease.?.record.generation },
+            .chatgpt_device, .chatgpt_plan => .{ .refresh_once = .{ .source = self.signIn().?, .generation = lease.?.record.generation } },
             .key_file => .key_rejected,
         };
     }
@@ -161,12 +192,13 @@ pub const Credential = union(enum) {
     /// Who a Turn's routing value belongs to (`turn_states`): a signed-in
     /// account's values go back only to that account. A sign-in owner is
     /// its account and FedRAMP binding, which a refresh keeps, read from
-    /// `lease`. A key or no credential is fixed for the Host's life, so it
+    /// `lease`: a plan sign-in's account is its ID token's subject, never
+    /// FedRAMP. A key or no credential is fixed for the Host's life, so it
     /// is one owner.
     pub fn routingOwner(self: Credential, lease: ?*const Lease) turn_states.TurnStates.Owner {
         return switch (self) {
             .none, .key_file => @splat(0),
-            .chatgpt_device => owner: {
+            .chatgpt_device, .chatgpt_plan => owner: {
                 const record = &lease.?.record;
                 var hash = std.crypto.hash.sha2.Sha256.init(.{});
                 hash.update(&.{@intFromBool(record.fedramp)});
@@ -180,6 +212,7 @@ pub const Credential = union(enum) {
         return switch (self) {
             .none => .endpoint,
             .chatgpt_device => .chatgpt_device,
+            .chatgpt_plan => .chatgpt_plan,
             .key_file => .key_file,
         };
     }
@@ -191,9 +224,15 @@ fn fixtureEndpoint(target: []const u8, ca_file: ?[]const u8) bool {
         (std.mem.startsWith(u8, target, "https://localhost:") and ca_file != null);
 }
 
+/// A fixture sign-in goes only to loopback: its requests, and the token
+/// endpoint that stands in for its issuer.
 fn validateAuthenticationEndpoint(target: []const u8, ca_file: ?[]const u8, authentication: Authentication) !void {
-    if (authentication.fixture and !fixtureEndpoint(target, ca_file))
+    if (authentication.fixture() and !fixtureEndpoint(target, ca_file))
         return error.InvalidCodexFixtureEndpoint;
+    switch (authentication.refresh) {
+        .issuer, .synthetic => {},
+        .fixture_endpoint => |url| if (!fixtureEndpoint(url, null)) return error.InvalidCodexFixtureEndpoint,
+    }
 }
 
 /// An API key goes over https, or to a loopback fixture when `fixture`.
@@ -218,10 +257,10 @@ pub const Headers = struct {
     /// Initialize in final stack storage. The fields are borrowed only until
     /// Transfer.start, whose stream copies the per-request ones; h2 borrows
     /// the credential (its Transfer then holds the use) and the literals.
-    fn initSignIn(self: *Headers, target: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Lease, shared_credentials: *provider_transport.Credentials) !void {
+    fn initDevice(self: *Headers, target: []const u8, ca_file: ?[]const u8, sign_in: SignIn, credential: *const Lease, shared_credentials: *provider_transport.Credentials) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
-        if (authentication.fixture) {
+        if (sign_in.refresh != .issuer) {
             if (!fixtureEndpoint(target, ca_file) or
                 !std.mem.eql(u8, access, codex_auth.fixture_access_token) or
                 !std.mem.eql(u8, account_id, codex_auth.fixture_account_id))
@@ -245,6 +284,29 @@ pub const Headers = struct {
             self.entries[self.length] = .{ .name = "x-openai-fedramp", .value = "true", .borrowed = true };
             self.length += 1;
         }
+    }
+
+    /// A ChatGPT plan sign-in's fields: its access token as a bearer, and
+    /// user-agent. OpenAI's API names the account from the token, so no
+    /// account or FedRAMP field is sent. A fixture accepts only a record
+    /// issued to the fixture client, so a real sign-in never reaches it.
+    fn initPlan(self: *Headers, target: []const u8, ca_file: ?[]const u8, sign_in: SignIn, credential: *const Lease, shared_credentials: *provider_transport.Credentials) !void {
+        const access = credential.record.access_token.slice();
+        if (sign_in.refresh != .issuer) {
+            if (!fixtureEndpoint(target, ca_file) or
+                !std.mem.eql(u8, credential.record.client_id.slice(), credential_policy.fixture_client_id))
+                return error.InvalidManagedFixture;
+        } else if (!std.mem.eql(u8, target, api_endpoint)) return error.ManagedEndpointMismatch;
+        if (access.len == 0) return error.InvalidCredentialHeader;
+        for (access) |byte| if (byte < 0x21 or byte > 0x7e) return error.InvalidCredentialHeader;
+        const shared = try shared_credentials.share(access, "");
+        self.credentials = shared_credentials;
+        self.credential = shared;
+        self.entries[0..2].* = .{
+            .{ .name = "authorization", .value = shared.authorization(), .sensitive = true, .borrowed = true },
+            .{ .name = "user-agent", .value = "rui/" ++ @import("transport_options").revision, .borrowed = true },
+        };
+        self.length = 2;
     }
 
     /// An API key's fields: the key and user-agent. The key goes only over
@@ -320,14 +382,11 @@ pub const Providers = struct {
         return null;
     }
 
-    /// The one leased sign-in whose leases and refreshes this Host's
-    /// sign-in worker serves, if any.
-    pub fn leasedSignIn(self: *const Providers) ?Authentication {
-        for (self.table.values) |served| if (served) |value| switch (value.credential) {
-            .chatgpt_device => |authentication| return authentication,
-            else => {},
-        };
-        return null;
+    /// Whether any served provider signs in, so this Host runs the sign-in
+    /// worker that leases and refreshes every served sign-in.
+    pub fn anySignIn(self: *const Providers) bool {
+        for (self.table.values) |served| if (served) |value| if (value.credential.leased()) return true;
+        return false;
     }
 
     pub fn routes(self: *const Providers) protocol.Routes {
@@ -402,7 +461,7 @@ test "ChatGPT headers carry the credential, user-agent and FedRAMP fields" {
         {
             var headers: Headers = .{};
             defer headers.deinit();
-            try headers.initSignIn("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials);
+            try headers.initDevice("http://127.0.0.1:1/responses", null, .{ .path = "unused", .refresh = .synthetic }, &credential, &credentials);
             const entries = headers.fields();
             var fedramp_found = false;
             for (entries) |entry| {
@@ -437,11 +496,12 @@ test "ChatGPT headers carry the credential, user-agent and FedRAMP fields" {
 test "each sign-in source says whether it waits for a lease and what a 401 means" {
     var lease: Lease = undefined;
     lease.record = try testRecord(codex_auth.fixture_account_id, false, codex_auth.fixture_access_token, 7);
-    const signed_in: Credential = .{ .chatgpt_device = .{ .path = "/c", .fixture = true } };
+    const source: Authentication = .{ .path = "/c", .wire = .codex_device, .refresh = .synthetic };
+    const signed_in: Credential = .{ .chatgpt_device = .{ .path = "/c", .refresh = .synthetic } };
     const keyed: Credential = .{ .key_file = .{ .key = "sk-test" } };
     try std.testing.expect(signed_in.leased() and !keyed.leased() and !Credential.leased(.none));
     // A sign-in may refresh the generation it presented; a key names its remedy.
-    try std.testing.expectEqual(Credential.Rejection{ .refresh_once = 7 }, signed_in.rejection(&lease));
+    try std.testing.expectEqual(Credential.Rejection{ .refresh_once = .{ .source = source, .generation = 7 } }, signed_in.rejection(&lease));
     try std.testing.expectEqual(Credential.Rejection.key_rejected, keyed.rejection(null));
     try std.testing.expectEqual(Credential.Rejection.settle, Credential.rejection(.none, null));
     // Each refuses an endpoint it may not go to.
@@ -464,10 +524,61 @@ test "a Host's routes name each provider it serves and its credential" {
     providers.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .none });
     try std.testing.expect(providers.any() and providers.serves(.codex));
     try std.testing.expectEqual(protocol.Route.endpoint, providers.routes().codex);
-    try std.testing.expectEqual(@as(?Authentication, null), providers.leasedSignIn());
+    try std.testing.expect(!providers.anySignIn());
     providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
     try std.testing.expectEqual(protocol.Route.chatgpt_device, providers.routes().codex);
-    try std.testing.expectEqualStrings("/c", providers.leasedSignIn().?.path);
+    try std.testing.expect(providers.anySignIn());
+    try std.testing.expectEqualStrings("/c", providers.get(.codex).?.credential.signIn().?.path);
+    providers.table.set(.chatgpt, .{ .endpoint = endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } });
+    try std.testing.expectEqual(protocol.Route.chatgpt_plan, providers.routes().chatgpt);
+    try std.testing.expectEqual(protocol.Route.unserved, providers.routes().openai);
+    // Each sign-in's jobs speak its own wire.
+    try std.testing.expectEqual(Authentication{ .path = "/c", .wire = .codex_device }, providers.get(.codex).?.credential.signIn().?);
+    try std.testing.expectEqual(Authentication{ .path = "/p", .wire = .chatgpt_plan }, providers.get(.chatgpt).?.credential.signIn().?);
+    // The ChatGPT backend refuses structured output; OpenAI's API takes it.
+    try std.testing.expect(!acceptsOutputSchema(.chatgpt_device) and acceptsOutputSchema(.chatgpt_plan));
+}
+
+test "a ChatGPT plan sign-in sends a bearer and user-agent, only to OpenAI's API" {
+    var lease: Lease = undefined;
+    lease.record = try testRecord("plan-subject", false, "plan-access", 4);
+    var credentials: provider_transport.Credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
+    const plan: Credential = .{ .chatgpt_plan = .{ .path = "/p" } };
+    try std.testing.expect(plan.leased());
+    {
+        var headers: Headers = .{};
+        defer headers.deinit();
+        try plan.fields(api_endpoint, null, &lease, &credentials, &headers);
+        const entries = headers.fields();
+        try std.testing.expectEqual(@as(usize, 2), entries.len);
+        try std.testing.expectEqualStrings("authorization", entries[0].name);
+        try std.testing.expectEqualStrings("Bearer plan-access", entries[0].value);
+        try std.testing.expect(entries[0].sensitive);
+        try std.testing.expectEqualStrings("user-agent", entries[1].name);
+        for (entries) |entry| try std.testing.expect(provider_transport.hostField(entry.name));
+    }
+    var refused: Headers = .{};
+    // Not to the Codex backend, a base URL's endpoint or a loopback.
+    for ([_][]const u8{ managed_endpoint, "https://proxy.example/v1/responses", "http://127.0.0.1:9/responses" }) |target|
+        try std.testing.expectError(error.ManagedEndpointMismatch, plan.fields(target, null, &lease, &credentials, &refused));
+    // A fixture takes only a record issued to the fixture client, at loopback.
+    const fixture: Credential = .{ .chatgpt_plan = .{ .path = "/p", .refresh = .{ .fixture_endpoint = "http://127.0.0.1:9/token" } } };
+    try std.testing.expectError(error.InvalidManagedFixture, fixture.fields("http://127.0.0.1:9/responses", null, &lease, &credentials, &refused));
+    try lease.record.client_id.set(credential_policy.fixture_client_id);
+    try std.testing.expectError(error.InvalidManagedFixture, fixture.fields(api_endpoint, null, &lease, &credentials, &refused));
+    {
+        var headers: Headers = .{};
+        defer headers.deinit();
+        try fixture.fields("http://127.0.0.1:9/responses", null, &lease, &credentials, &headers);
+        try std.testing.expectEqual(@as(usize, 2), headers.fields().len);
+    }
+    try fixture.validate("http://127.0.0.1:9/responses", null);
+    try std.testing.expectError(error.InvalidCodexFixtureEndpoint, fixture.validate(api_endpoint, null));
+    const remote_token: Credential = .{ .chatgpt_plan = .{ .path = "/p", .refresh = .{ .fixture_endpoint = "https://auth.example/token" } } };
+    try std.testing.expectError(error.InvalidCodexFixtureEndpoint, remote_token.validate("http://127.0.0.1:9/responses", null));
+    // A 401 refreshes the plan sign-in once, over its own wire.
+    try std.testing.expectEqual(Credential.Rejection{ .refresh_once = .{ .source = .{ .path = "/p", .wire = .chatgpt_plan }, .generation = 4 } }, plan.rejection(&lease));
+    try std.testing.expectEqual(@as(?*provider_transport.SharedCredential, null), credentials.head);
 }
 
 test "a sign-in's routing owner is its account and FedRAMP binding, which a refresh keeps" {

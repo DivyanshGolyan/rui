@@ -250,7 +250,7 @@ pub fn renderHostInfo(response: protocol.JsonOut, info: HostInfo) !void {
     const shape = protocol.host_info_reply;
     try response.appendShape(shape.head, .{ info.store, info.instance, info.active_capacity, info.intake_capacity, limit_text, info.started_at, info.custody_occupied, info.paused });
     if (info.doublewrite) |value| try response.appendShape(shape.doublewrite, .{value});
-    try response.appendShape(shape.tail, .{ routes.codex, routes.openai });
+    try response.appendShape(shape.tail, .{ routes.codex, routes.openai, routes.chatgpt });
 }
 
 pub fn renderHostPause(response: protocol.JsonOut, paused: bool) !void {

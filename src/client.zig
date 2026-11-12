@@ -628,6 +628,58 @@ pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128
     };
 }
 
+/// Discover a Store through an authenticated socket peer, then confirm the hint
+/// with the existing read-only profiles. Older SQLite Hosts require the Store in
+/// host-info, so an empty-Store discovery request cannot find them.
+pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !?HostControlObservation {
+    const until = hostObservationDeadline(io, deadline);
+    const address = try std.Io.net.UnixAddress.init(socket_path);
+    // A refused connect may be a live Host's full backlog. Give it a short
+    // retry window inside the shared observation budget, never absence authority.
+    const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 200 * std.time.ns_per_ms);
+    const fd = connection: {
+        while (true) {
+            const connected = connectRequest(.{ .io = io }, address, connect_until) catch |err| {
+                if (err == error.ConnectionRefused) {
+                    const remaining = connect_until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+                    if (remaining > 0) {
+                        try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 25 * std.time.ns_per_ms))), .awake);
+                        if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < connect_until) continue;
+                    }
+                }
+                switch (err) {
+                    error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
+                        if (platform.socketStoreIsUnowned(io, socket_path)) return null;
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            break :connection connected;
+        }
+    };
+    // Once connected, unreadable peers remain failures regardless of hints.
+    defer closeSocket(io, fd);
+    const identity = @import("host_identity.zig");
+    const pid = try identity.peer(fd);
+    var snapshot = try identity.snapshot(allocator, pid);
+    defer snapshot.deinit(allocator);
+    if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) return error.InvalidHostInfo;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var problem: @import("cli_grammar.zig").Refusal = undefined;
+    const parsed = @import("serve_grammar.zig").definition.parseSyntax(snapshot.argv[3..], arena.allocator(), &problem) catch return error.InvalidHostInfo;
+    const supplied = parsed.get("store") orelse return error.InvalidHostInfo;
+    // A relative argv path is not relative to this client. Without a verified
+    // canonical identity, report it rather than probing a guessed Store.
+    if (!std.fs.path.isAbsolute(supplied)) return error.InvalidHostInfo;
+    const paths = try platform.resolveClientPaths(io, supplied);
+    if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.InvalidHostInfo;
+    const observed = try observeHostForUpgrade(io, paths.store.slice(), until);
+    if (observed.pid != pid) return error.InvalidHostInfo;
+    return observed;
+}
+
 fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     return @min(probe_end, deadline orelse probe_end);
@@ -844,7 +896,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 };
                 const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
                 var body_buffer: [1024]u8 = undefined;
-                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store });
+                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version)) ",\"chatgpt\":\"unserved\"" else "" });
                 var error_buffer: [256]u8 = undefined;
                 const body: []const u8 = switch (self.mode) {
                     .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -2377,7 +2429,7 @@ pub fn hostUnreachable(err: anyerror) bool {
     };
 }
 
-fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, FileNotFound, NotDir, SymLinkLoop, ReadOnlyFileSystem, UnixConnectFailed } {
+fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, FileNotFound, NotDir, SymLinkLoop, ReadOnlyFileSystem, ConnectionRefused, UnixConnectFailed } {
     return switch (code) {
         .ACCES => error.AccessDenied,
         .PERM => error.PermissionDenied,
@@ -2385,6 +2437,7 @@ fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, File
         .NOTDIR => error.NotDir,
         .LOOP => error.SymLinkLoop,
         .ROFS => error.ReadOnlyFileSystem,
+        .CONNREFUSED => error.ConnectionRefused,
         else => error.UnixConnectFailed,
     };
 }
@@ -4961,7 +5014,7 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
         peers[count] = connectRequest(.{ .io = io }, address, until) catch |err| break err;
         count += 1;
     } else return error.TestUnexpectedResult;
-    try std.testing.expectEqual(if (blocks) error.TransferInactive else error.UnixConnectFailed, blocked);
+    try std.testing.expectEqual(if (blocks) error.TransferInactive else error.ConnectionRefused, blocked);
     var token: Cancellation = .{};
     const Stopper = struct {
         fn run(stop: *Cancellation) void {
@@ -4973,7 +5026,7 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     defer stopper.join();
     const stopped = connectRequest(.{ .io = io, .cancellation = &token }, address, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s);
     if (stopped) |fd| closeTestDescriptor(fd) else |_| {}
-    try std.testing.expectError(if (blocks) error.Cancelled else error.UnixConnectFailed, stopped);
+    try std.testing.expectError(if (blocks) error.Cancelled else error.ConnectionRefused, stopped);
 }
 
 test "a stopped Host's socket fails requests only in ways hostUnreachable names" {
@@ -5300,4 +5353,79 @@ test "schema file capture writes an object and refuses invalid input before publ
     var bytes: [64]u8 = undefined;
     const count = try saved.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings("{\"type\":\"object\"}", bytes[0..count]);
+}
+
+test "socket upgrade discovery never infers absence from missing stale backlog or unreadable peers" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("discovery.sock", &buffer);
+    // No Store identity means no lease observation: even a path removed
+    // since enumeration cannot establish that its Host released the Store.
+    try std.testing.expectError(error.FileNotFound, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+    {
+        var listener = try address.listen(io, .{ .kernel_backlog = 1 });
+        defer listener.deinit(io);
+        // A connected peer whose argv is not a Host is unreadable, not absent.
+        try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+        const unreadable = try listener.accept(io);
+        unreadable.close(io);
+
+        // Exercise the discovery boundary with a real saturated listener.
+        // Darwin refuses it immediately; Linux leaves connect pending. Neither
+        // outcome establishes absence, even after the bounded retry budget.
+        const blocks = @import("os/os.zig").full_backlog_blocks_connect;
+        var peers: [8]std.posix.fd_t = undefined;
+        var count: usize = 0;
+        defer for (peers[0..count]) |fd| closeTestDescriptor(fd);
+        const blocked = while (count < peers.len) {
+            const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 10 * std.time.ns_per_ms;
+            peers[count] = connectRequest(.{ .io = io }, address, until) catch |err| break err;
+            count += 1;
+        } else return error.TestUnexpectedResult;
+        try std.testing.expectEqual(if (blocks) error.TransferInactive else error.ConnectionRefused, blocked);
+        try std.testing.expectError(if (blocks) error.TransferInactive else error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+    }
+    // This really is stale (the fixture closed its listener), but discovery
+    // cannot distinguish it from the live backlog refusal without the Store.
+    const before = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    try std.testing.expectError(error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+    try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - before >= 25 * std.time.ns_per_ms);
+    // The retry window must never replace the caller's shorter deadline.
+    try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, before - 1));
+}
+
+test "socket upgrade discovery distinguishes stale free Store from refused held Store" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const parent = buffer[0..try tmp.dir.realPath(io, &buffer)];
+    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&store_buffer, "{s}/store", .{parent});
+    var lease = try platform.StoreLease.acquire(io, root);
+    var held = true;
+    defer if (held) lease.release();
+    try lease.prepareForServing(false);
+    const socket = lease.paths.socket;
+    defer {
+        if (!held) {
+            lease = platform.StoreLease.acquire(io, root) catch unreachable;
+            held = true;
+        }
+        lease.retireSocket() catch {};
+    }
+    var listener = try lease.listen(.{});
+    // A connected unreadable peer cannot be made absent by any routing hint.
+    try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    listener.deinit(io);
+    try std.testing.expectError(error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    lease.release();
+    held = false;
+    try std.testing.expectEqual(@as(?HostControlObservation, null), try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    // Discovery is read-only: a later lease holder, not discovery, reclaims it.
+    _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
 }

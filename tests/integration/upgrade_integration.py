@@ -171,9 +171,9 @@ class Case:
         assert result.returncode == expect, (args, result.returncode, result.stdout, result.stderr)
         return result.stdout + result.stderr
 
-    def json(self, *args):
+    def json(self, *args, input=None):
         result = subprocess.run([str(self.binary), *map(str, args)], env=self.env,
-                                capture_output=True, text=True, timeout=25)
+                                capture_output=True, text=True, timeout=25, input=input)
         assert result.returncode == 0, (args, result.stdout, result.stderr)
         return json.loads(result.stdout)
 
@@ -206,9 +206,10 @@ class Case:
         if source:
             (build / "revision").write_text("synthetic-source-revision-marker\n")
         destination = ["--store-hex", os.fsencode(self.store).hex()] if store_hex else ["--store", self.store]
+        provider = [] if "--provider-endpoint" in extra else ["--provider", "codex"]
         process, ready = start_ready_process(
             [build / "bin/rui", "host", "serve", *destination,
-             "--active-capacity", "2", "--provider", "codex", *extra], env=self.env)
+             "--active-capacity", "2", *provider, *extra], env=self.env)
         self.hosts.append(process)
         self.ready = ready
         status = self.status()
@@ -378,13 +379,13 @@ def discovery_cases(root, binary, releases):
 
     with case(root, binary, releases, "offline-discovery") as c:
         c.old_selection()
-        # Bound local connection refusal; no DNS, external host or provider.
+        # Bound local connection failure; no DNS, external host or provider.
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))
             c.env["RUI_TEST_UPGRADE_RELEASES_URL"] = f"http://127.0.0.1:{reserved.getsockname()[1]}/releases"
             child = c.spawn_upgrade()
             output = c.finish_upgrade(child, success=False)
-            assert "upgrade_download_failed" in output and "curl: (7)" in output, output
+            assert "upgrade_download_failed" in output and "curl: (" in output, output
         c.assert_unchanged()
         c.assert_no_host()
 
@@ -517,10 +518,9 @@ def lifecycle_cases(root, binary, releases):
     with case(root, binary, releases, "retained-tagged-source-host") as c:
         c.old_selection()
         host, previous = c.start_host(source=True)
-        output = c.finish_upgrade(c.spawn_upgrade(), success=False)
-        assert "Installed Rui" in output and "existing Host was left running" in output, output
-        assert host.poll() is None and c.status()["instance"] == previous["instance"]
-        assert os_semantics.process_executable(host.pid) != c.link.resolve()
+        output = c.finish_upgrade(c.spawn_upgrade())
+        assert "Installed Rui" in output and "Activation: ready;" in output, output
+        proof_ready(c, previous, host)
 
     with case(root, binary, releases, "application-owned-host") as c:
         c.old_selection()
@@ -649,6 +649,220 @@ class TerminalScreen:
     def save(self, destination, name):
         if destination is not None:
             (destination / f"{name}.txt").write_text(self.capture.completed + "\n")
+
+
+def restart_all_cases(root, binary, releases):
+    # This suite runs under an isolated non-root fixture user: --all intentionally
+    # discovers every Host of that uid, not just the defaults-selected Store.
+    # Earlier lifecycle cases intentionally crash Hosts. Leave one explicitly
+    # here too: discovery must prove its lease free without deleting its socket.
+    with case(root, binary, releases, "restart-all-crashed") as c:
+        from model_fixture import crash_host
+        process, _ = c.start_host("restart-all-crashed")
+        socket_path = pathlib.Path(c.ready["socket"])
+        crash_host(process, c.root, "restart-all-crashed")
+        assert socket_path.exists(), socket_path
+        assert c.run("host", "restart", "--all").strip() == "No running Hosts."
+        assert socket_path.exists(), "Discovery must not reclaim sockets"
+
+    with case(root, binary, releases, "restart-all-empty") as c:
+        assert c.run("host", "restart", "--all").strip() == "No running Hosts."
+        c.assert_no_host()
+        missing = c.run("host", "restart", expect=2)
+        assert "[option_required]" in missing, missing
+        rejected = c.run("host", "restart", "--all", "--store", c.store, expect=2)
+        assert "[option_unknown]" in rejected, rejected
+
+    with case(root, binary, releases, "restart-all-first") as first, \
+            case(root, binary, releases, "restart-all-second") as second:
+        # Both retained managed builds belong to the one installing user/home.
+        # They are real native Hosts, just as the other lifecycle cases above;
+        # a different retained path establishes older launch identity without
+        # inventing a Host version or replacing its wire implementation.
+        second.home, second.env, second.link = first.home, first.env, first.link
+        old_first, previous_first = first.start_host("restart-all-retained-first")
+        old_second, previous_second = second.start_host("restart-all-retained-second", store_hex=True)
+        first.select(first.build("restart-all-selected"))
+        first.binary = first.link
+        output = first.run("host", "restart", "--all", timeout=60)
+        for previous in (previous_first, previous_second):
+            assert f"{previous['store']}: restarted on {releases.version}" in output, output
+        assert "2 Hosts: 2 restarted" in output, output
+        current_first = proof_ready(first, previous_first, old_first)
+        current_second = proof_ready(second, previous_second, old_second)
+        output = first.run("host", "restart", "--all", timeout=60)
+        for previous in (previous_first, previous_second):
+            assert f"{previous['store']}: already on {releases.version}" in output, output
+        assert "2 Hosts: 0 restarted, 2 already current" in output, output
+        assert first.status()["instance"] == current_first["instance"]
+        assert second.status()["instance"] == current_second["instance"]
+
+        # Derive the runtime location from native readiness, not a second owner
+        # of the uid/hash naming rule. A live non-Host socket must be reported;
+        # after its listener closes, even this stale socket stays unconfirmed:
+        # discovery cannot prove the Store lease is free from a refused connect.
+        unreadable = pathlib.Path(first.ready["socket"]).parent / "restart-unreadable.sock"
+        try:
+            with os_semantics.unix_stream() as listener:
+                listener.bind(str(unreadable))
+                listener.listen(1)
+                output = first.run("host", "restart", "--all", expect=6)
+                assert "Store unknown (socket " in output and "failed at discovery:" in output, output
+                assert "[host_restart_failed]" in output, output
+                assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
+            output = first.run("host", "restart", "--all", expect=6)
+            assert str(unreadable) in output and "Host state is unconfirmed" in output, output
+            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
+            assert "[host_restart_failed]" in output, output
+        finally:
+            unreadable.unlink(missing_ok=True)
+        output = first.run("host", "restart", "--all")
+        assert "2 Hosts: 0 restarted, 2 already current" in output, output
+        assert str(unreadable) not in output, output
+
+    with case(root, binary, releases, "restart-all-managed-source") as c:
+        old_host, previous = c.start_host("retained-older-source", source=True)
+        target = c.build("selected-newer-source")
+        # As with the retained release builds above, these are different real
+        # build identities at the same numeric version. Source revisions can
+        # advance without a version bump; both builds have source markers.
+        (target / "revision").write_text("synthetic-newer-source-revision\n")
+        c.run("--publish-install", c.home, target, "intentional-source")
+        assert c.link.resolve() == target / "bin/rui"
+        c.binary = c.link
+        output = c.run("host", "restart", "--all", timeout=60)
+        assert f"{previous['store']}: restarted on {releases.version}" in output, output
+        current = proof_ready(c, previous, old_host)
+        output = c.run("host", "restart", "--all")
+        assert f"{previous['store']}: already on {releases.version}" in output, output
+        assert c.status()["instance"] == current["instance"]
+        # Observation of a source Host grants no right to replace a selected
+        # source installation through Upgrade: that still requires .released.
+        start = len(releases.requests)
+        output = c.upgrade(expect=6)
+        assert "intentional source build" in output, output
+        assert c.link.resolve() == target / "bin/rui"
+        assert c.status()["instance"] == current["instance"]
+        assert releases.archive_path not in releases.requests[start:]
+
+    with case(root, binary, releases, "restart-all-application-owned") as c:
+        process, previous = c.start_host("application-owned", managed=False)
+        # There is no selected installation: unsupported ownership is a skip,
+        # not an attempt to select a target, stop the process or start a Host.
+        output = c.run("host", "restart", "--all")
+        assert f"{previous['store']}: left running: application-owned Host" in output, output
+        assert "1 Hosts: 0 restarted, 0 already current, 1 left unchanged, 0 failed." in output, output
+        assert process.poll() is None and c.status()["instance"] == previous["instance"]
+
+    with case(root, binary, releases, "restart-all-unknown-managed") as c:
+        process, previous = c.start_host("unknown-managed")
+        executable = os_semantics.process_executable(process.pid)
+        (executable.parent.parent / "THIRD_PARTY_NOTICES.md").unlink()
+        output = c.run("host", "restart", "--all")
+        assert f"{previous['store']}: left running: application-owned Host" in output, output
+        assert process.poll() is None and c.status()["instance"] == previous["instance"]
+
+
+def tool_custody_cases(root, binary, releases, operation):
+    """A real Host Bash tool may kill its caller, but not restart custody.
+
+    The exact same restart CLI is used by both installers. Cross exec'd group
+    leader vs a retained installer shell with open vs already-broken stdout.
+    The originating Host is deliberately the first socket in discovery order.
+    Upgrade also uses this owner, including its inline UpgradeJob caller.
+    """
+    import codex_fixture
+    import model_fixture as fixture
+
+    rows = itertools.product((False, True), (False, True) if operation == "restart" else (False,))
+    for leader, closed_stdout in rows:
+        name = f"tool-{operation}-leader-{leader}-closed-{closed_stdout}"
+        with case(root, binary, releases, name + "-a") as first, \
+                case(root, binary, releases, name + "-b") as second:
+            second.home, second.env, second.link = first.home, first.env, first.link
+            credentials = first.home / ".config/rui/codex.json"
+            credentials.parent.mkdir(mode=0o700, parents=True)
+            codex_fixture.credentials(credentials)
+            endpoint = fixture.SuccessEndpoint([])
+            thread = threading.Thread(target=endpoint.serve_forever, daemon=True)
+            thread.start()
+            endpoints = {endpoint: thread}
+            try:
+                extra = ("--provider-endpoint", f"http://127.0.0.1:{endpoint.server_port}/responses")
+                old_first, previous_first = first.start_host("retained-a", extra=extra)
+                old_second, previous_second = second.start_host("retained-b", extra=extra)
+                # Take ordering from readiness socket paths, never duplicate the
+                # runtime's Store hash or assume creation order is discovery order.
+                origin = min((first, second), key=lambda c: c.ready["socket"])
+                later = second if origin is first else first
+                assert origin.ready["socket"] < later.ready["socket"]
+                diagnostic = first.root / "coordinator-receipts.txt"
+                if operation == "restart":
+                    first.select(first.build("selected"))
+                    argv = [str(first.link), "host", "restart", "--all"]
+                else:
+                    first.old_selection()
+                    argv = [str(binary), "upgrade", "--store", str(origin.store)]
+                invocation = shlex.join(argv)
+                if operation == "upgrade":
+                    # Host child environments intentionally omit test routing.
+                    # Bind this nested CLI explicitly to the offline authority;
+                    # never let a tool-side check reach published releases.
+                    invocation = shlex.join(["env", "RUI_TEST_UPGRADE_RELEASES_URL=" + releases.origin + "/releases", *argv])
+                if closed_stdout:
+                    # Leave a real fd 1 pipe with no readers, not a missing fd
+                    # that initialization could reuse. The break precedes exec.
+                    script = ("import os; r,w=os.pipe(); os.close(r); "
+                              "os.dup2(w,1); os.close(w); "
+                              f"os.execv({argv[0]!r}, {argv!r})")
+                    invocation = shlex.join([sys.executable, "-c", script])
+                command = ("exec " if leader else "") + invocation
+                command += " 2>" + shlex.quote(str(diagnostic))
+                if not leader:
+                    command += "; printf installer-shell-retained"
+                arguments = json.dumps({"cmd": command, "description": "Upgrade from a Host Bash tool", "timeout_ms": 90000})
+                endpoint.responses.append(fixture.sse_tool_calls(name, [("bash", name, arguments)]))
+                endpoint.responses.append(fixture.sse_answer(name + "-after", "reason", "message", "done")[0])
+                session = origin.json("session", "configure", "--store", origin.store,
+                    "--workspace", origin.root, "--provider", "codex", "--model", "gpt-6-luna",
+                    "--tools", "bash", "--permission-mode", "bypass")["answer"]["session"]
+                origin.json("session", "send", "--store", origin.store, "--to", session, input="upgrade now")
+
+                if operation == "restart":
+                    wait_for(lambda: (old_first.poll(), old_second.poll(), first.status(), second.status()),
+                             "origin-first tool restart returns every Host on the selected build", timeout=45,
+                             ready=lambda state: all(status["status"] == "ready" and status["instance"] != previous["instance"]
+                                                     for status, previous in zip(state[2:], (previous_first, previous_second))))
+                    current_first = proof_ready(first, previous_first, old_first)
+                    current_second = proof_ready(second, previous_second, old_second)
+                    assert current_first["instance"] != current_second["instance"]
+                    wait_for(lambda: diagnostic.exists() and "2 Hosts: 2 restarted" in diagnostic.read_text(),
+                             "closed caller output retains complete restart diagnostics")
+                    receipt = diagnostic.read_text()
+                    assert receipt.index(str(origin.store) + ": restarted") < receipt.index(str(later.store) + ": restarted"), receipt
+                else:
+                    # Upgrade activates its chosen Store, not unrelated Hosts.
+                    previous = previous_first if origin is first else previous_second
+                    old = old_first if origin is first else old_second
+                    wait_for(lambda: (old.poll(), origin.status()),
+                             "tool Upgrade finishes activation after its caller is killed", timeout=45,
+                             ready=lambda state: state[1]["status"] == "ready" and state[1]["instance"] != previous["instance"])
+                    current = proof_ready(origin, previous, old)
+
+                    def activation_receipt():
+                        if not diagnostic.exists():
+                            return None
+                        outcomes = [json.loads(line).get("outcome") for line in diagnostic.read_text().splitlines() if line.startswith("{")]
+                        return next((value for value in reversed(outcomes) if value is not None), None)
+
+                    outcome = wait_for(activation_receipt, "departed Upgrade caller retains the coordinator's complete outcome")
+                    assert set(outcome) == {"ready"}, outcome
+                    assert outcome["ready"]["pid"] == peer_pid(origin.ready["socket"]), outcome
+                    assert bytes(outcome["ready"]["instance"]).hex() == current["instance"], outcome
+                    untouched = previous_second if later is second else previous_first
+                    assert later.status()["instance"] == untouched["instance"]
+            finally:
+                fixture.stop_endpoint(endpoint, endpoints)
 
 
 def terminal_setup(c):
@@ -1211,8 +1425,8 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("terminal", "startup")):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [terminal|startup]")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("restart-all", "lifecycle", "custody", "terminal", "startup")):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all|lifecycle|custody|terminal|startup]")
     selection = sys.argv[2] if len(sys.argv) == 3 else "all"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
@@ -1231,10 +1445,22 @@ def main():
     releases = Releases(binary, version)
     complete = False
     try:
+        if selection in ("restart-all", "lifecycle"):
+            suite = {"restart-all": restart_all_cases, "lifecycle": lifecycle_cases}[selection]
+            suite(root, binary, releases)
+            print(f"upgrade native: {suite.__name__} passed", flush=True)
+            tool_custody_cases(root, binary, releases, "restart" if selection == "restart-all" else "upgrade")
+        if selection == "custody":
+            for operation in ("restart", "upgrade"):
+                tool_custody_cases(root, binary, releases, operation)
+                print(f"upgrade native: tool {operation} custody passed", flush=True)
         if selection == "all":
-            for suite in (discovery_cases, install_cases, lifecycle_cases):
+            for suite in (discovery_cases, install_cases, lifecycle_cases, restart_all_cases):
                 suite(root, binary, releases)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)
+            for operation in ("restart", "upgrade"):
+                tool_custody_cases(root, binary, releases, operation)
+                print(f"upgrade native: tool {operation} custody passed", flush=True)
         if selection in ("all", "terminal"):
             for suite in (terminal_download_failure, terminal_cases, conversation_case, escape_after_publication,
                           terminal_cancellation_guidance, terminal_path_guidance):

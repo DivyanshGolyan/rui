@@ -123,7 +123,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
-| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, its sign-in name, whether its credential is a sign-in or a key, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
+| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("Codex", "ChatGPT", "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
@@ -1182,6 +1182,14 @@ A missing or unreadable key fails startup.
 A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resend; the Session and overview say to save a new key and restart the Host, which keeps the key it started with.
 An auto-started Host adds `--provider openai` whenever a usable key is saved.
 
+`--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
+It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
+Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
+The terminal cannot sign it in yet: its provider fact has no login, so `rui auth login chatgpt` changes nothing and says so, the Host line and the overview's missing-sign-in notice say the terminal cannot sign in to it instead of naming a command, and its band reads only "ChatGPT sign-in expired." so the list pane keeps it whole.
+The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
+An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
+`subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
+
 The credential owner serializes mutations across Hosts and login processes.
 Login advances a generation.
 A compact access token with `exp` refreshes at or within 300 seconds of expiry; otherwise Rui refreshes eight days after the last successful exchange.
@@ -1249,7 +1257,7 @@ V1 depends on neither that endpoint nor automatic `context_management` support.
 Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead ends with the top-level `"tool_choice":"none","context_management":[{"type":"compaction","compact_threshold":1000}]`, after the history span, so the span and its carry are unchanged.
 The provider refuses a threshold under 1000 tokens, and a compaction Operation runs only on a large context, so 1000 always compacts; `tool_choice` keeps the reply the provider writes while compacting from calling a function or searching the web.
 With `context_management` the provider's response is `compaction`, `message`, `compaction`, and the last compaction item alone carries the whole memory: replaying only it keeps the context.
-No provider pins `openai-responses/3` yet.
+Only `chatgpt` pins `openai-responses/3`, so a ChatGPT plan Session's `compaction`, `message`, `compaction` response settles on its last compaction item: a later compaction item supersedes everything before it, as the rule below states.
 
 Require a completed response with at least one nonempty supported compaction item for explicit compaction.
 The last compaction item is the new base.
@@ -1627,7 +1635,32 @@ The thin upgrade coordinator composes `InstallationOutcome` separately from Host
 After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
 A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
 An already-installed target can still need activation of an older running Host.
-Manual source and release installation remain install-only.
+Source and release installers invoke the newly published command's `rui host restart --all` after publication; failure prints its receipt and a note without failing or undoing installation.
+`host_coordinator` owns restart-all and Upgrade activation in fresh processes that leave the inherited session before accepting a task, independent of the Bash tool (and Host) that launched the caller; no Host thread is added.
+Upgrade hands off its original checked Host observation, launch snapshot and selected target over a private bounded pipe, not a replacement observation or a persisted copy of the Host's environment.
+Cancellation is checked before handoff; once accepted, activation finishes retirement and pinned startup even if the caller departs or its report pipe closes.
+Restart-all similarly completes every discovered target after the originating Host stops, without identifying that Host or reordering it last.
+Closed stdout cannot abort remaining restarts: outcome counts are retained and receipts fall back to the existing optional stderr diagnostic boundary; closed diagnostics remain best-effort, not a new log registry.
+`--all` is required (`option_required` without it); per-Store restart selection is not exposed yet.
+`platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store.
+Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline; failed transport alone never establishes absence.
+Under the Store lease, `platform.StoreLease.listen` atomically publishes the canonical Store path beside a standard SQLite socket as `<hash>.store` (0600) before binding.
+Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and launch-frame sockets publish no hint.
+For an unreachable socket, `platform` validates the private same-owner regular hint, bounded canonical Store and exact socket hash, then observes that Store's lease: only a free lease proves absence, which discovery skips silently without deleting anything.
+A held or inaccessible lease, missing or untrusted hint (including older Hosts), or connected unreadable peer remains unconfirmed and counts as a failure with its socket path and recovery advice.
+The hint is only routing information, never a liveness flag, Host registry or activation authority. Startup's `platform.reclaimStaleSocket` still requires the held Store/runtime lease; discovery never reclaims sockets.
+The client authenticates a socket peer, takes its launch Store as a hint, validates the canonical socket through `platform`, then confirms Store, PID and instance with the current or released-9 read-only observation profiles.
+Unreadable identities are reported rather than guessed; relative or unavailable Store hints cannot grant activation authority.
+`host_restart_all` observes and activates one Host at a time through `HostLifecycle`, requiring the same discovered instance before activation; it keeps no Host registry or mirrored launch policy.
+Its pure report function consumes every `ActivationOutcome` and `Limitation`, keeping each Store-first line and success/failure category together; failures and unconfirmed restarts yield an operational caller error.
+A verified pinned launch answering with a different protocol (`client_incompatible`) counts as restarted with explicit selected-client advice, not ordinary Host readiness; it is not an uncertain activation.
+Already-target and newer Hosts remain untouched, and unsupported launches are left running with their reason.
+Managed released and source Host builds are eligible; source Host versions come from their retained executable's bounded `--version` output through the same numeric version parser as restart-all's target.
+Unknown managed, ineligible and foreign builds remain application-owned; a managed source build without a verified numeric version grants no activation plan.
+Upgrade installation eligibility still requires a selected managed release, independently of the running Host's build kind; a source-started Host newer than that release is superseded without interruption, otherwise normal activation can restart it.
+The target is the pinned installed selection, with a verified numeric version; an unversioned source target is reported without stopping Hosts.
+No running Hosts prints `No running Hosts.` and starts nothing.
+This install-wide operation is separate from `rui upgrade`, whose selected-Store behavior is unchanged.
 
 Lifecycle control observation is separate from ordinary client readiness.
 Upgrade can read the complete bounded Host-info envelope using only the current wire or the released wire `9`, with matching HTTP and body versions and peer PID from that same connection.
@@ -1725,7 +1758,7 @@ Request headers come from two owners.
 The codec writes its own once per request from the frozen settings, which carry the Session's affinity, into the prepared request's own bounded storage: at most 8, whose values total at most 192 bytes.
 Each name is a tag of the codec's constant `RequestHeader` enum, so the request stores only its index and the 192 bytes count values alone.
 Each name is a lowercase token that names no field the Host or h2 writes itself (`content-type`, the credential's `authorization` and `chatgpt-account-id`, `user-agent`, `x-openai-fedramp`, every codec's routing header, and h2's `content-length`, `accept-encoding`, `host` and connection fields) and no earlier header, and each value is printable ASCII without a leading or trailing space; a built-in codec's headers are tested against these rules over its settings domain rather than checked at runtime.
-The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT sign-in's `authorization` and `chatgpt-account-id`, or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
+The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT device sign-in's `authorization` and `chatgpt-account-id`, or a ChatGPT plan sign-in's or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
 A route without a credential sends the codec's headers and no credential-path fields.
 To classify an HTTP error body, the shell maps the sealed body read-only and gives it whole, as one slice, to the classifier of the codec the request was encoded with, with scratch the shell lends for that call and the classifier writes before it reads.
 The classifier writes its answer into one value the shell lends: context overflow, or else the `codec_abi.Refusal` its code names with the reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
@@ -1850,7 +1883,7 @@ Malformed JSON or framing, explicit incomplete generation and contradictory comp
 No failed prefix becomes accepted output.
 Scheduled retries save no rejection content; exhaustion retains only the settling Attempt's diagnostic and request correlation in the existing Resolution.
 
-HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted` and the two spend limits a quota and `usage_not_included` a plan.
+HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted`, the two spend limits and the two `subscription_sharing_usage_*` codes a quota and `usage_not_included` a plan.
 Each retains its neutral failure code, its refusal and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
 A Turn saved before refusal and sign-in codes became neutral keeps its old code (such as `provider_usage_limit_reached` or `provider_authentication_failed`), which now reads as an unknown failure: it shows its code, no trouble band and no reset time, and the Store does not fence it.
 Missing, null, invalid or duplicate reset metadata stays absent without making the quota refusal retryable.
@@ -2495,7 +2528,7 @@ A list still loading says so and is read again with the next listing, a fallback
 A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
 On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
 When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
-The sign-ins are named "ChatGPT" (`codex`) and "API key" (`openai`).
+The sign-ins are labelled by their provider facts: "Codex" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`), short enough that the list pane keeps the chosen one whole; a label's first word (`codex`, `chatgpt`, `api`) is the word that chooses it.
 Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.
 Esc steps back from the choice to the models, then closes the picker, and typing or a paste leaves it for the draft.
 Every pick saves the person's default, the one `/setup` and `rui defaults configure --provider --model` write, through the worker, and later starts use it (Divyansh, 2026-11-02, picker plan "Answered" 2 and 3).
@@ -2504,7 +2537,7 @@ An overview left without a pick writes nothing, and a failed save is not retried
 An Other model is picked like any other and runs with default limits.
 A save that fails says why in `/setup`'s words; one whose directory sync failed still changes the default and says its durability is unconfirmed.
 A save queued or running as the overview ends finishes first: on the way out the shell runs each save the core asked for through the worker's own job path, and the departure text reports one that ended after the person left.
-The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · ChatGPT`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
+The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · Codex`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
 The departure speaks for later launches, so it names the effort saved as the overview ends, whatever this launch named; one rule, `StartEffort`, decides the effort for the start and for both lines.
 The Session rows keep their highlight while the picker is open, so Ctrl-X acts on a row the person can see.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
@@ -2527,7 +2560,7 @@ Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes,
 Syntax validation is the only model check: an ID Rui's [list](#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
 A bad ID fails at the provider's first request, whose remedy is `/model` in the overview.
 Old pins remain readable and clearable, never substituted.
-The built-in providers are Codex and OpenAI; they share one catalog and the recommended model `gpt-6.1-sol`.
+The built-in providers are Codex, OpenAI and ChatGPT; they share one catalog and the recommended model `gpt-6.1-sol`.
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
 The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
@@ -2871,6 +2904,8 @@ The queued strip keeps its row when space runs short and leaves in the same fram
 A stop finds excluded Messages by walking Admission-only pages backward from itself, then renders them in admission order; no previous read's queue or drawing state decides placement.
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
+
+Wire version 13 adds the `chatgpt` provider key, and the `chatgpt_plan` route, to `host_info`'s `capabilities.providers`; different versions refuse each other.
 
 Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
@@ -3907,7 +3942,7 @@ Host information is a read-only, bounded `/v1/host-info` exchange for the canoni
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
-A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device` or `key_file`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
+A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.

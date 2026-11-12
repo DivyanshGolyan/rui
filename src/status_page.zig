@@ -530,11 +530,11 @@ test "the page shows the approved rows, `›` on the selected one, then the work
             "   Folder          ~/code/rui\n" ++
             "   Compact at      245,000 tokens · now 31,200" ++ grey ++ "model default" ++ end ++
             "   Headroom        0 tokens" ++ grey ++ "model default" ++ end ++
-            "   Model           gpt-6.1-sol · ChatGPT\n" ++
+            "   Model           gpt-6.1-sol · Codex\n" ++
             "   Store           ~/.local/share/rui/store" ++ grey ++ "fixed for this Session" ++ end ++
             "   Instructions    set from a shell\n" ++
             " New Sessions\n" ++
-            "   Model           gpt-6.1-sol · ChatGPT" ++ grey ++ "Rui default" ++ end ++
+            "   Model           gpt-6.1-sol · Codex" ++ grey ++ "Rui default" ++ end ++
             "   Effort          model default\n" ++
             "   Notifications   on\n" ++
             "   Store           ~/.rui/store\n" ++
@@ -648,7 +648,7 @@ test "each value stays on its row and says where it came from" {
         "Tools           bash\n",
         "Compact at      1,234,567 tokens  \x1b[90mSession override",
         "Headroom        999 tokens  \x1b[90mSession override",
-        "Model           model-a · ChatGPT",
+        "Model           model-a · Codex",
         "Instructions    none\n",
         "Model           gpt-x · API key\n",
         "Effort          low\n",

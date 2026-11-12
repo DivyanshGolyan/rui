@@ -690,7 +690,7 @@ export interface components {
             effort: null | "none" | "low" | "medium" | "high" | "xhigh" | "max";
             label?: string | null;
             /** @enum {string} */
-            provider?: "codex" | "openai";
+            provider?: "codex" | "openai" | "chatgpt";
             workspace?: string;
         };
         CallActivity: {
@@ -1042,9 +1042,11 @@ export interface components {
                 bash: true;
                 providers: {
                     /** @enum {string} */
-                    codex: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
+                    codex: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
                     /** @enum {string} */
-                    openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file";
+                    openai: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
+                    /** @enum {string} */
+                    chatgpt: "unserved" | "endpoint" | "chatgpt_device" | "key_file" | "chatgpt_plan";
                 };
             };
         };
@@ -1445,7 +1447,7 @@ export interface components {
         };
         ModelListEntry: {
             /** @enum {string} */
-            provider: "codex" | "openai";
+            provider: "codex" | "openai" | "chatgpt";
             /** @enum {string} */
             source: "catalog" | "pending" | "catalog_fallback" | "live";
             models: {
@@ -2721,7 +2723,7 @@ export interface components {
             reference: string;
             workspace: string;
             /** @enum {string} */
-            provider: "codex" | "openai";
+            provider: "codex" | "openai" | "chatgpt";
             model: string;
             /** @description None repeated; the names' bytes total at most x-rui-max-bytes. Each must be a tool the Host offers. */
             tools: string[];
@@ -2936,7 +2938,7 @@ export interface components {
             parent: string | null;
             workspace: string;
             /** @enum {string} */
-            provider: "codex" | "openai";
+            provider: "codex" | "openai" | "chatgpt";
             model: string;
             compaction_trigger: components["schemas"]["Decimal"];
             context_estimate: components["schemas"]["Decimal"] | null;
@@ -3126,7 +3128,7 @@ export interface components {
             command_key: string;
             workspace: string;
             /** @enum {string} */
-            provider: "codex" | "openai";
+            provider: "codex" | "openai" | "chatgpt";
             model: string;
             compaction_trigger: components["schemas"]["Decimal"] | null;
             output_reservation: components["schemas"]["Decimal"] | null;

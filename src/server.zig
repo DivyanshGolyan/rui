@@ -657,7 +657,7 @@ const Intake = struct {
             if (self.host.stopping() and listener_open.*) {
                 listener.deinit(self.host.io);
                 listener_open.* = false;
-                std.Io.Dir.deleteFileAbsolute(self.host.io, self.host.lease.paths.socket.slice()) catch |err|
+                self.host.lease.retireSocket() catch |err|
                     stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
                 socket_owned.* = false;
             }
@@ -943,7 +943,7 @@ pub fn serve(
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
         descriptorTransport(served),
-        served.leasedSignIn() != null,
+        served.anySignIn(),
         os.tag,
     );
     if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);
@@ -982,7 +982,7 @@ pub fn serve(
         intake_capacity,
         3,
         descriptorTransport(served),
-        served.leasedSignIn() != null,
+        served.anySignIn(),
         os.tag,
     );
     if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);
@@ -1077,13 +1077,12 @@ fn serveOpened(
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
-    const address = try std.Io.net.UnixAddress.init(lease.paths.socket.slice());
-    var listener = try address.listen(io, .{ .kernel_backlog = 128 });
+    var listener = try lease.listen(.{ .kernel_backlog = 128 });
     var listener_open = true;
     var socket_owned = true;
     errdefer {
         if (listener_open) listener.deinit(io);
-        if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+        if (socket_owned) lease.retireSocket() catch |err| {
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
     }
@@ -1181,7 +1180,7 @@ fn serveOpened(
         // execution or request custody. Store and lease outlive both drains.
         if (listener_open) listener.deinit(io);
         listener_open = false;
-        if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+        if (socket_owned) lease.retireSocket() catch |err| {
             // The lock still protects this failed cleanup. A later startup
             // removes the owned socket or refuses to serve if it cannot.
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
@@ -3840,8 +3839,12 @@ test "launch frame fenced MySQL shutdown is decided once at the return boundary 
         Probe.storage = &storage;
         Probe.fence_on_delete = case.late;
         Probe.used = 0;
-        var lease: platform.StoreLease = undefined;
-        lease.paths = .{};
+        var lease: platform.StoreLease = .{
+            .io = io,
+            .paths = .{},
+            .store_dir = .cwd(),
+            .lock_file = undefined,
+        };
         try lease.paths.socket.set(path);
         var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = &storage, .phase = .init(.stopping) };
         var intake: Intake = .{ .host = &host, .launched = case.launched, .deadline_armed = true };
@@ -3954,14 +3957,16 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         vtable.operate = Probe.operate;
         vtable.dirDeleteFile = Probe.delete;
         const io: std.Io = .{ .userdata = std.testing.io.userdata, .vtable = &vtable };
-        var lease: platform.StoreLease = undefined;
-        lease.paths = .{};
+        // The host-stop below leaves its stop record beside the lease.
+        var lease: platform.StoreLease = .{
+            .io = std.testing.io,
+            .paths = .{},
+            .store_dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{}),
+            .lock_file = undefined,
+        };
         try lease.paths.store.set("s");
         try lease.paths.scratch.set(root);
         try lease.paths.socket.set(socket_path);
-        // The host-stop below leaves its stop record beside the lease.
-        lease.io = std.testing.io;
-        lease.store_dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{});
         defer lease.store_dir.close(std.testing.io);
         var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
         const database = try std.fmt.bufPrint(&database_buffer, "{s}/{s}.sqlite", .{ root, @tagName(phase) });
