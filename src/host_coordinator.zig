@@ -198,7 +198,7 @@ test "coordinator transfers the original checked plan including private launch v
     var observed: client.HostControlObservation = .{
         .profile = .current,
         .pid = 123,
-        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(19), .active_capacity = 2, .intake_capacity = 17, .descriptor_limit = 4096, .started_at = 100, .custody_occupied = 3, .paused = true, .innodb_doublewrite = .{ .len = 0 }, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .unserved } } },
+        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(19), .active_capacity = 2, .intake_capacity = 17, .descriptor_limit = 4096, .started_at = 100, .custody_occupied = 3, .paused = true, .innodb_doublewrite = .{ .len = 0 }, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .unserved, .chatgpt = .unserved } } },
     };
     try observed.facts.store.set("/store/雪\n");
     try observed.facts.innodb_doublewrite.?.set("ON");
