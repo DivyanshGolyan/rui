@@ -251,6 +251,37 @@
       ]
     },
     {
+      "name": "mouse-settings",
+      "note": "Click the pinned Settings row using terminal mouse modes",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Settings"
+        },
+        {
+          "mouse": {
+            "at": "Settings",
+            "do": "move"
+          }
+        },
+        {
+          "mouse": {
+            "at": "Settings",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "Notifications"
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Notifications",
+        "Sign-in",
+        "Version"
+      ]
+    },
+    {
       "name": "start",
       "note": "02-overview",
       "open": "overview",
@@ -573,7 +604,10 @@
           ]
         },
         {
-          "gone": "Opening tool output\u2026"
+          "wait": "    stderr tail:"
+        },
+        {
+          "gone": "Opening tool output…"
         },
         {
           "keys": [
@@ -611,7 +645,10 @@
           ]
         },
         {
-          "gone": "Opening tool output\u2026"
+          "wait": "    Bash succeeded. Exit code: 0."
+        },
+        {
+          "gone": "Opening tool output…"
         },
         {
           "keys": [
@@ -886,7 +923,7 @@
           "wait": "retry policy notes"
         },
         {
-          "wait": "return null; //\n    expired"
+          "wait": "return null; //\n     expired"
         }
       ],
       "expect": [
@@ -1682,6 +1719,9 @@
       "open": "overview",
       "steps": [
         {
+          "wait": "Batch job"
+        },
+        {
           "keys": [
             "Down",
             "Down",
@@ -1859,7 +1899,7 @@
     },
     {
       "name": "exit",
-      "note": "81-exit",
+      "note": "81-exit: quiescent main-screen diagnostic after Rui exits",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -1871,14 +1911,14 @@
           "wait": "Detached. Host work continues."
         },
         {
-          "wait": "Pane is dead (status 0"
+          "exited": 0
         }
       ],
       "sizes": [
         "46x30",
         "140x40"
       ],
-      "expect": "Pane is dead (status 0"
+      "expect": "Detached. Host work continues."
     }
   ]
 }
