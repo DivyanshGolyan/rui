@@ -164,8 +164,8 @@ jobs:
           (needs.build.result == 'success' || needs.build.result == 'skipped') &&
           (needs.npm.result == 'success' || needs.npm.result == 'skipped') }}
     runs-on: ubuntu-24.04
-    # Ten for publication, five for the Host memory measurement.
-    timeout-minutes: 15
+    # Ten for publication, seven for fetching and measuring Host memory.
+    timeout-minutes: 17
     permissions:
       contents: write
       actions: read
@@ -187,17 +187,24 @@ jobs:
           ref: ${{ needs.plan.outputs.sha }}
           path: .release-source
           persist-credentials: false
+      - name: Fetch the released Linux executable to measure
+        id: memory_fetch
+        if: ${{ needs.plan.outputs.version != '' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
       - name: Measure the released Linux executable's Host memory
         # Never holds back the release: the notes say "not measured" when this step does not finish.
-        if: ${{ needs.plan.outputs.version != '' }}
+        # No token here: this step installs packages and runs fixture and product code.
+        if: ${{ needs.plan.outputs.version != '' && steps.memory_fetch.outcome == 'success' }}
         continue-on-error: true
         timeout-minutes: 5
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-linux-x86_64 --dir "$RUNNER_TEMP/memory"
           tar -xzf "$RUNNER_TEMP/memory/rui-$VERSION-linux-x86_64.tar.gz" -C "$RUNNER_TEMP/memory"
           python3 -m venv "$RUNNER_TEMP/memory-python"
           "$RUNNER_TEMP/memory-python/bin/pip" --disable-pip-version-check install --retries 1 \
