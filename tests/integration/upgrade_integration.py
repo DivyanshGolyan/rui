@@ -299,7 +299,7 @@ def discovery_cases(root, binary, releases):
         output = c.upgrade("--check")
         assert f"Latest published stable: {releases.version}" in output, output
         assert "Selected managed release: 0.1.0" in output, output
-        assert "No Host was running" in output
+        assert "No running Hosts discovered now" in output
         assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path]
         c.assert_unchanged()
         c.assert_no_host()
@@ -393,7 +393,7 @@ def install_cases(root, binary, releases):
     with case(root, binary, releases, "install-no-host") as c:
         c.old_selection()
         output = c.upgrade()
-        assert "Installed Rui" in output and "no Host was initially running and none was started" in output, output
+        assert "Installed Rui" in output and "No running Hosts." in output, output
         assert c.link.resolve() != c.original
         assert c.original.exists(), "retained old complete build removed"
         assert c.run("--version").startswith("rui " + releases.version)
@@ -424,7 +424,7 @@ def install_cases(root, binary, releases):
     with case(root, binary, releases, "newer-selected-no-downgrade") as c:
         c.select(c.build("synthetic-future-selected", "0.999.0"))
         output = c.upgrade()
-        assert "Installation unchanged" in output and "No downgrade or restart occurred" in output, output
+        assert "Installation unchanged" in output and "No running Hosts." in output, output
         c.assert_unchanged()
         c.assert_no_host()
 
@@ -468,7 +468,8 @@ def lifecycle_cases(root, binary, releases):
     with case(root, binary, releases, "managed-host-restart") as c:
         c.old_selection()
         old_host, previous = c.start_host()
-        # A second Store remains outside this Upgrade's lifecycle authority.
+        # A retained executable under another synthetic HOME is foreign to
+        # this installation. Discovery must still report its explained skip.
         other = Case(root, binary, releases, "unrelated-store")
         try:
             other_host, other_previous = other.start_host()
@@ -479,7 +480,7 @@ def lifecycle_cases(root, binary, releases):
             assert c.link.resolve() == c.original
             gate.release.set()
             output = c.finish_upgrade(child)
-            assert "Installed Rui" in output and "Activation: ready;" in output, output
+            assert "Installed Rui" in output and "restarted on " in output, output
             proof_ready(c, previous, old_host)
             assert other_host.poll() is None and other.status()["instance"] == other_previous["instance"]
         finally:
@@ -489,15 +490,15 @@ def lifecycle_cases(root, binary, releases):
         c.old_selection()
         old_host, previous = c.start_host(store_hex=True)
         output = c.upgrade()
-        assert "Installed Rui" in output and "Activation: ready;" in output, output
+        assert "Installed Rui" in output and "restarted on " in output, output
         proof_ready(c, previous, old_host)
 
     with case(root, binary, releases, "relative-launch-path-not-restarted") as c:
         c.old_selection()
         relative_bash = os.path.relpath("/bin/bash", pathlib.Path.cwd())
         old_host, previous = c.start_host(extra=("--bash-path", relative_bash))
-        output = c.finish_upgrade(c.spawn_upgrade(), success=False)
-        assert "Installed Rui" in output and "existing Host was left running" in output, output
+        output = c.finish_upgrade(c.spawn_upgrade())
+        assert "Installed Rui" in output and "left running: launch configuration cannot be safely reconstructed" in output, output
         assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
         assert os_semantics.process_executable(old_host.pid) != c.link.resolve()
 
@@ -506,26 +507,79 @@ def lifecycle_cases(root, binary, releases):
         old_host, previous = c.start_host()
         start = len(releases.requests)
         output = c.upgrade()
-        assert "Installation unchanged" in output and "Activation: ready;" in output, output
+        assert "Installation unchanged" in output and "restarted on " in output, output
         assert releases.archive_path not in releases.requests[start:]
         proof_ready(c, previous, old_host)
         ready = c.status()
         output = c.upgrade()
-        assert "already running the selected pinned build" in output, output
+        assert "already on " in output, output
         assert c.status()["instance"] == ready["instance"]
 
     with case(root, binary, releases, "retained-tagged-source-host") as c:
         c.old_selection()
         host, previous = c.start_host(source=True)
         output = c.finish_upgrade(c.spawn_upgrade())
-        assert "Installed Rui" in output and "Activation: ready;" in output, output
+        assert "Installed Rui" in output and "restarted on " in output, output
         proof_ready(c, previous, host)
+
+    with case(root, binary, releases, "upgrade-all-first") as first, \
+            case(root, binary, releases, "upgrade-all-second") as second, \
+            case(root, binary, releases, "upgrade-all-unsupported") as unsupported:
+        second.home, second.env, second.link = first.home, first.env, first.link
+        unsupported.home, unsupported.env, unsupported.link = first.home, first.env, first.link
+        first.old_selection()
+        old_first, previous_first = first.start_host("all-first")
+        old_second, previous_second = second.start_host("all-second", store_hex=True)
+        foreign, previous_foreign = unsupported.start_host("all-foreign", managed=False)
+        warning = first.upgrade("--check")
+        assert "Discovered 3 Hosts" in warning, warning
+        assert "every running Host" in warning and "ALL Sessions" in warning, warning
+        for previous in (previous_first, previous_second, previous_foreign):
+            assert previous["store"] in warning, warning
+        assert "left running: application-owned Host" in warning, warning
+        output = first.upgrade()
+        for previous in (previous_first, previous_second):
+            assert f"{previous['store']}: restarted on {releases.version}" in output, output
+        assert f"{previous_foreign['store']}: left running: application-owned Host" in output, output
+        assert "3 Hosts: 2 restarted, 0 already current, 1 left unchanged, 0 failed." in output, output
+        proof_ready(first, previous_first, old_first)
+        proof_ready(second, previous_second, old_second)
+        assert foreign.poll() is None and unsupported.status()["instance"] == previous_foreign["instance"]
+
+    with case(root, binary, releases, "upgrade-all-discovery-failure") as c:
+        c.old_selection()
+        old, previous = c.start_host()
+        unreadable = pathlib.Path(c.ready["socket"]).parent / "upgrade-unreadable.sock"
+        try:
+            with os_semantics.unix_stream() as listener:
+                listener.bind(str(unreadable))
+                listener.listen(1)
+                output = c.upgrade(expect=6)
+                assert "Installed Rui" in output and "[host_restart_failed]" in output, output
+                assert str(unreadable) in output and "failed at discovery" in output, output
+                assert "2 Hosts: 1 restarted, 0 already current, 0 left unchanged, 1 failed." in output, output
+                assert c.link.resolve() != c.original
+                proof_ready(c, previous, old)
+        finally:
+            unreadable.unlink(missing_ok=True)
+
+    with case(root, binary, releases, "upgrade-all-late-host") as c:
+        c.old_selection()
+        gate = releases.gate_archive()
+        child = c.spawn_upgrade()
+        wait_for(gate.entered.is_set, "initial empty census before late Host")
+        late, previous = c.start_host("late-after-check")
+        gate.release.set()
+        output = c.finish_upgrade(child)
+        assert "No running Hosts discovered now" in output, output
+        assert f"{previous['store']}: restarted on {releases.version}" in output, output
+        proof_ready(c, previous, late)
 
     with case(root, binary, releases, "application-owned-host") as c:
         c.old_selection()
         host, previous = c.start_host(managed=False)
-        output = c.finish_upgrade(c.spawn_upgrade(), success=False)
-        assert "Installed Rui" in output and "existing Host was left running" in output, output
+        output = c.finish_upgrade(c.spawn_upgrade())
+        assert "Installed Rui" in output and "left running: application-owned Host" in output, output
         assert host.poll() is None and c.status()["instance"] == previous["instance"]
         assert os_semantics.process_executable(host.pid) != c.link.resolve()
 
@@ -540,10 +594,11 @@ def lifecycle_cases(root, binary, releases):
         replacement, current = c.start_host("replacement-real-host")
         assert current["instance"] != previous["instance"]
         gate.release.set()
-        output = c.finish_upgrade(child, success=False)
-        assert "Installed Rui" in output and "another Host instance owns this Store" in output, output
-        assert replacement.poll() is None and c.status()["instance"] == current["instance"]
-        assert os_semantics.process_executable(replacement.pid) != c.link.resolve()
+        output = c.finish_upgrade(child)
+        assert "Installed Rui" in output and "restarted on " in output, output
+        # The pre-install census is warning-only. Fresh post-publication
+        # discovery must include and authorize the replacement, not an old plan.
+        proof_ready(c, current, replacement)
 
 
     with case(root, binary, releases, "activation-target-disappeared") as c:
@@ -561,8 +616,8 @@ def lifecycle_cases(root, binary, releases):
         installed.unlink()
         gate.unlink()
         output = c.finish_upgrade(child, success=False)
-        assert "Installed Rui" in output and "Activation: unconfirmed" in output, output
-        assert "release remains installed" in output and "failed before publication" not in output, output
+        assert "Installed Rui" in output and "Host restart could not finish" in output, output
+        assert "Installation was not rolled back" in output and "failed before publication" not in output, output
         assert c.link.is_symlink() and os.readlink(c.link) == str(installed)
         assert host.poll() is None and c.status()["instance"] == previous["instance"]
 
@@ -1191,7 +1246,8 @@ def signal_after_publication(root, binary, releases, artifacts):
             assert host.poll() is None and c.status()["instance"] == previous["instance"]
             receipt = exit_on_sigint(screen, process, "joined publication receipt and terminal exit after SIGINT")
             assert b"Installed Rui. Complete build:" in receipt, ("joined installation receipt was lost after interruption", receipt.decode())
-            assert b"cancelled after installation; publication was not rolled back" in receipt, receipt.decode()
+            assert b"Host restart could not finish (Cancelled)" in receipt, receipt.decode()
+            assert b"Installation was not rolled back" in receipt, receipt.decode()
             assert os.fsencode(installed.parent.parent) in receipt, "receipt lost the published build identity"
             assert gate.exists(), "signal exit required releasing the post-publication gate"
             assert c.link.resolve() == installed and installed.exists(), "signal rolled back publication"

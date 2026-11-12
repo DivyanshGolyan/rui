@@ -6722,7 +6722,7 @@ test "Upgrade runs inline: Esc cancels it before the draft, checking or preparin
     // Esc cancels the Upgrade and keeps the draft.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
     // The worker says whether the stop held; until then the line stands.
-    try std.testing.expectEqualStrings("Upgrading to 0.60.0 · no Host running · esc cancels", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
+    try std.testing.expectEqualStrings("Upgrading to 0.60.0 · no Hosts running · esc cancels", upgrade_status.line(state.upgrade.run.?, &buffer, .unicode).text);
     _ = try step(&state, .{ .upgrade = .cancelling });
     // A second Esc is still the Upgrade's while it winds down.
     try expectEffects(&.{.cancel_upgrade}, try press(&state, draft, .clear));
@@ -6821,10 +6821,10 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     _ = try step(&state, .start_upgrade);
     try expectStatus(&state, "Checking for updates…", .normal);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
-    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    try expectStatus(&state, "Upgrading to 0.60.0 · no Hosts running · esc cancels", .normal);
     // A notice never hides the run's line, where Esc is offered.
     state.say(.attention, "! Select a Session first.", .{});
-    try expectStatus(&state, "Upgrading to 0.60.0 · no Host running · esc cancels", .normal);
+    try expectStatus(&state, "Upgrading to 0.60.0 · no Hosts running · esc cancels", .normal);
     _ = try press(&state, .{}, .next);
     // An ending that is news is a notice: it goes with the next key and
     // the unconfirmed send shows again.
@@ -6855,7 +6855,7 @@ test "the status rows above the Footer say the status bar's line" {
     _ = try step(&state, .start_upgrade);
     _ = try step(&state, .{ .upgrade = .{ .installing = .{ .found = .{ .version = .{ .schema = 60, .patch = 0 }, .host = .none } } } });
     const upgrading = try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, 120, .{ .unicode = false })).?);
-    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Host running - esc cancels"));
+    try std.testing.expect(std.mem.startsWith(u8, upgrading, " Upgrading to 0.60.0 - no Hosts running - esc cancels"));
 }
 
 test "Upgrade is never refused as a Host request: the status bar shows its run at first, while it runs and after a hold" {

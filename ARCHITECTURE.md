@@ -1578,12 +1578,12 @@ If candidate facts are absent, it reports unknown and leaves validation to Host 
 The installer's read-only Store probe uses the defaults-selected Store, which is not necessarily the client's explicitly selected active Store.
 MySQL schema application and backup remain operator-owned.
 
-`rui upgrade` replaces an eligible managed released selection with the latest published stable release and conditionally activates it for the selected Store only when its Host was already running.
+`rui upgrade` replaces an eligible managed released selection with the latest published stable release, then calls the same restart-all core as `rui host restart --all` for every running same-user Host. The read-only check names the discovered Host count, Stores and unsupported reasons.
 `rui upgrade --check` is read-only and starts no Host.
 The Version row of app settings starts an Upgrade run, available from the overview or with a conversation open. The run stays inline on the status row, without sending a command to the model or adding an updater service.
 The overview owns the one run and runs its worker once its own and the conversation's Client work has settled; both screens hand Esc to that run.
-It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
-Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
+It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts every eligible Host (2 found) · esc cancels`.
+Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting Hosts…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
 When this run installs a different Rui, compatible or incompatible with the old client, the terminal leaves through its ordinary cancellation, save-flush and restoration path, then the CLI replaces its process image with the published selection's `bin/rui` (same PID and terminal, never PATH or the old executable).
 It reopens the overview or the same conversation (`Overview.Options.open`), pinning the old client's actual canonical Store explicitly and preserving its explicit `--provider` and `--model` selectors, the overview draft and every chat draft, including the open editor's bytes, caret, recall anchor and rejection state.
 A changed saved Store cannot redirect this restart.
@@ -1603,8 +1603,8 @@ One pure core, `upgrade_status`, turns that value into the Version field and sta
 `UpgradeJob.ending` alone derives the small failure reason from the run error: a download failure says "couldn't reach GitHub" even while settings hides the status bar. The restored shell report retains curl's last stderr line.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
-Restart can interrupt work in every Session in that Store, not other Stores.
-No running Host means install only.
+Restart can interrupt work in every Session across all affected Stores, not only the selected Store.
+No running Hosts means install only; absent Stores are not started. The pre-install census is warning-only: post-publication discovery includes Hosts started during preparation.
 
 The TUI handoff is a cross-version contract: the departing binary writes it and the selected binary reads it.
 `RUI_RELAUNCH` names an absolute `HOME/.rui-relaunch/<32 lowercase hexadecimal digits>.json` path; the directory is current-user-owned mode 0700, the exclusive random file is a current-user-owned regular file of mode 0600 with one link, and neither final component is followed through a symlink.
@@ -1623,8 +1623,10 @@ Each draft is bounded by `SessionInput.capacity`, the Store and ending line by t
 The encoded size bound allows six JSON-escaped bytes per input byte plus fixed field/integer overhead for that population; the reader streams into owned decoded drafts rather than allocating the file's advertised size.
 The exact v1 bytes are pinned in `relaunch_handoff.zig`.
 
-The thin upgrade coordinator composes `InstallationOutcome` separately from HostLifecycle `ActivationOutcome`.
-After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
+The thin upgrade coordinator composes `InstallationOutcome` with the restart-all batch of per-Host outcomes. After publication it pins the receipt's selected build, never PATH, and calls the restart-all owner once.
+For each eligible Host that owner reobserves the exact instance, waits for lease retirement after stopping it, starts the pinned target with preserved settings and verifies readiness before claiming activation.
+Upgrade keeps no single-Store activation path or private launch snapshot in its check. The TUI derives selected-Store compatibility from that Store's per-Host outcome; failure or unsupported-owner guidance from any Store remains visible and prevents a relaunch from swallowing it.
+Per-Host result lines and totals are the same as the standalone command. Any failed/unconfirmed Host produces `host_restart_failed` (operate, exit 6) after reporting the successful binary publication; unsupported Hosts are explained successful skips. Publication is never rolled back for a restart failure.
 A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
 An already-installed target can still need activation of an older running Host.
 Source and release installers invoke the newly published command's `rui host restart --all` after publication; failure prints its receipt and a note without failing or undoing installation.
@@ -1647,7 +1649,7 @@ Unknown managed, ineligible and foreign builds remain application-owned; a manag
 Upgrade installation eligibility still requires a selected managed release, independently of the running Host's build kind; a source-started Host newer than that release is superseded without interruption, otherwise normal activation can restart it.
 The target is the pinned installed selection, with a verified numeric version; an unversioned source target is reported without stopping Hosts.
 No running Hosts prints `No running Hosts.` and starts nothing.
-This install-wide operation is separate from `rui upgrade`, whose selected-Store behavior is unchanged.
+Source/release installers and `rui upgrade` use this one install-wide restart owner; only installation eligibility differs.
 
 Lifecycle control observation is separate from ordinary client readiness.
 Upgrade can read the complete bounded Host-info envelope using only the current wire or the released wire `9`, with matching HTTP and body versions and peer PID from that same connection.

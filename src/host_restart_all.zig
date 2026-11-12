@@ -9,30 +9,31 @@ const release = @import("release_candidate.zig");
 const process = @import("upgrade_process.zig");
 const TerminalText = @import("TerminalText.zig");
 
-const Target = struct {
+pub const Target = struct {
     build: []const u8,
     version: release.Version,
 
-    fn init(process_init: std.process.Init, allocator: std.mem.Allocator, home: []const u8) !Target {
-        var selected = try Installation.inspect(allocator, process_init.io, home);
+    pub fn init(init_process: std.process.Init, allocator: std.mem.Allocator, home: []const u8, build: ?[]const u8, cancellation: ?*const client.Cancellation) !Target {
+        var selected = if (build) |path|
+            try Installation.inspectBuild(allocator, init_process.io, home, path, cancellation)
+        else
+            try Installation.inspectCancellable(allocator, init_process.io, home, cancellation);
         errdefer selected.deinit(allocator);
         switch (selected) {
             .released => |value| return .{ .build = value.build, .version = value.version },
-            .source => |build| {
-                const binary = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{build});
+            .source => |path| {
+                const binary = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{path});
                 defer allocator.free(binary);
-                const reported = try process.output(allocator, process_init.io, &.{ binary, "--version" }, null, 512);
+                const reported = try process.output(allocator, init_process.io, &.{ binary, "--version" }, cancellation, 512);
                 defer allocator.free(reported);
-                // The existing lifecycle verifies a numeric release identity before
-                // claiming readiness. Never invent one for an unreleased source build.
                 const version = HostLifecycle.releaseVersion(reported) orelse return error.IneligibleInstallation;
-                return .{ .build = build, .version = version };
+                return .{ .build = path, .version = version };
             },
             else => return error.IneligibleInstallation,
         }
     }
 
-    fn deinit(self: Target, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: Target, allocator: std.mem.Allocator) void {
         allocator.free(self.build);
     }
 };
@@ -60,83 +61,206 @@ const Totals = struct {
     }
 };
 
-pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
+pub const Failure = enum { discovery, observation, selection };
+pub const Entry = struct {
+    socket: []const u8,
+    store: ?[]const u8 = null,
+    state: union(enum) {
+        /// Read-only census, never an activation plan. Reobserve before acting.
+        observed: client.HostControlObservation,
+        outcome: HostLifecycle.ActivationOutcome,
+        failed: Failure,
+    },
+};
+
+/// Owns only routing strings and read-only facts, not private launch snapshots.
+/// A census has observed entries; execution replaces each with its one outcome.
+pub const Batch = struct {
+    entries: []Entry = &.{},
+    version: ?release.Version = null,
+    failure: ?anyerror = null,
+
+    pub fn deinit(self: *Batch, allocator: std.mem.Allocator) void {
+        for (self.entries) |entry| {
+            allocator.free(entry.socket);
+            if (entry.store) |store| allocator.free(store);
+        }
+        allocator.free(self.entries);
+        self.* = .{};
+    }
+
+    pub fn selectedOutcome(self: *const Batch, store: []const u8) HostLifecycle.ActivationOutcome {
+        var unknown = self.failure != null;
+        for (self.entries) |entry| {
+            const path = entry.store orelse {
+                unknown = true;
+                continue;
+            };
+            if (!std.mem.eql(u8, path, store)) continue;
+            return switch (entry.state) {
+                .outcome => |outcome| outcome,
+                .failed, .observed => .{ .unconfirmed = .verifying },
+            };
+        }
+        if ((self.failure orelse error.Unexpected) == error.Cancelled) return .cancelled;
+        return if (unknown) .{ .unconfirmed = .verifying } else .not_needed;
+    }
+
+    pub fn hasGuidance(self: *const Batch) bool {
+        if (self.failure != null) return true;
+        for (self.entries) |entry| switch (entry.state) {
+            .failed => return true,
+            .observed => unreachable,
+            .outcome => |outcome| switch (outcome) {
+                .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => return true,
+                .not_needed, .superseded, .already_ready, .ready, .client_incompatible => {},
+            },
+        };
+        return false;
+    }
+
+    pub fn totals(self: *const Batch) Totals {
+        var result: Totals = .{};
+        if (self.failure != null) result.add(.failed);
+        for (self.entries) |entry| switch (entry.state) {
+            .observed => unreachable,
+            .failed => result.add(.failed),
+            .outcome => |outcome| result.add(category(outcome)),
+        };
+        return result;
+    }
+
+    pub fn write(self: *const Batch, writer: *std.Io.Writer) !void {
+        if (self.failure) |err| try writer.print("Host restart could not finish ({s}); inspect this user's Hosts with their owning clients, then retry.\n", .{@errorName(err)});
+        for (self.entries) |entry| switch (entry.state) {
+            .observed => unreachable,
+            .failed => |stage| try writeEntryFailure(writer, &entry, stage),
+            .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
+        };
+        try self.totals().write(writer);
+    }
+
+    pub fn writeWarning(self: *const Batch, writer: *std.Io.Writer) !void {
+        if (self.entries.len == 0 and self.failure == null) return writer.writeAll("No running Hosts discovered now; Hosts running after publication will also be considered.\n");
+        try writer.print("Upgrade restarts every running Host it can safely activate, interrupting work across ALL Sessions in those Stores. Discovered {d} Hosts:\n", .{self.entries.len});
+        for (self.entries) |entry| switch (entry.state) {
+            .observed => {
+                try field(writer, entry.store.?);
+                try writer.writeAll(": running; will restart on the selected installed build\n");
+            },
+            .outcome => |outcome| _ = try writeOutcome(writer, entry.store.?, outcome, self.version),
+            .failed => |stage| try writeEntryFailure(writer, &entry, stage),
+        };
+    }
+};
+
+/// One discovery owner for the pre-install warning and post-publication run.
+/// Eligibility is read-only here; no launch snapshot survives the census.
+pub fn discover(init: std.process.Init, allocator: std.mem.Allocator, home: []const u8, cancellation: ?*const client.Cancellation) !Batch {
     const sockets = try platform.listHostSockets(allocator, init.io);
     defer {
         for (sockets) |socket| allocator.free(socket);
         allocator.free(sockets);
     }
-    var buffer: [2048]u8 = undefined;
-    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-    const writer = &output.interface;
-    var totals: Totals = .{};
-    var target: ?Target = null;
-    defer if (target) |value| value.deinit(allocator);
-    // One observation and activation at a time: no concurrent Store interruption.
-    for (sockets) |socket| {
-        const discovered = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch {
-            // No verified Store means no lock-backed proof of absence. Even a
-            // refused or removed socket must be reported, not silently skipped.
-            try writer.writeAll("Store unknown (socket ");
-            try field(writer, socket);
-            try writer.writeAll("): failed at discovery: Host state is unconfirmed; inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n");
-            totals.add(.failed);
-            try output.flush();
-            continue;
-        } orelse continue; // Only a trusted Store hint and free lease prove absence.
-        const store = discovered.facts.store.slice();
-        const home = init.environ_map.get("HOME") orelse {
-            try writeFailure(writer, store, "selection", "HOME is unavailable; restore it and retry.");
-            totals.add(.failed);
-            try output.flush();
-            continue;
-        };
-        var observation = HostLifecycle.observe(allocator, init.io, home, store, null) catch {
-            try writeFailure(writer, store, "observation", "could not confirm this Host; inspect with its owning client, then retry.");
-            totals.add(.failed);
-            try output.flush();
-            continue;
-        };
-        defer observation.deinit(allocator);
-        // A limitation needs no installed target and grants no activation plan.
-        // Keep unsupported Hosts a successful, explained skip even on a source
-        // install whose target cannot pass the existing release verifier.
-        const inactive: ?HostLifecycle.ActivationOutcome = switch (observation) {
-            .absent => .not_needed,
-            .unsupported => |reason| .{ .unsupported = reason },
-            .managed => null,
-        };
-        if (inactive) |outcome| {
-            totals.add(try writeOutcome(writer, store, outcome, null));
-            try output.flush();
-            continue;
+    var entries: std.ArrayList(Entry) = .empty;
+    errdefer {
+        for (entries.items) |entry| {
+            allocator.free(entry.socket);
+            if (entry.store) |store| allocator.free(store);
         }
-        if (target == null) {
-            target = Target.init(init, allocator, home) catch {
-                try writeFailure(writer, store, "selection", "selected installed build has no verified release version; install a managed release and retry.");
-                totals.add(.failed);
-                try output.flush();
+        entries.deinit(allocator);
+    }
+    for (sockets) |socket| {
+        try process.check(cancellation);
+        const facts = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch {
+            const path = try allocator.dupe(u8, socket);
+            errdefer allocator.free(path);
+            try entries.append(allocator, .{ .socket = path, .state = .{ .failed = .discovery } });
+            continue;
+        } orelse continue;
+        const path = try allocator.dupe(u8, socket);
+        errdefer allocator.free(path);
+        const store = try allocator.dupe(u8, facts.facts.store.slice());
+        errdefer allocator.free(store);
+        const state: @FieldType(Entry, "state") = state: {
+            var observation = HostLifecycle.observe(allocator, init.io, home, store, cancellation) catch break :state .{ .failed = .observation };
+            defer observation.deinit(allocator);
+            break :state switch (observation) {
+                .absent => .{ .outcome = .not_needed },
+                .unsupported => |reason| .{ .outcome = .{ .unsupported = reason } },
+                .managed => .{ .observed = facts },
+            };
+        };
+        try entries.append(allocator, .{ .socket = path, .store = store, .state = state });
+    }
+    return .{ .entries = try entries.toOwnedSlice(allocator) };
+}
+
+pub const Options = struct {
+    home: []const u8,
+    target: ?*const Target = null,
+    cancellation: ?*const client.Cancellation = null,
+    progress: ?HostLifecycle.Progress = null,
+};
+
+pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: Options) !Batch {
+    var batch = try discover(init, allocator, options.home, options.cancellation);
+    errdefer batch.deinit(allocator);
+    var selected: ?Target = null;
+    defer if (selected) |target| target.deinit(allocator);
+    if (options.target) |target| batch.version = target.version;
+    for (batch.entries) |*entry| {
+        if (entry.state != .observed) continue;
+        const facts = entry.state.observed;
+        entry.state = .{ .outcome = outcome: {
+            process.check(options.cancellation) catch break :outcome .cancelled;
+            var observation = HostLifecycle.observe(allocator, init.io, options.home, entry.store.?, options.cancellation) catch {
+                entry.state = .{ .failed = .observation };
                 continue;
             };
-        }
-
-        const outcome: HostLifecycle.ActivationOutcome = outcome: {
-            // Discovery authorizes no mutation. The lifecycle must have observed
-            // the same exact Host before we hand it the activation request.
-            {
-                const current = observation.managed.observed;
-                if (current.pid != discovered.pid or
-                    !std.mem.eql(u8, &current.facts.instance, &discovered.facts.instance) or
-                    !std.mem.eql(u8, current.facts.store.slice(), store)) break :outcome .replacement_observed;
+            defer observation.deinit(allocator);
+            switch (observation) {
+                .absent => break :outcome .not_needed,
+                .unsupported => |reason| break :outcome .{ .unsupported = reason },
+                .managed => {},
             }
-            break :outcome HostLifecycle.activate(init, allocator, &observation, target.?.build, target.?.version, null, null) catch .{ .unconfirmed = .starting };
-        };
-        totals.add(try writeOutcome(writer, store, outcome, target.?.version));
-        try output.flush();
+            if (options.target == null and selected == null) {
+                selected = Target.init(init, allocator, options.home, null, options.cancellation) catch {
+                    entry.state = .{ .failed = .selection };
+                    continue;
+                };
+                batch.version = selected.?.version;
+            }
+            const target = options.target orelse &selected.?;
+            const current = observation.managed.observed;
+            if (current.pid != facts.pid or !std.mem.eql(u8, &current.facts.instance, &facts.facts.instance) or
+                !std.mem.eql(u8, current.facts.store.slice(), entry.store.?)) break :outcome .replacement_observed;
+            break :outcome HostLifecycle.activate(init, allocator, &observation, target.build, target.version, options.cancellation, options.progress) catch .{ .unconfirmed = .starting };
+        } };
     }
-    try totals.write(writer);
+    return batch;
+}
+
+pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
+    const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+    var batch = restart(init, allocator, .{ .home = home }) catch |err| Batch{ .failure = err };
+    defer batch.deinit(allocator);
+    var buffer: [2048]u8 = undefined;
+    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
+    try batch.write(&output.interface);
     try output.flush();
-    if (totals.failed != 0) return error.HostRestartFailed;
+    if (batch.totals().failed != 0) return error.HostRestartFailed;
+}
+
+fn writeEntryFailure(writer: *std.Io.Writer, entry: *const Entry, stage: Failure) !void {
+    if (entry.store) |store| return writeFailure(writer, store, @tagName(stage), switch (stage) {
+        .discovery => unreachable,
+        .observation => "could not confirm this Host; inspect with its owning client, then retry.",
+        .selection => "selected installed build has no verified release version; install a managed release and retry.",
+    });
+    try writer.writeAll("Store unknown (socket ");
+    try field(writer, entry.socket);
+    try writer.writeAll("): failed at discovery: Host state is unconfirmed; inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n");
 }
 
 fn field(writer: *std.Io.Writer, text: []const u8) !void {
@@ -150,35 +274,39 @@ fn writeFailure(writer: *std.Io.Writer, store: []const u8, stage: []const u8, re
     try writer.print(": failed at {s}: {s}\n", .{ stage, remedy });
 }
 
-/// Pure reporting policy over the lifecycle's own values, not a mirrored union.
-/// Returning the category from the same switch keeps line and exit truth together.
+/// Pure exit/total policy over the lifecycle's own values, not a mirrored union.
+/// Both entry rendering and aggregation call this one classification.
+fn category(outcome: HostLifecycle.ActivationOutcome) Result {
+    return switch (outcome) {
+        .ready, .client_incompatible => .restarted,
+        .already_ready => .current,
+        .superseded, .not_needed, .unsupported => .skipped,
+        .replacement_observed, .cancelled, .failed, .unconfirmed => .failed,
+    };
+}
+
 fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycle.ActivationOutcome, version: ?release.Version) !Result {
     try field(writer, store);
     try writer.writeAll(": ");
-    const result: Result = switch (outcome) {
-        .ready => result: {
+    switch (outcome) {
+        .ready => {
             try writer.print("restarted on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
-            break :result .restarted;
         },
-        .client_incompatible => result: {
+        .client_incompatible => {
             // The lifecycle verified the exact pinned launch and version, not
             // ordinary readiness. Preserve that certainty and name the limit.
             try writer.print("restarted on 0.{d}.{d}; different Host protocol; inspect with the selected Rui client", .{ version.?.schema, version.?.patch });
-            break :result .restarted;
         },
-        .already_ready => result: {
+        .already_ready => {
             try writer.print("already on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
-            break :result .current;
         },
-        .superseded => result: {
+        .superseded => {
             try writer.print("left running: newer than 0.{d}.{d}; no downgrade", .{ version.?.schema, version.?.patch });
-            break :result .skipped;
         },
-        .not_needed => result: {
+        .not_needed => {
             try writer.writeAll("no longer running; no Host started");
-            break :result .skipped;
         },
-        .unsupported => |limitation| result: {
+        .unsupported => |limitation| {
             try writer.print("left running: {s}", .{switch (limitation) {
                 .inaccessible => "Store or Host is inaccessible; check access with its owning client",
                 .incompatible => "Host protocol is unsupported; use its owning client",
@@ -186,23 +314,19 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
                 .application_owned => "application-owned Host (including MySQL); restart through its application",
                 .configuration_unavailable => "launch configuration cannot be safely reconstructed; restart through its owner",
             }});
-            break :result .skipped;
         },
-        .replacement_observed => result: {
+        .replacement_observed => {
             try writer.writeAll("failed at verifying: a replacement Host was observed; inspect with its owning client, then retry");
-            break :result .failed;
         },
-        .cancelled => result: {
+        .cancelled => {
             try writer.writeAll("failed at activation: cancelled; inspect Host status, then retry");
-            break :result .failed;
         },
-        .failed, .unconfirmed => |stage| result: {
+        .failed, .unconfirmed => |stage| {
             try writer.print("failed at {s}: {s}; inspect Host status with its owning client, then retry", .{ @tagName(stage), if (outcome == .failed) "restart failed" else "restart is unconfirmed" });
-            break :result .failed;
         },
-    };
+    }
     try writer.writeByte('\n');
-    return result;
+    return category(outcome);
 }
 
 test "restart all reports every activation outcome and limitation with exit truth" {
