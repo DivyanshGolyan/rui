@@ -213,14 +213,15 @@ pub fn localStatus(record: *const Record, now_seconds: i64, scratch: *ClaimScrat
 
 /// Credential failures the user can resolve by logging in again save a
 /// sign-in code (`failure_class.sign_in_prefix`), naming the refresh
-/// token's fate when the backend gave one; everything else is a backend
-/// failure.
+/// token's fate when the backend gave one, or that the account has not let
+/// this app use its ChatGPT plan; everything else is a backend failure.
 pub fn failureCode(err: anyerror) []const u8 {
     const sign_in = failure_class.sign_in_prefix;
     switch (err) {
         error.RefreshTokenExpired => return sign_in ++ "refresh_token_expired",
         error.RefreshTokenReused => return sign_in ++ "refresh_token_reused",
         error.RefreshTokenInvalidated => return sign_in ++ "refresh_token_invalidated",
+        error.PlanScopeMissing => return sign_in ++ "plan_scope_missing",
         else => {},
     }
     inline for (@typeInfo(LoginRequired).error_set.error_names.?) |name| {
@@ -229,8 +230,9 @@ pub fn failureCode(err: anyerror) []const u8 {
     return "provider_authentication_backend_failed";
 }
 
-/// Credential failures that only a new login resolves.
-pub const LoginRequired = error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated, RefreshRequiresLogin, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry };
+/// Credential failures that only a new login resolves. `PlanScopeMissing`
+/// first needs the account to let this app use its plan.
+pub const LoginRequired = error{ RefreshRejected, RefreshTokenExpired, RefreshTokenReused, RefreshTokenInvalidated, RefreshRequiresLogin, ExpiredCredential, AccountMismatch, AccountChanged, InvalidCredentialExpiry, PlanScopeMissing };
 
 pub const Claim = enum { claimed, superseded };
 

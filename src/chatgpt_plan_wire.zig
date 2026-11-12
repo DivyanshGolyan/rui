@@ -324,10 +324,17 @@ fn writeRefresh(writer: *std.Io.Writer, current: *const policy.Record) !void {
     try param(writer, "&resource=", resource);
 }
 
-/// The issuer answers a refresh as it answers a Codex one: rotated tokens for
-/// the same account, or a rejection in `policy.LoginRequired`. The
-/// replacement keeps the record's issued client id.
-pub const parseRefreshResponse = codex.parseRefreshResponse;
+/// Builds the replacement for a claimed plan record from a refresh response.
+/// The issuer answers as it answers a Codex refresh (`codex.parseRefreshResponse`:
+/// rotated tokens for the same account, or a rejection in
+/// `policy.LoginRequired`), and the granted scope must still let the tokens
+/// spend the plan, as at sign-in. The replacement keeps the record's issued
+/// client id. On error the replacement is zeroed.
+pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record, scratch: *codex.Scratch) !void {
+    try codex.parseRefreshResponse(current, status, json, refreshed_at, replacement, scratch);
+    errdefer std.crypto.secureZero(u8, std.mem.asBytes(replacement));
+    try requirePlanScope(json, &scratch.json);
+}
 
 /// Revokes the record's refresh token, as its issued client.
 pub fn revokeRequest(current: *const policy.Record, buffer: []u8) !Request {
@@ -692,6 +699,42 @@ test "each record validates by its own kind's account claim" {
     plan.fedramp = false;
     plan.client_id.wipe();
     try std.testing.expectError(error.MissingAccountClaim, policy.validateSelected(&plan, false, &claims));
+}
+
+test "sign-in and refresh accept a granted scope only with the plan scope" {
+    var attempt: Attempt = undefined;
+    try testAttempt(null, &attempt);
+    var grant: Grant = .{};
+    try grant.code.set("ac_made_up");
+    try grant.client_id.set(test_client_id);
+    var room: Scratch = undefined;
+    var current: policy.Record = undefined;
+    try testSavedRecord(&current);
+    current.state = .refresh_pending;
+    var record: policy.Record = undefined;
+    var json: [2048]u8 = undefined;
+    for ([_]struct { []const u8, ?anyerror }{
+        // Absent: granted as asked (RFC 6749, 5.1).
+        .{ "", null },
+        .{ granted_scope, null },
+        .{ ",\"scope\":\"openid profile email offline_access resource.invoke\"", error.PlanScopeMissing },
+    }) |case| {
+        const response = try testResponse(signed_in_claims, case[0], &json);
+        const login = loginRecord(&attempt, &grant, 200, response, 1_800_000_000, &record, &room);
+        const renewal = parseRefreshResponse(&current, 200, response, 77, &record, &room.wire);
+        if (case[1]) |failure| {
+            try std.testing.expectError(failure, login);
+            try std.testing.expectError(failure, renewal);
+            try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&record), 0));
+            // A sign-in failure, distinct from one a new sign-in alone resolves.
+            const required: policy.LoginRequired = error.PlanScopeMissing;
+            try std.testing.expectEqualStrings("provider_sign_in_plan_scope_missing", policy.failureCode(required));
+        } else {
+            try login;
+            try renewal;
+            try std.testing.expectEqualStrings("rt_made_up", record.refresh_token.slice());
+        }
+    }
 }
 
 test "a host id is a lowercase version 4 UUID URN" {

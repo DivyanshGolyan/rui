@@ -528,12 +528,14 @@ test "authentication failure classes name errors their producers raise" {
     // `policy.failureCode` classifies by name; a misspelled or renamed
     // producer error would silently become a backend failure.
     inline for (@typeInfo(policy.LoginRequired).error_set.error_names.?) |name| {
-        try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));
+        const plan = @import("chatgpt_plan_wire.zig");
+        try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(plan.parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));
         const failure: anyerror = @field(anyerror, name);
         const expected = switch (failure) {
             error.RefreshTokenExpired => "provider_sign_in_refresh_token_expired",
             error.RefreshTokenReused => "provider_sign_in_refresh_token_reused",
             error.RefreshTokenInvalidated => "provider_sign_in_refresh_token_invalidated",
+            error.PlanScopeMissing => "provider_sign_in_plan_scope_missing",
             else => "provider_sign_in_required",
         };
         try std.testing.expectEqualStrings(expected, policy.failureCode(failure));
