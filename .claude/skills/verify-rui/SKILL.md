@@ -61,7 +61,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 $V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--no-png] [--keep]
 ```
 
-Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). These are L2 layout captures, not physical-input proof. State `expect` markers must be present and optional `absent: ["TEXT", ...]` markers must be absent from every saved capture at every size.
+Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). Steps may include `{"mouse": {"at": "TEXT", "do": "move" | "click"}}`: the first cell of the first visible match receives an SGR motion or left press/release via `tmux send-keys -H` (1-based coordinates); a missing target fails the state. Set `expect` explicitly after mouse input. These are L2 layout captures, not physical-input proof. State `expect` markers must be present and optional `absent: ["TEXT", ...]` markers must be absent from every saved capture at every size.
 
 ## Doctor
 
@@ -85,12 +85,14 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 ## Drive
 
-Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait` and `/inspect-action` are ordinary unknown commands. `/help` still shows names and argument shapes.
+Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait`, `/inspect-action` and `/help` are ordinary unknown commands. A typed `?` stays in the draft.
+
+For the full keys-only reference, open the overview and press End then Enter to open the pinned Settings row. Press Down six times to select the last **Keys** row (after Version), then Enter. In a wide conversation, click the pinned Settings row instead, without leaving the chat. The `keys` frame checks this at 140 and 46 columns. Check eleven strong key names with short meanings: aligned row-major pairs at 140 columns, one column at 46, including `ctrl+x` → `stop`; no title, footer, instructions, command list or stale help text. Esc returns to Settings, and another Esc returns to the original screen.
 
 | Action | Command |
 | --- | --- |
 | Type text | `$V send "$RUN" NAME --text 'hello'` (tmux: `send-keys -l`; pty: FIFO) |
-| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r C-x BSpace PgUp PgDn S-PgUp Up Down Left Right End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names send unsolicited mouse reports; a real wheel reaches Rui as `Up`/`Down`. |
+| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r C-x BSpace PgUp PgDn S-PgUp Up Down Left Right End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names inject mouse wheel reports; App enables mouse reporting. This is byte replay, not physical-wheel proof. |
 | Raw bytes | `$V send "$RUN" NAME --hex 1b5b4d2069730a` (tmux: `send-keys -H`) |
 | Through the attached client | add `--via client` (bytes enter tmux as terminal input, not `send-keys`) |
 | Signal Rui | `$V signal "$RUN" NAME INT\|TERM\|HUP` (verifies the PID is this terminal's Rui) |

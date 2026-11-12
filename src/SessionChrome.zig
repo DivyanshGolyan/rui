@@ -3,8 +3,7 @@
 //! present what `session_chrome` decided, and puts them in the Session
 //! screen's slots each frame from the values the screen passes. It holds no
 //! decision and no state but its widgets: the screen keeps the notice
-//! (`session_chrome.Notice`), whether the `?` shortcuts are open
-//! (`session_chrome.shortcut`) and the title (`session_chrome.Title`). Every
+//! (`session_chrome.Notice`) and the title (`session_chrome.Title`). Every
 //! click runs one of the screen's own actions, the same one its key runs.
 const std = @import("std");
 const vaxis = @import("vaxis");
@@ -13,7 +12,6 @@ const chrome = @import("session_chrome.zig");
 const AppScreen = @import("AppScreen.zig");
 const ActivityBlock = @import("ActivityBlock.zig");
 const StatusRow = @import("StatusRow.zig");
-const Shortcuts = @import("Shortcuts.zig");
 const Chip = @import("Chip.zig");
 const Footer = @import("widgets/Footer.zig");
 const session_line = @import("session_line.zig");
@@ -78,10 +76,7 @@ pub const View = struct {
     /// until the next frame.
     notice: ?[]const u8 = null,
     overview: ?[]const u8 = null,
-    /// The `?` shortcuts are open.
-    shortcuts: bool = false,
-    /// The overlay the screen would show (the palette), or null. The `?`
-    /// shortcuts take its place while open.
+    /// The screen's palette, or null.
     overlay: ?vxfw.Widget = null,
     width: u16,
 };
@@ -96,7 +91,6 @@ facts: struct {
 activity: ActivityBlock,
 marker: Chip,
 marker_text: [chrome.marker_bytes]u8 = undefined,
-shortcuts: Shortcuts = .{},
 state: vxfw.Text = .{ .text = "", .softwrap = false, .overflow = .clip, .width_basis = .parent },
 unarchive: Chip,
 list_visible: bool = false,
@@ -139,7 +133,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     screen.tail = null;
     self.marker.label = chrome.marker(&self.marker_text, view.new_entries);
     screen.marker = if (view.browsing) self.marker.widget() else empty_marker.widget();
-    screen.overlay = if (view.shortcuts) self.shortcuts.widget() else view.overlay;
+    screen.overlay = view.overlay;
 }
 
 fn stateText(text: []const u8, key: []const u8) []const u8 {
@@ -278,7 +272,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.latest));
 }
 
-test "the status row shows the notice under what needs the person, and the ? shortcuts take the palette's place" {
+test "the status row shows the notice under what needs the person, and preserves the palette" {
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
     var bytes: [16]u8 = undefined;
@@ -295,9 +289,6 @@ test "the status row shows the notice under what needs the person, and the ? sho
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
     try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.left);
     try std.testing.expect(screen.overlay.?.eql(palette.widget()));
-    self.place(&screen, .{ .width = 80, .shortcuts = true, .overlay = palette.widget() });
-    try std.testing.expectEqualStrings("", self.status.bar.left);
-    try std.testing.expect(screen.overlay.?.eql(self.shortcuts.widget()));
     self.place(&screen, .{ .width = 80 });
     try std.testing.expect(screen.overlay == null);
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .needs = "! Not confirmed · ctrl+r retries", .needs_key = "ctrl+r retries" });
@@ -417,4 +408,34 @@ test "Session chrome back control exists only while the shell hides the list" {
         try @import("testing/app_events.zig").mouse(&ctx, row, release);
         try std.testing.expectEqual(before + @intFromBool(!list_visible), recorder.clicked.get(.back));
     }
+}
+
+test "SessionChrome footer and new-entry chips underline on hover without acting" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    self.facts.identity.archive = .archived;
+    self.status.key.label = "ctrl+r retries";
+    self.stoppable = true;
+    self.marker.label = "↓ 3 new";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 1 }, .cell_size = .{} };
+    const footer = try drawFooter(&self, draw_ctx);
+    try std.testing.expectEqual(@as(usize, 4), footer.children.len);
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]*Chip{ &self.facts.back, &self.status.key, &self.unarchive, &self.status.stop, &self.marker }) |chip| {
+        try chip.widget().handleEvent(&ctx, .mouse_enter);
+        const hovered = try chip.widget().draw(draw_ctx);
+        try std.testing.expectEqual(.single, hovered.readCell(0, 0).style.ul_style);
+        try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
+        const press: vaxis.Mouse = .{ .col = 0, .row = 0, .button = .left, .mods = .{}, .type = .press };
+        try chip.widget().handleEvent(&ctx, .{ .mouse = press });
+        try chip.widget().handleEvent(&ctx, .mouse_leave);
+        var release = press;
+        release.type = .release;
+        try chip.widget().handleEvent(&ctx, .{ .mouse = release });
+        const left = try chip.widget().draw(draw_ctx);
+        try std.testing.expectEqual(.off, left.readCell(0, 0).style.ul_style);
+    }
+    for (recorder.clicked.values) |count| try std.testing.expectEqual(@as(usize, 0), count);
 }

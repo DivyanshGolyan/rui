@@ -2576,7 +2576,6 @@ On a typed draft Ctrl-P says to empty the draft first, even while a step is read
 Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds the input, Ctrl-P and Ctrl-N do nothing and presses not yet read are dropped; a step already read still lands on the draft.
 Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
 Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is ignored without a notice as it arrives, leaving the draft unchanged (Divyansh’s decision): ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
-If the conversation shortcuts overlay is open, the key closes it first; the unbound chord otherwise does nothing.
 ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
 Alt-Enter adds a line like Shift-Enter and Ctrl-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
 A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
@@ -2902,6 +2901,12 @@ Neither the set nor any output is saved.
 An open row is marked by its heading's selection background alone; the footer names no close key, because Ctrl-O acts on the lowest openable row in view, which need not be the open one.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
+Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
+New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
+Hover never changes keyboard selection or focus.
+Rows and fields take the selection background or monochrome reverse while preserving their foreground; chips and peer links underline and show the pointer shape.
+Only drawn, clipped action regions take clicks, and their existing paste, consent, stale-content and availability guards still apply.
+Headings, fixed status fields and unkeyed summary aggregates remain inert.
 Rui does not enable alternate scroll mode 1007.
 libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
@@ -2923,7 +2928,7 @@ Standalone zero-width output clusters, clusters wider than eight cells and clust
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
 
-`/status`, `/requests` and `/help` render selected inspections without changing the draft.
+`/status` and `/requests` render selected inspections without changing the draft.
 `/status` is rendered by the next settled live read from that read's own Current capture, and shows in the same step as that read's history and composer status, so the page never disagrees with them.
 While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
 A live read's failure is the same failure with or without `/status`.
@@ -2956,12 +2961,12 @@ Marked paste never grants permission.
 Their unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
-`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME · /help`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
+`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-`slash_commands.zig` holds one table per screen of each command's name, argument shape and plain listed flag; the parser, command runner, list and `/help` read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too. `/help` retains the command names and argument shapes, without descriptions.
-`/requests`, `/recover`, `/result` and `/discard` are for recovery: they work and `/help` names them, but the list leaves them out (Divyansh, 2026-11-02).
+`slash_commands.zig` holds one table per screen of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too.
+`/requests`, `/recover`, `/result` and `/discard` are for recovery: they work, but the list leaves them out (Divyansh, 2026-11-02).
 `/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
 The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
 Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (23 of them, the list's rows less that one), the original included when it has no `/recover` row.
@@ -2982,11 +2987,15 @@ Enter in a shown list takes the highlighted row: a command with nothing more to 
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/help`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
-Both screens share `/help`, `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME · /help` (Divyansh, 2026-11-02: "Same commands both screens").
-The overview's `/help` replaces the Sessions' rows with a panel headed `Help`, `Esc returns` at its right: the overview's keys, then its commands as its table lists them.
-A screen too small for the whole panel says `! Screen too small for /help` instead, as `/model` does; one that shrinks under it shows the lines that fit and counts the rest.
-Esc or Ctrl-G, past a shown command list, closes the panel and keeps the draft, and the line under the input says `esc close` while it shows; a key that acts on a Session (one that selects, Ctrl-X, Enter on an empty draft) and `/rename` close it first and act where the Sessions show.
+The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
+There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
+The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
+Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in aligned row-major pairs when they fit, or one column otherwise: no title, footer or instructions.
+One `ctrl+x` stops work; it does not require two presses.
+`keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key is listed or explicitly marked as an alias of one listed row, and neither rows nor aliases name unbound keys.
+`keys_panel` derives fields from those rows; `Panel.KeyList` reuses the Panel's cell clipping, without selection or an event handler.
+`AppSettings` owns whether the reference is open; Esc or Ctrl-G closes it back to Settings before any choice, Upgrade cancellation or settings-page close, never leaving a conversation through that first press.
 The overview's `/rename NAME` names the selected Session and `/setup [OPTIONS]` saves defaults with no Session, each through the same CLI owner a conversation's runs, on the overview's worker with stdout and stderr in an unlinked scratch file; without a selected Session `/rename` says `! Select a Session first.`, as Ctrl-X does.
 With no Session, the overview's `/setup` says `Saved defaults for future Sessions.` and its failures name no Session, where a conversation's add that the active Session is unchanged.
 One command runs at a time, and Enter on an empty draft waits for it too, since a conversation's commands write to the same stdout and stderr; either says `! Wait for /NAME to finish.`
@@ -3652,14 +3661,13 @@ Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
 Bash and `bypass`, the default, stay quiet: no notice or banner announces them. Permission mode is a setting and never appears as a chat-footer suffix.
-`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it, and `/help` describes the Session line.
+`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 Successful conversation omits protocol receipts and follow reminders; original captured request handles remain available through `/requests`.
 If opening a Session started from the overview fails after its `session start` was confirmed, best-effort stderr guidance retains that request handle and an executable exact Store/Session resume command while preserving the original failure.
 This reports admission only, not completion, and does not promise delivery under stderr contention or failed output credit.
-`/help` describes the implemented Session commands and one-shot login route.
 These are presentation choices over existing Host facts, not new conversation or recovery authority; one-shot and JSON output remain unchanged.
 
 ### Connection capacity and control headroom

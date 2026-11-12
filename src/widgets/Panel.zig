@@ -4,6 +4,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
+const Hover = @import("Hover.zig");
 
 pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
@@ -26,6 +27,7 @@ scroll: usize = 0,
 /// Borrowed from the last draw arena, just like the framework's hit surface.
 /// Replaced on every draw; never read outside a mouse event for that frame.
 targets: []const Target = &.{},
+hover: Hover = .{},
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -67,6 +69,7 @@ pub fn takesKey(key: vaxis.Key) bool {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.hover.handleEvent(ctx, input);
     switch (input) {
         .key_press => |key| {
             if (!takesKey(key)) return;
@@ -118,6 +121,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
     self.targets = &.{};
+    self.hover.targets = &.{};
     if (size.width == 0 or size.height == 0) return surface;
     for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.rule_style });
     if (size.height == 1) return surface;
@@ -135,7 +139,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (self.fields, 0..) |field, index| {
         if (self.visible(self.rowOf(index), size.height)) |row| {
             const selected = self.choice == null and self.selected == index;
-            const style = if (selected) self.selection else self.ground;
+            const style = if (selected or self.hover.contains(.{ .row = row, .width = size.width })) self.selection else self.ground;
             fillRow(surface, row, style);
             _ = paintTo(ctx, surface, field.label, 3, row, style, @min(19, size.width));
             const end = paint(ctx, surface, field.value, 19, row, style);
@@ -150,7 +154,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (self.choice) |choice| if (choice.field == index) {
             for (choice.labels, 0..) |label, at| {
                 const row = self.visible(index + 1 + at, size.height) orelse continue;
-                const style = if (at == choice.selected) self.selection else self.ground;
+                const style = if (at == choice.selected or self.hover.contains(.{ .row = row, .width = size.width })) self.selection else self.ground;
                 fillRow(surface, row, style);
                 _ = paint(ctx, surface, if (choice.current == at) "✓" else " ", 5, row, style);
                 _ = paint(ctx, surface, label, 7, row, style);
@@ -164,11 +168,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             const start = col;
             const style = if (self.choice == null and self.selected == self.fields.len + at) self.selection else self.ground;
             col = paint(ctx, surface, action, col, row, style);
+            if (self.hover.contains(.{ .row = row, .col = start, .width = col - start })) {
+                _ = paint(ctx, surface, action, start, row, self.selection);
+            }
             if (col > start) try targets.append(.{ .row = row, .start = start, .end = col, .index = self.fields.len + at });
             col = @intCast(@min(@as(u32, col) + 5, size.width));
         }
     };
     self.targets = targets.items;
+    const hover_targets = try ctx.arena.alloc(Hover.Rect, targets.items.len);
+    for (targets.items, hover_targets) |target, *rect| rect.* = .{ .row = target.row, .col = target.start, .width = target.end - target.start };
+    self.hover.targets = hover_targets;
     return surface;
 }
 
@@ -324,4 +334,109 @@ test "Panel inline choices open pick cancel and scroll in the same field" {
     try panel.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 3, .col = 7 } });
     try std.testing.expect(panel.choice == null);
     try std.testing.expectEqual(@as(?usize, 0), fixture.picked);
+}
+
+test "Panel hover highlights fields choices and actions without changing keyboard state" {
+    var fixture: Fixture = .{};
+    var panel: Self = .{ .title = "Settings", .fields = &.{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" } }, .actions = &.{ "Rename", "Archive" }, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .userdata = &fixture, .on_activate = Fixture.activateRow, .on_pick = Fixture.pickRow };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
+    _ = try panel.widget().draw(ctx);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try panel.widget().handleEvent(&events, .mouse_enter);
+    for ([_]struct { row: i16, col: i16 }{ .{ .row = 3, .col = 39 }, .{ .row = 4, .col = 14 } }) |point| {
+        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = point.col, .row = point.row, .button = .none, .type = .motion, .mods = .{} } });
+        const surface = try panel.widget().draw(ctx);
+        try std.testing.expectEqual(panel.selection.bg, surface.readCell(@intCast(point.col), @intCast(point.row)).style.bg);
+        try std.testing.expectEqual(@as(usize, 0), panel.selected);
+        try std.testing.expectEqual(@as(?usize, null), fixture.activated);
+        try std.testing.expect(panel.hover.pointing);
+    }
+    try panel.widget().handleEvent(&events, .mouse_leave);
+    var surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.ground.bg, surface.readCell(39, 3).style.bg);
+    panel.openChoice(&.{ "First", "Second" }, 0);
+    _ = try panel.widget().draw(ctx);
+    try panel.widget().handleEvent(&events, .mouse_enter);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .none, .type = .motion, .mods = .{} } });
+    surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 4).style.bg);
+    try std.testing.expectEqual(@as(usize, 0), panel.choice.?.selected);
+    try std.testing.expectEqual(@as(?usize, null), fixture.picked);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqual(@as(?usize, 1), fixture.picked);
+    try panel.widget().handleEvent(&events, .mouse_leave);
+    _ = try panel.widget().draw(ctx);
+    try std.testing.expect(!panel.hover.pointing);
+}
+
+/// A read-only reference in fitting columns, without selection or input ownership.
+/// It shares the panel's cell clipping; labels are strong, values are plain.
+pub const KeyList = struct {
+    fields: []const Field,
+    ground: vaxis.Style = .{},
+    strong: vaxis.Style = .{ .bold = true },
+
+    pub fn widget(self: *KeyList) vxfw.Widget {
+        return .{ .userdata = self, .drawFn = drawReference };
+    }
+
+    fn drawReference(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *KeyList = @ptrCast(@alignCast(raw));
+        const size = ctx.max.size();
+        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+        @memset(surface.buffer, .{ .style = self.ground });
+        var key_widths = [_]usize{ 0, 0 };
+        var value_widths = [_]usize{ 0, 0 };
+        for (self.fields, 0..) |field, index| {
+            const column = index % 2;
+            key_widths[column] = @max(key_widths[column], ctx.stringWidth(field.label));
+            value_widths[column] = @max(value_widths[column], ctx.stringWidth(field.value));
+        }
+        const margin = 1;
+        const key_gap = 3;
+        const column_gap = 2;
+        const left_width = margin + key_widths[0] + key_gap + value_widths[0];
+        const right_width = margin + key_widths[1] + key_gap + value_widths[1];
+        const columns: usize = if (self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
+        if (columns == 1) key_widths[0] = @max(key_widths[0], key_widths[1]);
+        for (self.fields, 0..) |field, index| {
+            const row = index / columns;
+            if (row >= size.height) break;
+            const column = index % columns;
+            const start = if (column == 0) 0 else left_width + column_gap;
+            const column_width = if (column == 0) left_width else right_width;
+            const limit: u16 = if (columns == 1) size.width else @intCast(start + column_width);
+            const label: u16 = @intCast(@min(start + margin, limit));
+            const value: u16 = @intCast(@min(start + margin + key_widths[column] + key_gap, limit));
+            _ = paintTo(ctx, surface, field.label, label, @intCast(row), self.strong, limit);
+            _ = paintTo(ctx, surface, field.value, value, @intCast(row), self.ground, limit);
+        }
+        return surface;
+    }
+};
+
+test "Panel KeyList fits measured columns and aligns values after the widest key in cells" {
+    var reference: KeyList = .{ .fields = &.{
+        .{ .label = "界界界", .value = "one" },
+        .{ .label = "x", .value = "two" },
+        .{ .label = "long", .value = "three" },
+        .{ .label = "xy", .value = "four" },
+    } };
+    for ([_]u16{ 26, 27 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const surface = try reference.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 4 }, .cell_size = .{} });
+        // The left key is six terminal cells, the right key two. The
+        // measured widths are 15 + 2 + 10, unrelated to the app's table.
+        const columns: usize = if (width == 27) 2 else 1;
+        for ([_][]const u8{ "one", "two", "three", "four" }, 0..) |value, index| {
+            const start: usize = if (columns == 2 and index % 2 == 1) 23 else 10;
+            for (value, 0..) |byte, col| {
+                const cell = surface.readCell(@intCast(start + col), @intCast(index / columns));
+                try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
+            }
+        }
+    }
 }
