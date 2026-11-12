@@ -152,6 +152,15 @@ fn fillFrame(gpa: std.mem.Allocator, frame: *const launch_frame.Frame, settings:
 pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures, failure: *start_report.Failure) !hs.Prepared {
     var cwd: [std.Io.Dir.max_path_bytes]u8 = undefined;
     try hs.anchor(settings, cwd[0..try std.Io.Dir.cwd().realPath(init.io, &cwd)]);
+    try resolveProviders(init, settings, fixtures);
+    if (settings.store == .mysql) try resolve(init, &settings.store.mysql.url);
+    for (settings.tools.mcp.values[0..settings.tools.mcp.len]) |*server| try resolve(init, &server.bearer_token);
+    return hs.seal(settings, failure);
+}
+
+/// Provider/proxy preflight precedes Store selection just as today's CLI does.
+/// prepare reuses this owner after anchoring; resolved bytes/paths are not read twice.
+pub fn resolveProviders(init: std.process.Init, settings: *hs.Settings, fixtures: providers.Fixtures) !void {
     inline for (std.enums.values(protocol.Provider)) |provider| {
         if (@field(settings.providers.entries, @tagName(provider))) |*entry| {
             switch (comptime provider.facts().credential) {
@@ -178,14 +187,14 @@ pub fn prepare(init: std.process.Init, settings: *hs.Settings, fixtures: provide
             }
         }
     }
-    if (settings.store == .mysql) try resolve(init, &settings.store.mysql.url);
-    for (settings.tools.mcp.values[0..settings.tools.mcp.len]) |*server| try resolve(init, &server.bearer_token);
-    return hs.seal(settings, failure);
 }
 
 fn resolve(init: std.process.Init, secret: anytype) !void {
     const Secret = @typeInfo(@TypeOf(secret)).pointer.child;
     if (secret.source == .literal) return;
+    if (comptime Secret.default_source == .mysql) {
+        if (secret.bytes.parsed != null) return;
+    } else if (secret.bytes.len != 0) return;
     const buffer = try init.arena.allocator().alloc(u8, if (Secret.default_source == .mysql) hs.max_document_bytes + 2 else api_key.max_key_bytes + 2);
     defer {
         std.crypto.secureZero(u8, buffer);

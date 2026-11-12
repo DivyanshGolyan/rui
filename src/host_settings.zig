@@ -56,11 +56,13 @@ pub fn PathWith(comptime capacity: usize) type {
 }
 // Adapter paths preserve their existing interpretation: SQLite and TLS use
 // the Host cwd; Bash uses the Session workspace. Other sources are absolute.
-const PathRule = enum { absolute, adapter, interface };
+const PathRule = enum { absolute, adapter, trust, interface };
 fn PathKind(comptime capacity: usize, comptime rule: PathRule) type {
     return struct {
         pub const kind: Kind = .path;
         pub const path_rule = rule;
+        pub const absolute = rule == .absolute or rule == .interface;
+        pub const allow_empty = rule == .trust;
         pub const max_bytes = capacity;
         text: Text(capacity) = .{},
         /// Default routing is relative to the Host directory. For interface.dir
@@ -240,7 +242,7 @@ pub fn ProviderEntry(comptime credential: provider_name.Facts.Credential) type {
     };
 }
 pub const Network = struct {
-    ca_file: ?PathKind(max_ca_file_bytes, .adapter) = null,
+    ca_file: ?PathKind(max_ca_file_bytes, .trust) = null,
     pub const doc = .{ .ca_file = "Trust only this PEM file; absent uses system trust. Applies to every provider." };
 };
 pub const Tools = struct {
@@ -401,7 +403,7 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
         .path => {
             row.default = if (value.anchored) "(Host directory)" else value.slice();
             row.json_schema.max_bytes = T.max_bytes;
-            row.json_schema.format = if (T.path_rule == .adapter) null else "absolute-path";
+            row.json_schema.format = if (T.absolute) "absolute-path" else null;
             row.json_schema.nullable = true;
             row.sample_json = "\"/tmp/host-settings\"";
             row.sample_text = "/tmp/host-settings";
@@ -725,7 +727,7 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
             }
             const raw = try string(value, at, read);
             const text = if (T.path_rule == .interface) std.mem.trimEnd(u8, raw, "/") else raw;
-            if (text.len == 0 or (T.path_rule != .adapter and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
+            if ((text.len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
             dest.text.set(text) catch return refuse(read.failure, at, "path exceeds its byte bound or contains invalid text");
             dest.anchored = false;
         },
@@ -1465,7 +1467,7 @@ fn validateShape(comptime T: type, value: *const T, at: []const u8, failure: *st
                 // An anchored interface uses the platform-derived Host socket,
                 // not a literal runtime directory (whose path has a smaller bound).
                 if (T.path_rule == .interface and value.anchored) return;
-                if (value.text.len > T.max_bytes or value.anchored or value.slice().len == 0 or (T.path_rule != .adapter and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
+                if (value.text.len > T.max_bytes or value.anchored or (value.slice().len == 0 and !T.allow_empty) or (T.absolute and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
             },
             .url => {
                 if (value.text.len > T.max_bytes) return refuse(failure, at, "URL exceeds its byte bound");
@@ -1888,4 +1890,18 @@ test "Host settings proof requires each served sign-in path to be resolved" {
             _ = try seal(settings, &failure);
         }
     }
+}
+
+test "Host settings retain the legacy empty CA path for transport refusal" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    try apply(settings, gpa, "{\"providers\":{},\"network\":{\"caFile\":\"\"}}", .file, checkSample, &failure);
+    try anchor(settings, "/tmp/host-settings");
+    _ = try seal(settings, &failure);
+    try std.testing.expect(settings.network.ca_file != null);
+    try std.testing.expectEqualStrings("", settings.network.ca_file.?.slice());
 }

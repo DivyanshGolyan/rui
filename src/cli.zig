@@ -1890,6 +1890,14 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         if (frame != null and err == error.InvalidBaseUrl) return writeRefusal(io, &preparation_failure);
         return err;
     };
+    // Keep the existing environment diagnostic before startup takes stderr.
+    try host_start.resolveProviders(init, settings, tuning.fixtures);
+    const served = providers.fromSettings(settings, tuning.fixtures);
+    if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
+        stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
+        recordExit(.environment);
+        return error.Reported;
+    }
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const supplied = if (frame) |value| switch (value.store) {
         .sqlite_dir => |*directory| directory.slice(),
@@ -1898,13 +1906,6 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const selected = try selectedStore(init, supplied, &selected_buffer);
     if (settings.store == .sqlite) try host_start.selectStore(init.arena.allocator(), settings, selected, &preparation_failure);
     const prepared = try host_start.prepare(init, settings, tuning.fixtures, &preparation_failure);
-    // Keep the existing environment diagnostic before startup takes stderr.
-    const served = providers.fromSettings(settings, tuning.fixtures);
-    if (try served.proxyRefusal(std.heap.c_allocator)) |reason| {
-        stderr.diagnostic("rui: https_proxy/HTTPS_PROXY {s}; Rui tunnels only through an http:// proxy. The Host did not start.\n", .{reason});
-        recordExit(.environment);
-        return error.Reported;
-    }
     var failure: ?start_report.Failure = null;
     return finishServe(io, if (frame != null) (if (settings.store == .mysql) .mysql else .sqlite) else null, &failure, server.serve(io, std.heap.c_allocator, prepared, tuning, &failure));
 }
