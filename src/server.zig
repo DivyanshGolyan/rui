@@ -899,7 +899,8 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
     try storage.saveHostToolSet(owned);
 }
 
-pub fn serve(
+// Keep the measured Host main-thread root distinct from its CLI shell.
+pub noinline fn serve(
     io: std.Io,
     allocator: std.mem.Allocator,
     prepared: host_settings.Prepared,
