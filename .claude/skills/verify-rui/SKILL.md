@@ -18,7 +18,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
    ```
 
-   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` in containers that cannot build libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term` and `wait` refuse such builds with one line; direct tmux terminals and `frames` work. A build made before the library existed has none; rebuild it with `--force` to add it.
+   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term` and `wait` refuse such builds with one line; direct tmux terminals and `frames` work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
 2. **New run, one per experiment.**
 
@@ -85,6 +85,8 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 ## Drive
 
+Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait` and `/inspect-action` are ordinary unknown commands. `/help` still shows names and argument shapes.
+
 | Action | Command |
 | --- | --- |
 | Type text | `$V send "$RUN" NAME --text 'hello'` (tmux: `send-keys -l`; pty: FIFO) |
@@ -128,7 +130,7 @@ Fixture policy, chosen by the latest user text:
 
 The fixture never runs out of replies, so an extra submission shows up as an extra request and doesn't fail.
 
-The scripted proof journey (compose → draft cells → submit → answer → exactly one provider request and one new capture key whose saved text is exactly the draft → `/exit` restoration):
+The scripted proof journey (compose → draft cells → submit → answer → exactly one provider request and one new capture key whose saved text is exactly the draft → Ctrl-C restoration):
 
 ```sh
 $V journey "$RUN" j1 --surface tmux-detached   # or pty / tmux-attached
@@ -180,7 +182,7 @@ It never kills by process name. Evidence under `~/.cache/verify-rui/runs/ID/` su
 ## Gotchas
 
 - Opening a terminal in tmux makes Rui receive DECRPM replies (`ESC[?2027;0$y ESC[?1007;0$y`). These are terminal reports, not typed input. A PTY run receives none.
-- Rui exits 0 after `/exit`, Ctrl-C and SIGTERM, and prints `Detached. Host work continues.` on the main screen.
+- Rui exits 0 after Ctrl-C and SIGTERM, and prints `Detached. Host work continues.` on the main screen.
 - Esc completes only after the decoder's lone-Esc deadline. Wait for the next frame before sending more bytes, or they join it as Alt-key input.
 - PENDIN can be set after exit when input is queued. It is kernel-owned and masked in `termios_restored`, and the raw `stty_after` is kept.
 - The tap's wrapper shell (`/bin/sh -c`) is the session leader. Rui is its only child, and `signal` resolves and verifies that child.

@@ -446,10 +446,10 @@ def interactive_cases(state, binding=False, null_code=False):
                         if route == "/v1/message":
                             output += human.await_screen(master, human.CHOICE)
                             output += human.action_ready(ready_read, master)
-                    # A waiting choice prevents /exit from executing. Leave
+                    # A waiting choice retains its draft. Leave
                     # from the selector with Ctrl-D, without adding an unsent draft.
                     card = binding and route == "/v1/message"
-                    os.write(master, b"\x04" if card else b"/exit\r")
+                    os.write(master, b"\x04" if card else b"\x03")
                 # Supply output credit during the original exit budget for
                 # fatal cleanup and recoverable explicit detachment alike.
                 try:

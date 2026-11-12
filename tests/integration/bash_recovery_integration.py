@@ -86,7 +86,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
             assert action["action"] == "1" and action["resolution"] == "indeterminate", action
             assert action["result"]["text"] == result, action
             assert bash.resolution(store, session) == "indeterminate"
-            human.terminal_step(master, "/exit", "Detached.")
+            human.terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         continuation_release.set()
         fixture.wait_for(lambda: fixture.completed_observation(store, "effect-before-result-message"), "continuation")

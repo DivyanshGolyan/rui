@@ -5,15 +5,13 @@ For a first conversation, see [Start a conversation](../README.md#start-a-conver
 
 ## Commands
 
-Enter these at the `›` prompt.
+Enter these at the `›` prompt. Typing `/` lists names only; fixed choices appear quietly beside the name, separated by ` · `. Choice and option rows also show names only.
 
 | Command | What it does |
 | --- | --- |
 | `/help` | Lists available commands. |
 | `/requests` | Lists saved requests for recovery. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
-| `/upgrade` | On the overview or in a conversation, checks for a stable release and installs it at once, restarting this Store's Host; the status bar says each step, and Esc cancels until publishing starts. |
-| `/exit` or Ctrl+C | Closes the client without stopping background work. Unsent draft text is lost. |
 
 Tool outcomes start folded, showing their description and outcome, with a numeric failed exit when available.
 Click a tool heading to open or close its saved output in place.
@@ -23,6 +21,10 @@ Output is safely escaped and indented, with at most 20 rows followed by `… N m
 Long lines end in `…`; the display prefix is also bounded to 8,192 bytes before invisible-cluster escaping.
 Opened output uses the selvedge band; with NO_COLOR it keeps its indent without a band.
 Folds belong only to the open conversation and are not saved.
+
+Ctrl+C closes the client without stopping background work; unsent draft text is lost. Ctrl+D also leaves where the current input accepts it.
+
+Select **Settings**, then **Version**, to check for and install a stable release. The same run is available with a conversation open; its status stays on the status row, and Esc cancels until publishing starts.
 
 Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
 Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.

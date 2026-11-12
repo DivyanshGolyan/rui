@@ -516,7 +516,7 @@ draft: [view.draft_capacity]u8 = undefined,
 /// the next frame so the composer scrolls only when its caret leaves view.
 draft_anchor: usize = 0,
 worker: ClientTask = .{},
-/// The /upgrade run's worker, for as long as the core says one runs, and
+/// The Upgrade run's worker, for as long as the core says one runs, and
 /// the receipts runs left, which print on exit.
 upgrade_job: UpgradeJob = .{},
 /// The serving Host's pid, read once per Host start.
@@ -1161,6 +1161,9 @@ pub fn saveDefaults(self: *Self, edit: preferences.Edit) !void {
 /// Use the same Upgrade transition and worker lifecycle as the other screens.
 pub fn startUpgrade(self: *Self) !void {
     if (self.state.left) return error.UpgradeUnavailable;
+    if (self.app_session) |shown| if (shown.frontend) |frontend| {
+        if (!frontend.admitsUpgrade()) return error.UpgradeUnavailable;
+    };
     const next = try self.event(.start_upgrade);
     std.debug.assert(next == null);
 }
@@ -5269,7 +5272,7 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
         _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = if (archived) .{ .archive = .active } else .unarchive } });
         try std.testing.expectEqual(@as(usize, 1), overview.job_count);
         if (running) try overview.dispatch(.all);
-        try std.testing.expect(try rig.press("/upgrade\r") == null);
+        try overview.startUpgrade();
         try std.testing.expect(overview.state.upgrading());
         try std.testing.expect(!try overview.quiesceUpgrade());
         try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &Gate.entered, test_poll.isSet);
@@ -5294,7 +5297,7 @@ test "upgrade quiescence settles accepted queued and running archive mutations b
     };
 }
 
-test "Esc while /upgrade waits for a held archive keeps the cancel: nothing checks or installs" {
+test "Esc while Upgrade waits for a held archive keeps the cancel: nothing checks or installs" {
     const Gate = struct {
         var entered: std.atomic.Value(bool) = .init(false);
         var release: std.atomic.Value(bool) = .init(false);
@@ -5321,7 +5324,7 @@ test "Esc while /upgrade waits for a held archive keeps the cancel: nothing chec
     _ = try overview.event(.{ .conversed = .{ .reference = "k7m2qx".*, .work = .idle, .input = .{ .archive = .active } } });
     try overview.dispatch(.all);
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &Gate.entered, test_poll.isSet);
-    try std.testing.expect(try rig.press("/upgrade\r") == null);
+    try overview.startUpgrade();
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
     // The archive holds the handoff: the run has not started.
@@ -5360,7 +5363,7 @@ test "memory counts this TUI alone while no Host runs, at open and after a Host 
     try std.testing.expect(after.rui > 0 and after.tools == null);
 }
 
-test "a conversation's /upgrade waits for the conversation's running read, though the overview ticks first" {
+test "a conversation's Upgrade waits for the conversation's running read, though the overview ticks first" {
     const Worker = struct {
         fn read(_: *anyopaque, task: *ClientTask) !void {
             while (!task.cancellation.stopped.load(.acquire)) std.Thread.yield() catch {};
@@ -5398,9 +5401,23 @@ test "a conversation's /upgrade waits for the conversation's running read, thoug
     try std.testing.expect(overview.root.session != null);
     var ctx = rig.context();
     defer ctx.cmds.deinit(std.testing.allocator);
-    // A read the conversation still runs, then /upgrade before its tick.
+    // Version's backend preserves every admitted inspection before a run.
+    const backend = overview.settingsBackend();
+    for ([_]bool{ false, true }) |typed| for ([_]bool{ false, true }) |queued| for ([_]bool{ false, true }) |running| {
+        if (!typed and !queued and !running) continue;
+        if (typed) frontend.info_edit = .{ .permission = .ask };
+        if (queued) frontend.input.queueCommand("/help");
+        frontend.inspection.command_running = running;
+        try std.testing.expectError(error.UpgradeUnavailable, backend.upgrade(backend.context));
+        try std.testing.expect(!overview.state.upgrading());
+        if (typed) try std.testing.expectEqual(@as(@FieldType(@import("status_page.zig").Session, "permission"), .ask), frontend.info_edit.?.permission);
+        if (queued) try std.testing.expectEqualStrings("/help", frontend.input.takeCommand().?);
+        frontend.info_edit = null;
+        frontend.inspection.command_running = false;
+    };
+    // A read the conversation still runs, then Upgrade before its tick.
     try frontend.reader.start(std.testing.io, frontend, Worker.read);
-    try conversed(overview, .idle, .upgrade);
+    try overview.startUpgrade();
     try std.testing.expect(overview.state.upgrading());
     for (0..3) |_| try overview.appUpgrade(&ctx);
     try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
@@ -5452,38 +5469,35 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("/");
     var all = try rig.shown(80, 24);
     defer all.deinit();
-    try all.expectLines(11, &.{
-        "/archive              archive the selected Session; stop active work first",
-        "/configure [OPTIONS]  hold settings for the next Session",
-        "/exit                 leave; Host work continues",
-        "/help                 keys and commands",
-        "/rename NAME          name the selected Session",
-        "/sessions [VIEW]      view Unarchived, Archived or All Sessions",
-        "/setup [OPTIONS]      future defaults",
-        "/unarchive            restore the selected Session without restarting work",
-        "/upgrade              check stable Rui; install restarts this Store's Host",
+    try all.expectLines(13, &.{
+        "/archive",
+        "/configure",
+        "/help",
+        "/rename",
+        "/sessions   unarchived · archived · all",
+        "/setup",
+        "/unarchive",
         "────────────────────────────────────────────────────────────────────────────────",
         " › /",
     });
     try std.testing.expect(std.mem.endsWith(u8, try all.line(23), "enter pick / esc close"));
-    // Eleven rows leave six commands and a count of the rest.
-    var short = try rig.shown(80, 11);
+    // Ten rows leave five commands and a count of the rest.
+    var short = try rig.shown(80, 10);
     defer short.deinit();
     try short.expectLines(0, &.{
-        "/archive              archive the selected Session; stop active work first",
-        "/configure [OPTIONS]  hold settings for the next Session",
-        "/exit                 leave; Host work continues",
-        "/help                 keys and commands",
-        "/rename NAME          name the selected Session",
-        "/sessions [VIEW]      view Unarchived, Archived or All Sessions",
-        "+3 more · type to narrow",
+        "/archive",
+        "/configure",
+        "/help",
+        "/rename",
+        "/sessions   unarchived · archived · all",
+        "+2 more · type to narrow",
         "────────────────────────────────────────────────────────────────────────────────",
     });
     // Typing narrows it; Esc closes it and keeps the draft.
     _ = try rig.press("r");
     var narrowed = try rig.shown(80, 24);
     defer narrowed.deinit();
-    try narrowed.expectLines(19, &.{ "/rename NAME          name the selected Session", "────────────────────────────────────────────────────────────────────────────────", " › /r" });
+    try narrowed.expectLines(19, &.{ "/rename", "────────────────────────────────────────────────────────────────────────────────", " › /r" });
     _ = try rig.press("\x1b");
     var closed = try rig.shown(80, 24);
     defer closed.deinit();

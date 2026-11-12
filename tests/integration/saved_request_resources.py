@@ -113,7 +113,7 @@ def retained(state, binary, label):
                 else:
                     cli.chat_info_frame(master)
             samples.append(sample(process.pid))
-        cli.terminal_step(master, "/exit", "Detached.")
+        cli.terminal_step(master, "\x03", "Detached.")
         assert process.wait(timeout=5) == 0
         # Legacy baselines own stdio; the sole frontend additionally owns its
         # unlinked render scratch. A single polling reader may own one socket.

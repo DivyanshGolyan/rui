@@ -679,6 +679,14 @@ class FramesTest(unittest.TestCase):
                 self.assertEqual([r["ok"] for r in json.loads((out / "frames.json").read_text())],
                                  [reason is None for reason in reasons])
 
+    def test_frame_exit_key_allows_dead_pane_but_text_does_not(self):
+        steps = self.helper["frame_steps"]
+        run = types.SimpleNamespace(tmux=lambda *_args, **_kw: types.SimpleNamespace(returncode=0, stderr=""))
+        with patch.dict(steps.__globals__, {"frame_dead": lambda *_args: True}), patch("time.sleep"):
+            self.assertTrue(steps(run, "pane", [{"keys": [steps.__globals__["EXIT_KEY"]]}]))
+            with self.assertRaises(self.helper["FrameFailure"]):
+                steps(run, "pane", [{"text": "/exit"}])
+
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
                      if state["name"] == "stop")
