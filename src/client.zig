@@ -607,6 +607,38 @@ pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128
     };
 }
 
+/// Discover a Store through an authenticated socket peer, then confirm the hint
+/// with the existing read-only profiles. Older SQLite Hosts require the Store in
+/// host-info, so an empty-Store discovery request cannot find them.
+pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !HostControlObservation {
+    const until = hostObservationDeadline(io, deadline);
+    const fd = connectRequest(.{ .io = io }, try std.Io.net.UnixAddress.init(socket_path), until) catch |err| switch (err) {
+        // Only the initial connection establishes a stale/absent socket. A
+        // later missing Store or failed Host-info read is an unreadable Host.
+        error.FileNotFound, error.ConnectionRefused => return error.HostNotServing,
+        else => return err,
+    };
+    defer closeSocket(io, fd);
+    const identity = @import("host_identity.zig");
+    const pid = try identity.peer(fd);
+    var snapshot = try identity.snapshot(allocator, pid);
+    defer snapshot.deinit(allocator);
+    if (snapshot.argv.len < 3 or !std.mem.eql(u8, snapshot.argv[1], "host") or !std.mem.eql(u8, snapshot.argv[2], "serve")) return error.InvalidHostInfo;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var problem: @import("cli_grammar.zig").Refusal = undefined;
+    const parsed = @import("serve_grammar.zig").definition.parseSyntax(snapshot.argv[3..], arena.allocator(), &problem) catch return error.InvalidHostInfo;
+    const supplied = parsed.get("store") orelse return error.InvalidHostInfo;
+    // A relative argv path is not relative to this client. Without a verified
+    // canonical identity, report it rather than probing a guessed Store.
+    if (!std.fs.path.isAbsolute(supplied)) return error.InvalidHostInfo;
+    const paths = try platform.resolveClientPaths(io, supplied);
+    if (!std.mem.eql(u8, paths.socket.slice(), socket_path)) return error.InvalidHostInfo;
+    const observed = try observeHostForUpgrade(io, paths.store.slice(), until);
+    if (observed.pid != pid) return error.InvalidHostInfo;
+    return observed;
+}
+
 fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
     return @min(probe_end, deadline orelse probe_end);
@@ -2207,7 +2239,7 @@ pub fn hostUnreachable(err: anyerror) bool {
     };
 }
 
-fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, FileNotFound, NotDir, SymLinkLoop, ReadOnlyFileSystem, UnixConnectFailed } {
+fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, FileNotFound, NotDir, SymLinkLoop, ReadOnlyFileSystem, ConnectionRefused, UnixConnectFailed } {
     return switch (code) {
         .ACCES => error.AccessDenied,
         .PERM => error.PermissionDenied,
@@ -2215,6 +2247,7 @@ fn connectFailure(code: std.posix.E) error{ AccessDenied, PermissionDenied, File
         .NOTDIR => error.NotDir,
         .LOOP => error.SymLinkLoop,
         .ROFS => error.ReadOnlyFileSystem,
+        .CONNREFUSED => error.ConnectionRefused,
         else => error.UnixConnectFailed,
     };
 }
@@ -4767,7 +4800,7 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
         peers[count] = connectRequest(.{ .io = io }, address, until) catch |err| break err;
         count += 1;
     } else return error.TestUnexpectedResult;
-    try std.testing.expectEqual(if (blocks) error.TransferInactive else error.UnixConnectFailed, blocked);
+    try std.testing.expectEqual(if (blocks) error.TransferInactive else error.ConnectionRefused, blocked);
     var token: Cancellation = .{};
     const Stopper = struct {
         fn run(stop: *Cancellation) void {
@@ -4779,7 +4812,7 @@ test "transport cancellation saturated Unix backlog is not a connected writable 
     defer stopper.join();
     const stopped = connectRequest(.{ .io = io, .cancellation = &token }, address, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s);
     if (stopped) |fd| closeTestDescriptor(fd) else |_| {}
-    try std.testing.expectError(if (blocks) error.Cancelled else error.UnixConnectFailed, stopped);
+    try std.testing.expectError(if (blocks) error.Cancelled else error.ConnectionRefused, stopped);
 }
 
 test "a stopped Host's socket fails requests only in ways hostUnreachable names" {
@@ -5106,4 +5139,20 @@ test "schema file capture writes an object and refuses invalid input before publ
     var bytes: [64]u8 = undefined;
     const count = try saved.readPositionalAll(io, &bytes, 0);
     try std.testing.expectEqualStrings("{\"type\":\"object\"}", bytes[0..count]);
+}
+
+test "socket upgrade discovery distinguishes stale sockets from unreadable peers" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    var buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("discovery.sock", &buffer);
+    try std.testing.expectError(error.HostNotServing, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+    var listener = try address.listen(io, .{});
+    // The authenticated peer is this test executable, not a Host. It must be
+    // reported, even though no host-info envelope could be obtained.
+    try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
+    listener.deinit(io);
+    try std.testing.expectError(error.HostNotServing, observeHostForUpgradeAtSocket(allocator, io, address.path, null));
 }

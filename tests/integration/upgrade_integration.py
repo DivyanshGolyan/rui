@@ -619,6 +619,69 @@ class TerminalScreen:
             (destination / f"{name}.txt").write_text(self.capture.completed + "\n")
 
 
+def restart_all_cases(root, binary, releases):
+    # This suite runs under an isolated non-root fixture user: --all intentionally
+    # discovers every Host of that uid, not just the defaults-selected Store.
+    with case(root, binary, releases, "restart-all-empty") as c:
+        assert c.run("host", "restart", "--all").strip() == "No running Hosts."
+        c.assert_no_host()
+        missing = c.run("host", "restart", expect=2)
+        assert "[option_required]" in missing, missing
+        rejected = c.run("host", "restart", "--all", "--store", c.store, expect=2)
+        assert "[option_unknown]" in rejected, rejected
+
+    with case(root, binary, releases, "restart-all-first") as first, \
+            case(root, binary, releases, "restart-all-second") as second:
+        # Both retained managed builds belong to the one installing user/home.
+        # They are real native Hosts, just as the other lifecycle cases above;
+        # a different retained path establishes older launch identity without
+        # inventing a Host version or replacing its wire implementation.
+        second.home, second.env, second.link = first.home, first.env, first.link
+        old_first, previous_first = first.start_host("restart-all-retained-first")
+        old_second, previous_second = second.start_host("restart-all-retained-second", store_hex=True)
+        first.select(first.build("restart-all-selected"))
+        first.binary = first.link
+        output = first.run("host", "restart", "--all", timeout=60)
+        for previous in (previous_first, previous_second):
+            assert f"{previous['store']}: restarted on {releases.version}" in output, output
+        assert "2 Hosts: 2 restarted" in output, output
+        current_first = proof_ready(first, previous_first, old_first)
+        current_second = proof_ready(second, previous_second, old_second)
+        output = first.run("host", "restart", "--all", timeout=60)
+        for previous in (previous_first, previous_second):
+            assert f"{previous['store']}: already on {releases.version}" in output, output
+        assert "2 Hosts: 0 restarted, 2 already current" in output, output
+        assert first.status()["instance"] == current_first["instance"]
+        assert second.status()["instance"] == current_second["instance"]
+
+        # Derive the runtime location from native readiness, not a second owner
+        # of the uid/hash naming rule. A live non-Host socket must be reported;
+        # after its listener closes, the stale socket must be silently ignored.
+        unreadable = pathlib.Path(first.ready["socket"]).parent / "restart-unreadable.sock"
+        try:
+            with os_semantics.unix_stream() as listener:
+                listener.bind(str(unreadable))
+                listener.listen(1)
+                output = first.run("host", "restart", "--all", expect=6)
+                assert "Store unknown (socket " in output and "failed at discovery:" in output, output
+                assert "[host_restart_failed]" in output, output
+                assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
+            output = first.run("host", "restart", "--all")
+            assert "2 Hosts: 0 restarted, 2 already current" in output, output
+            assert str(unreadable) not in output, output
+        finally:
+            unreadable.unlink(missing_ok=True)
+
+    with case(root, binary, releases, "restart-all-application-owned") as c:
+        process, previous = c.start_host("application-owned", managed=False)
+        # There is no selected installation: unsupported ownership is a skip,
+        # not an attempt to select a target, stop the process or start a Host.
+        output = c.run("host", "restart", "--all")
+        assert f"{previous['store']}: left running: application-owned Host" in output, output
+        assert "1 Hosts: 0 restarted, 0 already current, 1 left unchanged, 0 failed." in output, output
+        assert process.poll() is None and c.status()["instance"] == previous["instance"]
+
+
 def terminal_setup(c):
     # Reuse the existing synthetic credential authority; never inspect the
     # caller's HOME, real credentials or a live provider endpoint.
@@ -936,8 +999,8 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    if len(sys.argv) != 2:
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "restart-all"):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all]")
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
     version_home = root / "version-home"
@@ -955,7 +1018,12 @@ def main():
     releases = Releases(binary, version)
     complete = False
     try:
-        for suite in (discovery_cases, install_cases, lifecycle_cases):
+        if len(sys.argv) == 3:
+            restart_all_cases(root, binary, releases)
+            print("upgrade native: restart_all_cases passed", flush=True)
+            complete = True
+            return
+        for suite in (discovery_cases, install_cases, lifecycle_cases, restart_all_cases):
             suite(root, binary, releases)
             print(f"upgrade native: {suite.__name__} passed", flush=True)
         cancel_selected_version_check(root, binary, releases, artifacts)

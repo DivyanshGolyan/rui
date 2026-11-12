@@ -422,6 +422,41 @@ fn validateCanonicalPath(canonical: []const u8) !void {
     if (!std.unicode.utf8ValidateSlice(canonical)) return error.InvalidStorePath;
 }
 
+/// Caller owns every path and the returned slice. Discovery never creates the
+/// runtime directory, follows directory-entry symlinks or reclaims stale sockets.
+pub fn listHostSockets(allocator: std.mem.Allocator, io: std.Io) ![][]u8 {
+    var buffer: [max_runtime_directory_bytes]u8 = undefined;
+    return listHostSocketsIn(allocator, io, try runtimeDirectory(&buffer));
+}
+
+fn listHostSocketsIn(allocator: std.mem.Allocator, io: std.Io, runtime: []const u8) ![][]u8 {
+    var directory = std.Io.Dir.cwd().openDir(io, runtime, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return allocator.alloc([]u8, 0),
+        else => return err,
+    };
+    defer directory.close(io);
+    try validatePrivateDirectory(directory, io);
+    var paths: std.array_list.Managed([]u8) = .init(allocator);
+    errdefer {
+        for (paths.items) |path| allocator.free(path);
+        paths.deinit();
+    }
+    var entries = directory.iterate();
+    while (try entries.next(io)) |entry| {
+        if (entry.kind != .unix_domain_socket or !std.mem.endsWith(u8, entry.name, socket_suffix)) continue;
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ runtime, entry.name });
+        errdefer allocator.free(path);
+        try paths.append(path);
+    }
+    // Stable receipts without changing the sequential activation semantics.
+    std.mem.sort([]u8, paths.items, {}, struct {
+        fn less(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    return paths.toOwnedSlice();
+}
+
 fn runtimeDirectory(buffer: []u8) ![]const u8 {
     return runtimeDirectoryForUid(buffer, @intCast(std.c.geteuid()));
 }
@@ -992,4 +1027,34 @@ test "Store target paths refuse invalid runtime hints without SQLite fallback" {
         try std.testing.expect(selected == .mysql);
         try std.testing.expectError(error.InvalidStorePath, selected.paths(std.testing.io));
     }
+}
+
+test "Host socket enumeration ignores non sockets wrong suffix and missing runtime" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const regular = try tmp.dir.createFile(io, "regular.sock", .{});
+    regular.close(io);
+    try tmp.dir.createDir(io, "directory.sock", .default_dir);
+    var socket_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("found.sock", &socket_buffer);
+    var listener = try address.listen(io, .{});
+    defer listener.deinit(io);
+    try tmp.dir.symLink(io, "found.sock", "linked.sock", .{});
+    var other_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    var other = try (try tmp.address("wrong.other", &other_buffer)).listen(io, .{});
+    defer other.deinit(io);
+    const paths = try listHostSocketsIn(allocator, io, tmp.root[0..tmp.root_len]);
+    defer {
+        for (paths) |path| allocator.free(path);
+        allocator.free(paths);
+    }
+    try std.testing.expectEqual(@as(usize, 1), paths.len);
+    try std.testing.expectEqualStrings(address.path, paths[0]);
+    const missing = try std.fmt.allocPrint(allocator, "{s}/missing", .{tmp.root[0..tmp.root_len]});
+    defer allocator.free(missing);
+    const empty = try listHostSocketsIn(allocator, io, missing);
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
 }

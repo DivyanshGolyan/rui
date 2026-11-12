@@ -34,7 +34,21 @@ The Version row in the terminal's app settings starts the same run from the over
 A selected source build or managed build with unknown release identity is refused before installation.
 The [standalone release installer](../README.md#install) can deliberately convert it to a release.
 An unmanaged, custom, or packaged destination belongs to its application or package manager.
-Manual source and release installers do not restart a Host.
+Source and release installers run `rui host restart --all` after publishing.
+You can run it again yourself:
+
+```sh
+rui host restart --all
+```
+
+`--all` is required; this command does not accept `--store` yet.
+It discovers this user's running Hosts through their private runtime sockets and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work.
+Each line names the Store and reports restarted, already current, left running with a reason, or failure with recovery instructions; a total follows.
+Stale sockets are ignored. An unreadable Host is reported, never guessed at.
+No running Hosts prints `No running Hosts.` and starts nothing.
+A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.
+A failed or unconfirmed restart returns an operational caller error; installer activation failures print a note without failing the completed install.
+The selected build must report a verified release version; an unversioned source target cannot be activated by the existing lifecycle and is reported without stopping Hosts.
 
 The Upgrade restart affects all Sessions in the selected Store and may interrupt their work.
 A running Host keeps its configured capacity through the restart.

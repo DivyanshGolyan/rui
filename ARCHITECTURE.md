@@ -1593,7 +1593,17 @@ The thin upgrade coordinator composes `InstallationOutcome` separately from Host
 After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
 A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
 An already-installed target can still need activation of an older running Host.
-Manual source and release installation remain install-only.
+Source and release installers invoke the newly published command's `rui host restart --all` after publication; failure prints its receipt and a note without failing or undoing installation.
+`--all` is required (`option_required` without it); per-Store restart selection is not exposed yet.
+`platform` alone owns per-user runtime naming and socket enumeration; stale/refused sockets are ignored without creating a runtime directory or Store.
+The client authenticates a socket peer, takes its launch Store as a hint, validates the canonical socket through `platform`, then confirms Store, PID and instance with the current or released-9 read-only observation profiles.
+Unreadable identities are reported rather than guessed; relative or unavailable Store hints cannot grant activation authority.
+`host_restart_all` observes and activates one Host at a time through `HostLifecycle`, requiring the same discovered instance before activation; it keeps no Host registry or mirrored launch policy.
+Its pure report function consumes every `ActivationOutcome` and `Limitation`, keeping each Store-first line and success/failure category together; failures and unconfirmed restarts yield an operational caller error.
+Already-target and newer Hosts remain untouched, and unsupported launches are left running with their reason.
+The target is the pinned installed selection, with a verified numeric version; an unversioned source target is reported without stopping Hosts.
+No running Hosts prints `No running Hosts.` and starts nothing.
+This install-wide operation is separate from `rui upgrade`, whose selected-Store behavior is unchanged.
 
 Lifecycle control observation is separate from ordinary client readiness.
 Upgrade can read the complete bounded Host-info envelope using only the current wire or the released wire `9`, with matching HTTP and body versions and peer PID from that same connection.

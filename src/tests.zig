@@ -32,6 +32,7 @@ test {
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
     _ = @import("HostLifecycle.zig");
+    _ = @import("host_restart_all.zig");
     _ = @import("host_identity.zig");
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");

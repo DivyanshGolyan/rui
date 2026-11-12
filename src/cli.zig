@@ -330,6 +330,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
         .host_start, .host_pause, .host_status => try host(init, command, parsed),
+        .host_restart => try @import("host_restart_all.zig").run(init, init.gpa),
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.

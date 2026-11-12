@@ -853,6 +853,12 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 ## Release demonstrations
 
 `upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
+Its `restart_all_cases` suite also runs alone with `python3 tests/integration/upgrade_integration.py REAL_RUI restart-all` as an isolated non-root user.
+Two real retained managed builds serve separate Stores; `host restart --all` must replace both instances with the selected pinned executable and retire both old PIDs, preserve capacity/environment, then leave both current instances unchanged on retry.
+The suite checks no-Host/no-start behavior, mandatory `--all`, refusal of per-Store selection, a live unreadable socket as an operational failure, a stale refused socket as a silent skip, and an application-owned Host as an explained successful skip even without an installed target.
+`host_restart_all` native unit tests cover every activation outcome, every limitation and every failed/unconfirmed stage; platform/client tests cover runtime filtering, missing directories and stale-versus-unreadable discovery.
+Both installer suites record the exact newly selected command's restart-all invocation, retain its output and require exit zero after a failed restart handoff.
+
 Only the fixture's build identity differs; installation eligibility, publication, Host lifecycle and terminal code are the production owners.
 Ordinary untagged builds still report `unreleased`.
 `zig build upgrade-fixture` exposes that same native actor for focused terminal evidence without a network download or a stale tagged binary.
