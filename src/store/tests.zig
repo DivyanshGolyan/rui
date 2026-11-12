@@ -16155,6 +16155,15 @@ test "configure parent inherits binding without a task, uses the create round bu
             try std.testing.expect(try storage.configure(&child, .{}) == .conflict);
             try submitTestMessage(&storage, &tmp, "native-child-task", "native-child-task", session.slice(), "answer");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            {
+                var view: HistoricalView = undefined;
+                storage.openHistoricalView(model, &view);
+                defer view.close();
+                var settings: HistoricalSettings = undefined;
+                try view.settings(&settings);
+                try std.testing.expect(settings.parent != null);
+                try std.testing.expectEqualStrings(parent.slice(), settings.parent.?.slice());
+            }
             const item = "{\"type\":\"message\",\"id\":\"native-child-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}";
             try settleItemsForTesting(&storage, &tmp, model, &.{item}, "hello");
             const ending = (try storage.nextCoreWork()).?.ending;
