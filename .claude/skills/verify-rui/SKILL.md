@@ -65,7 +65,7 @@ Runs each named state in `scripts/frames.json` on a plain PTY, with libghostty-v
 
 `--record` (or state `"record": true`) saves first-size transitions as an inline-PR GIF, plus optional MP4 when ffmpeg exists. Recordings use the same HTML renderer, deduplicate unchanged pictures, coalesce playback into 80 ms buckets (latest wins), bound frame delays to 60–1500 ms and hold the last frame for 2 s. Requires PNG rendering and ffmpeg; recordings refuse missing ffmpeg before allocating a run. The index displays GIFs when present.
 
-Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html`, `frames.json` results and failure captures. Cleans up unless `--keep`; PTYs always close. `expect`/`absent` apply to every size. These are L1 synthetic PTY layout/transition captures, not physical-input proof. See [scenario format and selection](features/frames.md), including mouse steps.
+Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html`, `frames.json` results and failure captures. Cleans up unless `--keep`; PTYs always close. `expect`/`absent` apply to every size. These are L1 synthetic PTY layout/transition captures, not physical-input proof. See [scenario format and selection](features/frames.md), including mouse steps: emitted mouse bytes wait for changed committed cells; top-level `"repaint": false` declares an intentional no-op, and no emitted bytes skips the wait.
 
 ## Doctor
 

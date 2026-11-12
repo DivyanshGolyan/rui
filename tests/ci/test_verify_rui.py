@@ -176,10 +176,10 @@ class FramesTest(unittest.TestCase):
                 terminal.pressed = None
                 terminal.log = Path(temp)
                 events, writes = [], []
-                terminal.capture = types.SimpleNamespace(frame=frame, mouse=lambda *args, **kw:
+                terminal.capture = types.SimpleNamespace(frame=frame, generation=1, mouse=lambda *args, **kw:
                     (events.append((args, kw)) or payload))
                 terminal.write = lambda data, _kind: writes.append(data)
-                terminal.mouse({"at": "Settings", "do": "click"})
+                terminal.mouse({"at": "Settings", "do": "click"}, repaint=False)
                 self.assertEqual([event[0] for event in events], [("press", 2, 0, "left"), ("release", 2, 0, "left")])
                 self.assertEqual([event[1]["pressed"] for event in events], [False, True])
                 self.assertEqual(writes, [payload, payload] if payload else [])
@@ -188,6 +188,100 @@ class FramesTest(unittest.TestCase):
                     terminal.mouse({"at": "absent", "do": "move"})
                 with self.assertRaisesRegex(self.helper["FrameFailure"], "outside"):
                     terminal.mouse({"at": [100, 0], "do": "click"})
+
+    def mouse_terminal(self, root, payload=b"encoded"):
+        import threading
+        terminal = self.helper["FrameTerminal"].__new__(self.helper["FrameTerminal"])
+        terminal.condition = threading.Condition()
+        terminal.process = types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None, complete=False))
+        terminal.pressed = None
+        terminal.log = root
+        frame = committed("Settings")
+        terminal.capture = types.SimpleNamespace(frame=frame, generation=1, completed=frame.text,
+                                                 mouse=unittest.mock.Mock(return_value=payload))
+        terminal.write = unittest.mock.Mock()
+        return terminal
+
+    def test_mouse_waits_for_delayed_committed_style_change_before_capture(self):
+        for action in ("move", "click", "press", "release", "wheel-up", "wheel-down"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                terminal = self.mouse_terminal(root)
+                before = terminal.frame
+                hovered = before._replace(cells=((before.cells[0][0]._replace(bg="345678"),)
+                                                 + before.cells[0][1:],))
+                # Neither uncommitted changes nor new identical commits confirm input.
+                pending = iter(((1, hovered), (2, before), (3, hovered)))
+
+                def repaint(_timeout):
+                    terminal.write.assert_called()
+                    terminal.capture.generation, terminal.capture.frame = next(pending)
+
+                with patch.object(terminal.condition, "wait", side_effect=repaint) as waited:
+                    self.helper["frame_steps"](None, terminal, [{"mouse": {"at": "Settings", "do": action}}])
+                self.assertEqual(waited.call_count, 3)
+                record = self.helper["frame_capture"](types.SimpleNamespace(meta={"sha": "a" * 40}),
+                    terminal, root, {"name": "hover", "steps": [], "expect": "Settings"}, (100, 20), None)
+                self.assertTrue(record["ok"])
+                self.assertIn("background:#345678", (root / record["files"]["html"]).read_text())
+                self.assertEqual((root / record["files"]["txt"]).read_text(), "Settings\n")
+
+    def test_mouse_withheld_repaint_fails_even_after_an_identical_commit(self):
+        for target in ("Settings", [0, 0]):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temp:
+                terminal = self.mouse_terminal(Path(temp))
+
+                def identical_commit(_timeout):
+                    terminal.capture.generation += 1
+
+                with patch.object(terminal.condition, "wait", side_effect=identical_commit) as waited, \
+                        patch("time.monotonic", side_effect=[0, 0, 21]), \
+                        self.assertRaises(self.helper["FrameFailure"]) as failure:
+                    self.helper["frame_steps"](None, terminal, [{"mouse": {"at": target, "do": "move"}}])
+                self.assertIn(f"mouse move at {target} did not repaint", str(failure.exception))
+                self.assertEqual(waited.call_count, 1)
+                terminal.write.assert_called_once_with(b"encoded", "mouse")
+
+    def test_mouse_explicit_no_repaint_does_not_wait(self):
+        with tempfile.TemporaryDirectory() as temp:
+            terminal = self.mouse_terminal(Path(temp))
+            with patch.object(terminal, "wait") as waited:
+                self.helper["frame_steps"](None, terminal, [
+                    {"mouse": {"at": "Settings", "do": "move"}, "repaint": False}])
+            waited.assert_not_called()
+            terminal.write.assert_called_once_with(b"encoded", "mouse")
+
+    def test_mouse_no_emitted_bytes_does_not_wait_and_keeps_logging(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            terminal = self.mouse_terminal(root, payload=b"")
+            with patch.object(terminal, "wait") as waited:
+                self.helper["frame_steps"](None, terminal, [{"mouse": {"at": "Settings", "do": "click"}}])
+            waited.assert_not_called()
+            terminal.write.assert_not_called()
+            events = self.helper["read_jsonl"](root / "mouse.jsonl")
+            self.assertEqual([event["action"] for event in events], ["press", "release"])
+            self.assertEqual([event["emitted"] for event in events], [False, False])
+
+    def test_repaint_is_a_boolean_mouse_step_modifier_only(self):
+        validate = self.helper["validate_scenario"]
+        for repaint in (True, False):
+            data = self.scenario()
+            step = {"mouse": {"at": "Settings", "do": "move"}, "repaint": repaint}
+            data["states"][0].update(steps=[step], expect=[])
+            self.assertEqual(validate(data)["states"][0]["steps"], [step])
+        for repaint in (None, 0, 1, "false", [], {}):
+            data = self.scenario()
+            data["states"][0].update(steps=[{"mouse": {"at": "Settings", "do": "move"}, "repaint": repaint}], expect=[])
+            with self.subTest(repaint=repaint), self.assertRaisesRegex(ValueError, "invalid repaint"):
+                validate(data)
+        for step in ({"text": "draft"}, {"keys": ["Enter"]}, {"wait": "Settings"}, {"gone": "Settings"},
+                     {"sleep": 1}, {"host": "pause"}, {"exited": 0},
+                     {"send": {"to": "Fix it", "text": "message"}}):
+            data = self.scenario()
+            data["states"][1].update(steps=[{**step, "repaint": False}], expect=[])
+            with self.subTest(step=step), self.assertRaisesRegex(ValueError, "invalid repaint"):
+                validate(data)
 
     def test_recording_keeps_every_timestamp_dedupes_cells_and_bounds_delays(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -448,7 +542,7 @@ while True:
                 terminal.capture.commit()
                 writes = []
                 terminal.write = lambda data, _kind: writes.append(data)
-                steps(None, terminal, [{"mouse": {"at": "Target", "do": action}}])
+                steps(None, terminal, [{"mouse": {"at": "Target", "do": action}, "repaint": False}])
                 self.assertEqual(b"".join(writes), expected)
                 self.assertTrue(all(row["at"] == [6, 1]
                                     for row in self.helper["read_jsonl"](terminal.log / "mouse.jsonl")))

@@ -2065,9 +2065,10 @@ def validate_scenario(data, sizes=None):
         require(isinstance(steps, list), f"{name}: steps must be a list")
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
-            actions = set(step) - {"timeout"}
+            actions = set(step) - {"timeout", "repaint"}
             require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host", "mouse", "exited"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
+            require("repaint" not in step or action == "mouse" and type(step["repaint"]) is bool, f"{name}: invalid repaint (mouse boolean only)")
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone", "exited") and duration(step["timeout"]), f"{name}: invalid timeout")
             if action == "mouse":
@@ -2301,7 +2302,7 @@ class FrameTerminal:
                 self.capture.commit()
         self.wait(lambda c: c.generation > generation, "committed resize frame", allow_exit=True)
 
-    def mouse(self, step):
+    def mouse(self, step, *, repaint=True):
         with self.condition:
             frame = self.frame
             if isinstance(step["at"], list):
@@ -2325,6 +2326,8 @@ class FrameTerminal:
                 col, row = found
             if not (0 <= col < frame.columns and 0 <= row < frame.lines):
                 raise FrameFailure(f"mouse position outside {frame.columns}x{frame.lines}: {col},{row}")
+            generation = self.capture.generation
+            emitted = False
             button = step.get("button", self.pressed or "left")
             actions = ("press", "release") if step["do"] == "click" else (step["do"],)
             for action in actions:
@@ -2336,7 +2339,11 @@ class FrameTerminal:
                 append_jsonl(self.log / "mouse.jsonl", {"t_ns": now_ns(), "action": action, "at": [col, row],
                                                        "button": button, "hex": raw.hex(), "emitted": bool(raw)})
                 if raw:
+                    emitted = True
                     self.write(raw, "mouse")
+        if emitted and repaint:
+            self.wait(lambda c: c.generation > generation and c.frame.cells != frame.cells,
+                      f"mouse {step['do']} at {step['at']} did not repaint")
 
     def stop_recording(self):
         with self.condition:
@@ -2368,7 +2375,7 @@ def frame_steps(run, terminal, steps, exiting=False):
                     # following bytes become Alt-key input (independent of tmux).
                     time.sleep(.35)
         elif "mouse" in step:
-            terminal.mouse(step["mouse"])
+            terminal.mouse(step["mouse"], repaint=step.get("repaint", True))
         elif "wait" in step or "gone" in step:
             action = "wait" if "wait" in step else "gone"
             frame_wait(run, terminal, step[action], action == "gone", step.get("timeout", 20), exiting)
