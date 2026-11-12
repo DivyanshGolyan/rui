@@ -827,6 +827,28 @@ class ProcessCensusTest(unittest.TestCase):
                 self.semantics.processes_executing("/bin/sh")
 
 
+class SessionListValuesTest(unittest.TestCase):
+    def test_only_read_freshness_is_removed_from_session_comparisons(self):
+        from session_list_fixture import session_values
+        row = {"read_version": "a"*32 + ".1", "reference": "aaaaaa", "revision": "1",
+               "work": {"state": {"kind": "finished", "since": "1"}},
+               "last_line": {"position": "2", "text": "Answer"}, "label": "Label"}
+        before = {"sessions": [row]}
+        later = {"sessions": [{**row, "read_version": "a"*32 + ".2"}]}
+        self.assertEqual(session_values(before), session_values(later))
+        for field, value in (("reference", "bbbbbb"), ("revision", "2"),
+                             ("work", {"state": {"kind": "stopped", "since": "1"}}),
+                             ("last_line", {"position": "3", "text": None}), ("label", "Changed")):
+            with self.subTest(field=field):
+                self.assertNotEqual(session_values(before), session_values({"sessions": [{**row, field: value}]}))
+        self.assertIn("read_version", row, "the comparison must not mutate the reply")
+        with self.assertRaises(KeyError):
+            session_values({"sessions": [{"reference": "aaaaaa"}]})
+        for invalid in ("nope", "a"*32 + ".01", "a"*32 + ".18446744073709551616"):
+            with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+                session_values({"sessions": [{**row, "read_version": invalid}]})
+
+
 class ImportSafetyTest(unittest.TestCase):
     def test_session_list_support_imports_ignore_process_arguments_and_workspace(self):
         source = """

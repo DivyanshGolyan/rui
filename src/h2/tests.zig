@@ -12,7 +12,8 @@ const test_poll = @import("test_poll");
 const Connection = @import("Connection.zig");
 const Resolver = @import("Resolver.zig");
 const c = @import("h2_c");
-const openssl = @import("tls_client").c;
+const tls_client = @import("tls_client");
+const openssl = tls_client.c;
 
 const ns_per_ms = std.time.ns_per_ms;
 
@@ -1373,8 +1374,8 @@ test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle prob
         try TrustVariables.clear("SSL_CERT_DIR");
     }
     {
-        // Empty is unset: the host bundle probe, which does not know this
-        // CA, or finds no bundle at all on a host without one.
+        // Empty is unset: the host's certificate directory or bundle, which
+        // does not know this CA, or no trust at all on a host without one.
         var peer: PeerThread = undefined;
         try peer.start(.{ .tls = .h2 });
         defer peer.stop();
@@ -1409,6 +1410,34 @@ test "exchange: on Linux, SSL_CERT_FILE and SSL_CERT_DIR replace the bundle prob
         try TrustVariables.set("SSL_CERT_DIR", "::");
         try std.testing.expectError(error.InvalidSslCertDir, systemTrustExchange(null));
     }
+}
+
+test "system trust takes a certificate directory only when it holds a readable subject-hash entry" {
+    for ([_][]const u8{ "002c0b4f.0", "ffffffff.12" }) |name| try std.testing.expect(tls_client.isSubjectHashName(name));
+    for ([_][]const u8{ "", "002c0b4f", "002c0b4f.", "002c0b4f.r0", "002c0b4f.0x", "002C0B4F.0", "02c0b4f.0", "002c0b4fa.0", "ca-certificates.crt" }) |name| {
+        try std.testing.expect(!tls_client.isSubjectHashName(name));
+    }
+
+    var peer: PeerThread = undefined;
+    try peer.start(.{ .tls = .h2 });
+    defer peer.stop();
+    var directory_z: [std.posix.PATH_MAX]u8 = undefined;
+    try std.testing.expect(tls_client.hashedDirectory(try peer.peer.caDirectory(&directory_z)));
+    // A directory holding only a bundle file gives OpenSSL no roots.
+    var bundle_z: [std.posix.PATH_MAX]u8 = undefined;
+    const bundle_directory = try std.fmt.bufPrintSentinel(&bundle_z, "{s}", .{std.fs.path.dirname(peer.peer.caPath()).?}, 0);
+    try std.testing.expect(!tls_client.hashedDirectory(bundle_directory));
+    try std.testing.expect(!tls_client.hashedDirectory("/nonexistent/h2-certs"));
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var tmp_z: [std.posix.PATH_MAX]u8 = undefined;
+    const tmp_directory = try std.fmt.bufPrintSentinel(&tmp_z, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
+    var dangling_z: [std.posix.PATH_MAX]u8 = undefined;
+    const dangling = try std.fmt.bufPrintSentinel(&dangling_z, "{s}/00000000.0", .{tmp_directory}, 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink("/nonexistent/h2-ca.pem", dangling));
+    // Every hash entry dangles: the store is missing, so the probe moves on.
+    try std.testing.expect(!tls_client.hashedDirectory(tmp_directory));
 }
 
 test "exchange: macOS trusts SecTrust and ignores SSL_CERT_FILE and SSL_CERT_DIR" {

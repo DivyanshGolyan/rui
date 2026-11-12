@@ -5,6 +5,7 @@
 //! carries the provider key, which so never touches disk, argv or the
 //! environment (D70, D108).
 const std = @import("std");
+const start_report = @import("start_report.zig");
 const api_key = @import("api_key.zig");
 const protocol = @import("protocol.zig");
 const wire_request = @import("wire_request.zig");
@@ -22,7 +23,7 @@ test "launch presets resolve MCP tools through the same tool set as configure" {
             const store = @import("store.zig");
             var frame: launch_frame.Frame = .{};
             defer frame.deinit();
-            var refusal: launch_frame.Refusal = undefined;
+            var refusal: start_report.Failure = undefined;
             try launch_frame.parse(std.testing.allocator,
                 \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"pages","url":"http://127.0.0.1:3000/mcp","bearerToken":"t","callTimeoutMs":1000}],"presets":{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["fetch_page"],"permissionMode":"ask"}}}
             , &frame, &refusal);
@@ -91,27 +92,6 @@ pub const max_frame_bytes = 1024 * 1024;
 pub const socket_name = "rui.sock";
 /// The longest `runtimeDir` whose socket path still binds.
 pub const max_runtime_dir_bytes = platform.max_launch_socket_path_bytes - "/".len - socket_name.len;
-const max_refusal_message_bytes = 256;
-
-/// A refusal at open, as `RuiStartError.code` names it (D136).
-pub const StartError = enum {
-    launch_frame_invalid,
-    invalid_preset,
-    store_locked,
-    store_schema_missing,
-    store_schema_behind,
-    mysql_version,
-    mariadb,
-    read_only_replica,
-    durability_innodb_flush_log_at_trx_commit,
-    durability_sync_binlog,
-    binlog_statement,
-    mysql_unreachable,
-    mysql_login,
-    store_fenced,
-    runtime_dir_unusable,
-    tool_name_collision,
-};
 
 pub const Frame = struct {
     store: Store = .{ .sqlite_dir = .{} },
@@ -180,16 +160,8 @@ pub const Frame = struct {
     }
 };
 
-/// Why a frame was refused, for the one line that reports it.
-pub const Refusal = struct {
-    code: StartError,
-    message: []const u8,
-    /// An invalid preset diagnostic survives the parsing arena.
-    buffer: [max_refusal_message_bytes]u8 = undefined,
-};
-
 /// Reads one frame from `file` into `frame`. On refusal, `refusal` says why.
-pub fn read(io: std.Io, file: std.Io.File, gpa: std.mem.Allocator, frame: *Frame, refusal: *Refusal) !void {
+pub fn read(io: std.Io, file: std.Io.File, gpa: std.mem.Allocator, frame: *Frame, refusal: *start_report.Failure) !void {
     var prefix: [4]u8 = undefined;
     readExact(io, file, &prefix) catch return refuse(refusal, "stdin closed before the 4-byte frame length");
     const length = std.mem.readInt(u32, &prefix, .big);
@@ -212,8 +184,8 @@ fn readExact(io: std.Io, file: std.Io.File, buffer: []u8) !void {
     }
 }
 
-fn refuse(refusal: *Refusal, message: []const u8) error{LaunchFrameInvalid} {
-    refusal.* = .{ .code = .launch_frame_invalid, .message = message };
+fn refuse(refusal: *start_report.Failure, message: []const u8) error{LaunchFrameInvalid} {
+    refusal.* = .init(.launch_frame_invalid, message);
     return error.LaunchFrameInvalid;
 }
 
@@ -235,7 +207,7 @@ pub const Wire = struct {
 
 /// Parses `bytes` into `frame`; the key is copied, and every other copy of
 /// it is zeroed before this returns.
-pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: *Refusal) !void {
+pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: *start_report.Failure) !void {
     var wiping: WipingAllocator = .{ .backing = gpa };
     var arena: std.heap.ArenaAllocator = .init(wiping.allocator());
     defer arena.deinit();
@@ -340,10 +312,11 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, frame: *Frame, refusal: 
     frame.presets_memory = memory;
 }
 
-fn refusePreset(refusal: *Refusal, name: []const u8, reason: []const u8) error{LaunchFrameInvalid} {
-    refusal.* = .{ .code = .invalid_preset, .message = "" };
+fn refusePreset(refusal: *start_report.Failure, name: []const u8, reason: []const u8) error{LaunchFrameInvalid} {
+    refusal.code = .invalid_preset;
     const shown = core_tools.diagnosticName(name);
-    refusal.message = std.fmt.bufPrint(&refusal.buffer, "preset {s}: {s}", .{ shown, reason }) catch unreachable;
+    const message = std.fmt.bufPrint(&refusal.message.bytes, "preset {s}: {s}", .{ shown, reason }) catch unreachable;
+    refusal.message.len = message.len;
     return error.LaunchFrameInvalid;
 }
 
@@ -351,21 +324,6 @@ fn validServerName(name: []const u8) bool {
     if (name.len == 0 or name.len > Frame.max_mcp_name_bytes) return false;
     for (name) |byte| if (!std.ascii.isAlphanumeric(byte) and byte != '-' and byte != '_') return false;
     return true;
-}
-
-/// Publish the refusal and carry its already-reported status through cleanup
-/// to the CLI. A refused launch exits nonzero without a second diagnostic.
-pub fn writeRefusal(io: std.Io, refusal: Refusal) error{Reported} {
-    // Every diagnostic byte may need a six-byte JSON escape.
-    var buffer: [6 * max_refusal_message_bytes + 128]u8 = undefined;
-    var out = std.Io.Writer.fixed(&buffer);
-    out.writeAll("{\"rui_start_error\":{\"code\":\"") catch return error.Reported;
-    out.writeAll(@tagName(refusal.code)) catch return error.Reported;
-    out.writeAll("\",\"message\":") catch return error.Reported;
-    std.json.Stringify.encodeJsonString(refusal.message, .{}, &out) catch return error.Reported;
-    out.writeAll("}}\n") catch return error.Reported;
-    std.Io.File.stdout().writeStreamingAll(io, out.buffered()) catch {};
-    return error.Reported;
 }
 
 fn frameBytes(comptime json: []const u8) [4 + json.len]u8 {
@@ -382,7 +340,7 @@ const valid_json =
 test "a launch frame carries the Store, provider key and runtime directory" {
     var frame: Frame = .{};
     defer frame.wipe();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(std.testing.allocator, valid_json, &frame, &refusal);
     try std.testing.expectEqualStrings("/tmp/s", frame.store.sqlite_dir.slice());
     try std.testing.expectEqualStrings("https://api.openai.com/v1", frame.base_url.slice());
@@ -406,7 +364,7 @@ test "a launch frame carries optional provider CA trust" {
         defer std.testing.allocator.free(json);
         var frame: Frame = .{};
         defer frame.deinit();
-        var refusal: Refusal = undefined;
+        var refusal: start_report.Failure = undefined;
         try parse(std.testing.allocator, json, &frame, &refusal);
         try std.testing.expectEqualStrings(path orelse "", frame.ca_file.slice());
         // An omitted CA returns to system trust, including after a prior parse.
@@ -428,10 +386,10 @@ test "a launch frame refuses invalid provider CA paths" {
         defer std.testing.allocator.free(json);
         var frame: Frame = .{};
         defer frame.deinit();
-        var refusal: Refusal = undefined;
+        var refusal: start_report.Failure = undefined;
         try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, json, &frame, &refusal));
-        try std.testing.expectEqual(StartError.launch_frame_invalid, refusal.code);
-        try std.testing.expect(std.mem.startsWith(u8, refusal.message, "provider.caFile "));
+        try std.testing.expectEqual(start_report.StartError.launch_frame_invalid, refusal.code);
+        try std.testing.expect(std.mem.startsWith(u8, refusal.message.slice(), "provider.caFile "));
         try std.testing.expectEqual(@as(usize, 0), frame.key.len);
     }
 }
@@ -439,7 +397,7 @@ test "a launch frame refuses invalid provider CA paths" {
 test "a launch frame carries MCP servers" {
     var frame: Frame = .{};
     defer frame.wipe();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(std.testing.allocator,
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"drift","url":"http://127.0.0.1:3000/mcp","bearerToken":"t0k","callTimeoutMs":1800000}]}
     , &frame, &refusal);
@@ -488,9 +446,9 @@ test "a launch frame refuses a bad MCP server" {
     };
     for (cases) |json| {
         var frame: Frame = .{};
-        var refusal: Refusal = undefined;
+        var refusal: start_report.Failure = undefined;
         try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, json, &frame, &refusal));
-        try std.testing.expectEqual(StartError.launch_frame_invalid, refusal.code);
+        try std.testing.expectEqual(start_report.StartError.launch_frame_invalid, refusal.code);
         for (frame.mcp_servers) |server| try std.testing.expectEqual(@as(usize, 0), server.bearer_token.len);
     }
 }
@@ -498,7 +456,7 @@ test "a launch frame refuses a bad MCP server" {
 test "a launch frame can open the Host paused" {
     var frame: Frame = .{};
     defer frame.wipe();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(std.testing.allocator, valid_json, &frame, &refusal);
     try std.testing.expect(!frame.paused);
     try parse(std.testing.allocator,
@@ -540,9 +498,9 @@ test "a launch frame is refused with launch_frame_invalid when it is wrong" {
     };
     for (cases) |json| {
         var frame: Frame = .{};
-        var refusal: Refusal = undefined;
+        var refusal: start_report.Failure = undefined;
         try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, json, &frame, &refusal));
-        try std.testing.expectEqual(StartError.launch_frame_invalid, refusal.code);
+        try std.testing.expectEqual(start_report.StartError.launch_frame_invalid, refusal.code);
         try std.testing.expectEqual(@as(usize, 0), frame.key.len);
     }
 }
@@ -560,7 +518,7 @@ test "a launch frame is read whole from a pipe, and a short one is refused" {
         writer.close(io);
         var frame: Frame = .{};
         defer frame.wipe();
-        var refusal: Refusal = undefined;
+        var refusal: start_report.Failure = undefined;
         if (sent == bytes.len) {
             try read(io, reader, std.testing.allocator, &frame, &refusal);
             try std.testing.expectEqualStrings("sk-test", frame.key.slice());
@@ -582,7 +540,7 @@ test "an oversized frame length is refused before any body is read" {
     std.mem.writeInt(u32, &prefix, max_frame_bytes + 1, .big);
     try writer.writeStreamingAll(io, &prefix);
     var frame: Frame = .{};
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try std.testing.expectError(error.LaunchFrameInvalid, read(io, reader, std.testing.allocator, &frame, &refusal));
 }
 
@@ -605,113 +563,10 @@ const WipingAllocator = struct {
     }
 };
 
-/// What a launched Host's caller reads when its start fails, if anything.
-/// Only static messages cross the refusal boundary: never server text or URL.
-pub fn startRefusal(store: std.meta.Tag(Frame.Store), err: anyerror) ?Refusal {
-    if (store == .mysql_url) if (mysqlRefusal(err)) |refusal| return refusal;
-    return switch (err) {
-        error.StoreAlreadyOwned => .{ .code = .store_locked, .message = "another Host owns this Store" },
-        error.RuntimeDirectoryInUse => .{ .code = .runtime_dir_unusable, .message = "another Host owns this runtimeDir" },
-        error.RuntimeDirectoryUnusable => .{ .code = .runtime_dir_unusable, .message = "runtimeDir must be a private (mode 0700) directory this Host can lock" },
-        else => null,
-    };
-}
-
-test "a launched Host's start failure is refused with its Store's codes only" {
-    const cases = [_]struct { store: std.meta.Tag(Frame.Store), err: anyerror, code: ?StartError }{
-        .{ .store = .sqlite_dir, .err = error.StoreAlreadyOwned, .code = .store_locked },
-        .{ .store = .mysql_url, .err = error.StoreAlreadyOwned, .code = .store_locked },
-        .{ .store = .mysql_url, .err = error.StoreLocked, .code = .store_locked },
-        .{ .store = .sqlite_dir, .err = error.StoreLocked, .code = null },
-        .{ .store = .mysql_url, .err = error.StoreSchemaMissing, .code = .store_schema_missing },
-        .{ .store = .sqlite_dir, .err = error.StoreSchemaMissing, .code = null },
-        .{ .store = .sqlite_dir, .err = error.RuntimeDirectoryInUse, .code = .runtime_dir_unusable },
-        .{ .store = .mysql_url, .err = error.RuntimeDirectoryUnusable, .code = .runtime_dir_unusable },
-        .{ .store = .sqlite_dir, .err = error.OutOfMemory, .code = null },
-    };
-    for (cases) |case| {
-        const refusal = startRefusal(case.store, case.err);
-        try std.testing.expectEqual(case.code, if (refusal) |value| value.code else null);
-    }
-    try std.testing.expect(!std.mem.eql(u8, startRefusal(.sqlite_dir, error.RuntimeDirectoryInUse).?.message, startRefusal(.sqlite_dir, error.RuntimeDirectoryUnusable).?.message));
-    const mysql_cases = [_]struct { err: anyerror, code: StartError }{
-        .{ .err = error.MysqlTooOld, .code = .mysql_version },
-        .{ .err = error.UnsupportedServer, .code = .mysql_version },
-        .{ .err = error.MysqlIsMariadb, .code = .mariadb },
-        .{ .err = error.MysqlReadOnly, .code = .read_only_replica },
-        .{ .err = error.MysqlFlushLogUnsafe, .code = .durability_innodb_flush_log_at_trx_commit },
-        .{ .err = error.MysqlSyncBinlogUnsafe, .code = .durability_sync_binlog },
-        .{ .err = error.MysqlStatementBinlog, .code = .binlog_statement },
-        .{ .err = error.ServerRefused, .code = .mysql_unreachable },
-        .{ .err = error.ConnectFailed, .code = .mysql_unreachable },
-        .{ .err = error.HostNotFound, .code = .mysql_unreachable },
-        .{ .err = error.InvalidHost, .code = .mysql_unreachable },
-        .{ .err = error.InvalidCaFile, .code = .mysql_unreachable },
-        .{ .err = error.TrustUnavailable, .code = .mysql_unreachable },
-        .{ .err = error.InvalidSslCertFile, .code = .mysql_unreachable },
-        .{ .err = error.InvalidSslCertDir, .code = .mysql_unreachable },
-        .{ .err = error.TlsRefused, .code = .mysql_unreachable },
-        .{ .err = error.TlsFailed, .code = .mysql_unreachable },
-        .{ .err = error.UntrustedPeer, .code = .mysql_unreachable },
-        .{ .err = error.PeerFailed, .code = .mysql_unreachable },
-        .{ .err = error.DeadlineExceeded, .code = .mysql_unreachable },
-        .{ .err = error.ConnectionLost, .code = .mysql_unreachable },
-        .{ .err = error.LoginRefused, .code = .mysql_login },
-        .{ .err = error.AuthMethodRefused, .code = .mysql_login },
-    };
-    for (mysql_cases) |case| {
-        try std.testing.expect(startRefusal(.mysql_url, case.err) != null);
-        const refusal = startRefusal(.mysql_url, case.err).?;
-        try std.testing.expectEqual(case.code, refusal.code);
-        try std.testing.expect(refusal.message.len > 0 and refusal.message.len <= max_refusal_message_bytes);
-        try std.testing.expect(startRefusal(.sqlite_dir, case.err) == null);
-    }
-    try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlFlushLogUnsafe).?.message, "innodb_flush_log_at_trx_commit=1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlSyncBinlogUnsafe).?.message, "sync_binlog=1") != null);
-    try std.testing.expectEqualStrings("the MySQL server refused the connection before login", mysqlRefusal(error.ServerRefused).?.message);
-    try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.LoginRefused).?.message, "SELECT, INSERT, UPDATE") != null);
-    try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.HostNotFound).?.message, mysqlRefusal(error.ConnectFailed).?.message));
-    try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.UntrustedPeer).?.message, mysqlRefusal(error.TlsFailed).?.message));
-}
-
-fn mysqlRefusal(err: anyerror) ?Refusal {
-    return switch (err) {
-        error.StoreLocked => .{ .code = .store_locked, .message = "another Host owns this Store" },
-        error.StoreSchemaMissing => .{ .code = .store_schema_missing, .message = "apply this build's MySQL schema before starting the Host" },
-        error.StoreSchemaBehind => .{ .code = .store_schema_behind, .message = "the MySQL Store format is older than this build; apply its forward migrations" },
-        error.StoreSchemaAhead => .{ .code = .store_schema_behind, .message = "the MySQL Store format is newer than this build; use a compatible build" },
-        error.MalformedStoreFormat => .{ .code = .store_schema_behind, .message = "the MySQL Store format metadata is not a valid number" },
-        error.WrongStoreVersion => .{ .code = .store_schema_behind, .message = "the MySQL Store wire version does not match this build" },
-        error.WrongStoreSchema => .{ .code = .store_schema_behind, .message = "the MySQL Store metadata contains an unexpected key" },
-        error.StoreCatalogMismatch => .{ .code = .store_schema_behind, .message = "the MySQL Store catalog does not match this build" },
-        error.WrongStoreIdentity => .{ .code = .store_schema_behind, .message = "the MySQL Store identity metadata or connection target is invalid" },
-        error.MysqlTooOld, error.UnsupportedServer => .{ .code = .mysql_version, .message = "MySQL 8.4 or newer is required" },
-        error.MysqlIsMariadb => .{ .code = .mariadb, .message = "MariaDB is not supported; use MySQL 8.4 or newer" },
-        error.MysqlReadOnly => .{ .code = .read_only_replica, .message = "MySQL requires read_only=OFF and super_read_only=OFF" },
-        error.MysqlFlushLogUnsafe => .{ .code = .durability_innodb_flush_log_at_trx_commit, .message = "MySQL requires innodb_flush_log_at_trx_commit=1" },
-        error.MysqlSyncBinlogUnsafe => .{ .code = .durability_sync_binlog, .message = "MySQL requires sync_binlog=1 when binlogging is enabled" },
-        error.MysqlStatementBinlog => .{ .code = .binlog_statement, .message = "MySQL STATEMENT binlogging is not supported; use ROW or MIXED" },
-        error.ServerRefused => .{ .code = .mysql_unreachable, .message = "the MySQL server refused the connection before login" },
-        error.ConnectFailed => .{ .code = .mysql_unreachable, .message = "could not connect to the MySQL server" },
-        error.HostNotFound => .{ .code = .mysql_unreachable, .message = "could not resolve the MySQL host" },
-        error.InvalidHost => .{ .code = .mysql_unreachable, .message = "the MySQL host address is invalid" },
-        error.InvalidCaFile => .{ .code = .mysql_unreachable, .message = "could not load the MySQL ssl-ca file" },
-        error.TrustUnavailable, error.InvalidSslCertFile, error.InvalidSslCertDir => .{ .code = .mysql_unreachable, .message = "could not load MySQL system TLS trust" },
-        error.TlsRefused => .{ .code = .mysql_unreachable, .message = "the MySQL server does not offer TLS" },
-        error.TlsFailed => .{ .code = .mysql_unreachable, .message = "the MySQL server's TLS handshake failed" },
-        error.UntrustedPeer => .{ .code = .mysql_unreachable, .message = "the MySQL server's TLS certificate is not trusted" },
-        error.PeerFailed => .{ .code = .mysql_unreachable, .message = "could not verify the MySQL server's TLS certificate" },
-        error.DeadlineExceeded => .{ .code = .mysql_unreachable, .message = "timed out connecting to the MySQL server" },
-        error.ConnectionLost => .{ .code = .mysql_unreachable, .message = "the MySQL connection was lost during startup" },
-        error.LoginRefused, error.AuthMethodRefused => .{ .code = .mysql_login, .message = "the MySQL server refused the login or the login lacks a privilege the Store needs; check credentials and SELECT, INSERT, UPDATE privileges on the database" },
-        else => null,
-    };
-}
-
 test "a MySQL launch frame keeps its login only in the stdin-owned frame" {
     var frame: Frame = .{};
     defer frame.wipe();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(std.testing.allocator,
         \\{"v":1,"store":"mysql://u:secret@h/db?ssl-ca=/private/ca.pem","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r"}
     , &frame, &refusal);
@@ -725,7 +580,7 @@ test "a MySQL launch frame keeps its login only in the stdin-owned frame" {
 test "a MySQL launch frame keeps presets after wiping its login" {
     var frame: Frame = .{};
     defer frame.deinit();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(std.testing.allocator,
         \\{"v":1,"store":"mysql://u:secret@h/db","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","presets":{"review":{"model":"model-a","effort":null,"compactAt":1000,"tools":[],"permissionMode":"ask"}}}
     , &frame, &refusal);
@@ -742,32 +597,13 @@ test "a MySQL launch frame keeps presets after wiping its login" {
     try std.testing.expect(frame.presets_memory == null);
 }
 
-test "MySQL metadata admission failures have distinct bounded static diagnostics" {
-    const cases = .{
-        .{ error.StoreSchemaBehind, "the MySQL Store format is older than this build; apply its forward migrations" },
-        .{ error.StoreSchemaAhead, "the MySQL Store format is newer than this build; use a compatible build" },
-        .{ error.MalformedStoreFormat, "the MySQL Store format metadata is not a valid number" },
-        .{ error.WrongStoreVersion, "the MySQL Store wire version does not match this build" },
-        .{ error.WrongStoreSchema, "the MySQL Store metadata contains an unexpected key" },
-        .{ error.StoreCatalogMismatch, "the MySQL Store catalog does not match this build" },
-        .{ error.WrongStoreIdentity, "the MySQL Store identity metadata or connection target is invalid" },
-    };
-    inline for (cases) |case| {
-        const refusal = startRefusal(.mysql_url, case[0]).?;
-        try std.testing.expectEqual(StartError.store_schema_behind, refusal.code);
-        try std.testing.expectEqualStrings(case[1], refusal.message);
-        try std.testing.expect(refusal.message.len <= max_refusal_message_bytes);
-        try std.testing.expect(startRefusal(.sqlite_dir, case[0]) == null);
-    }
-}
-
 test "each MySQL policy refusal has a static launch-frame code" {
     inline for (@typeInfo(@import("store.zig").MysqlStartError).error_set.error_names.?) |name|
-        try std.testing.expect(mysqlRefusal(@field(anyerror, name)) != null);
-    try std.testing.expectEqual(StartError.store_locked, mysqlRefusal(error.StoreLocked).?.code);
-    try std.testing.expectEqual(StartError.store_schema_missing, mysqlRefusal(error.StoreSchemaMissing).?.code);
-    try std.testing.expectEqual(StartError.store_schema_behind, mysqlRefusal(error.StoreSchemaBehind).?.code);
-    try std.testing.expect(mysqlRefusal(error.OutOfMemory) == null);
+        try std.testing.expect(start_report.classify(.mysql, @field(anyerror, name)) != null);
+    try std.testing.expectEqual(start_report.StartError.store_locked, start_report.classify(.mysql, error.StoreLocked).?.code);
+    try std.testing.expectEqual(start_report.StartError.store_schema_missing, start_report.classify(.mysql, error.StoreSchemaMissing).?.code);
+    try std.testing.expectEqual(start_report.StartError.store_schema_behind, start_report.classify(.mysql, error.StoreSchemaBehind).?.code);
+    try std.testing.expect(start_report.classify(.mysql, error.OutOfMemory) == null);
 }
 
 test "MCP launch frame defaults an absent call timeout" {
@@ -775,7 +611,7 @@ test "MCP launch frame defaults an absent call timeout" {
     const value = try gpa.create(Frame);
     defer gpa.destroy(value);
     defer value.wipe();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(gpa,
         \\{"v":1,"store":"/s","provider":{"kind":"openai_key","baseUrl":"https://a.b/v1","key":"k"},"runtimeDir":"/r","mcpServers":[{"name":"docs","url":"http://127.0.0.1:3000/mcp","bearerToken":"secret"}]}
     , value, &refusal);
@@ -792,7 +628,7 @@ const creating_spec =
 test "presets in a launch frame are owned until frame deinit" {
     var frame: Frame = .{};
     defer frame.deinit();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     const input = try std.testing.allocator.dupe(u8, preset_head ++ "{\"review-1\":" ++ creating_spec ++ "}}");
     try parse(std.testing.allocator, input, &frame, &refusal);
     std.testing.allocator.free(input);
@@ -809,7 +645,7 @@ test "presets in a launch frame are owned until frame deinit" {
 test "presets in a launch frame accept tool-set-backed names" {
     var frame: Frame = .{};
     defer frame.deinit();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(std.testing.allocator, preset_head ++
         \\{"reader":{"model":"model-a","effort":null,"compactAt":1000,"tools":["find_tools","fetch_page"],"permissionMode":"ask"}}}
     , &frame, &refusal);
@@ -839,12 +675,12 @@ test "presets in a launch frame refuse bad names and incomplete specs with their
     }) |case| {
         var frame: Frame = .{};
         defer frame.deinit();
-        var refusal: Refusal = undefined;
+        var refusal: start_report.Failure = undefined;
         try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, case.json, &frame, &refusal));
-        try std.testing.expectEqual(StartError.invalid_preset, refusal.code);
-        try std.testing.expect(std.unicode.utf8ValidateSlice(refusal.message));
-        try std.testing.expect(std.mem.indexOf(u8, refusal.message, case.name) != null);
-        try std.testing.expect(std.mem.indexOf(u8, refusal.message, case.field) != null);
+        try std.testing.expectEqual(start_report.StartError.invalid_preset, refusal.code);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(refusal.message.slice()));
+        try std.testing.expect(std.mem.indexOf(u8, refusal.message.slice(), case.name) != null);
+        try std.testing.expect(std.mem.indexOf(u8, refusal.message.slice(), case.field) != null);
     }
 }
 
@@ -862,13 +698,13 @@ test "presets in a launch frame accept their bounds and refuse one more" {
     try out.writeAll("}}");
     var frame: Frame = .{};
     defer frame.deinit();
-    var refusal: Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try parse(std.testing.allocator, json.written(), &frame, &refusal);
     try std.testing.expectEqual(core_tools.max_presets, frame.presets.len);
     frame.deinit();
     const extra = try std.mem.concat(memory.allocator(), u8, &.{ json.written()[0 .. json.written().len - 2], ",\"extra\":", creating_spec, "}}" });
     try std.testing.expectError(error.LaunchFrameInvalid, parse(std.testing.allocator, extra, &frame, &refusal));
-    try std.testing.expectEqual(StartError.invalid_preset, refusal.code);
+    try std.testing.expectEqual(start_report.StartError.invalid_preset, refusal.code);
     const longest_name = preset_head ++ "{\"" ++ @as([core_tools.max_preset_name_bytes]u8, @splat('a')) ++ "\":" ++ creating_spec ++ "}}";
     try parse(std.testing.allocator, longest_name, &frame, &refusal);
     try std.testing.expectEqual(core_tools.max_preset_name_bytes, frame.presets[0].name.len);
@@ -893,11 +729,11 @@ test "a MySQL ssl-ca load failure becomes a static start refusal" {
         if (missing) try tmp.dir.deleteFile(std.testing.io, "not-ca.pem");
         connection.open(url.options(), &diagnostic.writer) catch |err| {
             try std.testing.expectEqual(error.InvalidCaFile, err);
-            try std.testing.expect(startRefusal(.mysql_url, err) != null);
-            const refusal = startRefusal(.mysql_url, err).?;
-            try std.testing.expectEqual(StartError.mysql_unreachable, refusal.code);
-            try std.testing.expectEqualStrings("could not load the MySQL ssl-ca file", refusal.message);
-            try std.testing.expect(std.mem.indexOf(u8, refusal.message, path) == null);
+            try std.testing.expect(start_report.classify(.mysql, err) != null);
+            const refusal = start_report.classify(.mysql, err).?;
+            try std.testing.expectEqual(start_report.StartError.mysql_unreachable, refusal.code);
+            try std.testing.expectEqualStrings("could not load the MySQL ssl-ca file", refusal.message.slice());
+            try std.testing.expect(std.mem.indexOf(u8, refusal.message.slice(), path) == null);
             try std.testing.expectEqualStrings("", diagnostic.written());
             for (url.password.bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
             continue;

@@ -10249,6 +10249,10 @@
       "PageWork": {
         "type": "object",
         "properties": {
+          "read_version": {
+            "type": "string",
+            "x-rui-max-bytes": 53
+          },
           "state": {
             "$ref": "#/components/schemas/WorkStateJson"
           },
@@ -10282,6 +10286,16 @@
               }
             ]
           },
+          "last_line": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastLineFields"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revision": {
             "$ref": "#/components/schemas/Decimal"
           },
@@ -10292,10 +10306,12 @@
           }
         },
         "required": [
+          "read_version",
           "state",
           "turn",
           "operation",
           "first_action",
+          "last_line",
           "revision",
           "workspace"
         ],
@@ -10890,6 +10906,10 @@
       "SessionRow": {
         "type": "object",
         "properties": {
+          "read_version": {
+            "type": "string",
+            "x-rui-max-bytes": 53
+          },
           "archive_state": {
             "type": "string",
             "enum": [
@@ -11000,6 +11020,7 @@
           }
         },
         "required": [
+          "read_version",
           "archive_state",
           "reference",
           "workspace",
