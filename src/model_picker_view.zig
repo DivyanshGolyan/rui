@@ -55,7 +55,7 @@ pub const Line = struct { text: []const u8, segments: []const overview.Segment, 
 pub const Lines = struct { rows: []Line, selected: ?u32 };
 pub const Read = enum { unread, read, unanswered, invalid };
 
-const Columns = struct { context: bool = true, sign_ins: bool = false, all_sign_ins: bool = true };
+const Columns = struct { context: bool = true, sign_ins: bool = false, all_sign_ins: bool = true, mark_gap: usize = 2 };
 
 /// A frame's row plan. Only visible rows allocate text and spans.
 pub const Rows = struct {
@@ -198,6 +198,19 @@ fn lines(arena: std.mem.Allocator, menu: *const picker.Menu, words: []const u8, 
     return .{ .rows = result, .selected = plan.selected };
 }
 
+/// A field choice uses the picker's model row without its overview status
+/// sentences or effort/sign-in controls. Width is the full field-choice width.
+pub fn modelLine(arena: std.mem.Allocator, entry: picker.Entry, row: picker.Row, id_width: usize, width: usize) !Line {
+    const buffer = try arena.alloc(u8, @max(entry.id.len, id_width) + 256);
+    var columns: Columns = .{ .mark_gap = 1 };
+    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, true).text) > width) columns.context = false;
+    if (cells(format(buffer, entry, row, false, id_width, columns, .unicode, true).text) > width) columns.all_sign_ins = false;
+    const reserved = cells(format(buffer, entry, row, false, 0, columns, .unicode, true).text);
+    const formatted = format(buffer, entry, row, false, @min(id_width, width -| reserved), columns, .unicode, true);
+    const text = try arena.dupe(u8, formatted.text);
+    return .{ .text = text, .segments = try segments(arena, text, formatted) };
+}
+
 fn needed(buffer: []u8, menu: *const picker.Menu, query: picker.Query, defaults: picker.Defaults, choice: ?Choice, id_width: usize, columns: Columns, method: gwidth.Method, unicode: bool, typed_row: bool) usize {
     if (typed_row) {
         const entry = typedEntry(menu, query.words, defaults);
@@ -256,7 +269,7 @@ fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, highlighted: bool,
     var control_count: usize = 0;
     const mark = if (unicode) "✓" else "+";
     out.writeAll(if (row.current) mark else " ") catch unreachable;
-    out.writeAll("  ") catch unreachable;
+    for (0..columns.mark_gap) |_| out.writeByte(' ') catch unreachable;
     if (row.current) ranges[0] = .{ .start = 0, .end = mark.len, .style = .{ .colour = .mark, .bold = true } };
     if (entry.id.len > id_width) {
         if (id_width > 0) {

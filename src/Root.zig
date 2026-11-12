@@ -112,8 +112,8 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             ctx.consumeEvent();
         },
         .key_release => ctx.consumeEvent(),
-        // One router for every key while settings is open. A paste has
-        // nowhere to go and its line break must not change a setting. Esc
+        // One router for every key while settings is open. A paste goes
+        // only to the text editor, never a choice or action. Esc
         // (or Ctrl-G, as everywhere) closes the topmost thing only: an open
         // keys reference or choice, else the page, unless an Upgrade can still
         // be cancelled.
@@ -121,9 +121,10 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         // leaving and an Upgrade's Esc work as on the overview, which owns
         // them and takes nothing else under the page.
         .key_press => |key| if (self.settings_open and !self.sign_in_open) {
-            const closes = key.matches(vaxis.Key.escape, .{}) or key.matches('g', .{ .ctrl = true });
+            const named = @import("TerminalEditor.zig").named(key);
+            const closes = named == .escape or named == .ctrl_g;
             if (self.pasting) {
-                ctx.consumeEvent();
+                if (!self.settings_page.takesPaste()) ctx.consumeEvent();
             } else if (closes and self.settings_page.keys_open) {
                 self.settings_page.keys_open = false;
                 ctx.consumeAndRedraw();
@@ -133,7 +134,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             } else if (closes and !self.settings_page.upgradeTakesEscape()) {
                 try self.showMain(ctx);
                 ctx.consumeAndRedraw();
-            } else if (!AppSettings.takesKey(key)) {
+            } else if (!self.settings_page.takesKey(key)) {
                 try self.overview.handleEvent(ctx, input);
                 ctx.consumeAndRedraw();
             }
@@ -159,7 +160,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             }
             const first_command = ctx.cmds.items.len;
             try self.overview.handleEvent(ctx, .tick);
+            // Leaving is terminal for this dispatch: a child must not start
+            // old-client reobservation after Upgrade has requested departure.
+            if (ctx.quit) return;
             if (self.session) |session| try session.handleEvent(ctx, .tick);
+            if (ctx.quit) return;
             if (self.settings_open or self.sign_in_open) {
                 // Hidden screens still settle their workers and consent state,
                 // but their presentation targets aren't in this focus tree.
@@ -174,8 +179,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 ctx.cmds.items.len = kept;
                 if (self.settings_open) try self.settings_page.widget().handleEvent(ctx, .tick);
             }
+            if (ctx.quit) return;
             if (self.sign_in) |page| try page.handleEvent(ctx, .tick);
-            try ctx.tick(16, self.widget());
+            if (!ctx.quit) try ctx.tick(16, self.widget());
         },
         else => {},
     }
@@ -465,7 +471,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
     }
 }
 
-test "App root gives Escape to a cancellable Upgrade after a choice and before closing settings, and no pasted key to settings" {
+test "App root gives Escape to a cancellable Upgrade after a choice and before closing settings, and consumes pasted keys outside the Model filter" {
     const upgrade_status = @import("upgrade_status.zig");
     const Fixture = struct {
         run: ?upgrade_status.Run = null,
@@ -569,7 +575,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
             try std.testing.expect(root.settings_open);
         }
     };
-    // No key of a paste reaches the page or closes it; keys after it do.
+    // Without a text editor, no pasted key reaches the page or closes it.
     var pasted: Fixture = .{};
     var page: Self = .{ .overview = pasted.widget(), .list = pasted.widget(), .compose = pasted.widget() };
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
@@ -644,6 +650,151 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     ctx.cmds.clearRetainingCapacity();
     try root.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(ctx.cmds.items[0].request_focus.eql(hidden.widget()));
+}
+
+test "App root relaunch departure stops child ticks and scheduling at the first quit" {
+    const Pane = struct {
+        ticks: usize = 0,
+        quit: bool = false,
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = onEvent, .drawFn = drawPane };
+        }
+        fn onEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (input == .tick) {
+                self.ticks += 1;
+                if (self.quit) ctx.quit = true;
+            }
+        }
+        fn drawPane(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+    };
+    for (std.enums.values(enum { overview, session, sign_in, none })) |quitter| {
+        for ([_]bool{ false, true }) |settings| {
+            var overview: Pane = .{ .quit = quitter == .overview };
+            var session: Pane = .{ .quit = quitter == .session };
+            var sign_in: Pane = .{ .quit = quitter == .sign_in };
+            var root: Self = .{ .overview = overview.widget(), .list = overview.widget(), .compose = overview.widget(), .session = session.widget(), .settings_open = settings, .sign_in = sign_in.widget(), .sign_in_open = true };
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = std.testing.allocator, .cmds = .empty };
+            defer ctx.cmds.deinit(std.testing.allocator);
+            try root.widget().handleEvent(&ctx, .tick);
+            try std.testing.expectEqual(@as(usize, 1), overview.ticks);
+            try std.testing.expectEqual(@as(usize, if (quitter == .overview) 0 else 1), session.ticks);
+            try std.testing.expectEqual(@as(usize, if (quitter == .overview or quitter == .session) 0 else 1), sign_in.ticks);
+            try std.testing.expectEqual(quitter != .none, ctx.quit);
+            try std.testing.expectEqual(quitter == .none, ctx.cmds.items.len != 0);
+        }
+    }
+}
+
+test "App root routes Model filter typing to settings and Escape closes only its choice" {
+    var text: vxfw.Text = .{ .text = "overview" };
+    var root: Self = .{ .overview = text.widget(), .list = text.widget(), .compose = text.widget(), .settings_open = true };
+    root.settings_page.model_choice.open(null, .codex, "");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
+    const typed: vxfw.Event = .{ .key_press = .{ .codepoint = 'g', .text = "gpt" } };
+    try root.widget().captureEvent(&ctx, typed);
+    try std.testing.expect(!ctx.consume_event);
+    try root.settings_page.widget().handleEvent(&ctx, typed);
+    try std.testing.expectEqualStrings("gpt", root.settings_page.model_choice.editor.buffer[0..root.settings_page.model_choice.editor.length]);
+    ctx.consume_event = false;
+    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expect(!root.settings_page.hasChoice());
+    try std.testing.expect(root.settings_open);
+    ctx.consume_event = false;
+    try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
+    try std.testing.expect(ctx.consume_event);
+    try std.testing.expect(!root.settings_open);
+}
+
+test "App root routes typed and pasted settings text only to the Model filter without pasted activation" {
+    const preferences = @import("preferences.zig");
+    const Fixture = struct {
+        saves: usize = 0,
+        overview_keys: usize = 0,
+        edit: ?preferences.Edit = null,
+        fn backend(self: *@This()) AppSettings.Backend {
+            return .{ .context = self, .read = read, .save = save, .save_state = saveState, .upgrade = upgrade, .run = run, .caps = caps };
+        }
+        fn read(_: *anyopaque) !preferences.Values {
+            return .{};
+        }
+        fn save(raw: *anyopaque, edit: preferences.Edit) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.saves += 1;
+            self.edit = edit;
+        }
+        fn saveState(_: *anyopaque) AppSettings.SaveState {
+            return .pending;
+        }
+        fn upgrade(_: *anyopaque) !void {}
+        fn run(_: *anyopaque) ?@import("upgrade_status.zig").Run {
+            return null;
+        }
+        fn caps(_: *anyopaque) @import("overview_view.zig").Caps {
+            return .{};
+        }
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .eventHandler = @This().event, .drawFn = @This().draw };
+        }
+        fn event(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (input == .key_press) self.overview_keys += 1;
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+    };
+    const Choice = enum { model, ordinary, none };
+    const text = "gpt-5.5";
+    const app_events = @import("testing/app_events.zig");
+    for (std.enums.values(Choice)) |choice| for ([_]bool{ false, true }) |pasted| {
+        errdefer std.debug.print("settings text choice={s}, pasted={}\n", .{ @tagName(choice), pasted });
+        var fixture: Fixture = .{};
+        var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget(), .settings_page = .{ .backend = fixture.backend() } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try root.openSettings(&ctx);
+        const page = &root.settings_page;
+        page.select(switch (choice) {
+            .model => .model,
+            .ordinary => .effort,
+            .none => .notifications,
+        });
+        if (choice != .none) try app_events.send(&ctx, "\r", root.widget(), page.widget());
+        const row = page.panel.selected;
+        try app_events.send(&ctx, if (pasted) "\x1b[200~" ++ text ++ "\x1b[201~" else text, root.widget(), page.widget());
+        try std.testing.expectEqualStrings(if (choice == .model) text else "", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+        try std.testing.expectEqual(@as(usize, if (choice == .model or pasted) 0 else text.len), fixture.overview_keys);
+        try std.testing.expectEqual(choice != .none, page.hasChoice());
+        try std.testing.expectEqual(row, page.panel.selected);
+        try std.testing.expect(!root.pasting and !page.model_choice.pasting);
+        try std.testing.expectEqual(@as(usize, 0), fixture.saves);
+        // A pasted line break is never the Enter that chooses or acts.
+        const overview_keys = fixture.overview_keys;
+        const selected = if (page.panel.choice) |open| open.selected else null;
+        try app_events.send(&ctx, "\x1b[200~\r\x1b[201~", root.widget(), page.widget());
+        try std.testing.expectEqual(@as(usize, 0), fixture.saves);
+        try std.testing.expectEqual(overview_keys, fixture.overview_keys);
+        try std.testing.expectEqual(choice != .none, page.hasChoice());
+        try std.testing.expectEqual(selected, if (page.panel.choice) |open| open.selected else null);
+        try std.testing.expect(root.settings_open and !ctx.quit and !root.pasting);
+        // A real Enter after the paste still changes the selected field.
+        try app_events.send(&ctx, "\r", root.widget(), page.widget());
+        try std.testing.expectEqual(@as(usize, 1), fixture.saves);
+        switch (choice) {
+            .model => try std.testing.expectEqualStrings(text, fixture.edit.?.model.set),
+            .ordinary => try std.testing.expect(fixture.edit.?.reasoning_effort == .clear),
+            .none => try std.testing.expectEqual(@as(?bool, false), fixture.edit.?.notifications),
+        }
+    };
 }
 
 test "Sign-in frames keep the list at 140 columns and the code link and masked key at 46" {

@@ -4,6 +4,8 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Panel = @import("widgets/Panel.zig");
+const ModelChoice = @import("model_choice.zig");
+const picker = @import("model_picker.zig");
 const Footer = @import("widgets/Footer.zig");
 const keys_panel = @import("keys_panel.zig");
 const preferences = @import("preferences.zig");
@@ -28,6 +30,8 @@ pub const Backend = struct {
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
     caps: *const fn (*anyopaque) view.Caps,
+    /// Live lists change revision on every replacement or release.
+    models: ?*const fn (*anyopaque) ModelChoice.Snapshot = null,
     sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 
@@ -41,6 +45,7 @@ keys_open: bool = false,
 values: preferences.Values = .{},
 read_failed: bool = false,
 panel: Panel = .{ .title = "Rui" },
+model_choice: ModelChoice = .{},
 fields: [row_count]Panel.Field = undefined,
 /// The row awaiting the backend's answer. Displayed values always come from
 /// the saved file, including uncertain saves.
@@ -57,15 +62,24 @@ pub fn widget(self: *Self) vxfw.Widget {
 }
 
 pub fn hasChoice(self: *const Self) bool {
-    return self.panel.choice != null;
+    return self.panel.choice != null or self.model_choice.active;
 }
 
 pub fn cancelChoice(self: *Self) void {
     self.panel.closeChoice();
+    self.model_choice.cancel();
+    self.panel.custom_choice = null;
 }
 
-/// The page takes its panel's keys; every other key is the app's.
-pub const takesKey = Panel.takesKey;
+/// The page takes its panel's keys, and text while filtering models.
+pub fn takesKey(self: *const Self, key: vaxis.Key) bool {
+    return (self.model_choice.active and ModelChoice.takesKey(key)) or Panel.takesKey(key);
+}
+
+/// Only the Model filter edits text; a paste must never choose or act.
+pub fn takesPaste(self: *const Self) bool {
+    return self.model_choice.active;
+}
 
 /// Esc is the Upgrade's while it can still change nothing, as on the
 /// overview and in a conversation.
@@ -144,6 +158,10 @@ fn bind(self: *Self) void {
     self.panel.userdata = self;
     self.panel.on_activate = activate;
     self.panel.on_pick = pick;
+    _ = self.model_choice.validate();
+    self.model_choice.userdata = self;
+    self.model_choice.on_pick = pickModel;
+    self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(@backingInt(Row.model)) else null;
     for (std.enums.values(Row)) |row| self.fields[@backingInt(row)] = .{
         .label = switch (row) {
             .model => "Model",
@@ -165,6 +183,10 @@ fn bind(self: *Self) void {
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
+    self.model_choice.ground = self.panel.ground;
+    self.model_choice.selection = self.panel.selection;
+    self.model_choice.hover_style = self.panel.hover_style;
+    self.model_choice.quiet = self.panel.quiet;
 }
 
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
@@ -197,18 +219,15 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
     }
     switch (row) {
         .model => {
-            if (self.provider() == null) {
+            const saved_provider = self.provider() orelse {
                 self.failures.set(.model, " · sign-in unavailable");
                 return;
-            }
-            // Both supported sign-ins use the catalog's OpenAI chat models.
-            // Account-specific Host discovery remains the overview picker's job.
-            var current: ?usize = null;
-            for (catalog.openai_ids, 0..) |id, at| if (std.mem.eql(u8, id, self.model())) {
-                current = at;
-                break;
             };
-            self.panel.openChoice(&catalog.openai_ids, current);
+            if (backend.models) |models|
+                self.model_choice.openSource(.{ .context = backend.context, .read = models }, saved_provider, self.model())
+            else
+                self.model_choice.open(null, saved_provider, self.model());
+            if (!self.model_choice.active) self.failures.set(.model, " · models unavailable");
         },
         .effort => {
             self.effort_choices[0] = "model default";
@@ -233,18 +252,23 @@ fn pick(raw: *anyopaque, ctx: *vxfw.EventContext, field: usize, choice: usize) !
     const self: *Self = @ptrCast(@alignCast(raw));
     const row: Row = @fromBackingInt(@intCast(field));
     try self.save(ctx, row, switch (row) {
-        .model => .{
-            .provider = .{ .set = @tagName(self.provider().?) },
-            .model = .{ .set = catalog.openai_ids[choice] },
-        },
         .effort => .{
             .reasoning_effort = if (choice == 0) .clear else .{
                 .set = std.meta.stringToEnum(catalog.ReasoningEffort, self.effort_choices[choice]).?,
             },
         },
         .permissions => .{ .permission_mode = .{ .set = if (choice == 0) .bypass else .ask } },
-        // Only Model, Effort and Permissions open a choice.
-        .notifications, .sign_in, .version, .keys => unreachable,
+        // Model uses the shared full-width choice.
+        .model, .notifications, .sign_in, .version, .keys => unreachable,
+    });
+}
+
+fn pickModel(raw: *anyopaque, ctx: *vxfw.EventContext, id: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    self.panel.custom_choice = null;
+    try self.save(ctx, .model, .{
+        .provider = .{ .set = @tagName(self.provider().?) },
+        .model = .{ .set = id },
     });
 }
 
@@ -275,6 +299,11 @@ fn poll(self: *Self) !void {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.model_choice.active and !self.model_choice.validate()) {
+        self.panel.custom_choice = null;
+        ctx.consumeAndRedraw();
+        return;
+    }
     if (input == .tick) {
         const was_saving = self.saving_row != null;
         try self.poll();
@@ -307,7 +336,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .style = self.panel.quiet,
     };
     children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
-    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children, .cursor = children[0].surface.cursor };
 }
 
 const Fixture = struct {
@@ -368,27 +397,27 @@ test "App settings choices submit typed edits and show saved values after the ba
     try page.refresh();
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(page.hasChoice());
-    const next = (page.panel.choice.?.selected + 1) % catalog.openai_ids.len;
-    page.panel.choice.?.selected = next;
+    try press(&page, &ctx, vaxis.Key.down);
+    const chosen_model = page.model_choice.menu.entries[page.model_choice.selected.?].id;
     try press(&page, &ctx, vaxis.Key.enter);
     try std.testing.expect(!page.hasChoice());
     const model_edit = fixture.last_edit.?;
     try std.testing.expectEqualStrings("codex", model_edit.provider.set);
-    try std.testing.expectEqualStrings(catalog.openai_ids[next], model_edit.model.set);
+    try std.testing.expectEqualStrings(chosen_model, model_edit.model.set);
     try std.testing.expectEqual(.keep, model_edit.store);
     try std.testing.expectEqual(.keep, model_edit.reasoning_effort);
     try std.testing.expectEqual(@as(?bool, null), model_edit.notifications);
     try std.testing.expectEqual(@as(?Row, .model), page.saving_row);
     page.bind();
     try std.testing.expectEqualStrings(" · saving", page.fields[@backingInt(Row.model)].tail.?);
-    try fixture.values.model.set(catalog.openai_ids[next]);
+    try fixture.values.model.set(chosen_model);
     try fixture.values.provider.set("codex");
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expectEqual(@as(?Row, .model), page.saving_row);
     try std.testing.expectEqualStrings(defaults.recommended_model, page.model());
     fixture.save_status = .saved;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expectEqualStrings(catalog.openai_ids[next], page.model());
+    try std.testing.expectEqualStrings(chosen_model, page.model());
     try std.testing.expectEqual(@as(?[]const u8, null), page.failures.get(.model));
 
     // Effort choices are the selected model's supported efforts, plus clearing.
@@ -635,6 +664,62 @@ test "App settings Permissions choices save both modes and display the saved wor
         try std.testing.expectEqualStrings(if (mode == .bypass) "run without asking" else "ask first", page.fields[@backingInt(Row.permissions)].value);
         try std.testing.expectEqual(@as(?Row, null), page.saving_row);
     }
+}
+
+test "App settings Model shares the provider list at full width and preserves matches on filtering" {
+    const List = struct {
+        const entries = [_]picker.Entry{
+            .{ .id = "future-chat", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+            .{ .id = "api-only", .known = false, .catalogued = false, .providers = .initOne(.openai) },
+            .{ .id = "text-embedding-3-small", .known = true, .catalogued = true, .providers = .full },
+        };
+        const menu: picker.Menu = .{ .entries = &entries };
+        fn models(_: *anyopaque) ModelChoice.Snapshot {
+            return .{ .menu = &menu };
+        }
+    };
+    var fixture: Fixture = .{};
+    var backend = fixture.backend();
+    backend.models = List.models;
+    var page: Self = .{ .backend = backend };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try page.refresh();
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expect(page.hasChoice());
+    for ([_]u16{ 99, 46 }) |width| {
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        const parts = drawn.children[0].surface.children;
+        const choice = parts[parts.len - 1];
+        try std.testing.expectEqual(@as(i17, 0), choice.origin.col);
+        try std.testing.expectEqual(width, choice.surface.size.width);
+        try std.testing.expectEqual(@as(u16, 1), choice.surface.size.height);
+        try std.testing.expectEqualStrings(" ", choice.surface.readCell(2, 0).char.grapheme);
+        try std.testing.expectEqual(@as(usize, 1), page.model_choice.hits.len);
+        try std.testing.expectEqual(@as(u16, 19), drawn.cursor.?.col);
+        try std.testing.expectEqual(@as(u16, 2), drawn.cursor.?.row);
+        try std.testing.expectEqualStrings("E", drawn.children[0].surface.readCell(3, 4).char.grapheme);
+        try std.testing.expectEqualStrings(" ", drawn.children[0].surface.readCell(19, 2).char.grapheme);
+    }
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'f', .text = "future" } });
+    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zzzz" } });
+    try std.testing.expect(page.model_choice.no_match);
+    try std.testing.expectEqualStrings("future", page.model_choice.editor.buffer[0..page.model_choice.editor.length]);
+    for ([_]u16{ 99, 46 }) |width| {
+        const drawn = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} });
+        var screen = try vaxis.Screen.init(arena.allocator(), .{ .cols = width, .rows = 20, .x_pixel = 0, .y_pixel = 0 });
+        drawn.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 20, .screen = &screen }, page.widget());
+        try std.testing.expect(screen.cursor_vis);
+        try std.testing.expectEqual(@as(u16, 25), screen.cursor.col);
+        try std.testing.expectEqual(@as(u16, 2), screen.cursor.row);
+        try std.testing.expectEqualStrings("f", screen.readCell(19, 2).?.char.grapheme);
+    }
+    page.cancelChoice();
+    try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqualStrings("future-chat", fixture.last_edit.?.model.set);
 }
 
 test "App settings Sign-in row opens the shared sign-in screen on Enter" {
