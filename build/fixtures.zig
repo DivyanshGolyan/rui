@@ -32,6 +32,7 @@ pub const fixtures = [_]Fixture{
     .{ .step = "bash-lifecycle-integration", .description = "Run Bash lifecycle syscall-failure and custody cases", .script = "tests/integration/bash_lifecycle_integration.py" },
     .{ .step = "bash-recovery-integration", .description = "Run fresh-Host Bash recovery cuts for admitted and committed Actions", .script = "tests/integration/bash_recovery_integration.py", .screen = true },
     .{ .step = "codex-integration", .description = "Run synthetic managed-route credentials, Bash continuation and fresh-Host caller journey", .script = "tests/integration/codex_integration.py" },
+    .{ .step = "chatgpt-plan-integration", .description = "Run a synthetic ChatGPT plan sign-in: bearer only, codec 3, refresh at expiry and on a 401", .script = "tests/integration/chatgpt_plan_integration.py" },
     .{ .step = "codex-h2-integration", .description = "Run synthetic managed TLS/H2 negotiation and observed sequential reuse (requires h2==4.3.0)", .script = "tests/integration/codex_h2_integration.py" },
     .{ .step = "control-integration", .description = "Run Session-stop, exact-interruption, and protected-capacity cases", .script = "tests/integration/control_integration.py" },
     .{ .step = "descriptor-capacity-integration", .description = "Run reduced-limit startup rejection and adequate-limit fill/drain cases", .script = "tests/integration/descriptor_capacity_integration.py" },

@@ -468,6 +468,13 @@ pub fn Access(comptime mode: Mode, comptime Guards: type) type {
             a.inserted_count += 1;
         }
 
+        /// The live timings of Operation `operation`'s Attempt, sampled
+        /// when the write that ends the Attempt is queued.
+        pub fn attemptTimings(a: *const Self, operation: u64) @import("../model_timing.zig").Values {
+            comptime std.debug.assert(!reads_only);
+            return a.store.modelTimingSource().snapshot(operation, a.store.io);
+        }
+
         /// The next value of `column`, inside this transaction.
         pub fn identity(a: *Self, comptime column: store_core.Identity) !u64 {
             comptime std.debug.assert(!reads_only and mode != .single);

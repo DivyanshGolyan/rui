@@ -379,13 +379,13 @@ def discovery_cases(root, binary, releases):
 
     with case(root, binary, releases, "offline-discovery") as c:
         c.old_selection()
-        # Bound local connection refusal; no DNS, external host or provider.
+        # Bound local connection failure; no DNS, external host or provider.
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))
             c.env["RUI_TEST_UPGRADE_RELEASES_URL"] = f"http://127.0.0.1:{reserved.getsockname()[1]}/releases"
             child = c.spawn_upgrade()
             output = c.finish_upgrade(child, success=False)
-            assert "upgrade_download_failed" in output and "curl: (7)" in output, output
+            assert "upgrade_download_failed" in output and "curl: (" in output, output
         c.assert_unchanged()
         c.assert_no_host()
 

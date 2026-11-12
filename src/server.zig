@@ -943,7 +943,7 @@ pub fn serve(
         product_defaults.intake_capacity,
         3, // Two controls and concurrent discovery.
         descriptorTransport(served),
-        served.leasedSignIn() != null,
+        served.anySignIn(),
         os.tag,
     );
     if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);
@@ -982,7 +982,7 @@ pub fn serve(
         intake_capacity,
         3,
         descriptorTransport(served),
-        served.leasedSignIn() != null,
+        served.anySignIn(),
         os.tag,
     );
     if (mcp_servers.len != 0) try reserveMcpDescriptors(&descriptor_requirement);

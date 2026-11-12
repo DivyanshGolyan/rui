@@ -236,7 +236,7 @@ pub const Query = struct {
     }
 };
 
-/// The word a sign-in is typed as: its name's first, `chatgpt` or `api`.
+/// The word a sign-in is typed as: its label's first, `codex`, `chatgpt` or `api`.
 fn signInWord(provider: Provider) []const u8 {
     const name = provider.signIn();
     return name[0 .. std.mem.indexOfScalar(u8, name, ' ') orelse name.len];
@@ -606,7 +606,7 @@ test "/model terra low api leaves one row, set to low on the API key, whatever w
     defer menu.deinit(std.testing.allocator);
     const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .high };
     // Word order and case do not matter, and extra spaces are no words.
-    for ([_][]const u8{ "terra low api", "api low terra", "  TERRA  Low API ", "terra high low api chatgpt api" }) |typed| {
+    for ([_][]const u8{ "terra low api", "api low terra", "  TERRA  Low API ", "terra high low api codex api" }) |typed| {
         try expectRows(&menu, typed, &.{"gpt-6.1-terra"});
         const row = Query.parse(typed).row(entryOf(&menu, "gpt-6.1-terra"), saved).?;
         try std.testing.expectEqual(@as(?ReasoningEffort, .low), row.effort);
@@ -615,10 +615,10 @@ test "/model terra low api leaves one row, set to low on the API key, whatever w
     }
     // Without the sign-in, ChatGPT's gpt-5.6-terra stays too.
     try expectRows(&menu, "terra low", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
-    try expectRows(&menu, "terra chatgpt", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
-    const chatgpt = Query.parse("terra chatgpt").row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .openai, .effort = .medium }).?;
-    try std.testing.expectEqual(Provider.codex, chatgpt.provider);
-    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), chatgpt.effort);
+    try expectRows(&menu, "terra codex", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
+    const codex = Query.parse("terra codex").row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .openai, .effort = .medium }).?;
+    try std.testing.expectEqual(Provider.codex, codex.provider);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), codex.effort);
 }
 
 test "a word narrows to the rows whose ID holds it or that offer the effort or sign-in it begins" {
