@@ -322,14 +322,34 @@ test "a control marks its durable acceptance while it holds the Store, only when
             var archive: protocol.SessionArchiveCommand = .{ .archived = true };
             try archive.key.set("durable-archive");
             try archive.session.set(session.slice());
-            try std.testing.expect(storage.archiveSession(&archive, phases.faults()) == .accepted);
+            try std.testing.expect(storage.archiveSession(&archive, phases.faults()).accepted.archived);
             try phases.expect(true);
             var restore: protocol.SessionArchiveCommand = .{ .archived = false };
             try restore.key.set("durable-restore");
             try restore.session.set(session.slice());
-            try std.testing.expect(storage.archiveSession(&restore, phases.faults()) == .accepted);
+            try std.testing.expect(!storage.archiveSession(&restore, phases.faults()).accepted.archived);
             try phases.expect(false);
             try std.testing.expect(!storage.isFenced());
+        }
+    }.run);
+}
+
+test "a model interruption's replay names the target it saved, or the Store is corrupt" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            var interrupt: protocol.ModelInterruptionCommand = .{ .turn_id = 1, .operation_id = 1 };
+            try interrupt.key.set("saved-target-interrupt");
+            try interrupt.session.set("k7m2qx");
+            try std.testing.expectEqual(protocol.ModelInterruptionRejection.unknown_session, storage.interruptModel(&interrupt, .{}).rejected.code);
+            try std.testing.expect(storage.interruptModel(&interrupt, .{}).rejected.replayed);
+            try store_testing.exec(&storage, "UPDATE model_interruption_command SET operation_id='2' WHERE command_key='saved-target-interrupt'", .{});
+            try std.testing.expectEqual(ModelInterruptionReply.infrastructure_failure, storage.interruptModel(&interrupt, .{}));
+            try std.testing.expect(storage.isFenced());
         }
     }.run);
 }
