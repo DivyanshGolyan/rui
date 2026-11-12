@@ -687,21 +687,25 @@ class TerminalScreen:
         assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", frame), ("overview has a composer", frame)
         return frame
 
-    def empty_chat(self, case, session):
+    def empty_chat(self, case, session, *, expected_notice=None):
         """The sole accepted Session is open with its empty-chat facts.
 
         Empty-chat footers show model/effort/folder, not the reference. Bind
         identity through the public report and list instead; a mistaken New
         Session would add a second reference. Unsent drafts remain editor
         state and do not change this no-Message contract after relaunch.
+        A proven relaunch can retain a reply instead of the info action; its
+        caller must name that exact outcome rather than skip footer readiness.
         """
         report = case.json("session", "inspect", "--store", case.store, "--session", session)
         facts = report["session"]
         assert facts["reference"] == session, report
         assert report["selected_message"] is None and report["recent_messages"] == [], report
-        frame = wait_for(self.observe, "empty chat model facts and info action", timeout=15,
+        footer = "alt+i info" if expected_notice is None else expected_notice
+        assert footer, "empty chat requires an info action or an exact retained notice"
+        frame = wait_for(self.observe, "empty chat model facts and expected footer", timeout=15,
                          ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
-                         and shown("alt+i info", screen))
+                         and shown(footer, screen))
         listing = case.json("session", "list", "--store", case.store, "--all")
         assert {row["reference"] for row in listing["sessions"]} == {session}, listing
         return frame
@@ -1143,7 +1147,8 @@ def conversation_case(root, binary, releases, artifacts):
             screen.draft("conversation β draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
-            screen.empty_chat(c, session)
+            screen.empty_chat(c, session,
+                              expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
             screen.draft("conversation β draft", 5)
             screen.save(artifacts, "conversation-installed")
             proof_ready(c, previous, old_host)
@@ -1344,7 +1349,8 @@ def startup_cases(root, binary, releases, artifacts):
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
                     if screen_kind == "resume":
-                        screen.empty_chat(c, session)
+                        screen.empty_chat(c, session,
+                                          expected_notice=f"Upgraded to {c.releases.version} · Host restarted")
                         screen.draft("startup α draft", 5)
                         screen.send("X")
                         screen.draft("staXrtup α draft", 6)
