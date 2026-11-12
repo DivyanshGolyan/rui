@@ -19,7 +19,7 @@ import unittest
 from unittest.mock import patch
 
 from host_process import stop_process, wait_for
-from terminal_process import (close_pty, CAPTURES, answers_to, capture_descriptors, open_pty,
+from terminal_process import (close_pty, CAPTURES, TerminalOutput, answers_to, capture_descriptors, open_pty,
                               register_capture, spawn, terminal_process)
 from terminal_screen import ScreenCapture
 
@@ -147,6 +147,77 @@ class TerminalProcessTest(unittest.TestCase):
             with self.assertRaises(OSError) as raised:
                 os.fstat(fd)
             self.assertEqual(raised.exception.errno, errno.EBADF)
+
+    def test_background_collection_drains_exited_job_before_releasing_slave(self):
+        received, observation = bytearray(), {}
+        completed = threading.Event()
+        program = "import os, tty; tty.setraw(0); os.write(1, b'Detached. Host work continues.')"
+        with terminal_process([sys.executable, "-c", program], env=os.environ) as (process, master):
+            # Start collection after exit: the final drain, not the live read
+            # loop, must collect the tail from the still-retained terminal.
+            self.assertEqual(process.wait(timeout=5), 0)
+            slave = self.descriptors[1]
+
+            def collected(error):
+                observation.update(error=error, data=bytes(received), slave_open=os.isatty(slave),
+                                   raw=not (termios.tcgetattr(master)[3] & termios.ICANON))
+                completed.set()
+
+            output = TerminalOutput(process, master, received.extend, collected)
+            try:
+                wait_for(completed.is_set, "final retained-slave collection", drain=False)
+                self.assertEqual(observation, {"error": None, "data": b"Detached. Host work continues.",
+                                               "slave_open": True, "raw": True})
+            finally:
+                output.close()
+        self.assert_descriptors_closed()
+
+    def test_background_collection_preserves_every_chunk_and_reports_completion(self):
+        received, observation = bytearray(), {}
+        completed = threading.Event()
+        count = 2 * 1024 * 1024
+        program = ("import os, tty\ntty.setraw(0)\ndata = b'x' * " + str(count) + "\n"
+                   "while data:\n n = os.write(1, data)\n data = data[n:]\nos.write(1, b'final tail')")
+
+        def collected(error):
+            observation.update(error=error, data=bytes(received), slave_open=os.isatty(self.descriptors[1]))
+            completed.set()
+
+        with terminal_process([sys.executable, "-c", program], env=os.environ,
+                              feed=received.extend, collected=collected) as (process, _master):
+            wait_for(completed.is_set, "continuous terminal collection", drain=False)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(observation, {"error": None, "data": b"x" * count + b"final tail", "slave_open": True})
+        self.assert_descriptors_closed()
+
+    def test_background_feed_failure_reaches_scope_disposal(self):
+        entered = threading.Event()
+
+        def feed(_data):
+            entered.set()
+            raise RuntimeError("terminal feed failed")
+
+        with self.assertRaisesRegex(RuntimeError, "terminal feed failed"):
+            with terminal_process(child(), env=os.environ, feed=feed):
+                wait_for(entered.is_set, "failing terminal feed", drain=False)
+        self.assert_descriptors_closed()
+
+    def test_background_feed_eio_is_reported_not_mistaken_for_terminal_eof(self):
+        observation = {}
+        completed = threading.Event()
+
+        def feed(_data):
+            raise OSError(errno.EIO, "consumer failure")
+
+        def collected(error):
+            observation["error"] = error
+            completed.set()
+
+        with terminal_process(child(), env=os.environ, feed=feed, collected=collected):
+            wait_for(completed.is_set, "consumer EIO outcome", drain=False)
+            self.assertIsInstance(observation["error"], OSError)
+            self.assertEqual(observation["error"].errno, errno.EIO)
+        self.assert_descriptors_closed()
 
     def test_wait_drains_writer_and_opt_out_preserves_output(self):
         master, slave = open_pty()

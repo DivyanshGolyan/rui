@@ -1930,7 +1930,7 @@ def recording_delays(recording):
 
 
 def encode_recordings(out, records):
-    """Use ffmpeg's shared palette, or Pillow when ffmpeg is unavailable."""
+    """Stream playback through ffmpeg's shared difference palette."""
     for record in records:
         if "recording" not in record["files"]:
             continue
@@ -1947,31 +1947,19 @@ def encode_recordings(out, records):
         lines.append(lines[-2])  # concat needs a final file to apply its duration.
         concat.write_text("\n".join(lines) + "\n")
         gif = out / (manifest["stem"] + ".gif")
-        if shutil.which("ffmpeg"):
-            base = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", "1", "-filter_complex_threads", "1",
-                    "-f", "concat", "-safe", "0", "-i", str(concat)]
-            result = subprocess.run(base + ["-filter_complex", "format=rgb24,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=diff_mode=rectangle:dither=bayer:bayer_scale=5",
-                                            "-fps_mode", "vfr", "-loop", "0", str(gif)], capture_output=True, text=True)
-            frame_command(result, "encode GIF")
-            record["files"]["gif"] = gif.name
-            mp4 = gif.with_suffix(".mp4")
-            result = subprocess.run(base + ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p",
-                                            "-movflags", "+faststart", str(mp4)], capture_output=True, text=True)
-            if result.returncode == 0:
-                record["files"]["mp4"] = mp4.name
-            else:
-                print("verify-rui: optional MP4: " + result.stderr.strip(), file=sys.stderr)
+        base = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", "1", "-filter_complex_threads", "1",
+                "-f", "concat", "-safe", "0", "-i", str(concat)]
+        result = subprocess.run(base + ["-filter_complex", "format=rgb24,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=diff_mode=rectangle:dither=bayer:bayer_scale=5",
+                                        "-fps_mode", "vfr", "-loop", "0", str(gif)], capture_output=True, text=True)
+        frame_command(result, "encode GIF")
+        record["files"]["gif"] = gif.name
+        mp4 = gif.with_suffix(".mp4")
+        result = subprocess.run(base + ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p",
+                                        "-movflags", "+faststart", str(mp4)], capture_output=True, text=True)
+        if result.returncode == 0:
+            record["files"]["mp4"] = mp4.name
         else:
-            from PIL import Image
-            images = [Image.open(out / entry["html"].replace(".html", ".png")).convert("RGB").quantize(colors=128)
-                      for entry, _delay in timed]
-            try:
-                images[0].save(gif, save_all=True, append_images=images[1:],
-                               duration=[round(delay * 1000) for _entry, delay in timed], loop=0, disposal=1, optimize=True)
-            finally:
-                for image in images:
-                    image.close()
-            record["files"]["gif"] = gif.name
+            print("verify-rui: optional MP4: " + result.stderr.strip(), file=sys.stderr)
 
 
 def parse_sizes(value):
@@ -2195,59 +2183,45 @@ def seed_cast(run, entries):
 
 
 class FrameTerminal:
-    """One PTY, child, and libghostty observer, continuously drained until EOF."""
+    """Cell/recording adapter over terminal_process's owned PTY and collector."""
     def __init__(self, run, state, size, recording=None):
-        import fcntl
-        import pty
-        import struct
-        import termios
-        # Use the working skill's observer, not the pinned product's older helper.
+        # Use the working skill's observer and the shared PTY lifecycle owner,
+        # not the pinned product's older helpers.
         sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+        from terminal_process import terminal_process
         from terminal_screen import ScreenCapture
         self.run, self.state = run, state
         self.condition = threading.Condition()
-        self.status, self.error, self.eof = None, None, False
+        self.error, self.collected = None, False
         self.pressed = None
         self.recording = recording
         self.log = run.evidence / "frames-pty" / state["name"]
         self.log.mkdir(parents=True, exist_ok=True)
-        master, slave = pty.openpty()
-        self.master = master
         cols, rows = size
-        try:
-            # Set the initial viewport before exec: startup sees its real size.
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-            bg, fg = THEMES[state.get("theme", "night")]
-            rgb = lambda color: tuple(bytes.fromhex(color.lstrip("#")))
+        bg, fg = THEMES[state.get("theme", "night")]
+        rgb = lambda color: tuple(bytes.fromhex(color.lstrip("#")))
+        with contextlib.ExitStack() as setup:
             self.capture = ScreenCapture(cols, rows, reply=lambda data: self.write(data, "reply"),
                                          background=rgb(bg), foreground=rgb(fg),
                                          color_scheme="dark" if state.get("theme", "night") == "night" else "light")
+            setup.callback(self.capture.free)
             self.capture.listener = self._committed
+            self.raw_output = setup.enter_context(open(self.log / "output.bin", "wb"))
             env = run.env(**{"COLORTERM": "truecolor", **state.get("env", {})})
             argv = list(map(str, session_argv(run, state["open"])))
-            self.pid = os.fork()
-            if self.pid == 0:
-                try:
-                    os.close(master)
-                    os.setsid()
-                    fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
-                    for fd in (0, 1, 2):
-                        os.dup2(slave, fd)
-                    if slave > 2:
-                        os.close(slave)
-                    os.chdir(run.project)
-                    os.execve(argv[0], argv, env)
-                except BaseException as error:
-                    os.write(2, (str(error) + "\n").encode())
-                    os._exit(127)
-        except BaseException:
-            os.close(master)
-            raise
-        finally:
-            os.close(slave)
-        os.set_blocking(master, False)
-        self.thread = threading.Thread(target=self._read, name="frames-pty", daemon=True)
-        self.thread.start()
+            # The collector may start before __enter__ returns. Keep its
+            # callbacks behind this lock until their borrowed handles exist.
+            with self.condition:
+                self.process, self.master = setup.enter_context(terminal_process(
+                    argv, env=env, cwd=run.project, columns=cols, rows=rows,
+                    feed=self._feed, collected=self._collected))
+            self.scope = setup.pop_all()
+
+    @property
+    def status(self):
+        # Child exit alone is not completed capture: let the owner deliver
+        # its retained terminal tail before exposing an exited surface.
+        return self.process.returncode if self.collected else None
 
     def _committed(self, _text, _x, _y):
         t_ns = now_ns()
@@ -2259,44 +2233,24 @@ class FrameTerminal:
             self.recording.append(frame, t_ns)
         self.condition.notify_all()
 
-    def _read(self):
-        import errno
-        try:
-            with open(self.log / "output.bin", "wb") as output:
-                while True:
-                    readable, _, _ = select.select([self.master], [], [], .05)
-                    with self.condition:
-                        if self.status is None:
-                            pid, status = os.waitpid(self.pid, os.WNOHANG)
-                            if pid:
-                                self.status = os.waitstatus_to_exitcode(status)
-                        if readable:
-                            try:
-                                data = os.read(self.master, 65536)
-                            except BlockingIOError:
-                                continue
-                            except OSError as error:
-                                if error.errno != errno.EIO:
-                                    raise
-                                data = b""
-                            if not data:
-                                if self.status is None:
-                                    _, status = os.waitpid(self.pid, 0)
-                                    self.status = os.waitstatus_to_exitcode(status)
-                                # EOF is a final commit: no future output can
-                                # change the main-screen detach diagnostic.
-                                if not self.capture.synchronized:
-                                    self.capture.commit()
-                                self.eof = True
-                                self.condition.notify_all()
-                                return
-                            output.write(data)
-                            output.flush()
-                            self.capture.feed(data)
-        except BaseException as error:
-            with self.condition:
-                self.error = error
-                self.condition.notify_all()
+    def _feed(self, data):
+        with self.condition:
+            self.raw_output.write(data)
+            self.raw_output.flush()
+            self.capture.feed(data)
+
+    def _collected(self, error):
+        with self.condition:
+            self.error = error
+            try:
+                # The shared owner has reaped Rui and drained its retained
+                # terminal. No EOF is needed (or expected while the slave lives).
+                if error is None and not self.capture.synchronized:
+                    self.capture.commit()
+            except BaseException as caught:
+                self.error = caught
+            self.collected = True
+            self.condition.notify_all()
 
     @property
     def frame(self):
@@ -2327,7 +2281,7 @@ class FrameTerminal:
                     raise FrameFailure(f"Rui exited with status {self.status} before {description}")
                 if self.capture.frame is not None and predicate(self.capture):
                     return
-                if self.eof:
+                if self.collected:
                     raise FrameFailure(f"Rui exited with status {self.status} before {description}")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -2343,7 +2297,7 @@ class FrameTerminal:
             generation = self.capture.generation
             fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
             self.capture.resize(cols, rows)
-            if self.eof:
+            if self.collected:
                 # An exited terminal cannot repaint; reflow its final screen.
                 self.capture.commit()
         self.wait(lambda c: c.generation > generation, "committed resize frame", allow_exit=True)
@@ -2391,31 +2345,9 @@ class FrameTerminal:
             return recording.finish(now_ns()) if recording is not None else None
 
     def close(self):
-        # The reader alone reaps the child; join before releasing its PTY.
-        for sig in (signal.SIGHUP, signal.SIGKILL):
-            with self.condition:
-                if not self.thread.is_alive():
-                    break
-                # An unreaped child pins its pid/group identity. Once the
-                # reader has reaped it, never signal a potentially reused pid.
-                if self.status is None:
-                    try:
-                        os.killpg(self.pid, sig)
-                    except ProcessLookupError:
-                        pass  # It exited; the reader still drains final output.
-            self.thread.join(3)
-        if self.thread.is_alive():
-            raise FrameFailure(f"PTY reader did not stop for pid {self.pid}; retained descriptor {self.master}")
-        if self.status is None:
-            # Observer failure must not leave an unreaped child.
-            try:
-                os.killpg(self.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            _, status = os.waitpid(self.pid, 0)
-            self.status = os.waitstatus_to_exitcode(status)
-        os.close(self.master)
-        self.capture.free()
+        # Shared disposal stops/reaps the foreground job, joins its collector,
+        # and only then releases the master and retained slave.
+        self.scope.close()
 
 
 def frame_wait(run, terminal, text, absent=False, timeout=20, allow_exit=False):
@@ -2441,7 +2373,7 @@ def frame_steps(run, terminal, steps, exiting=False):
             action = "wait" if "wait" in step else "gone"
             frame_wait(run, terminal, step[action], action == "gone", step.get("timeout", 20), exiting)
         elif "exited" in step:
-            terminal.wait(lambda _c: terminal.eof, "Rui exit", step.get("timeout", 20), allow_exit=True)
+            terminal.wait(lambda _c: terminal.collected, "Rui exit", step.get("timeout", 20), allow_exit=True)
             if terminal.status != step["exited"]:
                 raise FrameFailure(f"Rui exit status {terminal.status}, expected {step['exited']}")
             exiting = True
@@ -2522,10 +2454,7 @@ def cmd_frames(args):
     if record_requested and args.no_png:
         die("recordings require PNG rendering; remove --no-png")
     if record_requested and not shutil.which("ffmpeg"):
-        try:
-            import PIL.Image  # noqa: F401 -- recording fallback preflight
-        except ImportError:
-            die("recordings require ffmpeg or Pillow")
+        die("recordings require ffmpeg")
     if not args.no_png:
         if not shutil.which("node"):
             die("frames requires node and Playwright; use --no-png")

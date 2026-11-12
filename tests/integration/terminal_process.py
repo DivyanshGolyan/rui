@@ -49,18 +49,20 @@ def register_capture(master, capture):
 
 
 def drain_ready(master, feed):
-    """Feed a bounded batch, then yield to the waiting observer."""
-    try:
-        for _ in range(16):
-            if not select.select([master], [], [], 0)[0]:
-                break
+    """Feed a bounded batch; return whether the batch limit left more to drain."""
+    for _ in range(16):
+        if not select.select([master], [], [], 0)[0]:
+            return False
+        try:
             chunk = os.read(master, 65536)
-            if not chunk:
-                break
-            feed(chunk)
-    except OSError as error:
-        if error.errno != errno.EIO:
-            raise
+        except OSError as error:
+            if error.errno != errno.EIO:
+                raise
+            return False
+        if not chunk:
+            return False
+        feed(chunk)  # A consumer failure is not terminal EOF, even for EIO.
+    return True
 
 
 def capture_descriptors():
@@ -357,19 +359,68 @@ class TerminalProcess:
         return tuple(None if end is None else b"".join(self.collected[end]) for end in (self.stdout, self.stderr))
 
 
+class TerminalOutput:
+    """Exclusive background collection on a borrowed master, while its slave lives.
+
+    The process owns exit status; collection finishes only after that status and
+    a final drain. `collected(error)` receives the outcome, or close raises it
+    when no outcome callback was supplied. Neither path retains output bytes.
+    """
+
+    def __init__(self, process, master, feed, collected=None):
+        self.process, self.master, self.feed, self.collected = process, master, feed, collected
+        self.error = None
+        os.set_blocking(master, False)
+        self.thread = threading.Thread(target=self._read, name="terminal-output", daemon=True)
+        self.thread.start()
+
+    def _read(self):
+        error = None
+        try:
+            while self.process.poll() is None:
+                if select.select([self.master], [], [], .05)[0]:
+                    drain_ready(self.master, self.feed)
+            # The job has ended, but the owner still holds the slave. Exhaust
+            # all queued output before publishing completion or releasing it.
+            while drain_ready(self.master, self.feed):
+                pass
+        except BaseException as caught:
+            error = caught
+        try:
+            if self.collected is None:
+                self.error = error
+            else:
+                self.collected(error)
+        except BaseException as caught:
+            self.error = caught  # A callback failure must reach scope disposal.
+
+    def close(self):
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError(f"terminal output collection did not stop for {self.process.pid}")
+        if self.error is not None:
+            raise self.error
+
+
 @contextmanager
-def terminal_process(args, *, env, cwd=None):
+def terminal_process(args, *, env, cwd=None, columns=COLUMNS, rows=ROWS, feed=None, collected=None):
     """Borrow (process, master) until scope exit; collect and assert inside it.
 
     The caller owns response boundaries and explicit exit assertions. This owner
     only retires the child and descriptors, retaining the slave through collection
     and reap so Darwin does not discard unread output. Do not close borrowed handles.
+    With `feed`, this owner continuously collects output in a background thread;
+    the caller must not also read the master. `collected(error)` reports the final
+    drain or its failure before disposal releases either descriptor.
     """
-    master, slave = open_pty()
-    process = None
+    master, slave = open_pty(columns, rows)
+    process, output = None, None
     try:
         process = spawn(args, env=env, cwd=cwd, stdin=slave, stdout=slave, stderr=slave)
+        if feed is not None:
+            output = TerminalOutput(process, master, feed, collected)
         yield process, master
     finally:
         dispose_all(lambda: stop_process(process, timeout=5) if process is not None else None,
+                    lambda: output.close() if output is not None else None,
                     lambda: close_pty(master), lambda: close_pty(slave))

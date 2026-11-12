@@ -217,38 +217,54 @@ class FramesTest(unittest.TestCase):
         delays = self.helper["recording_delays"]({"playback": playback})
         self.assertEqual([delay for _entry, delay in delays], [.06, .07, 2])
 
-    def test_gif_encoders_retain_canvas_and_update_only_changed_rectangles(self):
+    def test_ffmpeg_retains_canvas_and_update_only_changed_rectangles(self):
         try:
             from PIL import Image, ImageDraw
         except ImportError:
             self.skipTest("Pillow is optional")
         import shutil
-        for native in (False, True):
-            if native and not shutil.which("ffmpeg"):
-                continue
-            with self.subTest(ffmpeg=native), tempfile.TemporaryDirectory() as temp:
-                out = Path(temp)
-                commits = []
-                for i in range(2):
-                    image = Image.new("RGBA", (64, 32), (18, 25, 51, 255))
-                    image.putpixel((0, 0), (0, 0, 0, 0))  # Rounded-corner alpha must not force full disposal.
-                    ImageDraw.Draw(image).rectangle((10 + i * 4, 10, 12 + i * 4, 12), fill="white")
-                    image.save(out / f"{i}.png")
-                    commits.append({"t_ns": i * 200_000_000, "html": f"{i}.html"})
-                (out / "recording.json").write_text(json.dumps({"stem": "movie", "playback": commits}))
-                records = [{"files": {"recording": "recording.json"}}]
-                with contextlib.ExitStack() as stack:
-                    if not native:
-                        stack.enter_context(patch("shutil.which", return_value=None))
-                    self.helper["encode_recordings"](out, records)
-                self.assertEqual(records[0]["files"]["gif"], "movie.gif")
-                with Image.open(out / "movie.gif") as movie:
-                    movie.seek(1)
-                    extent = movie.tile[0].extents
-                    self.assertLess((extent[2] - extent[0]) * (extent[3] - extent[1]), 64 * 32 // 2)
-                    self.assertEqual(movie.disposal_method, 1)
-                    self.assertGreaterEqual(movie.info["duration"], 2000)
-                    self.assertEqual(movie.convert("RGB").getpixel((15, 11)), (255, 255, 255))
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is required for recordings")
+        with tempfile.TemporaryDirectory() as temp:
+            out = Path(temp)
+            commits = []
+            for i in range(2):
+                image = Image.new("RGBA", (64, 32), (18, 25, 51, 255))
+                image.putpixel((0, 0), (0, 0, 0, 0))  # Rounded-corner alpha must not force full disposal.
+                ImageDraw.Draw(image).rectangle((10 + i * 4, 10, 12 + i * 4, 12), fill="white")
+                image.save(out / f"{i}.png")
+                commits.append({"t_ns": i * 200_000_000, "html": f"{i}.html"})
+            (out / "recording.json").write_text(json.dumps({"stem": "movie", "playback": commits}))
+            records = [{"files": {"recording": "recording.json"}}]
+            self.helper["encode_recordings"](out, records)
+            self.assertEqual(records[0]["files"]["gif"], "movie.gif")
+            with Image.open(out / "movie.gif") as movie:
+                movie.seek(1)
+                extent = movie.tile[0].extents
+                self.assertLess((extent[2] - extent[0]) * (extent[3] - extent[1]), 64 * 32 // 2)
+                self.assertEqual(movie.disposal_method, 1)
+                self.assertGreaterEqual(movie.info["duration"], 2000)
+                self.assertEqual(movie.convert("RGB").getpixel((15, 11)), (255, 255, 255))
+
+    def test_recordings_require_ffmpeg_before_allocating_any_run(self):
+        command = self.helper["cmd_frames"]
+        for cli_flag in (False, True):
+            with self.subTest(cli_flag=cli_flag), tempfile.TemporaryDirectory() as temp:
+                data = self.scenario()
+                data["states"][0]["record"] = not cli_flag
+                path = Path(temp) / "scenario.json"
+                path.write_text(json.dumps(data))
+                args = types.SimpleNamespace(sha="a" * 40, scenario=path, sizes=None,
+                                             only="empty", no_png=False, record=cli_flag)
+                with patch.dict(command.__globals__, {"load_build": lambda _sha: {"screen_library": "/test/library"},
+                                                      "cmd_new": unittest.mock.Mock()}), patch.dict(os.environ), \
+                        patch("shutil.which", return_value=None), patch("subprocess.run") as render, \
+                        contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+                    allocate = command.__globals__["cmd_new"]
+                    command(args)
+                allocate.assert_not_called()
+                render.assert_not_called()
+                self.assertEqual(err.getvalue(), "verify-rui: recordings require ffmpeg\n")
 
     def test_frames_refuses_missing_screen_library_before_run_allocation(self):
         command = self.helper["cmd_frames"]
@@ -276,7 +292,7 @@ def draw(text):
     width, height = os.get_terminal_size()
     os.write(1, ('\x1b[?2026h\x1b[2J\x1b[H' + str(width) + 'x' + str(height) + ':' + text + '\x1b[?2026l').encode())
 signal.signal(signal.SIGWINCH, lambda *_args: draw('resized'))
-draw(reply.hex())
+draw(reply.hex() + (":foreground" if os.getsid(0) != os.getpid() and os.tcgetpgrp(0) == os.getpgrp() else ":leader"))
 while True:
     data = os.read(0, 1)
     if data == b'q':
@@ -293,12 +309,13 @@ while True:
             try:
                 terminal.wait(lambda c: "80x8:1b5d31313b7267623a663366332f656565652f653265321b5c" in c.completed,
                               "initial size and OSC answer")
+                self.assertIn(":foreground", terminal.frame.text)
                 terminal.write(b"x")
                 terminal.wait(lambda c: "80x8:x" in c.completed, "typed x")
                 terminal.resize((50, 10))
                 self.assertIn("50x10:resized", terminal.frame.text)
                 terminal.write(b"q")
-                terminal.wait(lambda c: terminal.eof and "exited" in c.completed, "quiescent exit", allow_exit=True)
+                terminal.wait(lambda c: terminal.collected and "exited" in c.completed, "quiescent exit", allow_exit=True)
                 self.assertEqual(terminal.status, 0)
                 with self.assertRaisesRegex(self.helper["FrameFailure"], "Rui exited"):
                     terminal.wait(lambda _c: False, "unreachable")
