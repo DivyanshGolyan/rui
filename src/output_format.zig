@@ -185,11 +185,22 @@ pub const OutputMetadataWriter = struct {
             std.mem.writeInt(u64, bytes[48..56], usage.output, .little);
         }
         @memcpy(bytes[72..104], &record.content_digest);
-        try self.file.writeStreamingAll(self.io, &bytes);
+        try self.file.writePositionalAll(self.io, &bytes, self.charged - bytes.len);
         self.records += 1;
         if (record.tag == .part and record.kind == .message) {
             self.decoded_length = try std.math.add(u64, self.decoded_length, record.decoded_length);
         }
+    }
+
+    /// Forgets every record written so far: the file is emptied and its
+    /// charge released, and the next record is the first.
+    pub fn discard(self: *OutputMetadataWriter) !void {
+        std.debug.assert(!self.sealed);
+        try self.file.setLength(self.io, 0);
+        self.budget.release(self.charged);
+        self.charged = 0;
+        self.records = 0;
+        self.decoded_length = 0;
     }
 
     pub fn sealForRead(self: *OutputMetadataWriter) !void {

@@ -160,6 +160,12 @@ fn writeOutcome(writer: *std.Io.Writer, store: []const u8, outcome: HostLifecycl
             try writer.print("restarted on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
             break :result .restarted;
         },
+        .client_incompatible => result: {
+            // The lifecycle verified the exact pinned launch and version, not
+            // ordinary readiness. Preserve that certainty and name the limit.
+            try writer.print("restarted on 0.{d}.{d}; different Host protocol; inspect with the selected Rui client", .{ version.?.schema, version.?.patch });
+            break :result .restarted;
+        },
         .already_ready => result: {
             try writer.print("already on 0.{d}.{d}", .{ version.?.schema, version.?.patch });
             break :result .current;
@@ -204,6 +210,7 @@ test "restart all reports every activation outcome and limitation with exit trut
     const Case = struct { outcome: HostLifecycle.ActivationOutcome, text: []const u8, result: Result };
     const cases = [_]Case{
         .{ .outcome = .{ .ready = .{ .instance = identity.instance, .pid = identity.pid } }, .text = "restarted on 0.1.2", .result = .restarted },
+        .{ .outcome = .{ .client_incompatible = identity.pid }, .text = "restarted on 0.1.2; different Host protocol; inspect with the selected Rui client", .result = .restarted },
         .{ .outcome = .{ .already_ready = .{ .instance = identity.instance, .pid = identity.pid } }, .text = "already on 0.1.2", .result = .current },
         .{ .outcome = .superseded, .text = "left running: newer than 0.1.2; no downgrade", .result = .skipped },
         .{ .outcome = .not_needed, .text = "no longer running; no Host started", .result = .skipped },

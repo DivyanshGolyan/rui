@@ -30,6 +30,10 @@ Run `rui --version` to see the selected build.
 It restarts the selected Store's Host only if that Host is already running and can be safely activated.
 With an eligible installation and no running Host, Upgrade only installs.
 The Version row in the terminal's app settings starts the same run from the overview or with a conversation open, on the status row: it installs a found release at once, and Esc cancels until publishing starts.
+After installing, it redraws in the new Rui and returns to the same place with unsent drafts intact.
+Restart keeps the current Store even if saved defaults changed, and restores existing work without requiring fresh-session preferences or local sign-in.
+That also resolves the old client's protocol/restart hold; a failed or unconfirmed Host activation still needs its recovery instructions.
+If Rui must show recovery or repair instructions, follow the departure guidance instead; see the [Upgrade contract](../ARCHITECTURE.md#store-format-and-upgrades).
 
 A selected source build or managed build with unknown release identity is refused before installation.
 The [standalone release installer](../README.md#install) can deliberately convert it to a release.
@@ -51,6 +55,7 @@ A held or inaccessible lease, absent/untrusted hint (including an older Host), o
 It does not reclaim sockets or infer absence from failed transport.
 No running Hosts prints `No running Hosts.` and starts nothing.
 A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.
+A verified exact pinned launch with a different protocol is reported as restarted with advice to use the selected Rui client, never as ordinary Host readiness.
 A failed or unconfirmed restart returns an operational caller error; installer activation failures print a note without failing the completed install.
 The selected build must report a verified release version; an unversioned source target cannot be activated by the existing lifecycle and is reported without stopping Hosts.
 
