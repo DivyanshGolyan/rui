@@ -817,12 +817,15 @@ test "schema 66 MySQL migration freezes actual effort emission and prior admitte
         try load(name, store_testing.baseline_mysql_ddl, false);
         try load(name, store_testing.baseline_rows, true);
         inline for (schema.migrations) |step| {
-            if (comptime step.from < schema.schema_version - 1) try load(name, schema.mysqlMigration(step.from), false);
+            if (comptime step.from < 65) try load(name, schema.mysqlMigration(step.from), false);
         }
         try load(name, store_testing.operation_effort_migration_seed, false);
         try load(name, choice.sql(), false);
         if (legacy_codec) try load(name, "UPDATE session SET codec='openai-responses/1' WHERE session_ref='d8mv7p'", false);
-        try load(name, schema.mysqlMigration(schema.schema_version - 1), false);
+        // Seed format 65, then exercise its effort migration and every later step.
+        inline for (schema.migrations) |step| {
+            if (comptime step.from >= 65) try load(name, schema.mysqlMigration(step.from), false);
+        }
         var rows: std.Io.Writer.Allocating = .init(std.testing.allocator);
         defer rows.deinit();
         try writeResult("SELECT operation_id,effort_source_revision,previous_reasoning_effort,effort_update FROM " ++ name ++ ".model_operation WHERE session_ref='d8mv7p' ORDER BY operation_id", &rows.writer);
