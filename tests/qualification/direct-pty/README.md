@@ -31,7 +31,8 @@ The default inventory covers editing, graphemes, unbound modifiers, Kitty keys,
 double ESC, marked paste, explicit fragmentation, bare ESC expiry, incomplete
 input, rejection, resize, and raw Ctrl-R recovery. Seeded-history rows cover
 PgUp/PgDn, Shift-PgUp, CSI/SS3 Up, three End forms, Esc and Ctrl-G return,
-alternate-scroll wheel Up/Down encodings, and `/status`. Unsolicited SGR/X10
+alternate-scroll wheel Up/Down encodings, and chat info (Alt-I opens its fields and footer; Esc returns to the feed).
+Unsolicited SGR/X10
 wheel and split-X10 reports must leave submitted text unchanged.
 The bare ESC expiry row waits 150 ms, observes the overview, then reopens the
 fixture's only Session with Enter and checks its identity and restored `ab`

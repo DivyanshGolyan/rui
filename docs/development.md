@@ -25,10 +25,10 @@ A failed build leaves the previous installation unchanged.
 
 Installation keeps Stores, credentials, shell profiles and earlier builds, because a running Host may still use an earlier build.
 The release installer, unlike this source install, adds `~/.local/bin` to the shell profile when `PATH` lacks it.
-It starts and stops nothing.
-It reports only what needs action: a running Host and the command that can stop it, a Store format the new build cannot open, and a `PATH` that does not select the new command.
-A running Host keeps its old executable.
-To use the new one, let the Host's work finish, run the `host pause` command the installer printed, wait for `rui host status` to report unavailable, then start `rui` again.
+After publication it runs the newly selected `~/.local/bin/rui host restart --all`, restarting eligible running Hosts one at a time and preserving saved work and launch settings.
+It prints each Store's outcome and a total; unsupported Hosts stay running with a reason.
+The existing lifecycle requires a numeric release identity, so an unversioned source target is reported without interrupting Hosts.
+Activation failure does not fail or undo the completed installation; follow the printed instructions and retry `rui host restart --all` after resolving it.
 
 If your shell still runs an older `rui`, check `type -a rui`, then run `rehash` in Zsh or `hash -r` in Bash.
 

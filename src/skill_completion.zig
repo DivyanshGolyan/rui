@@ -312,7 +312,7 @@ test "skill rows give way to the command's own list where the caret is in no /wo
     var reads: Reads = .{};
     var rows: Rows = .{};
     // After a command word, its next word's choices list as they always did.
-    const draft = "/configure ";
+    const draft = "/setup ";
     const listed = slash_commands.conversation.suggest(draft, .{});
     const shown = reads.shown(&rows, draft, draft.len, 5, listed, null).?;
     const plain = slash_commands.Shown.next(null, 5, listed).?;
@@ -322,22 +322,22 @@ test "skill rows give way to the command's own list where the caret is in no /wo
 }
 
 test "a draft's first /word is the command's: it lists commands, never skills" {
-    const entries = [_]skill_suggestions.Entry{.{ .name = "status-report", .description = "" }};
+    const entries = [_]skill_suggestions.Entry{.{ .name = "setup-report", .description = "" }};
     var reads: Reads = .{};
     var rows: Rows = .{};
-    _ = reads.ask("sta").?;
-    _ = reads.answer(1, testPage(&entries), "sta");
+    _ = reads.ask("set").?;
+    _ = reads.answer(1, testPage(&entries), "set");
     // Enter runs a draft that starts with `/` as a command, so a skill
     // chosen there would never be sent: the word lists its commands alone.
-    const draft = "/sta";
+    const draft = "/set";
     const commands = slash_commands.conversation.suggest(draft, .{});
     const shown = reads.shown(&rows, draft, draft.len, 1, commands, null).?;
     try std.testing.expectEqual(slash_commands.Shown.next(null, 1, commands).?.list.count, shown.list.count);
-    for (shown.list.shown()) |entry| try std.testing.expect(!std.mem.eql(u8, entry.shown, "/status-report"));
+    for (shown.list.shown()) |entry| try std.testing.expect(!std.mem.eql(u8, entry.shown, "/setup-report"));
     // A later word lists the skill.
-    try std.testing.expectEqualStrings("/status-report", reads.shown(&rows, "x /sta", "x /sta".len, 2, null, null).?.list.entries[0].shown);
+    try std.testing.expectEqualStrings("/setup-report", reads.shown(&rows, "x /set", "x /set".len, 2, null, null).?.list.entries[0].shown);
     // Every word of a command line is the command's, its arguments too.
-    for ([_][]const u8{ "/rename /sta", "/configure --workspace /sta" }) |line| {
+    for ([_][]const u8{ "/rename /set", "/setup --store /set" }) |line| {
         try std.testing.expectEqual(@as(?Word, null), skillWordAt(line, line.len));
         if (reads.shown(&rows, line, line.len, 3, null, null)) |listed| try std.testing.expectEqual(@as(usize, 0), listed.list.count);
     }
@@ -371,7 +371,7 @@ test "Tab or Enter on a row replaces the caret's name, or adds a later word's re
     var shown = reads.shown(&rows, draft, "use /r".len, 1, null, null).?;
     shown.highlight = 1;
     try expectReplacement(.{ .start = "use /".len, .end = "use /re".len, .text = "review" }, edit(draft, "use /r".len, &shown));
-    const command = "/configure ";
+    const command = "/setup ";
     const listed = reads.shown(&rows, command, command.len, 2, slash_commands.conversation.suggest(command, .{}), null).?;
     try expectReplacement(.{ .start = command.len, .end = command.len, .text = listed.completion() }, edit(command, command.len, &listed));
 }
@@ -458,8 +458,8 @@ test "skill rows are the held page's, numbered by the read that made them" {
     // The caret in no `/word` shows nothing; the draft's first word lists
     // only its commands.
     try std.testing.expectEqual(@as(?slash_commands.Shown, null), reads.shown(&rows, "use it", 3, 2, null, null));
-    const commands = slash_commands.conversation.suggest("/st", .{}).?;
-    const start = reads.shown(&rows, "/st", 3, 3, commands, null).?;
+    const commands = slash_commands.conversation.suggest("/ef", .{}).?;
+    const start = reads.shown(&rows, "/ef", 3, 3, commands, null).?;
     try std.testing.expectEqual(commands.count, start.list.count);
     try std.testing.expectEqual(@as(u64, 0), start.source);
 }

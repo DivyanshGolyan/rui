@@ -11,7 +11,7 @@ const ReadPhase = departure.ReadPhase;
 pub const scan_interval_ns: i96 = 250_000_000;
 
 /// When the next scan may start, once a read is applied at `now_ns`: at
-/// once for a /status asked for during that read, which is the next read's.
+/// once for a chat-info capture asked for during that read, which is the next read's.
 pub fn scanDue(now_ns: i96, status_requested: bool) i96 {
     return if (status_requested) 0 else now_ns + scan_interval_ns;
 }
@@ -61,12 +61,6 @@ pub fn commandSettled(completed: bool, phase: ReadPhase) bool {
     return !completed or phase == .inspection;
 }
 
-/// Whether the /status page reads its defaults again: a command run over
-/// it, such as /setup, may have changed them.
-pub fn defaultsChanged(phase: ReadPhase, inspection: Inspection, status_shown: bool) bool {
-    return phase == .inspection and inspection == .command and status_shown;
-}
-
 /// What a read that failed while preparing says, when no diagnostic of its
 /// own is waiting. `copy` stands for /copy's own words for its failure.
 pub const Unavailable = union(enum) { say: []const u8, copy };
@@ -106,7 +100,7 @@ pub fn messageShows(asked: Asked, now: Asked) bool {
     return asked.place != .elsewhere and std.meta.eql(asked, now);
 }
 
-test "the next scan waits its interval after a read, except for a /status asked during it" {
+test "the next scan waits its interval after a read, except for a chat-info capture asked during it" {
     try std.testing.expectEqual(@as(i96, 1_250_000_000), scanDue(1_000_000_000, false));
     try std.testing.expectEqual(@as(i96, 0), scanDue(1_000_000_000, true));
 }
@@ -154,13 +148,6 @@ test "a command's output settles when its page shows or its read ends early, nev
         try std.testing.expect(commandSettled(false, phase));
         try std.testing.expectEqual(phase == .inspection, commandSettled(true, phase));
     }
-}
-
-test "only a command run over the shown /status page rereads its defaults" {
-    try std.testing.expect(defaultsChanged(.inspection, .command, true));
-    try std.testing.expect(!defaultsChanged(.inspection, .command, false));
-    try std.testing.expect(!defaultsChanged(.inspection, .copy, true));
-    try std.testing.expect(!defaultsChanged(.fill, .command, true));
 }
 
 test "a read that failed while preparing says which page is unavailable" {
