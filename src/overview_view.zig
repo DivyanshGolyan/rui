@@ -3895,7 +3895,7 @@ test "snapshot and listing rows render identical stopped failed and done endings
         // supplied it. Use the same clock, with no intervening refresh.
         var from_list = try opened(&.{initial});
         defer from_list.deinit();
-        // Compare the same chat-sidebar presentation: the standalone list
+        // Compare the same sidebar presentation: the standalone list
         // additionally draws its pinned New Session control.
         _ = try step(&from_list, .{ .conversation = ref });
         _ = try step(&from_list, .{ .tick = state.now_ms });

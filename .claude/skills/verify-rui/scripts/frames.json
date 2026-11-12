@@ -2296,15 +2296,20 @@
       "steps": [
         {
           "wait": "Check this sidebar."
+        },
+        {
+          "wait": "Schema migration"
         }
       ],
       "sizes": [
-        "46x30",
-        "140x40"
+        "140x40",
+        "46x30"
       ],
       "expect": [
-        "Check this sidebar."
+        "Check this sidebar.",
+        "alt+i info"
       ],
+      "expect_last": "alt+i info",
       "absent": [
         "+ New Session"
       ],
@@ -2318,6 +2323,29 @@
           "mode": "bypass",
           "effort": "high"
         }
+      ]
+    },
+    {
+      "name": "chat-sidebar-rows",
+      "note": "51e-chat-sidebar-populated",
+      "open": "Sidebar chat",
+      "steps": [
+        {
+          "wait": "Schema migration"
+        }
+      ],
+      "sizes": [
+        "140x40"
+      ],
+      "expect": [
+        "Schema migration",
+        "Sidebar chat",
+        "Batch job",
+        "Check this sidebar."
+      ],
+      "expect_last": "alt+i info",
+      "absent": [
+        "+ New Session"
       ]
     },
     {
