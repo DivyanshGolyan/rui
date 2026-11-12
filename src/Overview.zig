@@ -56,6 +56,7 @@ const model_capability = @import("model_capability.zig");
 const new_session_selection = @import("new_session_selection.zig");
 const preferences = @import("preferences.zig");
 const marks = @import("marks.zig");
+const handoff = @import("relaunch_handoff.zig");
 
 comptime {
     // The draft holds what a conversation's does.
@@ -83,6 +84,26 @@ pub const Options = struct {
     selectors: new_session_selection.Intent = .{},
     /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
+};
+
+/// A settled departure the CLI can replace. All slices are owned by the caller;
+/// no terminal, worker or editor remains borrowed when `run` returns it.
+pub const Relaunch = struct {
+    executable: []const u8,
+    handoff: []const u8,
+    receipt: []const u8,
+    open: ?view.Reference,
+
+    pub fn deinit(self: Relaunch, gpa: std.mem.Allocator) void {
+        gpa.free(self.executable);
+        gpa.free(self.handoff);
+        gpa.free(self.receipt);
+    }
+
+    pub fn writeFallback(self: Relaunch, store: []const u8) void {
+        _ = stderr.writeReceipt(self.receipt);
+        TerminalApp.detached(store, if (self.open) |*id| id else null, null);
+    }
 };
 
 /// What the CLI lends the overview and its conversations: scratch files and
@@ -520,6 +541,11 @@ host_observation: HostObservation = .unread,
 /// The last launch's typed summary, never a boolean standing in for a cause.
 host_launch: ?HostLaunch = null,
 upgrade_report: ?std.Io.Writer.Allocating = null,
+/// The finished publication is retained after its worker frees the Check.
+relaunch_build: ?[]const u8 = null,
+upgrade_guidance: bool = false,
+relaunch_line: [upgrade_status.max_line_bytes]u8 = undefined,
+relaunch_line_len: usize = 0,
 /// What the overview last said under the open conversation.
 conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
 /// The terminal title as last set: the open Session's name, if any, and how
@@ -551,9 +577,9 @@ screen_fresh: bool = true,
 screen_ready: bool = false,
 
 /// Opens the overview and returns once the person leaves it, or a signal
-/// stops it. Every way out restores the terminal and then prints the
-/// Detached notice once.
-pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
+/// stops it. Every way out restores the terminal, then returns a relaunch
+/// value or prints the ordinary Detached notice once.
+pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     const self = try create(init, options, hooks, client_operations, &Signals.cancellation);
     defer self.destroy();
     const screen = try init.gpa.create(SessionScreen);
@@ -566,9 +592,10 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !void {
     prepared catch |err| return self.failed(err, options.open);
     defer if (self.screen_ready) screen.deinit();
     self.session_screen = screen;
+    try self.restoreRelaunch();
     Signals.cancellation.stopped.store(false, .release);
     var app: TerminalApp = undefined;
-    app.init(init.io, init.environ_map) catch |err| return self.failed(err, options.open);
+    app.init(init.io, init.environ_map) catch |err| return self.failed(err, self.options.open);
     self.app = &app;
     self.attention = &app.attention;
     const ended = app.run(self.root.widget());
@@ -843,7 +870,34 @@ fn appUpgrade(self: *Self, ctx: *vxfw.EventContext) !void {
         try self.appNext(ctx, try self.event(.{ .upgrade = stands }));
         ctx.redraw = true;
     }
-    if (done) try self.keepUpgrade();
+    if (done) {
+        const installed = job.relaunchBuild() != null;
+        try self.keepUpgrade();
+        if (installed) self.leaveForUpgrade(ctx, stands.ended.outcome);
+    }
+}
+
+fn leaveForUpgrade(self: *Self, ctx: *vxfw.EventContext, outcome: session_upgrade.Outcome) void {
+    if (self.relaunch_build == null) return;
+    if (session_upgrade.relaunch(outcome, self.upgrade_guidance or self.pendingDepartureGuidance())) {
+        ctx.quit = true;
+    } else {
+        // A guided run retains today's screen and exit behavior. A later
+        // ordinary quit is not a delayed request to relaunch.
+        self.init.gpa.free(self.relaunch_build.?);
+        self.relaunch_build = null;
+    }
+}
+
+/// Do not leave the screen automatically when guidance is already known.
+/// The settled departure is still authoritative for failures found on leave.
+noinline fn pendingDepartureGuidance(self: *const Self) bool {
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var text = std.Io.Writer.fixed(&bytes);
+    self.departureText(&text);
+    if (text.buffered().len != 0) return true;
+    if (self.app_session) |left| return if (left.frontend) |frontend| frontend.hasDepartureGuidance() else true;
+    return false;
 }
 
 /// The open conversation, if any, has no Client work of its own in flight.
@@ -858,6 +912,15 @@ fn conversationSettled(self: *const Self) bool {
 fn keepUpgrade(self: *Self) !void {
     const job = &self.upgrade_job;
     if (!job.started) return;
+    self.upgrade_guidance = self.upgrade_guidance or job.hasGuidance();
+    if (self.relaunch_build) |build| self.init.gpa.free(build);
+    self.relaunch_build = null;
+    if (job.relaunchBuild()) |build| {
+        self.relaunch_build = try self.init.gpa.dupe(u8, build);
+        const stands = job.status(self.state.summary.counts.working);
+        const line = upgrade_status.relaunchLine(stands, &self.relaunch_line, if (self.caps.unicode) .unicode else .ascii);
+        self.relaunch_line_len = line.len;
+    }
     const detailed = job.failure != null or job.cleanup.any() or job.outcome == .incompatible;
     if (detailed or job.result != null) {
         if (self.upgrade_report == null) self.upgrade_report = .init(self.init.gpa);
@@ -875,45 +938,112 @@ fn disposeSession(self: *Self, left: Left) void {
     if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
 }
 
-fn finishApp(self: *Self, ended: anyerror!void) !void {
+fn finishApp(self: *Self, ended: anyerror!void) !?Relaunch {
     defer {
         for (self.retired.items) |retired| self.disposeSession(retired.left);
         self.retired.deinit(self.init.gpa);
     }
-    // A run still going is cancelled and joined; what it published and
-    // the full check print with the departure.
     self.upgrade_job.settle();
     const kept = self.keepUpgrade();
-    // The terminal is restored: the report names what the run published or
-    // left behind, so it is written whole, however small the terminal's buffer.
-    // A stderr that takes nothing leaves no other place to say it.
-    if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
     self.worker.cancel();
     const answered: anyerror!?Next = if (self.event(.leave)) |_| self.complete() else |err| err;
     const saved = self.flushSaves();
-    self.writeDeparture();
-    if (self.app_session) |held| {
-        // The Session the person left, or the one that failed to open,
-        // names itself on departure with the Session's own guidance.
-        var left = held;
-        self.app_session = null;
+    var left = self.app_session;
+    self.app_session = null;
+    defer if (left) |held| self.disposeSession(held);
+    var departure: ?SessionFrontend.Departure = null;
+    if (left) |*held| {
         ended catch |err| {
-            left.ended = err;
+            held.ended = err;
         };
-        if (answered) |_| {} else |err| left.ended = err;
+        if (answered) |_| {} else |err| {
+            held.ended = err;
+        }
         saved catch |err| {
-            left.ended = err;
+            held.ended = err;
         };
         kept catch |err| {
-            left.ended = err;
+            held.ended = err;
         };
-        return self.leave(left, {});
+        if (held.frontend) |frontend| departure = frontend.settleDeparture(held.ended, {});
+    }
+    return self.finishDeparture(ended, answered, saved, kept, left, departure);
+}
+
+/// One rendered departure supplies both the pure decision and fallback output.
+/// Keep its bounded scratch off the ordinary finish frame.
+noinline fn finishDeparture(self: *Self, ended: anyerror!void, answered: anyerror!?Next, saved: anyerror!void, kept: anyerror!void, left: ?Left, departure: ?SessionFrontend.Departure) !?Relaunch {
+    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
+    var text = std.Io.Writer.fixed(&bytes);
+    self.departureText(&text);
+    const has_failure = std.meta.isError(ended) or std.meta.isError(answered) or std.meta.isError(saved) or std.meta.isError(kept);
+    const guidance = has_failure or self.upgrade_guidance or text.buffered().len != 0 or
+        (if (departure) |value| value.has_guidance else left != null);
+    // The core decides only after all leave work has settled. Encoding failure
+    // preserves today's departure instead of losing an unsent draft.
+    const outcome: session_upgrade.Outcome = if (self.state.upgrade.run) |stands| if (stands == .ended) stands.ended.outcome else .unchanged else .unchanged;
+    if (session_upgrade.relaunch(outcome, guidance) and self.relaunch_build != null) {
+        if (self.makeRelaunch(left)) |request| return request else |_| {}
+    }
+    if (self.upgrade_report) |*report| _ = stderr.writeReceipt(report.written());
+    _ = stderr.write(text.buffered());
+    if (left) |held| {
+        // `finish` has already joined this frontend. Leave only emits the
+        // original guidance; the defer above disposes its scratch and editor.
+        try self.leaveFinished(held, departure);
+        return null;
     }
     TerminalApp.detached(self.options.store, null, null);
     try ended;
     _ = try answered;
     try saved;
     try kept;
+    return null;
+}
+
+fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
+    const gpa = self.init.gpa;
+    // Put the open editor back under the sparse draft owner before encoding.
+    // The copied snapshot remains owned here until encoding succeeds.
+    if (left) |held| if (held.frontend) |frontend| {
+        try self.session_drafts.put(gpa, &held.session, frontend.input.snapshot());
+    };
+    var entries: std.ArrayList(handoff.Entry) = .empty;
+    defer entries.deinit(gpa);
+    var drafts = self.session_drafts.iterator();
+    while (drafts.next()) |entry| try entries.append(gpa, .{ .id = entry.id, .snapshot = entry.snapshot });
+    const bytes = try handoff.encode(gpa, .{
+        .v = 1,
+        .store = self.options.store,
+        .open = if (left) |*held| &held.session else null,
+        .overview = .{ .bytes = self.draft[0..self.composer.length], .cursor = self.composer.cursor, .rejected = self.composer.rejected },
+        .drafts = entries.items,
+        .line = self.relaunch_line[0..self.relaunch_line_len],
+    });
+    errdefer gpa.free(bytes);
+    const executable = try std.fmt.allocPrint(gpa, "{s}/bin/rui", .{self.relaunch_build.?});
+    errdefer gpa.free(executable);
+    const receipt = try gpa.dupe(u8, if (self.upgrade_report) |*report| report.written() else "");
+    return .{ .executable = executable, .handoff = bytes, .receipt = receipt, .open = if (left) |held| held.session else null };
+}
+
+/// Called only at overview start; malformed or unrelated handoffs do nothing.
+fn restoreRelaunch(self: *Self) !void {
+    var parsed = handoff.read(self.init, self.options.home, self.options.store) orelse return;
+    defer parsed.deinit();
+    const value = parsed.value;
+    // Copy every inactive draft before restoring the composer or opening a chat.
+    // An allocation failure refuses startup rather than showing a partial handoff.
+    for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
+    @memcpy(self.draft[0..value.overview.bytes.len], value.overview.bytes);
+    self.composer.length = value.overview.bytes.len;
+    self.composer.cursor = value.overview.cursor;
+    self.composer.rejected = value.overview.rejected;
+    if (value.open) |id| self.options.open = id[0..session_id.bytes].*;
+    var notice: view.Notice = .{ .colour = .normal };
+    @memcpy(notice.bytes[0..value.line.len], value.line);
+    notice.len = value.line.len;
+    self.state.notice = notice;
 }
 
 /// The Sessions list's rows for one frame, each with what a click on it
@@ -1218,6 +1348,7 @@ fn destroy(self: *Self) void {
     self.session_drafts.deinit(self.init.gpa);
     std.debug.assert(self.worker.thread == null);
     self.upgrade_job.deinit();
+    if (self.relaunch_build) |build| self.init.gpa.free(build);
     if (self.upgrade_report) |*report| report.deinit();
     self.job.deinit(self.init.gpa);
     for (self.jobs[0..self.job_count]) |job| job.deinit(self.init.gpa);
@@ -1803,36 +1934,23 @@ fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Sai
 
 /// Writes the core's departure to stderr in one write. Never inlined: its
 /// buffer stays off `finish`'s frame.
-noinline fn writeDeparture(self: *const Self) void {
-    // A ledger entry prints well under 512 bytes.
-    var bytes: [view.max_requests * 512 + view.max_late_save_bytes + view.max_late_command_bytes]u8 = undefined;
-    var guidance = std.Io.Writer.fixed(&bytes);
-    // Read now and whatever this launch named, since the line speaks for
-    // later launches. An unreadable file only leaves the effort out: the
-    // next launch that reads it reports the error.
+fn departureText(self: *const Self, out: *std.Io.Writer) void {
     const saved_effort = if (self.options.home.len == 0) null else if (preferences.load(self.options.home)) |values| values.reasoning_effort else |_| null;
-    view.writeDeparture(&self.state, saved_effort, &guidance) catch unreachable;
-    _ = stderr.write(guidance.buffered());
+    view.writeDeparture(&self.state, saved_effort, out) catch unreachable;
 }
 
 /// Lets the conversation the person left join its borrowers and write its
 /// guidance, then names the Session to resume.
-fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
-    const io = self.init.io;
-    defer if (left.files) |files| {
-        inline for (.{ "scratch", "action", "inspection", "status" }) |name| @field(files, name).close(io);
-        for (files.actions) |file| file.close(io);
-    };
-    defer if (left.frontend) |frontend| self.init.gpa.destroy(frontend);
+fn leaveFinished(self: *Self, left: Left, settled: ?SessionFrontend.Departure) !void {
     const session = &left.session;
     const store = self.options.store;
     const outcome: anyerror!void = run: {
         const frontend = left.frontend orelse {
-            restored catch {};
             _ = left.ended catch |err| break :run err;
             break :run {};
         };
-        const departure = frontend.leave(left.ended, restored);
+        const departure = settled.?;
+        frontend.writeDeparture(departure);
         const end = departure.end catch |err| {
             if (departure.failure_notice) TerminalApp.detached(store, session, departure.action);
             break :run err;
@@ -3674,7 +3792,7 @@ fn finishedWith(rig: *Rig, ended: anyerror!void, failure: ?anyerror, buffer: []u
     const finished = rig.overview.finishApp(ended);
     _ = std.c.dup2(saved, 2);
     _ = std.c.close(saved);
-    if (failure) |expected| try std.testing.expectError(expected, finished) else try finished;
+    if (failure) |expected| try std.testing.expectError(expected, finished) else if (try finished) |request| request.deinit(rig.overview.init.gpa);
     const count = std.c.read(pipe[0], buffer.ptr, buffer.len);
     return if (count > 0) buffer[0..@intCast(count)] else "";
 }
@@ -6895,4 +7013,127 @@ test "App settings typed queued saves settle on departure and retain failures" {
         }
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
     }
+}
+
+test "relaunch departure matrix preserves every screen and all unsent drafts" {
+    const gpa = std.testing.allocator;
+    for (std.enums.values(session_upgrade.Outcome)) |outcome| {
+        for ([_]bool{ false, true }) |conversation| {
+            for ([_]bool{ false, true }) |guidance| {
+                for ([_]bool{ false, true }) |drafted| {
+                    var cancellation: client.Cancellation = .{};
+                    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests" }, fake_operations, &cancellation);
+                    defer rig.close();
+                    const overview = rig.overview;
+                    overview.state.upgrade.run = .{ .ended = .{
+                        .how = switch (outcome) {
+                            .unchanged => .cancelled,
+                            .compatible => .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = true } },
+                            .incompatible => .{ .incompatible = .{ .schema = 60, .patch = 0 } },
+                        },
+                        .outcome = outcome,
+                    } };
+                    if (outcome != .unchanged) overview.relaunch_build = try gpa.dupe(u8, "/published/build");
+                    overview.upgrade_guidance = guidance;
+                    const ending = upgrade_status.relaunchLine(overview.state.upgrade.run.?, &overview.relaunch_line, .unicode);
+                    overview.relaunch_line_len = ending.len;
+                    if (drafted) {
+                        @memcpy(overview.draft[0.."overview α".len], "overview α");
+                        overview.composer.length = "overview α".len;
+                        overview.composer.cursor = 3;
+                        try overview.session_drafts.put(gpa, "aaaaaa", .{ .bytes = "inactive α", .cursor = 2, .anchor = .{ .position = 7, .end = 9 } });
+                        try overview.session_drafts.put(gpa, "bbbbbb", .{ .bytes = "another", .cursor = 0, .rejected = .invalid });
+                    }
+                    if (conversation) {
+                        overview.opened = "cccccc".*;
+                        const frontend = try gpa.create(SessionFrontend);
+                        frontend.begin(rig.init, "/store", &overview.opened, "/requests", undefined, undefined, undefined, undefined, rig.screen, &cancellation, undefined);
+                        if (drafted) frontend.input.restore(.{ .bytes = "open α", .cursor = 2, .anchor = .{ .position = 11, .end = 13 } });
+                        overview.app_session = .{ .session = overview.opened, .frontend = frontend, .files = null, .ended = .detached };
+                        overview.state.conversing = overview.opened;
+                    }
+                    var ctx = rig.context();
+                    defer ctx.cmds.deinit(gpa);
+                    overview.leaveForUpgrade(&ctx, outcome);
+                    try std.testing.expectEqual(outcome != .unchanged and !guidance, ctx.quit);
+                    // Finishing a guided run later must not be a delayed exec.
+                    const request = try overview.finishApp({});
+                    try std.testing.expectEqual(outcome != .unchanged and !guidance, request != null);
+                    if (request) |value| {
+                        defer value.deinit(gpa);
+                        try std.testing.expectEqualStrings("/published/build/bin/rui", value.executable);
+                        try std.testing.expectEqual(conversation, value.open != null);
+                        var parsed = try handoff.decode(gpa, value.handoff, "/store");
+                        defer parsed.deinit();
+                        try std.testing.expectEqual(conversation, parsed.value.open != null);
+                        if (conversation) try std.testing.expectEqualStrings("cccccc", parsed.value.open.?);
+                        try std.testing.expectEqualStrings(if (drafted) "overview α" else "", parsed.value.overview.bytes);
+                        try std.testing.expectEqual(@as(usize, if (drafted) 3 else 0), parsed.value.overview.cursor);
+                        try std.testing.expectEqual(@as(usize, if (drafted) (if (conversation) 3 else 2) else 0), parsed.value.drafts.len);
+                        for (parsed.value.drafts) |entry| {
+                            if (std.mem.eql(u8, entry.id, "aaaaaa")) {
+                                try std.testing.expectEqualStrings("inactive α", entry.snapshot.bytes);
+                                try std.testing.expectEqual(@as(usize, 2), entry.snapshot.cursor);
+                                try std.testing.expectEqual(SessionInput.Recalled{ .position = 7, .end = 9 }, entry.snapshot.anchor.?);
+                            } else if (std.mem.eql(u8, entry.id, "bbbbbb")) {
+                                try std.testing.expectEqualStrings("another", entry.snapshot.bytes);
+                                try std.testing.expectEqual(.invalid, entry.snapshot.rejected.?);
+                            } else {
+                                try std.testing.expectEqualStrings("cccccc", entry.id);
+                                try std.testing.expectEqualStrings("open α", entry.snapshot.bytes);
+                                try std.testing.expectEqual(SessionInput.Recalled{ .position = 11, .end = 13 }, entry.snapshot.anchor.?);
+                            }
+                        }
+                        try std.testing.expectEqualStrings(ending, parsed.value.line);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "relaunch startup restores copied drafts open conversation and ending notice exactly once" {
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_buffer[0..try tmp.dir.realPath(std.testing.io, &home_buffer)];
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview_draft: SessionInput.Snapshot = .{ .bytes = "overview α", .cursor = 3, .rejected = .overflow };
+    const chat: SessionInput.Snapshot = .{ .bytes = "chat β", .cursor = 2, .anchor = .{ .position = 7, .end = 9 }, .rejected = .invalid };
+    const line = "Upgraded to 0.60.0 · Host restarted";
+    const bytes = try handoff.encode(gpa, .{
+        .v = 1,
+        .store = "/store",
+        .open = "bbbbbb",
+        .overview = overview_draft,
+        .drafts = &.{ .{ .id = "aaaaaa", .snapshot = chat }, .{ .id = "bbbbbb", .snapshot = .{ .bytes = "open draft", .cursor = 1 } } },
+        .line = line,
+    });
+    defer gpa.free(bytes);
+    const path = try handoff.writeEncoded(rig.init, home, bytes);
+    defer gpa.free(path);
+    try rig.environ.put("RUI_RELAUNCH", path);
+    try rig.overview.restoreRelaunch();
+    try std.testing.expectEqualStrings(overview_draft.bytes, rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(overview_draft.cursor, rig.overview.composer.cursor);
+    try std.testing.expectEqual(overview_draft.rejected, rig.overview.composer.rejected);
+    try std.testing.expectEqualStrings("bbbbbb", &rig.overview.options.open.?);
+    var status: view.StatusBuffer = undefined;
+    try std.testing.expectEqualStrings(line, view.statusLine(&rig.overview.state, rig.overview.caps, &status).?.text);
+    for ([_][]const u8{ "aaaaaa", "bbbbbb" }) |id| {
+        const draft = rig.overview.session_drafts.take(gpa, id).?;
+        defer draft.deinit(gpa);
+        if (std.mem.eql(u8, id, "aaaaaa")) {
+            try std.testing.expectEqualStrings(chat.bytes, draft.snapshot.bytes);
+            try std.testing.expectEqual(chat.cursor, draft.snapshot.cursor);
+            try std.testing.expectEqual(chat.anchor, draft.snapshot.anchor);
+            try std.testing.expectEqual(chat.rejected, draft.snapshot.rejected);
+        } else try std.testing.expectEqualStrings("open draft", draft.snapshot.bytes);
+    }
+    try rig.overview.restoreRelaunch();
+    try std.testing.expect(rig.overview.session_drafts.first == null);
+    try std.testing.expectEqualStrings("", rig.environ.get("RUI_RELAUNCH").?);
 }

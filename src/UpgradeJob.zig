@@ -211,6 +211,21 @@ pub fn writeReceipt(self: *const Self, writer: *std.Io.Writer) !void {
     try self.cleanup.write(writer);
 }
 
+/// The publication's pinned selection, never PATH or this running image.
+/// An activation-only run has installed nothing and must not replace the TUI.
+pub fn relaunchBuild(self: *const Self) ?[]const u8 {
+    std.debug.assert(!self.started or self.finished);
+    const result = &(self.result orelse return null);
+    if (result.installation != .installed) return null;
+    return result.installation.receipt().selected_after;
+}
+
+pub fn hasGuidance(self: *const Self) bool {
+    return self.failure != null or self.cleanup.any() or
+        (if (self.result) |*result| upgrade.hasGuidance(result) else false) or
+        (if (self.checked) |checked| checked.path.state != .selected else false);
+}
+
 /// Read only after finished/settle; always render the actual publication and
 /// activation receipt and copied cleanup facts, including on cancellation.
 pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
@@ -658,4 +673,49 @@ test "the selected build already current installs quietly: no found release, the
     try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = .{ .up_to_date = .{ .schema = 60, .patch = 1 } }, .outcome = .compatible } }, job.status(0));
     job.result = null;
     job.checked = null;
+}
+
+test "relaunch uses only an installed receipt selection and keeps every guidance category" {
+    const Installation = @import("Installation.zig");
+    const receipt: Installation.Receipt = .{ .operation_build = "/downloaded/target", .selected_after = "/published/selection" };
+    for ([_]bool{ false, true }) |installed| {
+        var job: Self = .{ .finished = true, .result = .{ .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt }, .activation = .not_needed, .store = "/store" } };
+        if (installed) try std.testing.expectEqualStrings("/published/selection", job.relaunchBuild().?) else try std.testing.expect(job.relaunchBuild() == null);
+        try std.testing.expect(!job.hasGuidance());
+        job.failure = error.ConnectionRefused;
+        try std.testing.expect(job.hasGuidance());
+        job.failure = null;
+        inline for (std.enums.values(upgrade.CleanupReceipts.Phase)) |phase| {
+            job.cleanup = .{};
+            const reporter = job.cleanup.reporter(phase);
+            reporter.report(reporter.context, .{ .primary = null, .secondary = error.AccessDenied, .retained_path = "/retained" });
+            try std.testing.expect(job.hasGuidance());
+        }
+        job.cleanup = .{};
+        var checked: upgrade.Check = undefined;
+        inline for (.{ .selected, .shadowed, .missing, .unavailable }) |state| {
+            checked.path = .{ .state = state };
+            job.checked = checked;
+            try std.testing.expectEqual(state != .selected, job.hasGuidance());
+        }
+    }
+}
+
+test "relaunch job retains the result owner's guidance for every activation and installation" {
+    const Installation = @import("Installation.zig");
+    const HostLifecycle = @import("HostLifecycle.zig");
+    const receipt: Installation.Receipt = .{ .operation_build = "/prepared", .selected_after = "/selected" };
+    const info = @typeInfo(HostLifecycle.ActivationOutcome).@"union";
+    inline for (info.field_names, info.field_types) |name, Payload| {
+        const activation = @unionInit(HostLifecycle.ActivationOutcome, name, std.mem.zeroes(Payload));
+        for ([_]bool{ false, true }) |installed| {
+            const result: upgrade.Result = .{
+                .installation = if (installed) .{ .installed = receipt } else .{ .unchanged = receipt },
+                .activation = activation,
+                .store = "/store",
+            };
+            const job: Self = .{ .finished = true, .result = result };
+            try std.testing.expectEqual(upgrade.hasGuidance(&result), job.hasGuidance());
+        }
+    }
 }

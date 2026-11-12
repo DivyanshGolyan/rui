@@ -1356,36 +1356,59 @@ pub const Departure = struct {
     failure_notice: bool,
     /// The recovery guide is written; otherwise a failed notice writes it.
     recovery_shown: bool,
+    /// Anything beyond the ordinary Detached notice must survive departure.
+    has_guidance: bool,
+    failure: ?anyerror,
 };
 
 /// Joins what the Session stopped, after the caller restored the terminal, and writes
 /// the guidance that follows restoration. The caller prints the Detached notice.
 pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
+    const result = self.settleDeparture(ended, restored);
+    self.writeDeparture(result);
+    return result;
+}
+
+/// Settles every borrower before the caller decides whether departure can be
+/// replaced by a new TUI. No terminal guidance is emitted here.
+pub fn settleDeparture(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     const settled = self.settle(restored);
     self.submission.close();
+    const cause: ?anyerror = if (ended) |_| null else |err| err;
+    const plan = departure.exit(settled, cause, self.submission.view() != null);
+    const action_view = self.screen.action_view != null;
+    return .{
+        .end = if (plan.failure) |err| err else ended,
+        .action = if (action_view) self.live.work.first_action else null,
+        .failure_notice = action_view and !std.meta.isError(restored),
+        .recovery_shown = plan.recovery_before_notice,
+        .has_guidance = self.hasDepartureGuidance() or plan.recovery_before_notice or plan.failure != null,
+        .failure = plan.failure,
+    };
+}
+
+/// Known guidance while the screen is still open. A later settlement can add
+/// failures, so `settleDeparture` always checks again before any replacement is allowed.
+pub fn hasDepartureGuidance(self: *const Self) bool {
+    return self.reading.pending_diagnostic != null or self.submission.view() != null or
+        self.inspection.command_running or self.screen.action_view != null;
+}
+
+/// Emits the already-settled departure. Relaunch never swallows these bytes.
+pub fn writeDeparture(self: *Self, result: Departure) void {
     if (self.reading.pending_diagnostic != null) {
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
         self.writePendingDiagnostic(&out) catch unreachable;
         stderr.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
     }
-    const cause: ?anyerror = if (ended) |_| null else |err| err;
-    const plan = departure.exit(settled, cause, self.submission.view() != null);
-    if (plan.recovery_before_notice) self.recoveryGuide();
+    if (result.recovery_shown) self.recoveryGuide();
     if (self.inspection.command_running and self.inspection.kind == .command) self.commandOutputGuide();
-    if (plan.failure) |err| switch (err) {
+    if (result.failure) |err| switch (err) {
         error.TerminalTooSmall => stderr.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
         error.TerminalTooLarge => stderr.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
         error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => stderr.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
         else => {},
-    };
-    const action_view = self.screen.action_view != null;
-    return .{
-        .end = if (plan.failure) |err| err else ended,
-        .action = if (action_view) self.live.work.first_action else null,
-        // Never a main-screen notice before confirmed restoration.
-        .failure_notice = action_view and !std.meta.isError(restored),
-        .recovery_shown = plan.recovery_before_notice,
     };
 }
 

@@ -1666,7 +1666,135 @@ fn openOverview(init: std.process.Init, options: Overview.Options) !void {
     defer init.gpa.destroy(directory_buffer);
     var with_directory = options;
     with_directory.directory = requestDirectory(init, directory_buffer) catch |err| return Overview.printFailure(err, options.store, options.open, null);
-    return Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .start_host = startOverviewHost });
+    if (try Overview.run(init, with_directory, .{ .scratch = renderScratch, .command = sessionCommand, .requests = sessionRequests, .status = sessionStatus, .captured = captureGate, .start_host = startOverviewHost })) |request| {
+        defer request.deinit(init.gpa);
+        finishRelaunch(init, with_directory, request, .{});
+    }
+}
+
+const RelaunchHooks = struct {
+    replace: *const fn (std.process.Init, []const []const u8) anyerror!void = replaceRui,
+};
+
+fn replaceRui(init: std.process.Init, argv: []const []const u8) !void {
+    return std.process.replace(init.io, .{ .argv = argv, .environ_map = init.environ_map });
+}
+
+/// The open chat travels in the handoff, not argv: entering through bare Rui
+/// admits exactly the original launch selectors (resume accepts no model pin).
+fn relaunchArguments(executable: []const u8, selectors: new_session_selection.Intent, buffer: *[7][]const u8) []const []const u8 {
+    buffer[0] = executable;
+    var count: usize = 1;
+    inline for (.{ "store", "provider", "model" }) |name| {
+        if (@field(selectors, name)) |value| {
+            buffer[count] = "--" ++ name;
+            buffer[count + 1] = value;
+            count += 2;
+        }
+    }
+    return buffer[0..count];
+}
+
+fn finishRelaunch(init: std.process.Init, options: Overview.Options, request: Overview.Relaunch, hooks: RelaunchHooks) void {
+    startRelaunch(init, options, request, hooks) catch {
+        request.writeFallback(options.store);
+        stderr.diagnosticBytes("rui: The new Rui could not be started.\n");
+    };
+}
+
+fn startRelaunch(init: std.process.Init, options: Overview.Options, request: Overview.Relaunch, hooks: RelaunchHooks) !void {
+    const handoff = @import("relaunch_handoff.zig");
+    const path = try handoff.writeEncoded(init, options.home, request.handoff);
+    defer init.gpa.free(path);
+    // Successful exec never returns; on failure the old client removes the
+    // unconsumed private handoff and emits its ordinary departure instead.
+    defer handoff.discard(init, path);
+    try init.environ_map.put("RUI_RELAUNCH", path);
+    defer init.environ_map.put("RUI_RELAUNCH", "") catch {};
+    var argv: [7][]const u8 = undefined;
+    try hooks.replace(init, relaunchArguments(request.executable, options.selectors, &argv));
+}
+
+test "relaunch argv preserves every explicit selector subset and never searches PATH" {
+    for (0..8) |mask| {
+        const selectors: new_session_selection.Intent = .{
+            .store = if (mask & 1 != 0) "./store as given" else null,
+            .provider = if (mask & 2 != 0) "provider" else null,
+            .model = if (mask & 4 != 0) "model pin" else null,
+        };
+        var buffer: [7][]const u8 = undefined;
+        const args = relaunchArguments("/published/build/bin/rui", selectors, &buffer);
+        try std.testing.expectEqualStrings("/published/build/bin/rui", args[0]);
+        var at: usize = 1;
+        inline for (.{ "store", "provider", "model" }) |name| if (@field(selectors, name)) |value| {
+            try std.testing.expectEqualStrings("--" ++ name, args[at]);
+            try std.testing.expectEqualStrings(value, args[at + 1]);
+            at += 2;
+        };
+        try std.testing.expectEqual(at, args.len);
+    }
+}
+
+test "relaunch replacement failure retains departure and deletes the handoff without exec" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var environment = std.process.Environ.Map.init(gpa);
+    defer environment.deinit();
+    var init: std.process.Init = undefined;
+    init.io = io;
+    init.gpa = gpa;
+    init.environ_map = &environment;
+    const Mock = struct {
+        var calls: usize = 0;
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var path_len: usize = 0;
+
+        fn replace(invocation: std.process.Init, argv: []const []const u8) !void {
+            calls += 1;
+            try std.testing.expectEqualStrings("/published/build/bin/rui", argv[0]);
+            try std.testing.expectEqualStrings("--store", argv[1]);
+            try std.testing.expectEqualStrings("./original store", argv[2]);
+            try std.testing.expectEqual(@as(usize, 3), argv.len);
+            const named = invocation.environ_map.get("RUI_RELAUNCH").?;
+            @memcpy(path[0..named.len], named);
+            path_len = named.len;
+            const file = try std.Io.Dir.cwd().openFile(invocation.io, named, .{});
+            defer file.close(invocation.io);
+            try std.testing.expectEqual(@as(u64, 7), (try file.stat(invocation.io)).size);
+            return error.FileNotFound;
+        }
+    };
+    Mock.calls = 0;
+    const request: Overview.Relaunch = .{
+        .executable = "/published/build/bin/rui",
+        .handoff = "handoff",
+        .receipt = "Installed receipt\n",
+        .open = "k7m2qx".*,
+    };
+    const options: Overview.Options = .{ .store = "/canonical/store", .home = home, .directory = "", .workspace = "", .selectors = .{ .store = "./original store" } };
+    const output = try tmp.dir.createFile(io, "departure", .{ .read = true });
+    defer output.close(io);
+    {
+        const saved = std.c.dup(2);
+        if (saved < 0) return error.TestRedirectFailed;
+        defer closeDescriptor(saved);
+        if (std.c.dup2(output.handle, 2) != 2) return error.TestRedirectFailed;
+        defer std.debug.assert(std.c.dup2(saved, 2) == 2);
+        finishRelaunch(init, options, request, .{ .replace = Mock.replace });
+    }
+    try std.testing.expectEqual(@as(usize, 1), Mock.calls);
+    try std.testing.expectEqualStrings("", environment.get("RUI_RELAUNCH").?);
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().openFile(io, Mock.path[0..Mock.path_len], .{}));
+    var bytes: [4096]u8 = undefined;
+    const text = bytes[0..try output.readPositionalAll(io, &bytes, 0)];
+    try std.testing.expect(std.mem.startsWith(u8, text, request.receipt));
+    try std.testing.expect(std.mem.indexOf(u8, text, "Detached. Host work continues.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "k7m2qx") != null);
+    try std.testing.expect(std.mem.endsWith(u8, text, "rui: The new Rui could not be started.\n"));
 }
 
 fn captureGate(io: std.Io) !void {
@@ -2472,6 +2600,7 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         .provider = if (binding) |*value| value.provider.slice() else null,
         .model = if (binding) |*value| value.model.slice() else null,
         .open = open,
+        .selectors = .{ .store = parsed.get("store") },
     });
 }
 
