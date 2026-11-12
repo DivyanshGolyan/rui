@@ -112,7 +112,7 @@ jobs:
           retention-days: 3
           if-no-files-found: error
   npm:
-    # The npm tarballs: the compiled client (npm name ruicode) and one package per platform. Publishing them to npm is manual.
+    # The npm tarballs: the compiled client (npm name ruicode) and one package per platform. npm_publish publishes them.
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -218,7 +218,7 @@ jobs:
             echo
             echo "The target build checks Store compatibility at Host startup. Supported SQLite formats are backed up and migrated then; installation alone never migrates or resets a Store. MySQL schema changes remain operator-owned."
             echo
-            echo "Also attached: the Linux ARM64 archive, and the npm tarballs (the TypeScript client and one executable package per platform). npm publishing is manual."
+            echo "Also attached: the Linux ARM64 archive, and the npm tarballs (the TypeScript client and one executable package per platform). The same packages are on npm: npm install ruicode."
             echo
             echo "The Linux executables ship without debug info. For readable crash traces, add it"
             echo "to the installed build (again after each update, which installs a new build):"
@@ -229,3 +229,44 @@ jobs:
             echo '```'
           } > notes.md
           python3 -B tests/ci/release.py publish "$VERSION" "$SHA" dist notes.md
+  npm_publish:
+    # Publishes the npm tarballs after the GitHub release, platform packages first so ruicode's
+    # optional dependencies resolve. npm trusted publishing (OIDC) authenticates it: each package
+    # trusts this repository's promote.yml, the workflow that calls this one. No token is stored.
+    # A rerun skips versions npm already has.
+    needs: [plan, npm, publish]
+    if: ${{ needs.plan.outputs.version != '' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - name: Publish to npm
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm install -g npm@11.15.0 --no-audit --no-fund
+          for delay in 10 30 ''; do
+            rm -rf "$RUNNER_TEMP/npm"
+            gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name rui-npm --dir "$RUNNER_TEMP/npm" && break
+            test -n "$delay" || exit 1
+            echo "::warning::Artifact download failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          for package in ruicode-linux-x64:rui-linux-x64 ruicode-linux-arm64:rui-linux-arm64 ruicode-darwin-arm64:rui-darwin-arm64 ruicode:rui; do
+            name=${package%%:*}
+            file="$RUNNER_TEMP/npm/${package#*:}-$VERSION.tgz"
+            if [ "$(npm view "$name@$VERSION" version 2>/dev/null || :)" = "$VERSION" ]; then
+              echo "$name@$VERSION is already on npm"
+              continue
+            fi
+            npm publish --access public --provenance "$file"
+          done
