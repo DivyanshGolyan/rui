@@ -30,6 +30,7 @@ const draft_layout = @import("draft_layout.zig");
 const failure_class = @import("failure_class.zig");
 const state_marks = @import("marks.zig");
 const keymap = @import("keymap.zig");
+const app_input = @import("app_input.zig");
 const model_capability = @import("model_capability.zig");
 const model_picker = @import("model_picker.zig");
 const model_picker_view = @import("model_picker_view.zig");
@@ -180,9 +181,6 @@ pub const Draft = struct { bytes: []const u8 = "", cursor: usize = 0, anchor: us
 
 /// Where the next input goes: the composer, or frozen while a start waits.
 pub const InputMode = enum { compose, frozen };
-
-/// How the shell takes one input: editing, or the frozen composer's keys.
-pub const Route = enum { edit, frozen };
 
 /// What one input did, and the draft as that input left it.
 pub const Composed = struct { input: Input, draft: Draft };
@@ -350,7 +348,10 @@ pub const StartResult = union(enum) {
 
 pub const Event = union(enum) {
     composed: Composed,
-    /// A key at the drawn footer, before the editor can consume it.
+    /// A key, paste mark or malformed key Root handed the overview. `step`
+    /// decides what it means and returns that in `Effects.take`.
+    key: KeyInput,
+    /// A footer input that is no key: the drawn choice's close action.
     footer_input: FooterInput,
     /// The size of the screen the shell draws next; keys read until the
     /// next one act on that screen.
@@ -391,6 +392,66 @@ pub const Event = union(enum) {
     /// Esc left a conversation whose original is unconfirmed. The shell
     /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
+};
+
+/// One terminal input as the shell classified it. Bindings match exact
+/// modifiers, as the line editor's do.
+pub const Key = union(enum) {
+    /// A key the screen's table names, as `keys` binds it.
+    named: keymap.Key,
+    enter,
+    tab,
+    shift_tab,
+    /// `r`, which starts a stopped Host from an empty draft; else text.
+    host_start,
+    /// Other typed text.
+    text,
+    /// Any other key: an edit key, a chord or a control.
+    other,
+    paste_start,
+    paste_end,
+    /// A malformed key sequence.
+    invalid,
+};
+
+/// One input Root handed the overview, with the facts its owners hold.
+pub const KeyInput = struct {
+    key: Key,
+    /// It arrived inside a bracketed paste: text, never an action.
+    pasted: bool = false,
+    /// What it arrived under: the overview, or the settings page over it.
+    under: app_input.Layer.Covered = .main,
+    /// The draft as the composer holds it before this input.
+    draft: Draft = .{},
+    /// The footer's model or effort choice, as its owner (the settings
+    /// page) answers for this input; null while none is open.
+    choice: ?Choice = null,
+    /// The Host is stopped and a start can mend it now.
+    host_startable: bool = false,
+
+    pub const Choice = struct {
+        /// Drawn: open and not hidden while its save is pending.
+        shown: bool,
+        /// The choice takes this input itself.
+        takes: bool,
+    };
+};
+
+/// What the shell does with the input of a `key` event.
+pub const Take = enum {
+    /// Nothing takes it.
+    drop,
+    /// The core took it whole; the shell redraws.
+    taken,
+    /// The footer's open choice takes it.
+    choice,
+    /// Close the footer's choice.
+    close_choice,
+    /// Start the stopped Host.
+    start_host,
+    /// The composer edits with it, and the shell sends what that did as
+    /// `composed`.
+    edit,
 };
 
 /// What a click names, as the widget under it drew it: a Session to open,
@@ -704,8 +765,6 @@ pub const Effect = union(enum) {
     open: Reference,
     open_settings,
     open_choice: FooterField,
-    /// Continue the original event to the editor without changing its bytes.
-    forward_input,
     stop: Reference,
     archive: ArchiveRequest,
     /// Read the Host's model lists.
@@ -759,6 +818,8 @@ pub const ArchiveAdmission = enum { admitted, refused };
 /// Effects are run in order; admission describes only this event's attempt.
 pub const Effects = struct {
     archive_admission: ArchiveAdmission = .refused,
+    /// What the shell does with a `key` event's input; others leave it.
+    take: Take = .drop,
     items: [3]Effect = undefined,
     len: usize = 0,
 
@@ -1115,14 +1176,6 @@ pub const State = struct {
             .unread => false,
             .read => !self.menu.loading(),
             .unanswered, .invalid => true,
-        };
-    }
-
-    /// How the shell takes an input.
-    pub fn route(self: *const State, _: keymap.Selection(Action)) Route {
-        return switch (self.inputMode()) {
-            .compose => .edit,
-            .frozen => .frozen,
         };
     }
 
@@ -1611,7 +1664,8 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
     }
     switch (event) {
         .composed => |value| try compose(state, value, &effects),
-        .footer_input => |input| footerInput(state, input, &effects),
+        .key => |input| effects.take = try keyInput(state, input, &effects),
+        .footer_input => |input| _ = footerInput(state, input, &effects),
         .tick => |now_ms| try tick(state, now_ms, &effects),
         .list => |reply| switch (reply) {
             .page => |page| try listPage(state, page, &effects),
@@ -1626,7 +1680,9 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         // A click is input as a key is: the screen that takes no key takes
         // no click, wherever it lands.
         .clicked => |input| if (state.inputMode() != .frozen) switch (input.target) {
-            .footer => |field| if (!input.pasting) footerInput(state, .{ .click = field }, &effects),
+            .footer => |field| if (!input.pasting) {
+                _ = footerInput(state, .{ .click = field }, &effects);
+            },
             .open => |reference| try clickOpen(state, reference, &effects),
             // The row the frame drew, only in the list it drew: then
             // Enter takes it, as arrowing to it and pressing Enter would.
@@ -1798,13 +1854,11 @@ fn footerEffort(state: *const State) ?[]const u8 {
     return if (shown) |value| @tagName(value) else null;
 }
 
-fn footerInput(state: *State, input: FooterInput, effects: *Effects) void {
-    if (state.inputMode() == .frozen) {
-        // The existing frozen composer route owns global exit keys and
-        // suppresses edits. Footer focus must not intercept that authority.
-        effects.add(.forward_input);
-        return;
-    }
+/// Steps the footer's focus; true when the input goes on to the composer.
+fn footerInput(state: *State, input: FooterInput, effects: *Effects) bool {
+    // The frozen composer owns global exit keys and suppresses edits.
+    // Footer focus must not intercept that authority.
+    if (state.inputMode() == .frozen) return true;
     const decision = state.footer.step(footerEffort(state) != null, input);
     if (state.footer.pending) |field| {
         if (field == .model and !state.modelsReady()) {
@@ -1814,7 +1868,67 @@ fn footerInput(state: *State, input: FooterInput, effects: *Effects) void {
             effects.add(.{ .open_choice = field });
         }
     }
-    if (decision.forward) effects.add(.forward_input);
+    return decision.forward;
+}
+
+/// What one input Root handed the overview means, in order: under the
+/// settings page only the whole app's keys; then the footer's open choice;
+/// then footer focus; then the Host start key; else the composer.
+fn keyInput(state: *State, input: KeyInput, effects: *Effects) error{OutOfMemory}!Take {
+    const named: ?keymap.Key = if (input.pasted) null else switch (input.key) {
+        .named => |name| name,
+        else => null,
+    };
+    const action: ?Action = if (named) |name| keys.get(name) else null;
+    switch (input.under) {
+        // Under the settings page only the keys that are the whole app's
+        // stay live: leaving, and Esc for an Upgrade it can still cancel.
+        // Nothing edits the hidden draft or the list.
+        .settings => return if (action == .exit or (action == .clear and state.upgrade.takesEscape())) toComposer(state, input, action, effects) else .drop,
+        .main => {},
+    }
+    if (input.choice) |choice| {
+        // Esc closes the choice, even one hidden while its save is pending.
+        if (named == .escape or named == .ctrl_g) return .close_choice;
+        if (choice.shown) {
+            if (choice.takes) return .choice;
+            // As on the settings page, unbound text and a paste into a row
+            // choice never edit the hidden draft; leaving still works.
+            return if (action == .exit) toComposer(state, input, action, effects) else .drop;
+        }
+    }
+    if (!footerInput(state, footerKey(input), effects)) return .taken;
+    if (input.key == .host_start and !input.pasted and input.draft.bytes.len == 0 and input.host_startable) return .start_host;
+    return toComposer(state, input, action, effects);
+}
+
+/// The composer takes the input: the line editor edits with it, or while a
+/// start waits the frozen composer takes only the screen's actions.
+/// It supersedes a footer opening still waiting, as `composed` does.
+fn toComposer(state: *State, input: KeyInput, action: ?Action, effects: *Effects) error{OutOfMemory}!Take {
+    state.footer.pending = null;
+    switch (state.inputMode()) {
+        .compose => return .edit,
+        .frozen => {
+            const outcome: keymap.Outcome(Action) = if (action) |name| .{ .action = name } else .none;
+            try compose(state, .{ .input = .{ .composer = outcome }, .draft = input.draft }, effects);
+            return .taken;
+        },
+    }
+}
+
+/// What a key means to footer focus.
+fn footerKey(input: KeyInput) FooterInput {
+    if (input.key == .paste_start) return .text;
+    if (input.pasted) return .other;
+    return switch (input.key) {
+        .tab => .{ .tab = false },
+        .shift_tab => .{ .tab = true },
+        .enter => .enter,
+        .named => |name| if (name == .escape or name == .ctrl_g) .escape else .other,
+        .text, .host_start => .text,
+        .other, .paste_start, .paste_end, .invalid => .other,
+    };
 }
 
 /// Takes a shared model-list answer. A failed read keeps the last menu.
@@ -3880,7 +3994,7 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
                 }
             },
             .open_choice => |field| try std.testing.expectEqual(field, got.open_choice),
-            .list_models, .clear_draft, .cancel_upgrade, .open_settings, .forward_input, .exit => {},
+            .list_models, .clear_draft, .cancel_upgrade, .open_settings, .exit => {},
         }
     }
 }
@@ -6628,9 +6742,12 @@ test "while a start waits the composer is frozen" {
     defer state.deinit();
     try expectEffects(&.{.{ .start = .{ .settings = &state.settings, .text = "go", .binding = state.nextBinding() } }}, try submit(&state, try typeText(&state, "go")));
     try std.testing.expectEqual(InputMode.frozen, state.inputMode());
-    try std.testing.expectEqual(Route.frozen, state.route(.{ .action = .previous }));
-    try std.testing.expectEqual(Route.frozen, state.route(.text));
-    try std.testing.expectEqual(Route.frozen, state.route(.enter));
+    // No key reaches the line editor; the screen's own keys still act.
+    for ([_]Key{ .{ .named = .up }, .text, .enter, .tab, .paste_start }) |key| {
+        const effects = try step(&state, .{ .key = .{ .key = key, .draft = .{ .bytes = "go" } } });
+        try std.testing.expectEqual(Take.taken, effects.take);
+        try std.testing.expectEqual(@as(usize, 0), effects.len);
+    }
 }
 
 test "a command's output is cut at what the overview keeps, and its failure ends the overview only once its output was kept" {
@@ -6946,10 +7063,12 @@ test "the Footer names the Enter action submission takes, over every composer st
         const listed = if (state.commands) |shown| shown.seen == .drawn else false;
         try std.testing.expectEqual(case.action, enterAction(&state, listed, draft.bytes));
         try expectLastLine(&state, draft, case.right);
-        // Submission takes that action. The frozen composer's route turns
-        // Enter into no input at all.
+        // Submission takes that action. The frozen composer turns Enter
+        // into no input at all.
         if (case.setup == .frozen) {
-            try std.testing.expectEqual(Route.frozen, state.route(.enter));
+            const frozen = try step(&state, .{ .key = .{ .key = .enter, .draft = draft } });
+            try std.testing.expectEqual(Take.taken, frozen.take);
+            try std.testing.expectEqual(@as(usize, 0), frozen.len);
             continue;
         }
         const effects = try submit(&state, draft);
@@ -7302,9 +7421,8 @@ test "new chat footer focus domain uses the same drawn fields as chat" {
             try std.testing.expectEqual(case.focus[at], chat.focus);
             try std.testing.expectEqual(case.open[at], chat.open_choice);
             try std.testing.expectEqual(case.forward[at], chat.forward);
-            try std.testing.expectEqual(@as(usize, @intFromBool(case.open[at] != null) + @intFromBool(case.forward[at])), effects.len);
+            try std.testing.expectEqual(@as(usize, @intFromBool(case.open[at] != null)), effects.len);
             if (case.open[at]) |field| try std.testing.expectEqual(field, effects.slice()[0].open_choice);
-            if (case.forward[at]) try std.testing.expect(effects.slice()[0] == .forward_input);
         };
         // Clicks name what the previous frame drew, not the newer model.
         for (std.enums.values(FooterField)) |field| {
@@ -7400,14 +7518,152 @@ test "new chat footer keys describe the action that currently owns Enter" {
     }
 }
 
+test "every key Root hands the overview means one thing in each screen state, under main or settings" {
+    // Expectations are what Overview.appEvent decided in its shell at main
+    // 309d639, before this core took its keys. Each combination matches
+    // exactly one row, and every row matches some.
+    const Setup = enum { plain, commands, footer_focused, choice, choice_pending, frozen, host_down_empty, host_down_draft, upgrade_cancellable };
+    const Pressed = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, left, right, tab, shift_tab, host_start };
+    const Under = app_input.Layer.Covered;
+    const Tag = std.meta.Tag(Effect);
+    const all_setups = std.enums.values(Setup);
+    const closing = [_]Pressed{ .escape, .ctrl_g };
+    // The footer takes these first while focus is on the input.
+    const footer_path = [_]Setup{ .plain, .commands, .host_down_empty, .host_down_draft, .upgrade_cancellable, .choice_pending };
+    const Expected = struct {
+        setups: []const Setup = all_setups,
+        under: Under = .main,
+        keys: []const Pressed,
+        take: Take,
+        /// Footer focus after the key; null leaves it as it was.
+        focus: ?FooterFocus = null,
+        effects: []const Tag = &.{},
+    };
+    const rows = [_]Expected{
+        // Under settings only leaving, and Esc for an Upgrade that can still
+        // be cancelled, are the overview's; nothing edits the hidden draft.
+        .{ .under = .settings, .setups = &.{ .plain, .commands, .footer_focused, .choice, .choice_pending, .host_down_empty, .host_down_draft, .upgrade_cancellable }, .keys = &.{.ctrl_c}, .take = .edit },
+        .{ .under = .settings, .setups = &.{.frozen}, .keys = &.{.ctrl_c}, .take = .taken, .effects = &.{.exit} },
+        .{ .under = .settings, .setups = &.{.upgrade_cancellable}, .keys = &closing, .take = .edit },
+        .{ .under = .settings, .setups = &.{ .plain, .commands, .footer_focused, .choice, .choice_pending, .frozen, .host_down_empty, .host_down_draft }, .keys = &closing, .take = .drop },
+        .{ .under = .settings, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start }, .take = .drop },
+        // Focus on the input: the footer takes Tab and Shift-Tab, the
+        // composer the rest, and `r` on an empty draft starts a stopped Host.
+        .{ .setups = &footer_path, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .ctrl_c, .left, .right }, .take = .edit },
+        .{ .setups = &.{ .plain, .commands, .host_down_empty, .host_down_draft, .upgrade_cancellable }, .keys = &closing, .take = .edit },
+        .{ .setups = &footer_path, .keys = &.{.tab}, .take = .taken, .focus = .model },
+        .{ .setups = &footer_path, .keys = &.{.shift_tab}, .take = .taken, .focus = .effort },
+        .{ .setups = &.{ .plain, .commands, .host_down_draft, .upgrade_cancellable, .choice_pending }, .keys = &.{.host_start}, .take = .edit },
+        .{ .setups = &.{.host_down_empty}, .keys = &.{.host_start}, .take = .start_host },
+        // A choice hidden while its save is pending still closes on Esc.
+        .{ .setups = &.{.choice_pending}, .keys = &closing, .take = .close_choice },
+        // Focus on the footer's model.
+        .{ .setups = &.{.footer_focused}, .keys = &.{ .printable, .host_start }, .take = .edit, .focus = .input },
+        .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .left, .right }, .take = .edit },
+        .{ .setups = &.{.footer_focused}, .keys = &.{.enter}, .take = .taken, .focus = .input, .effects = &.{.open_choice} },
+        .{ .setups = &.{.footer_focused}, .keys = &closing, .take = .taken, .focus = .input },
+        .{ .setups = &.{.footer_focused}, .keys = &.{.tab}, .take = .taken, .focus = .effort },
+        .{ .setups = &.{.footer_focused}, .keys = &.{.shift_tab}, .take = .taken, .focus = .input },
+        // The shown choice takes its own keys and closes on Esc; only
+        // leaving reaches past it.
+        .{ .setups = &.{.choice}, .keys = &.{.enter}, .take = .choice },
+        .{ .setups = &.{.choice}, .keys = &closing, .take = .close_choice },
+        .{ .setups = &.{.choice}, .keys = &.{.ctrl_c}, .take = .edit },
+        .{ .setups = &.{.choice}, .keys = &.{ .printable, .pasted_printable, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start }, .take = .drop },
+        // While a start waits the frozen composer takes every key: the
+        // footer moves no focus, and only the screen's actions act.
+        .{ .setups = &.{.frozen}, .keys = &.{.ctrl_c}, .take = .taken, .effects = &.{.exit} },
+        .{ .setups = &.{.frozen}, .keys = &closing, .take = .taken, .effects = &.{.clear_draft} },
+        .{ .setups = &.{.frozen}, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start }, .take = .taken },
+    };
+    const Case = struct {
+        fn has(comptime T: type, set: []const T, value: T) bool {
+            return std.mem.indexOfScalar(T, set, value) != null;
+        }
+        fn key(pressed: Pressed) Key {
+            return switch (pressed) {
+                .printable, .pasted_printable => .text,
+                .enter, .pasted_enter => .enter,
+                .escape => .{ .named = .escape },
+                .ctrl_g => .{ .named = .ctrl_g },
+                .ctrl_c => .{ .named = .ctrl_c },
+                .left, .right => .other,
+                .tab => .tab,
+                .shift_tab => .shift_tab,
+                .host_start => .host_start,
+            };
+        }
+    };
+    var used: [rows.len]bool = @splat(false);
+    for (all_setups) |setup| for (std.enums.values(Under)) |under| for (std.enums.values(Pressed)) |pressed| {
+        errdefer std.debug.print("setup={s} under={s} key={s}\n", .{ @tagName(setup), @tagName(under), @tagName(pressed) });
+        var matched: ?usize = null;
+        for (rows, 0..) |row, index| {
+            if (row.under != under or !Case.has(Setup, row.setups, setup) or !Case.has(Pressed, row.keys, pressed)) continue;
+            try std.testing.expectEqual(@as(?usize, null), matched);
+            matched = index;
+        }
+        const row = rows[matched.?];
+        used[matched.?] = true;
+
+        var state = try opened(&.{});
+        defer state.deinit();
+        // A model with efforts, its list read, so the footer has both fields
+        // and Enter on the model opens its choice at once.
+        state.default = Default.of("codex", "gpt-6.1-sol");
+        state.menu_read = .read;
+        var draft: Draft = .{};
+        switch (setup) {
+            .plain, .choice, .choice_pending, .host_down_empty => {},
+            .commands => {
+                draft = try drawnCommandList(&state, null);
+                try std.testing.expect(state.commands != null);
+            },
+            .footer_focused => state.footer.focus = .model,
+            .frozen => {
+                draft = try typeText(&state, "a task");
+                _ = try submit(&state, draft);
+                try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+            },
+            .host_down_draft => draft = try typeText(&state, "a task"),
+            .upgrade_cancellable => {
+                _ = try step(&state, .start_upgrade);
+                try std.testing.expect(state.upgrade.takesEscape());
+            },
+        }
+        const pasted = pressed == .pasted_printable or pressed == .pasted_enter;
+        const before = state.footer.focus;
+        const effects = try step(&state, .{
+            .key = .{
+                .key = Case.key(pressed),
+                .pasted = pasted,
+                .under = under,
+                .draft = draft,
+                // A row choice, as the settings page answers: it takes Enter,
+                // and no pasted key.
+                .choice = switch (setup) {
+                    .choice, .choice_pending => .{ .shown = setup == .choice, .takes = pressed == .enter },
+                    else => null,
+                },
+                .host_startable = setup == .host_down_empty or setup == .host_down_draft,
+            },
+        });
+        try std.testing.expectEqual(row.take, effects.take);
+        try std.testing.expectEqual(row.focus orelse before, state.footer.focus);
+        try std.testing.expectEqual(row.effects.len, effects.len);
+        for (row.effects, effects.slice()) |want, got| try std.testing.expectEqual(want, std.meta.activeTag(got));
+    };
+    for (used) |hit| try std.testing.expect(hit);
+}
+
 test "new chat frozen footer leaves global keys with the existing frozen composer" {
     var state = try opened(&.{});
     defer state.deinit();
     state.default = Default.of("codex", "gpt-6.1-sol");
     _ = try submit(&state, .{ .bytes = "start a task" });
     try std.testing.expectEqual(InputMode.frozen, state.inputMode());
-    for ([_]FooterInput{ .{ .tab = false }, .{ .tab = true }, .enter, .escape, .text, .other }) |input| {
-        try expectEffects(&.{.forward_input}, try step(&state, .{ .footer_input = input }));
+    for ([_]Key{ .tab, .shift_tab, .enter, .{ .named = .escape }, .text, .other }) |key| {
+        try std.testing.expectEqual(Take.taken, (try step(&state, .{ .key = .{ .key = key, .draft = .{ .bytes = "start a task" } } })).take);
         try std.testing.expectEqual(FooterFocus.input, state.footer.focus);
         try std.testing.expect(state.footer.pending == null);
     }
