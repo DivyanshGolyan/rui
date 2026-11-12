@@ -12,6 +12,7 @@ History still scrolls with PgUp/PgDn, arrows or the wheel when the panel is clos
 - `chat-info-refresh`: current inspection facts refresh without resetting an open choice; late reads do not reopen a closed panel.
 - `tool-output`: Ctrl-O or a click on a tool heading opens its saved output in place, at most 20 rows then `… N more lines`; the same key or click closes it.
 - `scroll-page`: PgUp/PgDn move through one continuous feed; repeated PgUp stops at the first saved row.
+- `scroll-wheel`: the physical wheel scrolls the visible widget through App's mouse reporting. Rui does not enable alternate scroll (`?1007h`).
 - `return-live`: Esc, End (empty draft) and Ctrl-G return to the latest messages with the draft unchanged.
 
 ## How to get to it (user POV)
@@ -31,7 +32,7 @@ Preconditions: a run with `--seed 3` or more, `doctor` PASS, and a terminal on `
 - **Draft survives.** Type `keep me`, open info, open and close a choice, then close info. The caret row remains `› keep me` and the provider count is unchanged. Separately test PgUp then Ctrl-G on that draft.
 - **Folder and actions.** Check HOME→`~` and a long path at 46 columns: left ellipsis keeps whole trailing components when possible (normally `…/checkout/code/rui`). If the basename itself is oversized, retain its longest fitting grapheme-aligned suffix after the ellipsis; never cut its right edge or hide the whole name behind an ellipsis. A blank row must remain before both inline and stacked actions.
 - **Page.** With info closed, send PgUp until another PgUp leaves the first Message unchanged, then PgDn until live.
-- **Wheel path (L1–L3 only).** Byte replay of Up/Down or SGR mouse reports is not hardware proof. Inside info, Up/Down selects fields rather than scrolling history.
+- **Wheel path (L1–L3 only).** `--keys SGRWheelUp` and `--keys SGRWheelDown` inject SGR wheel reports at cell 10,10; App routes them to the visible widget under that cell. This is byte replay, not hardware proof. Up/Down are keyboard input; inside info they select fields rather than scrolling history.
 - **Proof.** Save snapshots per step with committed-frame generations and times. Use `frames --only chat-info,chat-info-model,settings-model,settings-model-filter,model-picker,model-filter` for layout captures; overview model states open app settings, not a composer command.
 
 ## Gotchas

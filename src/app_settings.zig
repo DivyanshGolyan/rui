@@ -180,11 +180,13 @@ fn bind(self: *Self) void {
     self.model_choice.unicode = caps.unicode;
     self.panel.ground = widget_style.of(caps, .{ .background = .bar });
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
+    self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
+    self.model_choice.hover_style = self.panel.hover_style;
     self.model_choice.quiet = self.panel.quiet;
 }
 
@@ -751,6 +753,53 @@ test "App settings shared ASCII capability reaches the panel model choice tails 
             try std.testing.expectEqualStrings("-", surface.children[0].surface.readCell(0, 0).char.grapheme);
             if (page.narrow) try std.testing.expectEqualStrings("<", surface.children[1].surface.readCell(1, 0).char.grapheme);
         }
+    }
+}
+
+test "App settings mouse hover and click use the same field choices as Enter" {
+    for ([_]protocol.PermissionMode{ .ask, .bypass }) |initial| {
+        var fixture: Fixture = .{ .values = .{ .permission_mode = initial } };
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try page.refresh();
+        _ = try page.widget().draw(draw_ctx);
+        try page.widget().handleEvent(&events, .mouse_enter);
+        const permissions_row = 2 + @backingInt(Row.permissions);
+        var mouse: vaxis.Mouse = .{ .col = 1, .row = permissions_row, .button = .none, .type = .motion, .mods = .{} };
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        var surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, 2).style.bg);
+        try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
+        try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
+        try page.widget().handleEvent(&events, .mouse_leave);
+        surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.ground.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        mouse.button = .left;
+        mouse.type = .press;
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(@as(usize, @backingInt(Row.permissions)), page.panel.choice.?.field);
+        const selected = page.panel.choice.?.selected;
+        const next: protocol.PermissionMode = if (initial == .ask) .bypass else .ask;
+        const choice_row: u16 = permissions_row + 1 + @as(u16, if (next == .bypass) 0 else 1);
+        _ = try page.widget().draw(draw_ctx);
+        mouse.row = @intCast(choice_row);
+        mouse.button = .none;
+        mouse.type = .motion;
+        try page.widget().handleEvent(&events, .mouse_enter);
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, choice_row).style.bg);
+        try std.testing.expectEqual(selected, page.panel.choice.?.selected);
+        mouse.button = .left;
+        mouse.type = .press;
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(next, fixture.last_edit.?.permission_mode.set);
+        try std.testing.expect(!page.hasChoice());
+        try page.widget().handleEvent(&events, .mouse_leave);
     }
 }
 

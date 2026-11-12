@@ -89,7 +89,7 @@ app_screen: AppScreen.Session = undefined,
 app_preview: DocumentView = undefined,
 app_consent: ActionConsent = .{},
 app_card: PermissionCard = undefined,
-app_palette: Palette = undefined,
+app_palette: Palette = .{ .shown = undefined },
 app_info: ChatInfo = undefined,
 info_open: bool = false,
 /// One panel effect, retained through its definite answer, even when closed.
@@ -764,6 +764,18 @@ fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void
     }
 }
 
+/// A palette click chooses the drawn row, then uses the input's Enter path:
+/// command choices run, incomplete words and skills replace the draft.
+fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands_shared.Shown.Pick) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.app_consent.request != null or self.app_hooks.root.pasting) return;
+    // A pointer names the row in the list the last frame drew, not the
+    // list a key has stored since for a newly edited draft.
+    const stored = &self.screen.commands;
+    _ = slash_commands_shared.Shown.pickedNow(stored, self.nextCommands(stored.*), pressed) orelse return;
+    try appEvent(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+}
+
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.leaving != null) return;
@@ -963,6 +975,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
     const attention = style.of(self.app_caps, .{ .colour = .attention });
     const failure = style.of(self.app_caps, .{ .colour = .failure });
+    const hover = style.of(self.app_caps, .{ .background = .hover });
     const colours: viewport.Colours = .{
         .quiet = quiet.fg,
         .user = style.of(self.app_caps, .{ .colour = .ink }).fg,
@@ -980,23 +993,33 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
+    self.app_card.hover_style = hover;
     self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
+    self.app_preview.hover_style = hover;
     self.app_preview.method = self.app_caps.width;
     self.app_content.style = normal;
+    self.app_content.hover_style = hover;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
     self.app_document.style = normal;
     self.app_document.colours = colours;
+    self.app_document.hover_style = hover;
     self.app_document.method = self.app_caps.width;
     self.app_document.document = if (screen.view == .message) &screen.staging else &screen.browsing;
     self.app_body.shown = if (screen.view == .feed) self.app_content.widget() else self.app_document.widget();
     screen.commands = self.nextCommands(screen.commands);
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
-        self.app_palette = .{ .shown = shown, .method = self.app_caps.width, .style = normal, .quiet = quiet };
+        self.app_palette.shown = shown;
+        self.app_palette.method = self.app_caps.width;
+        self.app_palette.style = normal;
+        self.app_palette.quiet = quiet;
+        self.app_palette.hover_style = hover;
+        self.app_palette.userdata = self;
+        self.app_palette.on_select = appSelectCommand;
         palette = self.app_palette.widget();
     };
     const now_ms = self.nowMs();
@@ -3477,6 +3500,25 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                     var ctx = held.context();
                     const preview = &held.self.app_preview;
                     const row: i16 = @intCast(preview.drawn.height);
+                    // The continuation row hovers in the hover role at every depth.
+                    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+                        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+                        held.self.app_caps = .{ .depth = depth };
+                        _ = try held.draw();
+                        try preview.widget().handleEvent(&ctx, .mouse_enter);
+                        try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
+                        const role = style.of(held.self.app_caps, .{ .background = .hover });
+                        for (0..hovered.size.width) |col| {
+                            const cell = hovered.readCell(@intCast(col), @intCast(row)).style;
+                            try std.testing.expectEqual(role.bg, cell.bg);
+                            try std.testing.expectEqual(role.ul_style, cell.ul_style);
+                            try std.testing.expectEqual(role.reverse, cell.reverse);
+                        }
+                        try preview.widget().handleEvent(&ctx, .mouse_leave);
+                    }
+                    held.self.app_caps = .{ .depth = .none };
+                    _ = try held.draw();
                     for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
                         try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .mods = .{}, .type = kind } });
                     }
@@ -3496,6 +3538,31 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "row 000") != null);
             }
         }
+    }
+}
+
+test "App Session binds the hover role to every widget it owns with a hover style at every depth" {
+    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.self.app_caps = .{ .depth = depth };
+        // A shown palette binds too; it draws only without a request.
+        try held.keys("/c");
+        _ = try held.draw();
+        try std.testing.expect(held.screen.commands != null);
+        const role = style.of(held.self.app_caps, .{ .background = .hover });
+        var bound: usize = 0;
+        const info = @typeInfo(Self).@"struct";
+        inline for (info.field_names, info.field_types) |name, Field| {
+            if (@typeInfo(Field) == .@"struct" and @hasField(Field, "hover_style")) {
+                errdefer std.debug.print("field={s}\n", .{name});
+                try std.testing.expectEqualDeep(role, @field(held.self, name).hover_style);
+                bound += 1;
+            }
+        }
+        // app_card, app_preview, app_content, app_document and app_palette.
+        try std.testing.expectEqual(5, bound);
     }
 }
 
@@ -8595,4 +8662,151 @@ test "chat info supplies the one bottom footer after the input and both dividers
         try std.testing.expect((try rowWith(held, "alt+i info")) != null);
         try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
     };
+}
+
+test "App Session palette clicks follow Enter for command words options and values and retain hover across frames" {
+    const Case = struct { draft: []const u8, word: []const u8, after: []const u8, queued: ?[]const u8 = null, notice: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .draft = "/ef", .word = "effort ", .after = "/effort " },
+        .{ .draft = "/setup ", .word = "--model ", .after = "/setup --model " },
+        .{ .draft = "/effort ", .word = "low", .after = "", .queued = "/effort low" },
+        .{ .draft = "/ren", .word = "rename ", .after = "/rename " },
+    }) |case| {
+        errdefer std.debug.print("draft={s}, word={s}\n", .{ case.draft, case.word });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try captureInfo(held, "Palette");
+        held.self.line.read = .{ .revision = 1, .end = 1 };
+        try held.self.line.model.set("gpt-5.5");
+        try held.keys(case.draft);
+        _ = try held.draw();
+        const shown = if (held.screen.commands) |*shown| shown else return error.TestExpectedCommandList;
+        const index = for (shown.list.shown(), 0..) |entry, index| {
+            if (std.mem.eql(u8, case.word, entry.word)) break index;
+        } else return error.TestExpectedRow;
+        shown.highlight = if (index == 0) shown.list.count - 1 else 0;
+        const selected = shown.highlight;
+        _ = try held.draw();
+        const row: i16 = @intCast(index - held.self.app_palette.first);
+        const widget_ = held.self.app_palette.widget();
+        var events = held.context();
+        try widget_.handleEvent(&events, .mouse_enter);
+        try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+        // Parent redraws must not replace the widget's pointer state.
+        _ = try held.draw();
+        try std.testing.expect(held.self.app_palette.hover.pointing);
+        const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+        const cell = palette.readCell(2, @intCast(row));
+        if (selected == index) try std.testing.expect(cell.style.reverse) else {
+            try std.testing.expect(!cell.style.reverse);
+            try std.testing.expectEqual(held.self.app_palette.hover_style.bg, cell.style.bg);
+            try std.testing.expectEqual(held.self.app_palette.hover_style.ul_style, cell.style.ul_style);
+            try std.testing.expect(palette.readCell(2, @intCast(selected - held.self.app_palette.first)).style.reverse);
+        }
+        try std.testing.expectEqual(selected, held.screen.commands.?.highlight);
+        try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
+        for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
+        try widget_.handleEvent(&events, .mouse_leave);
+        _ = try held.draw();
+        try std.testing.expect(!held.self.app_palette.hover.pointing);
+        if (selected != index) {
+            const plain = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+            try std.testing.expect(!plain.readCell(2, @intCast(row)).style.reverse);
+        }
+        try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqualStrings(case.after, held.self.input.composition().bytes);
+        if (case.queued) |expected| try std.testing.expectEqualStrings(expected, held.self.input.queuedCommand().?) else try std.testing.expectEqual(null, held.self.input.queuedCommand());
+        if (case.notice) |expected| try std.testing.expectEqualStrings(expected, held.self.shown_notice.current(held.self.nowMs()).?);
+        try std.testing.expect(held.self.submission.view() == null);
+    }
+}
+
+test "App Session palette refuses clicks on stale drafts closed lists and during paste or approval" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.keys("/r");
+    _ = try held.draw();
+    const widget_ = held.self.app_palette.widget();
+    var events = held.context();
+    const click: vxfw.Event = .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } };
+    try held.keys("en"); // The drawn /reload-skills row is not the new /rename row.
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
+    // A key that acts on `/ren`'s list before a frame draws it does not make
+    // the drawn `/r` row its row.
+    try held.keys("\x1b[B\x1b[A");
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
+    try std.testing.expectEqual(null, held.self.input.queuedCommand());
+    _ = try held.draw();
+    held.root.pasting = true;
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
+    held.root.pasting = false;
+    held.self.app_consent.adopt(41);
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
+    held.self.app_consent.withdraw();
+    held.screen.commands.?.close();
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/ren", held.self.input.composition().bytes);
+    try std.testing.expectEqual(null, held.self.input.queuedCommand());
+}
+
+test "App Session palette clicks requests rows with an empty draft as Enter does" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const older = "01234567-89ab-4cde-8012-0123456789ab";
+    const newer = "01234567-89ab-4cde-8012-0123456789ac";
+    held.screen.view = .inspection;
+    held.self.inspection.kind = .requests;
+    held.self.saved_requests.offer(.{ .nanoseconds = 1 }, "09:00", older);
+    held.self.saved_requests.offer(.{ .nanoseconds = 2 }, "09:05", newer);
+    _ = try held.draw();
+    var events = held.context();
+    const widget_ = held.self.app_palette.widget();
+    try widget_.handleEvent(&events, .mouse_enter);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
+    try widget_.handleEvent(&events, .mouse_leave);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqualStrings("/result " ++ older, held.self.input.queuedCommand().?);
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+}
+
+test "App Session palette clicks replace the caret skill without sending or moving focus on hover" {
+    const Fake = struct {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+            const entries = try gpa.alloc(skill_suggestions.Entry, 2);
+            entries[0] = .{ .name = try gpa.dupe(u8, "recap"), .description = try gpa.dupe(u8, "Summarise") };
+            entries[1] = .{ .name = try gpa.dupe(u8, "review"), .description = try gpa.dupe(u8, "Review a change") };
+            return .{ .entries = entries, .total = 2 };
+        }
+        fn completed(self: *Self) bool {
+            return self.skill_task.completed();
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.self.skill_read = Fake.read;
+    try held.keys("please /re");
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &held.self, Fake.completed);
+    try held.settle();
+    try held.keys(" now\x1b[D\x1b[D\x1b[D\x1b[D");
+    _ = try held.draw();
+    try std.testing.expectEqualStrings("/review", held.screen.commands.?.list.entries[1].shown);
+    const widget_ = held.self.app_palette.widget();
+    var events = held.context();
+    try widget_.handleEvent(&events, .mouse_enter);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    _ = try held.draw();
+    try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
+    try std.testing.expectEqualStrings("please /re now", held.self.input.composition().bytes);
+    for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
+    try widget_.handleEvent(&events, .mouse_leave);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
+    try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
+    try std.testing.expectEqual(null, held.self.input.queuedCommand());
+    try std.testing.expectEqual(null, held.self.submission.view());
 }

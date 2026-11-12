@@ -2,7 +2,7 @@ const std = @import("std");
 
 pub const Rgb = [3]u8;
 pub const Mode = enum { light, dark };
-pub const Background = enum { ground, selvedge, selection, alert };
+pub const Background = enum { ground, selvedge, selection, hover, alert };
 pub const Text = enum { strong, body, indigo, quiet, attention, failure, on_alert };
 pub const Depth = enum { direct, indexed };
 pub const Color = union(Depth) { direct: Rgb, indexed: u8 };
@@ -11,6 +11,8 @@ const Palette = struct {
     ground: Rgb,
     selvedge: Rgb,
     selection: Rgb,
+    /// Per-channel midpoint of selvedge and selection: a pointer's row, quieter than the keyboard's.
+    hover: Rgb,
     strong: Rgb,
     body: Rgb,
     indigo: Rgb,
@@ -24,6 +26,7 @@ const light: Palette = .{
     .ground = .{ 0xf3, 0xee, 0xe2 },
     .selvedge = .{ 0xe6, 0xdd, 0xc8 },
     .selection = .{ 0xdd, 0xe0, 0xee },
+    .hover = .{ 0xe1, 0xde, 0xdb },
     .strong = .{ 0x1a, 0x18, 0x14 },
     .body = .{ 0x2f, 0x2b, 0x25 },
     .indigo = .{ 0x1f, 0x2d, 0x6b },
@@ -36,6 +39,7 @@ const dark: Palette = .{
     .ground = .{ 0x12, 0x19, 0x33 },
     .selvedge = .{ 0x1a, 0x22, 0x46 },
     .selection = .{ 0x2a, 0x34, 0x67 },
+    .hover = .{ 0x22, 0x2b, 0x56 },
     .strong = .{ 0xf2, 0xec, 0xdf },
     .body = .{ 0xd4, 0xce, 0xbf },
     .indigo = .{ 0xa9, 0xb6, 0xec },
@@ -58,6 +62,7 @@ pub fn background(mode: Mode, depth: Depth, role: Background) Color {
         .ground => p.ground,
         .selvedge => p.selvedge,
         .selection => p.selection,
+        .hover => p.hover,
         .alert => Rgb{ 0xe9, 0xb1, 0x30 },
     };
     return switch (depth) {
@@ -72,7 +77,8 @@ pub fn text(mode: Mode, depth: Depth, role: Text, on: Background) Color {
         .strong => p.strong,
         .body => p.body,
         .indigo => p.indigo,
-        .quiet => if (mode == .light and on == .selvedge) Rgb{ 0x62, 0x5a, 0x4c } else p.quiet,
+        // Quiet text darkens on the day selvedge and hover to keep 4.5:1.
+        .quiet => if (mode == .light and (on == .selvedge or on == .hover)) Rgb{ 0x62, 0x5a, 0x4c } else p.quiet,
         .attention => p.attention,
         .failure => p.failure,
         .on_alert => Rgb{ 0x14, 0x14, 0x14 },
@@ -117,13 +123,29 @@ const Indexed = struct {
     thread: u8,
 };
 
+/// The xterm grey ramp has no step between selvedge and selection in either skin, so the
+/// nearest hover entries (237 night, 253 day) would repeat them. Night hover takes 235,
+/// between ground and selvedge, a step from both and quieter than selection on each. Day
+/// hover takes white 231, lifting a row where selection darkens it; the darker free grey
+/// 252 would fail 4.5:1 under the pinned attention 58 and stand out more than selection.
+fn pinnedBackground(mode: Mode, role: Background) ?u8 {
+    return switch (role) {
+        .selection => if (mode == .dark) 237 else null,
+        .hover => switch (mode) {
+            .dark => 235,
+            .light => 231,
+        },
+        else => null,
+    };
+}
+
 const indexed = blk: {
     @setEvalBranchQuota(2_000_000);
     var tables = std.enums.EnumArray(Mode, Indexed).initUndefined();
     for (std.enums.values(Mode)) |mode| {
         const table = tables.getPtr(mode);
         for (std.enums.values(Background)) |ground| {
-            table.backgrounds.set(ground, if (mode == .dark and ground == .selection) 237 else nearestIndex(background(mode, .direct, ground).direct));
+            table.backgrounds.set(ground, pinnedBackground(mode, ground) orelse nearestIndex(background(mode, .direct, ground).direct));
             var colours = std.enums.EnumArray(Text, u8).initUndefined();
             for (std.enums.values(Text)) |role| {
                 colours.set(role, if (mode == .light and role == .attention) 58 else nearestIndex(text(mode, .direct, role, ground).direct));
@@ -178,7 +200,10 @@ test "decided indexed pins" {
     try std.testing.expectEqual(@as(u8, 58), text(.light, .indexed, .attention, .selvedge).indexed);
     try std.testing.expectEqual(@as(u8, 237), background(.dark, .indexed, .selection).indexed);
     try std.testing.expectEqual(@as(u8, 234), background(.dark, .indexed, .ground).indexed);
+    try std.testing.expectEqual(@as(u8, 235), background(.dark, .indexed, .hover).indexed);
+    try std.testing.expectEqual(@as(u8, 231), background(.light, .indexed, .hover).indexed);
     try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .selvedge).direct);
+    try std.testing.expectEqual(Rgb{ 0x62, 0x5a, 0x4c }, text(.light, .direct, .quiet, .hover).direct);
 }
 
 test "nearest xterm index excludes terminal-defined entries" {
@@ -214,7 +239,7 @@ test "readable text meets WCAG contrast on its layout backgrounds" {
         }
     };
     for (std.enums.values(Mode)) |mode| for (std.enums.values(Depth)) |depth| {
-        for ([_]Background{ .ground, .selvedge, .selection }) |bg| {
+        for ([_]Background{ .ground, .selvedge, .selection, .hover }) |bg| {
             for ([_]Text{ .strong, .body, .indigo, .quiet, .attention, .failure }) |fg| {
                 const contrast = Check.contrast(text(mode, depth, fg, bg), background(mode, depth, bg));
                 if (contrast < 4.5) std.debug.print("{s} {s}: {s} on {s}: {d:.3}\n", .{ @tagName(mode), @tagName(depth), @tagName(fg), @tagName(bg), contrast });

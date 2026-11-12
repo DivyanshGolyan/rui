@@ -11,6 +11,7 @@ const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
 const panel_editor = @import("panel_editor.zig");
 const Panel = @import("widgets/Panel.zig");
+const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 /// The owner changes revision whenever it replaces or releases a list. A
@@ -47,9 +48,11 @@ userdata: ?*anyopaque = null,
 on_pick: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
 ground: vaxis.Style = .{},
 selection: vaxis.Style = .{ .reverse = true },
+hover_style: vaxis.Style = .{ .ul_style = .single },
 quiet: vaxis.Style = .{ .dim = true },
 /// The most recent frame's model indices, borrowed from its draw arena.
 hits: []const usize = &.{},
+hover: Hover = .{},
 
 /// The immutable menu must outlive this choice. Mutable owners use openSource.
 pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, current: []const u8) void {
@@ -97,6 +100,7 @@ pub fn cancel(self: *Self) void {
     _ = self.editor.blur();
     self.active = false;
     self.hits = &.{};
+    self.hover.targets = &.{};
 }
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -159,9 +163,11 @@ fn pick(self: *Self, ctx: *vxfw.EventContext) !void {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (!self.validate()) {
+        try self.hover.handleEvent(ctx, .mouse_leave);
         ctx.consumeAndRedraw();
         return;
     }
+    try self.hover.handleEvent(ctx, input);
     if (input == .key_press and !self.pasting and !takesKey(input.key_press)) return;
     if (input == .mouse) {
         const mouse = input.mouse;
@@ -171,7 +177,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             .left => {
                 if (mouse.type != .press or mouse.row < 0) return;
                 const at: usize = @intCast(mouse.row);
-                if (at >= self.hits.len) return;
+                if (at >= self.hits.len or !self.hover.targets[at].contains(mouse.col, mouse.row)) return;
                 self.selected = self.hits[at];
                 try self.pick(ctx);
             },
@@ -225,6 +231,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.hits = &.{};
+    self.hover.targets = &.{};
     const limit = ctx.max.size();
     if (!self.validate()) return vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = limit.width, .height = 0 });
     var indices: std.array_list.Managed(usize) = .init(ctx.arena);
@@ -255,10 +262,13 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     var widest: usize = 0;
     for (shown) |at| widest = @max(widest, self.menu.entries[at].id.len);
     self.hits = shown;
+    const targets = try ctx.arena.alloc(Hover.Rect, shown.len);
+    for (targets, 0..) |*target, y| target.* = .{ .row = @intCast(y), .width = size.width };
+    self.hover.targets = targets;
     for (shown, 0..) |at, y| {
         const entry = self.menu.entries[at];
         const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, size.width -| 3, self.unicode);
-        const style = if (self.selected == at) self.selection else self.ground;
+        const style = if (self.selected == at) self.selection else if (self.hover.contains(targets[y])) self.hover_style else self.ground;
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
         paint(ctx, surface, line.text, @intCast(y), @min(3, size.width), size.width, style);
     }
@@ -685,4 +695,60 @@ test "Model choice ASCII cursor projection stays bounded across Unicode prefixes
             try std.testing.expectEqual(case.caret, choice.editor.cursor);
         }
     };
+}
+
+test "Model choice hover and click follow full-width Panel matches without selecting overflow" {
+    const entries = blk: {
+        var all: [10]picker.Entry = undefined;
+        inline for (0..10) |i| all[i] = .{ .id = std.fmt.comptimePrint("model-{d}", .{i}), .known = false, .catalogued = false, .providers = .initOne(.codex) };
+        break :blk all;
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    for ([_]u16{ 46, 140 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var fixture: Fixture = .{};
+        var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 3 } } };
+        choice.open(&menu, .codex, "model-0");
+        var panel: Panel = .{ .title = "Title", .fields = &.{.{ .label = "Model", .value = "model-0" }} };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
+        _ = try panel.widget().draw(draw_ctx);
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try panel.widget().handleEvent(&events, .mouse_enter);
+        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
+        try std.testing.expect(panel.hover.pointing);
+        panel.custom_choice = choice.field(0);
+        _ = try panel.widget().draw(draw_ctx);
+        var mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(panel.custom_origin + 1), .button = .none, .type = .motion, .mods = .{} };
+        for (0..2) |_| {
+            try panel.widget().handleEvent(&events, .{ .mouse = mouse });
+            const surface = try panel.widget().draw(draw_ctx);
+            const child = surface.children[surface.children.len - 1].surface;
+            try std.testing.expectEqual(choice.hover_style, child.readCell(width - 1, 1).style);
+            try std.testing.expectEqual(@as(?usize, 0), choice.selected);
+            try std.testing.expectEqual(@as(usize, 0), panel.selected);
+            try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
+            try std.testing.expect(choice.hover.pointing);
+            try std.testing.expect(!panel.hover.pointing);
+        }
+        try panel.widget().handleEvent(&events, .mouse_leave);
+        const left = try panel.widget().draw(draw_ctx);
+        try std.testing.expectEqual(choice.ground, left.children[left.children.len - 1].surface.readCell(width - 1, 1).style);
+        try std.testing.expect(!choice.hover.pointing);
+        mouse.row = @intCast(panel.custom_origin + panel.custom_height - 1);
+        try panel.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expect(!choice.hover.pointing); // Quiet overflow is not a model.
+        mouse.button = .left;
+        mouse.type = .press;
+        try panel.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
+        mouse.row = @intCast(panel.custom_origin + 1);
+        mouse.col = @intCast(width);
+        try panel.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
+        mouse.col -= 1;
+        try panel.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqualStrings("model-1", fixture.picked.?);
+        for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+    }
 }

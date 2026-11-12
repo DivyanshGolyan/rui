@@ -19,11 +19,13 @@ const AppSettings = @import("app_settings.zig");
 const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
+const Hover = @import("widgets/Hover.zig");
 const host_identity = @import("host_identity.zig");
 const platform = @import("platform.zig");
 const host_restart = @import("host_restart.zig");
 const OverviewLines = @import("OverviewLines.zig");
 const Palette = @import("Palette.zig");
+const slash_commands = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
 const client = @import("client.zig");
@@ -499,10 +501,12 @@ app_input: InputArea = undefined,
 app_sessions: GroupedList = .{},
 session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_panel: GroupedList = .{},
+app_settings_line: OverviewLines.Settings = undefined,
 /// The counts line and its bands, which take the view-name click.
 app_header: OverviewLines.Header = undefined,
-app_palette: Palette = undefined,
+app_palette: Palette = .{ .shown = undefined },
 app_frame: u64 = 0,
+app_host_hover: Hover = .{},
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
 /// Where leaving a Session goes when Session links are followed.
@@ -724,9 +728,15 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = click }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.pasting } }));
     if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
+}
+
+/// A press on a command list row names the row as the frame drew it; the
+/// core decides what it does, as for every other click.
+fn appPaletteSelect(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands.Shown.Pick) anyerror!void {
+    try appClick(raw, ctx, .{ .command = pressed });
 }
 
 fn appNext(self: *Self, ctx: *vxfw.EventContext, next: ?Next) !void {
@@ -1041,9 +1051,9 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 break :sessions &self.app_sessions;
             },
         };
-        const settings = try ctx.arena.create(OverviewLines.Settings);
-        settings.* = .{ .selected = self.state.selected == .settings, .caps = self.caps, .userdata = self, .on_click = appClick };
-        prepared.tail = .{ .widget = settings.widget(), .rows = view.layout(&self.state).settings.len() };
+        self.app_settings_line.selected = self.state.selected == .settings;
+        self.app_settings_line.caps = self.caps;
+        prepared.tail = .{ .widget = self.app_settings_line.widget(), .rows = view.layout(&self.state).settings.len() };
         prepared.caps = self.caps;
         self.app_screen.content = prepared;
         list = prepared;
@@ -1065,7 +1075,13 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_screen.tail = null;
         self.app_screen.overlay = null;
         if (self.state.commands) |*shown| {
-            self.app_palette = .{ .shown = shown, .style = normal, .quiet = quiet, .method = self.caps.width };
+            self.app_palette.shown = shown;
+            self.app_palette.style = normal;
+            self.app_palette.quiet = quiet;
+            self.app_palette.hover_style = @import("widget_style.zig").of(self.caps, .{ .background = .hover });
+            self.app_palette.method = self.caps.width;
+            self.app_palette.userdata = self;
+            self.app_palette.on_select = appPaletteSelect;
             self.app_screen.overlay = self.app_palette.widget();
         }
     }
@@ -1138,6 +1154,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" }, .facts_at = .bottom };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
+    self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
     errdefer self.state.deinit();
@@ -1949,13 +1966,21 @@ fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
 
 fn hostNotice(raw: *anyopaque) ?vxfw.Widget {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.hostState() == .ready and self.host_launch == null) return null;
+    if (self.hostState() == .ready and self.host_launch == null) {
+        self.app_host_hover.targets = &.{};
+        return null;
+    }
     return .{ .userdata = self, .drawFn = drawHostNotice, .eventHandler = hostNoticeEvent };
 }
 
 fn hostNoticeEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.app_host_hover.handleEvent(ctx, input);
     if (input == .mouse and input.mouse.button == .left and input.mouse.type == .press) {
-        _ = try requestHostStart(raw, ctx);
+        for (self.app_host_hover.targets) |target| if (target.contains(input.mouse.col, input.mouse.row)) {
+            _ = try requestHostStart(raw, ctx);
+            break;
+        };
         ctx.consumeEvent();
     }
 }
@@ -1985,6 +2010,16 @@ fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
         .failure => .failure,
     } }) };
     var surface = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width, .height = @min(1, ctx.max.height.?) }));
+    const target: Hover.Rect = .{ .row = 0, .width = surface.size.width, .height = surface.size.height };
+    self.app_host_hover.targets = if (self.hostNext() != null and surface.size.width > 0 and surface.size.height > 0) try ctx.arena.dupe(Hover.Rect, &.{target}) else &.{};
+    if (self.app_host_hover.targets.len != 0 and self.app_host_hover.contains(target)) {
+        const hover = @import("widget_style.zig").of(self.caps, .{ .background = .hover });
+        for (surface.buffer) |*cell| {
+            cell.style.bg = hover.bg;
+            cell.style.reverse = hover.reverse;
+            cell.style.ul_style = hover.ul_style;
+        }
+    }
     surface.widget = hostNotice(self).?;
     return surface;
 }
@@ -6170,7 +6205,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         ctx.redraw = false;
                         // The list's semantic selection has one presentation
                         // transition, independent of the later departure result.
-                        try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .open = target } }));
+                        try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .target = .{ .open = target } } }));
                         try std.testing.expect(!ctx.quit);
                         try std.testing.expect(ctx.redraw);
                         try std.testing.expect(!overview.root.settings_open);
@@ -6563,15 +6598,15 @@ test "App settings Model filters live choices and saves the next Session at both
         defer rig.close();
         const overview = rig.overview;
         // Core opening intents share one read; snapshots never enqueue.
-        try std.testing.expect((try overview.event(.{ .clicked = .settings })).? == .open_settings);
+        try std.testing.expect((try overview.event(.{ .clicked = .{ .target = .settings } })).? == .open_settings);
         const initial = modelsSnapshot(overview);
         try std.testing.expect(initial.menu == null);
         _ = modelsSnapshot(overview);
-        try std.testing.expect((try overview.event(.{ .clicked = .settings })).? == .open_settings);
+        try std.testing.expect((try overview.event(.{ .clicked = .{ .target = .settings } })).? == .open_settings);
         try std.testing.expectEqual(@as(usize, 1), overview.job_count);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), Seen.now.model_lists);
-        try std.testing.expect(try overview.event(.{ .clicked = .new_session }) == null);
+        try std.testing.expect(try overview.event(.{ .clicked = .{ .target = .new_session } }) == null);
         try std.testing.expect(try overview.event(.{ .models = .{ .menu = try model_picker.testMenu(&.{
             .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
             .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-5.5\ngpt-6-luna\nfuture-chat\n" } } },
@@ -6754,4 +6789,265 @@ test "chat info Archive backend forwards exact core ledger admission through the
             try std.testing.expectEqual(@import("chat_info.zig").SaveState.saved, backend.state(backend.context));
         }
     };
+}
+
+test "Overview mouse Settings hover persists across frames and never changes selection or focus" {
+    const rig = try openListed();
+    defer rig.close();
+    var plain = try rig.shown(80, 24);
+    defer plain.deinit();
+    const row: u16 = for (0..24) |y| {
+        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "  Settings")) break @intCast(y);
+    } else return error.TestExpectedSettingsRow;
+    const selection = rig.overview.state.selected;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try rig.overview.app_settings_line.widget().handleEvent(&ctx, .mouse_enter);
+    try rig.overview.app_settings_line.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    var hovered = try rig.shown(80, 24);
+    defer hovered.deinit();
+    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).bg, hovered.screen.readCell(4, row).?.style.bg);
+    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).reverse, hovered.screen.readCell(4, row).?.style.reverse);
+    try std.testing.expectEqual(selection, rig.overview.state.selected);
+    for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+    try rig.overview.app_settings_line.widget().handleEvent(&ctx, .mouse_leave);
+    var left = try rig.shown(80, 24);
+    defer left.deinit();
+    try std.testing.expectEqual(plain.screen.readCell(4, row).?.style, left.screen.readCell(4, row).?.style);
+    try std.testing.expect(try rig.click(4, row, 80, 24) == null);
+    try std.testing.expect(rig.overview.root.settings_open);
+}
+
+test "Overview mouse Palette hover survives redraw and a click follows Enter except during paste" {
+    const rig = try openListed();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/") == null);
+    var plain = try rig.shown(80, 24);
+    defer plain.deinit();
+    const row: u16 = for (0..24) |y| {
+        if (std.mem.startsWith(u8, try plain.line(@intCast(y)), "/rename")) break @intCast(y);
+    } else return error.TestExpectedPaletteRow;
+    const index = for (rig.overview.state.commands.?.list.shown(), 0..) |entry, i| {
+        if (std.mem.startsWith(u8, entry.shown, "/rename")) break i;
+    } else return error.TestExpectedRenameCommand;
+    const highlight = rig.overview.state.commands.?.highlight;
+    const selection = rig.overview.state.selected;
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    const local_row: i16 = @intCast(index - rig.overview.app_palette.first);
+    try rig.overview.app_palette.widget().handleEvent(&ctx, .mouse_enter);
+    try rig.overview.app_palette.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 4, .row = local_row, .button = .none, .type = .motion, .mods = .{} } });
+    var hovered = try rig.shown(80, 24);
+    defer hovered.deinit();
+    try std.testing.expect(highlight != index);
+    try std.testing.expect(!hovered.screen.readCell(4, row).?.style.reverse);
+    try std.testing.expectEqual(@import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover }).bg, hovered.screen.readCell(4, row).?.style.bg);
+    try std.testing.expect(hovered.screen.readCell(4, row - @as(u16, @intCast(local_row)) + @as(u16, @intCast(highlight - rig.overview.app_palette.first))).?.style.reverse);
+    try std.testing.expectEqual(highlight, rig.overview.state.commands.?.highlight);
+    try std.testing.expectEqual(selection, rig.overview.state.selected);
+    for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+    try rig.overview.app_palette.widget().handleEvent(&ctx, .mouse_leave);
+    var left = try rig.shown(80, 24);
+    defer left.deinit();
+    try std.testing.expectEqual(plain.screen.readCell(4, row).?.style, left.screen.readCell(4, row).?.style);
+    rig.overview.root.pasting = true;
+    try std.testing.expect(try rig.click(4, row, 80, 24) == null);
+    try std.testing.expectEqualStrings("/", rig.overview.composerDraft().bytes);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    rig.overview.root.pasting = false;
+    try std.testing.expect(try rig.click(4, row, 80, 24) == null);
+    try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
+    try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/rename"));
+}
+
+test "Overview mouse Palette click on a row drawn before the draft changed runs nothing" {
+    const rig = try openListed();
+    defer rig.close();
+    try std.testing.expect(try rig.press("/") == null);
+    var shown = try rig.shown(80, 24);
+    defer shown.deinit();
+    const row: u16 = for (0..24) |y| {
+        if (std.mem.startsWith(u8, try shown.line(@intCast(y)), "/archive")) break @intCast(y);
+    } else return error.TestExpectedArchiveRow;
+    // The same frame, as the widgets a press lands on hold it.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const frame = try rig.overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} });
+    // `s` arrives before the next frame: `/s` lists /sessions where /archive was.
+    try std.testing.expect(try rig.press("s") == null);
+    try std.testing.expectEqualStrings("/s", rig.overview.composerDraft().bytes);
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    try app_events.mouse(&ctx, frame, .{ .col = 1, .row = @intCast(row), .button = .left, .type = .press, .mods = .{} });
+    try std.testing.expect(!ctx.quit);
+    try std.testing.expectEqualStrings("/s", rig.overview.composerDraft().bytes);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
+}
+
+test "Overview mouse New Session forwards blank whitespace task command and paste drafts" {
+    for ([_][]const u8{ "", "   ", "a mouse task", "/configure --reasoning-effort high" }) |draft| for ([_]bool{ false, true }) |pasting| {
+        const rig = try openListed();
+        defer rig.close();
+        try std.testing.expect(try rig.press(draft) == null);
+        var shown = try rig.shown(80, 24);
+        defer shown.deinit();
+        const row: u16 = for (0..24) |y| {
+            if (std.mem.indexOf(u8, try shown.line(@intCast(y)), "+ New Session") != null) break @intCast(y);
+        } else return error.TestExpectedNewRow;
+        rig.overview.root.pasting = pasting;
+        try std.testing.expect(try rig.click(4, row, 80, 24) == null);
+        try std.testing.expect(try rig.settle() == null);
+        const starts = !pasting and std.mem.eql(u8, draft, "a mouse task");
+        try std.testing.expectEqual(@as(usize, if (starts) 1 else 0), Seen.now.starts);
+        try std.testing.expectEqual(@as(usize, if (starts) 1 else 0), Seen.now.conversations);
+        if (starts) try std.testing.expectEqualStrings(draft, Seen.now.start.text.slice());
+        if (!pasting and std.mem.startsWith(u8, draft, "/configure")) {
+            try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
+            var args: [2 * view.start_options.len][]const u8 = undefined;
+            const held = rig.overview.state.settings.args(&args);
+            try std.testing.expectEqual(@as(usize, 2), held.len);
+            try std.testing.expectEqualStrings("--reasoning-effort", held[0]);
+            try std.testing.expectEqualStrings("high", held[1]);
+        }
+    };
+}
+
+test "Overview mouse Palette activates fixed choices and skills through the same Enter policy" {
+    for ([_][]const u8{ "/configure --permission-mode ", "use /rec" }) |draft| {
+        const keyed = try openListed();
+        defer keyed.close();
+        try std.testing.expect(try keyed.press(draft) == null);
+        try std.testing.expect(try keyed.settle() == null);
+        var key_frame = try keyed.shown(80, 24);
+        defer key_frame.deinit();
+        try std.testing.expect(keyed.overview.state.commands != null);
+        const index = keyed.overview.state.commands.?.list.count - 1;
+        for (0..index) |_| try std.testing.expect(try keyed.press("\x1b[B") == null);
+        try std.testing.expect(try keyed.press("\r") == null);
+        const expected = try std.testing.allocator.dupe(u8, keyed.overview.composerDraft().bytes);
+        defer std.testing.allocator.free(expected);
+        const clicked = try openListed();
+        defer clicked.close();
+        try std.testing.expect(try clicked.press(draft) == null);
+        try std.testing.expect(try clicked.settle() == null);
+        var click_frame = try clicked.shown(80, 24);
+        defer click_frame.deinit();
+        const entry = clicked.overview.state.commands.?.list.entries[index];
+        const row: u16 = for (0..24) |y| {
+            if (std.mem.startsWith(u8, try click_frame.line(@intCast(y)), entry.shown)) break @intCast(y);
+        } else return error.TestExpectedPaletteChoice;
+        try std.testing.expect(try clicked.click(1, row, 80, 24) == null);
+        try std.testing.expectEqualStrings(expected, clicked.overview.composerDraft().bytes);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.starts);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+    }
+}
+
+test "Overview mouse Host start and retry hover preserve foreground selection and focus and click invokes the action" {
+    for ([_]bool{ false, true }) |retry| for ([_]view.Caps.Depth{ .none, .direct }) |depth| {
+        const ops = HostRecovery.operations();
+        HostRecovery.availability = .stopped;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.caps.depth = depth;
+        overview.queue(.host);
+        try std.testing.expect(try rig.settle() == null);
+        if (retry) {
+            HostRecovery.fail_start = true;
+            try std.testing.expect(try rig.press("r") == null);
+            try std.testing.expect(try rig.settle() == null);
+            HostRecovery.fail_start = false;
+        }
+        const starts = HostRecovery.starts;
+        try std.testing.expectEqual(@as(?HostLaunch.Next, if (retry) .retry else .start), overview.hostNext());
+        const host_widget = hostNotice(overview).?;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
+        const plain = try host_widget.draw(draw_ctx);
+        const selected = overview.state.selected;
+        var events = rig.context();
+        defer events.cmds.deinit(std.testing.allocator);
+        try host_widget.handleEvent(&events, .mouse_enter);
+        try host_widget.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
+        const hovered = try host_widget.draw(draw_ctx);
+        const hover = @import("widget_style.zig").of(overview.caps, .{ .background = .hover });
+        for (hovered.buffer, plain.buffer) |cell, before| {
+            try std.testing.expectEqual(hover.bg, cell.style.bg);
+            try std.testing.expectEqual(hover.ul_style, cell.style.ul_style);
+            try std.testing.expectEqual(before.style.fg, cell.style.fg);
+        }
+        try std.testing.expect(overview.app_host_hover.pointing);
+        try std.testing.expectEqual(selected, overview.state.selected);
+        try std.testing.expectEqual(starts, HostRecovery.starts);
+        for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+        try host_widget.handleEvent(&events, .mouse_leave);
+        const left = try host_widget.draw(draw_ctx);
+        try std.testing.expectEqual(plain.readCell(2, 0).style, left.readCell(2, 0).style);
+        // Clipping removes the target, including from an old widget handle.
+        for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 60, .height = 0 } }) |size| {
+            _ = try host_widget.draw(draw_ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
+            try std.testing.expectEqual(@as(usize, 0), overview.app_host_hover.targets.len);
+            try host_widget.handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 0, .button = .left, .type = .press, .mods = .{} } });
+            try std.testing.expectEqual(starts, HostRecovery.starts);
+        }
+        var frame = try rig.shown(80, 24);
+        defer frame.deinit();
+        const row: u16 = for (0..24) |y| {
+            if (std.mem.indexOf(u8, try frame.line(@intCast(y)), "Host stopped") != null) break @intCast(y);
+        } else return error.TestExpectedHostLine;
+        try std.testing.expect(try rig.click(2, row, 80, 24) == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(starts + 1, HostRecovery.starts);
+        try std.testing.expect(hostNotice(overview) == null);
+        try std.testing.expectEqual(@as(usize, 0), overview.app_host_hover.targets.len);
+    };
+}
+
+test "Overview mouse Host line without a start or retry has no hover or click action" {
+    const Case = enum { paused, stopping, upgrading, starting, incompatible, store_identity, ready_warning };
+    for (std.enums.values(Case)) |case| {
+        const ops = HostRecovery.operations();
+        HostRecovery.availability = switch (case) {
+            .paused => .paused,
+            .stopping => .stopping,
+            .ready_warning => .ready,
+            else => .stopped,
+        };
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.queue(.host);
+        try std.testing.expect(try rig.settle() == null);
+        switch (case) {
+            .upgrading => overview.state.upgrade.after = .blocked,
+            .starting => overview.queue(.start_host),
+            .incompatible => overview.host_launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } },
+            .store_identity => overview.host_launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } },
+            .ready_warning => overview.host_launch = .{ .ready = .invalid_openai_base_url },
+            else => {},
+        }
+        try std.testing.expectEqual(null, overview.hostNext());
+        const host_widget = hostNotice(overview).?;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 1 }, .cell_size = .{} };
+        const plain = try host_widget.draw(draw_ctx);
+        var events = rig.context();
+        defer events.cmds.deinit(std.testing.allocator);
+        try host_widget.handleEvent(&events, .mouse_enter);
+        try host_widget.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
+        const hovered = try host_widget.draw(draw_ctx);
+        try std.testing.expectEqual(plain.readCell(2, 0).style, hovered.readCell(2, 0).style);
+        try std.testing.expect(!overview.app_host_hover.pointing);
+        try std.testing.expectEqual(@as(usize, 0), overview.app_host_hover.targets.len);
+        try host_widget.handleEvent(&events, .mouse_leave);
+        try host_widget.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqual(@as(usize, 0), HostRecovery.starts);
+        for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+    }
 }

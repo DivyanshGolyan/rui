@@ -145,11 +145,13 @@ fn bind(self: *Self) void {
     self.model_choice.unicode = caps.unicode;
     self.panel.ground = widget_style.of(caps, .{ .background = .bar });
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
+    self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
+    self.model_choice.hover_style = self.panel.hover_style;
     self.model_choice.quiet = self.panel.quiet;
     self.panel.title_widget = .{ .userdata = self, .drawFn = drawTitle };
     self.panel.custom_choice = if (self.model_choice.active) self.model_choice.field(4) else null;
@@ -1367,4 +1369,45 @@ test "Chat info natural body matches the mock grows by actual Model rows and shr
         try std.testing.expectEqual(base_height + @as(u16, if (width == 46) 2 else 0), failed.size.height);
         try std.testing.expectEqual(width == 46, page.panel.stacked_actions);
     };
+}
+
+test "Chat info hover follows editable fields and action click regions without changing selection" {
+    for ([_]u16{ 46, 99 }) |width| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
+        _ = try page.widget().draw(draw_ctx);
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try page.widget().handleEvent(&events, .mouse_enter);
+        for (0..page.fields.len) |index| {
+            const selectable = index != 3 and index != 5;
+            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(2 + index), .button = .none, .type = .motion, .mods = .{} };
+            try page.widget().handleEvent(&events, .{ .mouse = mouse });
+            const drawn = try page.widget().draw(draw_ctx);
+            try std.testing.expectEqual(selectable, page.panel.hover.pointing);
+            try std.testing.expectEqual(if (index == 0) page.panel.selection else if (selectable) page.panel.hover_style else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(2 + index)).style);
+            try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
+            try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
+        }
+        for ([_]u16{ 3, 14, 26 }) |col| {
+            try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 9, .button = .none, .type = .motion, .mods = .{} } });
+            const drawn = try page.widget().draw(draw_ctx);
+            try std.testing.expectEqual(page.panel.hover_style, drawn.children[0].surface.readCell(col, 9).style);
+            try std.testing.expect(page.panel.hover.pointing);
+            try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
+        }
+        try page.widget().handleEvent(&events, .mouse_leave);
+        try std.testing.expect(!page.panel.hover.pointing);
+        for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+        // The same Permissions region opens the same inline choices as Enter.
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 3, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqual(@as(usize, 1), page.panel.choice.?.field);
+        _ = try page.widget().draw(draw_ctx);
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 4, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqual(@as(@FieldType(status.Session, "permission"), .bypass), fixture.edit.?.permission);
+    }
 }

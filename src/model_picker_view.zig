@@ -48,9 +48,10 @@ pub const Saved = struct {
     provider: picker.Provider,
 };
 
-/// A row for GroupedList. Model indices refer to the Menu, not this list;
-/// `menu.entries.len` names the owned unlisted choice. Prose is not selectable.
-pub const Line = struct { text: []const u8, segments: []const overview.Segment, model: ?usize = null, heading: bool = false };
+/// A row for GroupedList owns the model identity and controls it drew.
+/// Prose is not selectable.
+pub const Control = struct { start: u16, end: u16, target: Click.Target };
+pub const Line = struct { text: []const u8, segments: []const overview.Segment, model: ?Choice = null, heading: bool = false, controls: []const Control = &.{} };
 pub const Lines = struct { rows: []Line, selected: ?u32 };
 pub const Read = enum { unread, read, unanswered, invalid };
 
@@ -127,7 +128,7 @@ pub const Rows = struct {
         const buffer = try arena.alloc(u8, @max(entry.id.len, self.widest) + 256);
         const formatted = format(buffer, entry, selected_row, highlighted, self.widest, self.columns, self.method, self.unicode);
         const text = try arena.dupe(u8, formatted.text);
-        return .{ .text = text, .segments = try segments(arena, text, formatted), .model = index };
+        return .{ .text = text, .segments = try segments(arena, text, formatted), .model = Choice.of(entry, selected_row), .controls = try arena.dupe(Control, formatted.controls[0..formatted.control_count]) };
     }
 };
 
@@ -231,7 +232,7 @@ fn cells(text: []const u8) usize {
 }
 
 const Range = struct { start: usize, end: usize, style: overview.Style };
-const Formatted = struct { text: []const u8, ranges: [3]?Range = @splat(null) };
+const Formatted = struct { text: []const u8, ranges: [3]?Range = @splat(null), controls: [4]Control = undefined, control_count: usize = 0 };
 
 fn simpleLine(arena: std.mem.Allocator, text: []const u8, heading: bool) !Line {
     const spans = try arena.alloc(overview.Segment, 1);
@@ -262,6 +263,8 @@ fn segments(arena: std.mem.Allocator, text: []const u8, formatted: Formatted) ![
 fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, highlighted: bool, id_width: usize, columns: Columns, method: gwidth.Method, unicode: bool) Formatted {
     var out: std.Io.Writer = .fixed(buffer);
     var ranges: [3]?Range = @splat(null);
+    var controls: [4]Control = undefined;
+    var control_count: usize = 0;
     const mark = if (unicode) "✓" else "+";
     out.writeAll(if (row.current) mark else " ") catch unreachable;
     for (0..columns.mark_gap) |_| out.writeByte(' ') catch unreachable;
@@ -295,6 +298,11 @@ fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, highlighted: bool,
                 const control_start = out.buffered().len;
                 if (unicode) out.print("‹ {s} ›", .{@tagName(effort)}) catch unreachable else out.print("< {s} >", .{@tagName(effort)}) catch unreachable;
                 ranges[1] = .{ .start = control_start, .end = out.buffered().len, .style = .{ .colour = .strong, .bold = true } };
+                const start_col: u16 = @intCast(gwidth.gwidth(out.buffered()[0..control_start], method));
+                const end_col: u16 = @intCast(gwidth.gwidth(out.buffered(), method));
+                controls[control_count] = .{ .start = start_col, .end = start_col + 1, .target = .lower_effort };
+                controls[control_count + 1] = .{ .start = end_col - 1, .end = end_col, .target = .higher_effort };
+                control_count += 2;
             } else out.print("  {s}", .{@tagName(effort)}) catch unreachable;
         }
         while (gwidth.gwidth(out.buffered(), method) - start < 11) out.writeByte(' ') catch unreachable;
@@ -302,6 +310,7 @@ fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, highlighted: bool,
     var offered = (if (columns.sign_ins) row.providers else picker.Providers.empty).iterator();
     while (offered.next()) |provider| {
         if (!columns.all_sign_ins and provider != row.provider) continue;
+        const control_start_col = gwidth.gwidth(out.buffered(), method) + 2;
         const boxed = highlighted and row.providers.count() > 1 and provider == row.provider;
         if (boxed) {
             out.writeAll("  ") catch unreachable;
@@ -309,8 +318,12 @@ fn format(buffer: []u8, entry: picker.Entry, row: picker.Row, highlighted: bool,
             out.print("[{s}]", .{provider.signIn()}) catch unreachable;
             ranges[2] = .{ .start = control_start, .end = out.buffered().len, .style = .{ .colour = .strong, .bold = true } };
         } else out.print("  {s}", .{provider.signIn()}) catch unreachable;
+        if (row.providers.count() > 1) {
+            controls[control_count] = .{ .start = @intCast(control_start_col), .end = @intCast(gwidth.gwidth(out.buffered(), method)), .target = .{ .sign_in = provider } };
+            control_count += 1;
+        }
     }
-    return .{ .text = out.buffered(), .ranges = ranges };
+    return .{ .text = out.buffered(), .ranges = ranges, .controls = controls, .control_count = control_count };
 }
 
 /// Opening highlights the saved default when offered and matching, without
@@ -419,7 +432,8 @@ test "model picker view opens on the saved default without changing row order" {
         try std.testing.expectEqualStrings(id, step(&menu, "", defaults, &choice, .save).?.model);
         const shown = try lines(arena.allocator(), &menu, "", defaults, choice, 100);
         var previous: ?usize = null;
-        for (shown.rows) |line| if (line.model) |index| {
+        for (shown.rows) |line| if (line.model) |model| {
+            const index = model.index(&menu);
             if (previous) |old| try std.testing.expect(old < index);
             previous = index;
         };
@@ -571,8 +585,8 @@ test "model picker view drops other efforts without losing the selected model" {
     const selected = select(&menu, "", .{}, menu.find("openai/gpt-4.1")).?;
     const narrow = try lines(arena.allocator(), &menu, "", .{}, selected, 30);
     var selected_visible = false;
-    for (narrow.rows) |line| if (line.model) |index| {
-        if (index == selected.index(&menu)) {
+    for (narrow.rows) |line| if (line.model) |model| {
+        if (model.index(&menu) == selected.index(&menu)) {
             try std.testing.expect(std.mem.indexOf(u8, line.text, "openai/gpt-4.1") != null);
             selected_visible = true;
         } else try std.testing.expect(std.mem.indexOf(u8, line.text, "low") == null);
@@ -668,15 +682,15 @@ fn expectTypedAdmission(menu: *const picker.Menu, words: []const u8, admitted: b
     try std.testing.expectEqual(admitted, plan.typed_row);
     for (0..plan.count) |at| {
         const line = try plan.row(arena.allocator(), at);
-        try std.testing.expectEqual(admitted, line.model.? == menu.entries.len);
+        try std.testing.expectEqual(admitted, line.model.?.index(menu) == menu.entries.len);
     }
     const selected = try plan.row(arena.allocator(), plan.selected.?);
-    try std.testing.expectEqual(admitted, selected.model.? == menu.entries.len);
+    try std.testing.expectEqual(admitted, selected.model.?.index(menu) == menu.entries.len);
     const saved = step(menu, words, defaults, &choice, .save).?;
     try std.testing.expectEqualStrings(if (admitted) words else "gpt-6.1-sol", saved.model);
     try std.testing.expect(model_catalog.validModelSyntax(saved.model));
     // Hit testing and keyboard actions consume the same effective query.
-    const clicked = step(menu, words, defaults, &choice, .{ .click = .{ .index = selected.model.?, .target = .model } }).?;
+    const clicked = step(menu, words, defaults, &choice, .{ .click = .{ .index = selected.model.?.index(menu), .target = .model } }).?;
     try std.testing.expectEqualStrings(saved.model, clicked.model);
     _ = step(menu, words, defaults, &choice, .next);
     try std.testing.expectEqualStrings(if (admitted) words else "gpt-6.1-terra", choice.?.id.slice());
@@ -721,7 +735,7 @@ test "model picker domain accounts for overflow at every selection height and wi
                     continue;
                 }
                 const shown = try plan.row(arena.allocator(), plan.selected.?);
-                try std.testing.expectEqual(@as(?usize, selected), shown.model);
+                try std.testing.expectEqual(selected, shown.model.?.index(&menu));
                 if (width >= 40) try std.testing.expect(std.mem.indexOf(u8, shown.text, entry.id) != null);
                 if (height < 3) continue;
                 var visible: usize = 0;
@@ -762,7 +776,7 @@ test "model picker domain shows provider columns only across sign-ins and short 
         const plan = try rows(arena.allocator(), &menu, "", .{}, open(&menu, "", .{}), 100, .unicode, true, .read);
         for (0..plan.count) |at| {
             const row = try plan.row(arena.allocator(), at);
-            const id = menu.entries[row.model.?].id;
+            const id = row.model.?.id.slice();
             const provider_shown = std.mem.indexOf(u8, row.text, "API key") != null or std.mem.indexOf(u8, row.text, "ChatGPT") != null;
             try std.testing.expectEqual(both, provider_shown);
             const limit: ?[]const u8 = if (std.mem.eql(u8, id, "gpt-6.1-sol")) "1M" else if (std.mem.eql(u8, id, "gpt-5.3-codex")) "400K" else null;
@@ -793,4 +807,60 @@ test "model picker shared ASCII model rows preserve compact mark gap and truncat
     try std.testing.expect(std.mem.startsWith(u8, unicode.text, "✓ gpt-6.1-sol"));
     const ascii = try modelLine(arena.allocator(), entry, row, entry.id.len, 99, false);
     try std.testing.expect(std.mem.startsWith(u8, ascii.text, "+ gpt-6.1-sol"));
+}
+
+test "model picker controls use printed cell columns for effort and every offered sign-in" {
+    var menu = try picker.testMenu(&.{
+        .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } },
+    });
+    defer menu.deinit(std.testing.allocator);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const defaults: picker.Defaults = .{ .provider = .codex, .effort = .high };
+    const choice = open(&menu, "", defaults);
+    for ([_]bool{ true, false }) |unicode| {
+        const plan = try rows(arena.allocator(), &menu, "", defaults, choice, 100, .unicode, unicode, .read);
+        const line = try plan.row(arena.allocator(), 0);
+        try std.testing.expectEqual(@as(usize, 4), line.controls.len);
+        const lower_byte = std.mem.indexOf(u8, line.text, if (unicode) "‹" else "<").?;
+        const higher_byte = std.mem.indexOf(u8, line.text, if (unicode) "›" else ">").?;
+        try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..lower_byte])), .end = @intCast(cells(line.text[0..lower_byte]) + 1), .target = .lower_effort }, line.controls[0]);
+        try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..higher_byte])), .end = @intCast(cells(line.text[0..higher_byte]) + 1), .target = .higher_effort }, line.controls[1]);
+        const chat = std.mem.indexOf(u8, line.text, "[ChatGPT]").?;
+        const api = std.mem.indexOf(u8, line.text, "API key").?;
+        try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..chat])), .end = @intCast(cells(line.text[0..chat]) + 9), .target = .{ .sign_in = .codex } }, line.controls[2]);
+        try std.testing.expectEqual(Control{ .start = @intCast(cells(line.text[0..api])), .end = @intCast(cells(line.text[0..api]) + 7), .target = .{ .sign_in = .openai } }, line.controls[3]);
+    }
+}
+
+test "model picker dropped columns keep remaining control hits on their printed labels" {
+    var menu = try picker.testMenu(&.{
+        .{ .provider = .codex, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } },
+        .{ .provider = .openai, .list = .{ .live = .{ .bytes = "gpt-6.1-sol\n" } } },
+    });
+    defer menu.deinit(std.testing.allocator);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const defaults: picker.Defaults = .{ .provider = .codex, .effort = .high };
+    const choice = open(&menu, "", defaults);
+    for ([_]usize{ 12, 32, 46, 80 }) |width| {
+        const plan = try rows(arena.allocator(), &menu, "", defaults, choice, width, .unicode, true, .read);
+        const line = try plan.row(arena.allocator(), 0);
+        for (line.controls) |control| {
+            const label: []const u8 = switch (control.target) {
+                .model => return error.TestUnexpectedResult,
+                .lower_effort => "‹",
+                .higher_effort => "›",
+                .sign_in => |provider| if (provider == .codex) "[ChatGPT]" else "API key",
+            };
+            const byte = std.mem.indexOf(u8, line.text, label).?;
+            const column = cells(line.text[0..byte]);
+            try std.testing.expectEqual(@as(u16, @intCast(column)), control.start);
+            try std.testing.expectEqual(@as(u16, @intCast(column + cells(label))), control.end);
+        }
+        if (!plan.columns.all_sign_ins) for (line.controls) |control| {
+            if (control.target == .sign_in) try std.testing.expectEqual(picker.Provider.codex, control.target.sign_in);
+        };
+    }
 }

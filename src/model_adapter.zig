@@ -21,6 +21,26 @@ const ScratchBudget = provider.ScratchBudget;
 const PreparedRequest = provider.PreparedRequest;
 pub const HistoryMemos = history_memo.Table;
 
+/// What `memos` remembers of each Session's last request, for the
+/// admission that starts its next one: that request's history read then
+/// rides the admission's commit (`store.HistoricalStart`).
+pub fn remembered(memos: *HistoryMemos) store.HistoricalStart.Remembered {
+    return .{ .context = memos, .of = rememberedOf };
+}
+
+fn rememberedOf(context: *anyopaque, session: []const u8) ?store.HistoricalResume {
+    const memos: *const HistoryMemos = @ptrCast(@alignCast(context));
+    const slot = history_memo.sessionSlot(memos.entries, session) orelse return null;
+    const memo = &memos.entries[slot].memo.?;
+    return .{
+        .after_position = memo.history_position,
+        .group_cursor = memo.tool_group_cursor,
+        .keys = .{ .floor = memo.view.floor, .first_message = memo.view.first_message, .base = memo.view.base, .anchor = memo.key.anchor },
+        .tool_set = memo.view.tool_set,
+        .tools = if (codecs.declaresTools(memo.carry)) .declared else .all,
+    };
+}
+
 test {
     _ = history_memo;
 }
@@ -1197,6 +1217,10 @@ pub const Preparation = struct {
             .admission_position = self.view.admissionPosition(),
             .history_position = self.state.history_position,
             .tool_group_cursor = self.view.toolGroupCursor(),
+            .view = view: {
+                const keys = self.view.resumeKeys();
+                break :view .{ .floor = keys.floor, .first_message = keys.first_message, .base = keys.base, .tool_set = self.view.currentDeclaration().tool_set_id };
+            },
             .carry = self.carry,
             .length = self.writer.offset - span.start,
             .digest = undefined,

@@ -35,6 +35,10 @@ pub const Layout = struct {
 
 pub const representable = display_text.representable;
 
+/// Test builds count every `lineRows` measurement, so cost tests assert
+/// how layout work grows without timing it. Release builds keep no counter.
+pub var measured_lines: if (@import("builtin").is_test) usize else void = if (@import("builtin").is_test) 0 else {};
+
 /// Rows used by a print that ended at `result`. A row is used once text
 /// reaches it; an exact fill leaves the next row unused. Overflow means
 /// that at least one more row remains, even when the last visible row filled.
@@ -662,6 +666,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
         }
 
         pub fn lineRows(self: *const Self, layout: Layout, offset: usize) u16 {
+            if (@import("builtin").is_test) measured_lines += 1;
             var screen: vaxis.Screen = undefined;
             return self.printLine(layout.measuring(&screen), 0, offset, false, false, .{}, .{});
         }
@@ -680,6 +685,37 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
             }
             return .{ .rows = @intCast(row), .next = .end };
         }
+
+        /// Rows from `from` down, in one forward pass that measures each line
+        /// once: the nth `next` is `down(layout, from, n)` while `measure`
+        /// from `from` still counts row n. A frame walks every row through
+        /// this, not through repeated `down`, which would make it quadratic.
+        pub fn rowsFrom(self: *const Self, layout: Layout, from: Position) Rows {
+            return .{ .document = self, .layout = layout, .position = if (self.text().len == 0) null else self.clamp(layout, from) };
+        }
+
+        /// Borrows the document; any edit invalidates it.
+        pub const Rows = struct {
+            document: *const Self,
+            layout: Layout,
+            position: ?Position,
+            /// The current line's rows, measured on its first row.
+            used: ?u16 = null,
+
+            /// The next row, or null below the text.
+            pub fn next(self: *Rows) ?Position {
+                const position = self.position orelse return null;
+                const used = self.used orelse self.document.lineRows(self.layout, position.offset);
+                self.used = used;
+                if (position.row + 1 < used) {
+                    self.position.?.row += 1;
+                } else {
+                    self.position = if (self.document.nextLine(position.offset)) |offset| .{ .offset = offset } else null;
+                    self.used = null;
+                }
+                return position;
+            }
+        };
 
         /// Rows from `from` that fit `height`, without drawing.
         pub fn measure(self: *const Self, layout: Layout, from: Position, height: u16) struct { rows: usize, next: Position } {
@@ -1689,4 +1725,40 @@ test "one line band owner covers adjacent code, selected tool, output and plain 
             }
         }
     }
+}
+
+test "Document rows answer down within measure for every row from every first row" {
+    const document = try std.testing.allocator.create(Document);
+    defer std.testing.allocator.destroy(document);
+    document.* = .{ .sidenotes = true };
+    try document.append("› a long user line that wraps \x1b[8m14:20\x1b[0m\n\n" ++ tool_fold.heading_marker ++ "$ Bash done\n  wide 漢字漢字漢字 cells wrap\n\x1b[2;8m┄ 9 more lines\x1b[0m\nlast");
+    try document.prepare();
+    for ([_]u16{ 1, 3, 7, 16, 80 }) |width| {
+        const layout: Layout = .{ .width = width, .method = .unicode };
+        const total = document.measure(layout, .{}, std.math.maxInt(u16)).rows;
+        var from: ?Position = .{};
+        while (from) |start| : (from = if (document.measure(layout, start, 2).rows == 2) document.down(layout, start, 1) else null) {
+            var rows = document.rowsFrom(layout, start);
+            for (0..total + 2) |row| {
+                const expected = if (document.measure(layout, start, @intCast(row + 1)).rows > row) document.down(layout, start, row) else null;
+                try std.testing.expectEqual(expected, rows.next());
+            }
+        }
+    }
+    // A tall document from its top, and an empty one.
+    const tall = try std.testing.allocator.create(Document);
+    defer std.testing.allocator.destroy(tall);
+    tall.* = .{};
+    for (0..300) |line| try tall.append(if (line % 4 == 0) "words that wrap at five\n" else "x\n");
+    try tall.prepare();
+    const narrow: Layout = .{ .width = 5, .method = .unicode };
+    const total = tall.measure(narrow, .{}, std.math.maxInt(u16)).rows;
+    // 75 five-row lines and 225 one-row lines.
+    try std.testing.expectEqual(@as(usize, 600), total);
+    var rows = tall.rowsFrom(narrow, .{});
+    for (0..total) |row| try std.testing.expectEqual(tall.down(narrow, .{}, row), rows.next().?);
+    try std.testing.expectEqual(@as(?Position, null), rows.next());
+    tall.* = .{};
+    var none = tall.rowsFrom(narrow, .{});
+    try std.testing.expectEqual(@as(?Position, null), none.next());
 }

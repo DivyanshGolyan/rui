@@ -377,17 +377,23 @@ pub const Event = union(enum) {
     /// The command `step` asked the shell to run ended.
     ran: Ran,
     /// A pointer press on something a click acts on.
-    clicked: Click,
+    clicked: struct { target: Click, draft: Draft = .{}, pasting: bool = false },
     /// Esc left a conversation whose original is unconfirmed. The shell
     /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
 };
 
 /// What a click names, as the widget under it drew it: a Session to open,
-/// New Session, Settings, or the counts line's view name, which shows
-/// only off the default view. A click names the thing and never a place,
-/// so it means what the person saw whatever the list has become since.
-pub const Click = union(enum) { open: Reference, new_session, settings };
+/// New Session, Settings, or a command list row
+/// with the identity of the list the frame drew. A click names the thing
+/// and never a place, so it means what the person saw whatever the list
+/// has become since, or nothing when that thing is gone.
+pub const Click = union(enum) {
+    open: Reference,
+    new_session,
+    settings,
+    command: slash_commands.Shown.Pick,
+};
 
 /// What a click on a list item names; an empty slot takes none.
 pub fn clickOf(state: *const State, item: Item) ?Click {
@@ -1562,9 +1568,18 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         .first_line => |result| try firstLine(state, result),
         // A click is input as a key is: the screen that takes no key takes
         // no click, wherever it lands.
-        .clicked => |clicked| if (state.inputMode() != .frozen) switch (clicked) {
+        .clicked => |input| if (state.inputMode() != .frozen) switch (input.target) {
             .open => |reference| try clickOpen(state, reference, &effects),
-            .new_session => state.selected = .new_session,
+            // The row the frame drew, only in the list it drew: then
+            // Enter takes it, as arrowing to it and pressing Enter would.
+            .command => |pressed| if (!input.pasting) {
+                if (slash_commands.Shown.pickedNow(&state.commands, nextCommands(state, input.draft), pressed) != null)
+                    try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
+            },
+            .new_session => {
+                state.selected = .new_session;
+                if (!input.pasting) try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
+            },
             .settings => {
                 state.selected = .settings;
                 effects.add(.open_settings);
@@ -2767,11 +2782,11 @@ fn hex(comptime text: *const [7]u8) Rgb {
 pub const palettes = std.enums.EnumArray(Skin, Palette).init(.{
     .day = .{
         .colours = .init(.{ .strong = hex("#121a44"), .ink = hex("#1d2a63"), .normal = hex("#3a4677"), .quiet = hex("#535c86"), .mark = hex("#7d84a6"), .rule = hex("#d8cfbb"), .attention = hex("#7a5200"), .failure = hex("#9e2328"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#f3eee2"), .bar = hex("#e7dfcc"), .selection = hex("#dcdcec"), .band = hex("#f2c200") }),
+        .backgrounds = .init(.{ .ground = hex("#f3eee2"), .bar = hex("#e7dfcc"), .selection = hex("#dcdcec"), .hover = hex("#e1dddc"), .band = hex("#f2c200") }),
     },
     .night = .{
         .colours = .init(.{ .strong = hex("#f6f1e4"), .ink = hex("#e2dccb"), .normal = hex("#bdb8a9"), .quiet = hex("#9d9bb0"), .mark = hex("#6e7396"), .rule = hex("#2a3157"), .attention = hex("#f2c200"), .failure = hex("#ff8f7d"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#121833"), .bar = hex("#1a2142"), .selection = hex("#2b3568"), .band = hex("#f2c200") }),
+        .backgrounds = .init(.{ .ground = hex("#121833"), .bar = hex("#1a2142"), .selection = hex("#2b3568"), .hover = hex("#222b55"), .band = hex("#f2c200") }),
     },
 });
 
@@ -5209,12 +5224,12 @@ test "overview selection walks both ends and every row without folding" {
 test "one click on a row opens it, under Enter's rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
     try expectSelected(&state, "b2c3d4");
     // While Host requests wait on an Upgrade, the click selects but does
     // not open, as Enter would not.
     state.upgrade.run = .checking;
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "g7h8j9".* } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "g7h8j9".* } } }));
     try expectSelected(&state, "g7h8j9");
 }
 
@@ -5224,7 +5239,7 @@ test "a click while a start waits changes nothing, as keys do, and the start the
     const selected = state.selected.session;
     _ = try submit(&state, try typeText(&state, "go"));
     try std.testing.expectEqual(InputMode.frozen, state.inputMode());
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
     try expectSelected(&state, &selected);
     try expectEffects(&.{ .clear_draft, .{ .open = "z9y8x7".* }, .list_models }, try step(&state, .{ .start = .{ .started = .{ .reference = "z9y8x7".*, .handle = "h1" } } }));
 }
@@ -5232,10 +5247,10 @@ test "a click while a start waits changes nothing, as keys do, and the start the
 test "overview settings and New Session clicks follow Enter and draft rules" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .settings }));
+    try expectEffects(&.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .{ .target = .settings } }));
     try std.testing.expectEqual(Selection.settings, state.selected);
     try expectEffects(&.{.open_settings}, try submit(&state, .{}));
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .new_session }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .new_session } }));
     try std.testing.expectEqual(Selection.new_session, state.selected);
     try expectEffects(&.{}, try submit(&state, .{}));
     for ([_]Selection{ .new_session, .settings }) |selection| {
@@ -5272,7 +5287,7 @@ test "a click that names a Session gone from the list since it was drawn changes
     var state = try opened(&mixed);
     defer state.deinit();
     const selected = state.selected.session;
-    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .open = "n0n0n0".* } }));
+    try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .open = "n0n0n0".* } } }));
     try expectSelected(&state, &selected);
 }
 
@@ -5280,13 +5295,13 @@ test "a click on a Session while a panel shows opens it and closes the panel, as
     var state = try opened(&mixed);
     defer state.deinit();
     try showOutputPanel(&state);
-    try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .open = "b2c3d4".* } }));
+    try expectEffects(&.{ .{ .open = "b2c3d4".* }, .list_models }, try step(&state, .{ .clicked = .{ .target = .{ .open = "b2c3d4".* } } }));
     try std.testing.expectEqual(null, state.panel);
 }
 
 test "every click obeys the input mode: a frozen screen takes none, whatever it names" {
     const ref = "b2c3d4";
-    for ([_]bool{ false, true }) |frozen| for ([_]Click{ .{ .open = ref.* }, .new_session, .settings }) |clicked| {
+    for ([_]bool{ false, true }) |frozen| for ([_]Click{ .{ .open = ref.* }, .new_session, .settings, .{ .command = .{ .index = 0, .revision = 0, .source = 0 } } }) |clicked| {
         var state = try opened(&mixed);
         defer state.deinit();
 
@@ -5295,7 +5310,7 @@ test "every click obeys the input mode: a frozen screen takes none, whatever it 
             try std.testing.expectEqual(InputMode.frozen, state.inputMode());
         }
         const selected = state.selected;
-        const effects = try step(&state, .{ .clicked = clicked });
+        const effects = try step(&state, .{ .clicked = .{ .target = clicked } });
         if (frozen) {
             // No key moves a frozen screen, and no click does.
             try expectEffects(&.{}, effects);
@@ -5305,6 +5320,7 @@ test "every click obeys the input mode: a frozen screen takes none, whatever it 
             .open => try expectEffects(&.{ .{ .open = ref.* }, .list_models }, effects),
             .new_session => try std.testing.expectEqual(Selection.new_session, state.selected),
             .settings => try expectEffects(&.{ .open_settings, .list_models }, effects),
+            .command => try expectEffects(&.{}, effects), // No list was drawn.
         }
     };
 }
@@ -5640,9 +5656,9 @@ test "overview sender does not change ended title styling" {
 }
 
 test "the overview indexed palettes retain every colour" {
-    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [4]u8 }{
-        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 214 } },
-        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 238, 214 } },
+    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [5]u8 }{
+        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 253, 214 } },
+        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 238, 237, 214 } },
     };
     for (expected) |case| {
         for (std.enums.values(Colour), case.colours) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).colours.get(role));
@@ -6796,12 +6812,12 @@ const TestModelOpening = enum { settings_click, settings_enter, session_click, s
 
 fn openModelConsumer(state: *State, opening: TestModelOpening) !Effects {
     return switch (opening) {
-        .settings_click => step(state, .{ .clicked = .settings }),
+        .settings_click => step(state, .{ .clicked = .{ .target = .settings } }),
         .settings_enter => blk: {
             state.selected = .settings;
             break :blk submit(state, .{});
         },
-        .session_click => step(state, .{ .clicked = .{ .open = "models".* } }),
+        .session_click => step(state, .{ .clicked = .{ .target = .{ .open = "models".* } } }),
         .session_enter => blk: {
             state.selected = .{ .session = "models".* };
             break :blk submit(state, .{});
@@ -6863,16 +6879,16 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
             if (hold != .checking) try expectEffects(&.{}, try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = if (hold == .blocked) .incompatible else .unchanged } } }));
         }
         const wanted = hold == .active and answer != .complete;
-        try expectEffects(if (wanted) &.{ .open_settings, .list_models } else &.{.open_settings}, try step(&state, .{ .clicked = .settings }));
+        try expectEffects(if (wanted) &.{ .open_settings, .list_models } else &.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
         try std.testing.expectEqual(wanted, state.asking_models);
-        try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .settings }));
+        try expectEffects(&.{.open_settings}, try step(&state, .{ .clicked = .{ .target = .settings } }));
         // Periodic loading retries must use exactly the same hold admission.
         const ticked = try step(&state, .{ .tick = state.next_list_ms });
         try expectEffects(&.{.{ .list = testToken(1) }}, ticked);
         if (hold == .reobserving) {
             _ = try respond(&state, .full, testToken(2), &.{});
             try std.testing.expect(!state.holdsHost());
-            try expectEffects(if (answer == .complete) &.{.open_settings} else &.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .settings }));
+            try expectEffects(if (answer == .complete) &.{.open_settings} else &.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .{ .target = .settings } }));
         }
     };
 }
@@ -6939,4 +6955,119 @@ test "archive admission reports only a new ledger request across every surface c
     const refused = try press(&empty, .{}, .archive);
     try std.testing.expectEqual(ArchiveAdmission.refused, refused.archive_admission);
     try std.testing.expectEqual(@as(usize, 0), empty.request_count);
+}
+
+test "overview mouse New Session owns Enter policy for every draft frozen and paste state" {
+    const Case = struct { text: []const u8, tags: []const std.meta.Tag(Effect) };
+    for ([_]Case{
+        .{ .text = "", .tags = &.{} },
+        .{ .text = " \n", .tags = &.{.clear_draft} },
+        .{ .text = "a mouse task", .tags = &.{.start} },
+        .{ .text = "/configure --reasoning-effort high", .tags = &.{.clear_draft} },
+    }) |case| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |pasting| {
+        var state = try opened(&mixed);
+        defer state.deinit();
+        _ = try step(&state, .{ .resized = .{ .width = 100, .height = 60 } });
+        const draft = try typeText(&state, case.text);
+        if (frozen) _ = try submit(&state, .{ .bytes = "already starting" });
+        state.selected = .{ .session = "b2c3d4".* };
+        const before = state.selected;
+        const effects = try step(&state, .{ .clicked = .{ .target = .new_session, .draft = draft, .pasting = pasting } });
+        try std.testing.expectEqual(if (frozen) before else Selection.new_session, state.selected);
+        const tags = if (frozen or pasting) &.{} else case.tags;
+        try std.testing.expectEqual(tags.len, effects.len);
+        for (tags, effects.slice()) |tag, effect| try std.testing.expectEqual(tag, std.meta.activeTag(effect));
+        if (!frozen and !pasting) {
+            if (std.mem.eql(u8, case.text, "a mouse task")) try std.testing.expectEqualStrings(case.text, effects.items[0].start.text);
+        }
+    };
+}
+
+/// Draws a command list over a draft, as a frame with room does: the
+/// overview's own commands under `/`, or two skills under `use /re` read as
+/// `entries` (one answered skills read).
+fn drawnCommandList(state: *State, skills: ?[]const []const u8) !Draft {
+    const draft = try typeText(state, if (skills == null) "/" else "use /re");
+    if (skills) |names| {
+        const read = askSkills(state, draft).?;
+        const entries = try state.gpa.alloc(skill_suggestions.Entry, names.len);
+        for (entries, names) |*entry, name| entry.* = .{ .name = try state.gpa.dupe(u8, name), .description = try state.gpa.dupe(u8, "a skill") };
+        skillsRead(state, read.read, .{ .entries = entries, .total = entries.len }, draft);
+        drawWithRoom(state, draft);
+    }
+    try std.testing.expectEqual(.drawn, state.commands.?.seen);
+    return draft;
+}
+
+test "overview command list click takes the drawn row only from the list the frame drew, as arrows and Enter do" {
+    const Case = enum { unchanged, unchanged_skill, edited, replaced, closed };
+    const Mode = enum { editable, frozen, pasting };
+    const first_page = [_][]const u8{ "refactor", "review" };
+    for (std.enums.values(Case)) |case| for (std.enums.values(Mode)) |mode| {
+        errdefer std.debug.print("case={s} mode={s}\n", .{ @tagName(case), @tagName(mode) });
+        const skill = case == .unchanged_skill or case == .replaced;
+        const index: usize = if (skill or case == .edited) 1 else 3;
+        var clicked = try opened(&mixed);
+        defer clicked.deinit();
+        var keyed = try opened(&mixed);
+        defer keyed.deinit();
+        var drafts: [2]Draft = undefined;
+        var pressed: slash_commands.Shown.Pick = undefined;
+        for ([_]*State{ &clicked, &keyed }, &drafts) |state, *draft| {
+            draft.* = try drawnCommandList(state, if (skill) &first_page else null);
+            // The frame drew the row; the press names it in that list.
+            if (state == &clicked) pressed = state.commands.?.pick(index);
+            // What changed after the frame drew the list and before the
+            // click: the draft gained `s`, a new skills page replaced the
+            // rows of the same draft, or Esc closed the list.
+            switch (case) {
+                .unchanged, .unchanged_skill => {},
+                .edited => {
+                    draft.* = .{ .bytes = "/s", .cursor = 2, .edits = draft.edits +% 1 };
+                    try expectEffects(&.{}, try step(state, .{ .composed = .{ .input = .{ .composer = .append }, .draft = draft.* } }));
+                },
+                .replaced => {
+                    if (state.skills.reset()) |page| {
+                        var held = page;
+                        held.deinit(state.gpa);
+                    }
+                    const read = askSkills(state, draft.*).?;
+                    const entries = try state.gpa.alloc(skill_suggestions.Entry, 2);
+                    for (entries, [_][]const u8{ "release", "rename" }) |*entry, name| entry.* = .{ .name = try state.gpa.dupe(u8, name), .description = try state.gpa.dupe(u8, "a skill") };
+                    skillsRead(state, read.read, .{ .entries = entries, .total = 2 }, draft.*);
+                },
+                .closed => try expectEffects(&.{}, try press(state, draft.*, .clear)),
+            }
+            if (mode == .frozen) {
+                // A start begins; the shell keeps the list its frame drew.
+                const kept = state.commands;
+                _ = try submit(state, .{ .bytes = "already starting" });
+                try std.testing.expectEqual(InputMode.frozen, state.inputMode());
+                state.commands = kept;
+            }
+        }
+        const before = clicked.commands;
+        const selected = clicked.selected;
+        const effects = try step(&clicked, .{ .clicked = .{ .target = .{ .command = pressed }, .draft = drafts[0], .pasting = mode == .pasting } });
+        if ((case == .unchanged or case == .unchanged_skill) and mode == .editable) {
+            // Independent expectation: the arrows to that row, then Enter.
+            for (0..index) |_| _ = try press(&keyed, drafts[1], .next);
+            const entered = try submit(&keyed, drafts[1]);
+            try std.testing.expect(entered.len != 0);
+            try expectEffects(entered.slice(), effects);
+            try std.testing.expectEqual(keyed.selected, clicked.selected);
+            try std.testing.expectEqual(keyed.panel, clicked.panel);
+            try std.testing.expectEqual(keyed.commands != null, clicked.commands != null);
+            if (keyed.commands) |shown| try std.testing.expectEqual(shown.highlight, clicked.commands.?.highlight);
+        } else {
+            try expectEffects(&.{}, effects);
+            try std.testing.expectEqual(selected, clicked.selected);
+            try std.testing.expectEqual(before != null, clicked.commands != null);
+            if (before) |shown| {
+                try std.testing.expectEqual(shown.highlight, clicked.commands.?.highlight);
+                try std.testing.expectEqual(shown.revision, clicked.commands.?.revision);
+                try std.testing.expectEqual(shown.seen, clicked.commands.?.seen);
+            }
+        }
+    };
 }
