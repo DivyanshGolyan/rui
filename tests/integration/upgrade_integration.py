@@ -710,7 +710,9 @@ def conversation_case(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
-            screen.contains(f"‹ {session}")
+            # The wide shell keeps the list alongside the conversation; its
+            # footer identifies the opened Session in the right pane.
+            screen.contains(f"│ {session} · gpt-6-luna")
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "conversation installation archive gate")
             screen.contains(f"upgrading to {releases.version}")
