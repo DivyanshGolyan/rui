@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 70;
+pub const schema_version: u32 = 71;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -57,6 +57,7 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 68, .digest = 0x7bec7f8f004abc7c },
     .{ .schema_version = 69, .digest = 0x8db67f4a14f18a37 },
     .{ .schema_version = 70, .digest = 0xb60d036b364ad267 },
+    .{ .schema_version = 71, .digest = 0xa61e85ed49f9fa8b },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -645,6 +646,15 @@ pub const migrations = [_]Migration{
         },
         .mysql = &.{
             "UPDATE store_meta SET meta_value='14' WHERE meta_key='wire_version' AND meta_value='13'",
+        },
+    },
+    .{
+        .from = 70,
+        .sqlite = &.{
+            "UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'",
+        },
+        .mysql = &.{
+            "UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'",
         },
     },
 };
@@ -2921,6 +2931,17 @@ test "MySQL sessions read literals as rsql copies them, and strictly" {
         } else false;
         try std.testing.expect(found);
     }
+}
+
+test "schema 71 migration updates only wire metadata on SQLite and MySQL" {
+    const step = migrations[70 - migration_baseline];
+    try std.testing.expectEqual(@as(u32, 70), step.from);
+    inline for (.{ rsql.Dialect.sqlite, rsql.Dialect.mysql }) |dialect| {
+        const statements = if (dialect == .sqlite) step.sqlite else step.mysql;
+        try std.testing.expectEqual(@as(usize, 1), statements.len);
+        for (statements) |statement| try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14'", statement);
+    }
+    try std.testing.expectEqualStrings("UPDATE store_meta SET meta_value='15' WHERE meta_key='wire_version' AND meta_value='14';\n", mysqlMigration(70));
 }
 
 test "schema 70 migration updates only wire metadata on SQLite and MySQL" {
