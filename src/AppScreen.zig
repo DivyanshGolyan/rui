@@ -7,13 +7,21 @@ const Stack = @import("widgets/Stack.zig");
 const Layer = @import("widgets/Layer.zig");
 
 pub const Overview = Screen(@import("GroupedList.zig"));
-pub const Session = Screen(@import("Transcript.zig"));
+/// A Session switches between the feed and independent panel widgets.
+pub const Content = struct {
+    shown: vxfw.Widget,
 
-fn Screen(comptime Content: type) type {
+    pub fn widget(self: *Content) vxfw.Widget {
+        return self.shown;
+    }
+};
+pub const Session = Screen(Content);
+
+fn Screen(comptime Body: type) type {
     return struct {
         const Self = @This();
 
-        content: *Content,
+        content: *Body,
         input: *InputArea,
         style: @import("vaxis").Style = .{},
         header: ?vxfw.Widget = null,
@@ -168,7 +176,7 @@ test "App screens compose content input facts status and an overlay without owni
     const document = try std.testing.allocator.create(@import("ConversationViewport.zig").Document);
     defer std.testing.allocator.destroy(document);
     document.* = .{};
-    var transcript: @import("Transcript.zig") = .{ .document = document };
+    var transcript: @import("DocumentView.zig") = .{ .document = document };
     var events: usize = 0;
     const Handler = struct {
         fn event(raw: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {
@@ -177,7 +185,8 @@ test "App screens compose content input facts status and an overlay without owni
         }
     };
     var overview: Overview = .{ .content = &list, .input = &input, .userdata = &events, .on_event = Handler.event };
-    var session: Session = .{ .content = &transcript, .input = &input, .userdata = &events, .on_event = Handler.event };
+    var facade: Content = .{ .shown = transcript.widget() };
+    var session: Session = .{ .content = &facade, .input = &input, .userdata = &events, .on_event = Handler.event };
     const overlay: vxfw.Text = .{ .text = "Commands" };
     overview.overlay = overlay.widget();
     session.overlay = overlay.widget();
@@ -238,7 +247,7 @@ test "App screens compose content input facts status and an overlay without owni
 
 test "App screens render the original composition with painted marker rows" {
     const vaxis = @import("vaxis");
-    const Content = struct {
+    const TestContent = struct {
         fn widget(self: *@This()) vxfw.Widget {
             return .{ .userdata = self, .drawFn = draw };
         }
@@ -253,8 +262,8 @@ test "App screens render the original composition with painted marker rows" {
     var bytes = "draft".*;
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = 2 };
     var input: InputArea = .{ .composer = .{ .editor = &editor } };
-    var content: Content = .{};
-    var screen: Screen(Content) = .{ .content = &content, .input = &input, .userdata = &content, .on_event = Content.event, .style = .{ .bg = .{ .index = 4 } } };
+    var content: TestContent = .{};
+    var screen: Screen(TestContent) = .{ .content = &content, .input = &input, .userdata = &content, .on_event = TestContent.event, .style = .{ .bg = .{ .index = 4 } } };
     const header: vxfw.Text = .{ .text = "Header", .style = .{ .bold = true } };
     const tail: vxfw.Text = .{ .text = "Tail\nSecond" };
     const marker: vxfw.Text = .{ .text = "Up" };
@@ -333,9 +342,10 @@ test "App screens update layout state through exhausted resizes for every option
     for (0..8) |flags| for (1..11) |small_height| {
         var all: []const GroupedList.Row = rows[0..3];
         var list: GroupedList = .{ .rows = .of(&all) };
-        var transcript: @import("Transcript.zig") = .{ .document = document };
+        var transcript: @import("DocumentView.zig") = .{ .document = document };
         var overview: Overview = .{ .content = &list, .input = &input, .userdata = &list, .on_event = Row.event };
-        var session: Session = .{ .content = &transcript, .input = &input, .userdata = &transcript, .on_event = Row.event };
+        var facade: Content = .{ .shown = transcript.widget() };
+        var session: Session = .{ .content = &facade, .input = &input, .userdata = &transcript, .on_event = Row.event };
         inline for (.{ &overview, &session }) |screen| {
             var header: Row = .{ .text = .{ .text = "Header" } };
             var tail: Row = .{ .text = .{ .text = "Tail\nSecond" } };

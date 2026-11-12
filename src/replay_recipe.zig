@@ -19,6 +19,16 @@ pub const Recipe = struct {
         return .{ .frontier = base.position, .floor = @max(own_floor, base.floor) };
     }
 
+    /// Relational projection of select for an admission's frozen request.
+    /// The caller supplies the raw newest base, never an older compatible one.
+    pub fn floorSql(comptime model: []const u8, comptime base_model: []const u8, comptime base_floor: []const u8, comptime own_floor: []const u8) []const u8 {
+        return "max(coalesce(" ++ own_floor ++ ",0),CASE WHEN " ++ base_model ++ "=" ++ model ++ " THEN coalesce(" ++ base_floor ++ ",0) ELSE 0 END)";
+    }
+
+    pub fn anchorSql(comptime model: []const u8, comptime base_model: []const u8, comptime anchor: []const u8) []const u8 {
+        return "CASE WHEN " ++ base_model ++ "=" ++ model ++ " THEN coalesce(" ++ anchor ++ ",0) ELSE 0 END";
+    }
+
     /// Model identity is checked by the caller; usage covers only this recipe.
     pub fn measuredBy(recipe: Recipe, measured: Recipe) bool {
         return recipe.frontier == measured.frontier and recipe.floor == measured.floor;
