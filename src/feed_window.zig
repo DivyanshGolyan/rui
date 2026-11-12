@@ -449,7 +449,7 @@ pub const Window = struct {
         if (self.entries[index].length == 0) return 0;
         var next = index + 1;
         while (next < self.count and self.entries[next].length == 0) : (next += 1) {}
-        return @intFromBool(next < self.count and !(self.entries[index].tight and self.entries[next].tight));
+        return @intFromBool(next < self.count and View.gap(self.entries[index].tight, self.entries[next].tight));
     }
 
     pub fn indexOf(self: *const Window, key: Key) ?usize {

@@ -1,9 +1,9 @@
-# rui (TypeScript client)
+# ruicode (TypeScript client for Rui)
 
 Starts a Rui Host as a child of your process and talks to it over its local socket.
 
 ```ts
-import { Rui } from "rui";
+import { Rui } from "ruicode";
 
 const rui = await Rui.connect({
 	database: "/var/lib/myapp/rui-store",
@@ -17,9 +17,10 @@ await rui.close();
 
 ## Install
 
-The `rui` package carries the client.
+Run `npm install ruicode`.
+The `ruicode` package carries the client.
 The `rui` executable comes from the platform package beside it
-(`rui-linux-x64`, `rui-linux-arm64` or `rui-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
+(`ruicode-linux-x64`, `ruicode-linux-arm64` or `ruicode-darwin-arm64`, installed as optional dependencies), else from `rui` on `PATH`.
 Pass `binary` to `Rui.connect` to name one yourself.
 
 Bundled and custom binaries and their child Host launch are application-owned.
