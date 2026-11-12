@@ -2,7 +2,11 @@
 //! paste in progress, and which pane takes each terminal event. Root reads
 //! the facts other owners hold, calls `step`, and applies the `Effects` it
 //! returns without deciding anything itself. Navigation between layers is an
-//! input to the same `step`, so keys and navigation share one owner.
+//! input to the same `step`, so keys and navigation share one owner, and
+//! every navigation focuses the top visible layer.
+//! Keys for the main pane and the settings page `pass`: vxfw's focus path
+//! delivers them, since only it knows which main widget has focus; PR2 and
+//! PR3 move main's keys into the pane cores.
 const std = @import("std");
 const keymap = @import("keymap.zig");
 
@@ -72,7 +76,10 @@ pub const Input = union(enum) {
     /// Show the main pane: close settings, keeping any sign-in over it.
     show_main,
     open_sign_in,
+    /// Close sign-in back to what it covered.
     close_sign_in,
+    /// Sign-in finished: close it and any settings under it, showing main.
+    signed_in,
 
     pub const Key = struct {
         /// The editor's name for the key; null for text and Enter.
@@ -95,9 +102,8 @@ pub const Effects = struct {
         cancel_choice,
         /// Leaving the page: cancel its choice and close its keys.
         reset,
-        /// Opening the page: reload its values and close its keys.
-        open,
     };
+    /// Always the top visible layer after the input: never a hidden pane.
     pub const Focus = enum { main, settings, sign_in };
     pub const Route = enum {
         /// vxfw's own focus or hit-test path delivers it to the shown pane;
@@ -126,8 +132,18 @@ pub fn pane(layer: Layer, session_open: bool) Pane {
     };
 }
 
-const main_shown: Effects = .{ .page = .reset, .focus = .main, .redraw = true };
+/// A layer change: the page change it makes, focus on the top layer, a redraw.
+fn navigated(layer: Layer, page: Effects.Page) Effects {
+    const top: Effects.Focus = switch (layer) {
+        .main => .main,
+        .settings => .settings,
+        .sign_in => .sign_in,
+    };
+    return .{ .page = page, .focus = top, .redraw = true };
+}
 
+/// Root reloads the settings page before it sends `open_settings`, so a
+/// failed reload never reaches this state.
 pub fn step(state: *State, facts: Facts, input: Input) Effects {
     switch (input) {
         .open_settings => {
@@ -135,14 +151,14 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
                 .main, .settings => .settings,
                 .sign_in => .{ .sign_in = .{ .over = .settings } },
             };
-            return .{ .page = .open, .focus = .settings, .redraw = true };
+            return navigated(state.layer, .close_keys);
         },
         .show_main => {
             state.layer = switch (state.layer) {
                 .main, .settings => .main,
                 .sign_in => .{ .sign_in = .{ .over = .main } },
             };
-            return main_shown;
+            return navigated(state.layer, .reset);
         },
         .open_sign_in => {
             state.layer = switch (state.layer) {
@@ -150,7 +166,7 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
                 .settings => .{ .sign_in = .{ .over = .settings } },
                 .sign_in => state.layer,
             };
-            return .{ .focus = .sign_in, .redraw = true };
+            return navigated(state.layer, .keep);
         },
         .close_sign_in => {
             state.layer = switch (state.layer) {
@@ -160,26 +176,30 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
                     .settings => .settings,
                 },
             };
-            return if (state.layer == .settings) .{ .focus = .settings, .redraw = true } else main_shown;
+            return navigated(state.layer, .keep);
+        },
+        .signed_in => {
+            state.layer = .main;
+            return navigated(state.layer, .reset);
         },
         .key_release => return .{ .route = .swallow },
         .colors => return .{ .route = .colors },
         .other => return .{},
         .key, .invalid_key, .paste_start, .paste_end, .mouse => {},
     }
+    // A paste is stream state: it spans layers, whoever takes its bytes.
+    switch (input) {
+        .paste_start => state.pasting = true,
+        .paste_end => state.pasting = false,
+        else => {},
+    }
     // The sign-in page owns keys and pastes even over settings or a list
     // that had focus before it opened, and no click navigates behind it.
-    // Its paste boundaries are its own: they don't open a paste here.
     if (state.layer == .sign_in) return switch (input) {
         .mouse => .{ .route = .swallow },
         else => .{ .route = .sign_in },
     };
-    switch (input) {
-        .paste_start => state.pasting = true,
-        .paste_end => state.pasting = false,
-        .key => |key| if (state.layer == .settings) return settingsKey(state, facts.settings, key),
-        else => {},
-    }
+    if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
     return .{};
 }
 
@@ -195,7 +215,7 @@ fn settingsKey(state: *State, page: Facts.Settings, key: Input.Key) Effects {
     if (closes and page.choice_open) return .{ .page = .cancel_choice, .route = .swallow, .redraw = true };
     if (closes and !page.upgrade_takes_escape) {
         state.layer = .main;
-        var closed = main_shown;
+        var closed = navigated(state.layer, .reset);
         closed.route = .swallow;
         return closed;
     }
@@ -205,11 +225,14 @@ fn settingsKey(state: *State, page: Facts.Settings, key: Input.Key) Effects {
 
 test "Root input routing over every layer, main pane, settings state and input" {
     // Expectations are the routing Root.capture, openSettings, showMain and
-    // the sign-in open/close made before this owner existed (main 5df5531).
-    // Each combination matches exactly one row, and every row matches some.
+    // the sign-in open/close made before this owner existed (main 5df5531),
+    // except three decisions made with it: a paste spans every layer,
+    // navigation focuses the top visible layer, and signing in is one
+    // request. Each combination matches exactly one row, and every row
+    // matches some.
     const LayerCase = enum { main, settings, sign_in_over_main, sign_in_over_settings };
     const Page = enum { plain, keys_open, choice_open, model_filter, upgrade_cancellable };
-    const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, wheel, key_release, colors, invalid_key, focus_out, open_settings, show_main, open_sign_in, close_sign_in };
+    const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, wheel, key_release, colors, invalid_key, focus_out, open_settings, show_main, open_sign_in, close_sign_in, signed_in };
     const all_layers = std.enums.values(LayerCase);
     const all_pages = std.enums.values(Page);
     const shown = [_]LayerCase{ .main, .settings };
@@ -226,14 +249,17 @@ test "Root input routing over every layer, main pane, settings state and input" 
         /// Pasting after the input; null leaves it as it was.
         pasting: ?bool = null,
     };
+    const main_shown: Effects = .{ .page = .reset, .focus = .main, .redraw = true };
     const closed: Effects = .{ .page = .reset, .focus = .main, .route = .swallow, .redraw = true };
     const rows = [_]Row{
         // Every layer.
         .{ .events = &.{.key_release}, .effects = .{ .route = .swallow } },
         .{ .events = &.{.colors}, .effects = .{ .route = .colors } },
         .{ .events = &.{.focus_out}, .effects = .{} },
-        // Sign-in takes keys, pastes and invalid keys; its paste is its own.
-        .{ .layers = &signing, .events = &(keys ++ [_]Event{ .paste_start, .paste_end, .invalid_key }), .effects = .{ .route = .sign_in } },
+        // Sign-in takes keys, pastes and invalid keys; the paste is still one.
+        .{ .layers = &signing, .events = &(keys ++ [_]Event{.invalid_key}), .effects = .{ .route = .sign_in } },
+        .{ .layers = &signing, .events = &.{.paste_start}, .effects = .{ .route = .sign_in }, .pasting = true },
+        .{ .layers = &signing, .events = &.{.paste_end}, .effects = .{ .route = .sign_in }, .pasting = false },
         .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .swallow } },
         // Under main and settings, vxfw's path takes the rest.
         .{ .layers = &shown, .events = &.{.paste_start}, .effects = .{}, .pasting = true },
@@ -250,15 +276,16 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .layers = &.{.settings}, .pages = &.{ .choice_open, .model_filter }, .events = &closing, .effects = .{ .page = .cancel_choice, .route = .swallow, .redraw = true } },
         .{ .layers = &.{.settings}, .pages = &.{.plain}, .events = &closing, .effects = closed, .layer = .main },
         .{ .layers = &.{.settings}, .pages = &.{.upgrade_cancellable}, .events = &closing, .effects = .{ .route = .app_keys, .redraw = true } },
-        // Navigation.
-        .{ .layers = &.{ .main, .settings }, .events = &.{.open_settings}, .effects = .{ .page = .open, .focus = .settings, .redraw = true }, .layer = .settings },
-        .{ .layers = &signing, .events = &.{.open_settings}, .effects = .{ .page = .open, .focus = .settings, .redraw = true }, .layer = .sign_in_over_settings },
+        // Navigation: focus stays on, or moves to, the top visible layer.
+        .{ .layers = &.{ .main, .settings }, .events = &.{.open_settings}, .effects = .{ .page = .close_keys, .focus = .settings, .redraw = true }, .layer = .settings },
+        .{ .layers = &signing, .events = &.{.open_settings}, .effects = .{ .page = .close_keys, .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_settings },
         .{ .layers = &.{ .main, .settings }, .events = &.{.show_main}, .effects = main_shown, .layer = .main },
-        .{ .layers = &signing, .events = &.{.show_main}, .effects = main_shown, .layer = .sign_in_over_main },
+        .{ .layers = &signing, .events = &.{.show_main}, .effects = .{ .page = .reset, .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_main },
         .{ .layers = &.{ .main, .sign_in_over_main }, .events = &.{.open_sign_in}, .effects = .{ .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_main },
         .{ .layers = &.{ .settings, .sign_in_over_settings }, .events = &.{.open_sign_in}, .effects = .{ .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_settings },
-        .{ .layers = &.{ .main, .sign_in_over_main }, .events = &.{.close_sign_in}, .effects = main_shown, .layer = .main },
+        .{ .layers = &.{ .main, .sign_in_over_main }, .events = &.{.close_sign_in}, .effects = .{ .focus = .main, .redraw = true }, .layer = .main },
         .{ .layers = &.{ .settings, .sign_in_over_settings }, .events = &.{.close_sign_in}, .effects = .{ .focus = .settings, .redraw = true }, .layer = .settings },
+        .{ .events = &.{.signed_in}, .effects = main_shown, .layer = .main },
     };
     const Case = struct {
         fn layer(case: LayerCase) Layer {
@@ -308,6 +335,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
                 .show_main => .show_main,
                 .open_sign_in => .open_sign_in,
                 .close_sign_in => .close_sign_in,
+                .signed_in => .signed_in,
             };
         }
     };
@@ -325,18 +353,49 @@ test "Root input routing over every layer, main pane, settings state and input" 
         // A pasted key arrives inside a paste; paste_end closes one.
         const pasting = event == .pasted_printable or event == .pasted_enter or event == .paste_end;
         var state: State = .{ .layer = Case.layer(layer), .pasting = pasting };
-        try std.testing.expectEqual(row.effects, step(&state, Case.facts(page, event), Case.input(event)));
-        try std.testing.expectEqual(Case.layer(row.layer orelse layer), state.layer);
-        try std.testing.expectEqual(row.pasting orelse pasting, state.pasting);
+        const effects = step(&state, Case.facts(page, event), Case.input(event));
         // The main pane shows the Session when one is open, under any layer.
-        const expected_pane: Pane = switch (state.layer) {
+        const shown_pane: Pane = switch (state.layer) {
             .main => if (session) .session else .overview,
             .settings => .settings,
             .sign_in => .sign_in,
         };
-        try std.testing.expectEqual(expected_pane, pane(state.layer, session));
+        try std.testing.expectEqual(shown_pane, pane(state.layer, session));
+        // No effect focuses a hidden pane: focus names the pane now shown.
+        if (effects.focus) |focus| try std.testing.expect(switch (focus) {
+            .main => shown_pane == .overview or shown_pane == .session,
+            .settings => shown_pane == .settings,
+            .sign_in => shown_pane == .sign_in,
+        });
+        try std.testing.expectEqual(row.effects, effects);
+        try std.testing.expectEqual(Case.layer(row.layer orelse layer), state.layer);
+        try std.testing.expectEqual(row.pasting orelse pasting, state.pasting);
     };
     for (used) |hit| try std.testing.expect(hit);
+
+    // A paste that straddles sign-in opening and closing stays one paste, so
+    // a pasted Enter after it closes never chooses on the settings page.
+    const Step = struct { input: Input, effects: Effects, layer: LayerCase, pasting: bool };
+    const key: Input = .{ .key = .{ .named = null } };
+    const straddles = [_]Step{
+        .{ .input = .paste_start, .effects = .{}, .layer = .settings, .pasting = true },
+        .{ .input = .open_sign_in, .effects = .{ .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_settings, .pasting = true },
+        .{ .input = key, .effects = .{ .route = .sign_in }, .layer = .sign_in_over_settings, .pasting = true },
+        .{ .input = .paste_end, .effects = .{ .route = .sign_in }, .layer = .sign_in_over_settings, .pasting = false },
+        .{ .input = .paste_start, .effects = .{ .route = .sign_in }, .layer = .sign_in_over_settings, .pasting = true },
+        .{ .input = .close_sign_in, .effects = .{ .focus = .settings, .redraw = true }, .layer = .settings, .pasting = true },
+        .{ .input = key, .effects = .{ .route = .swallow }, .layer = .settings, .pasting = true },
+        .{ .input = .paste_end, .effects = .{}, .layer = .settings, .pasting = false },
+        .{ .input = key, .effects = .{}, .layer = .settings, .pasting = false },
+    };
+    var state: State = .{ .layer = .settings };
+    for (straddles, 0..) |expected, index| {
+        errdefer std.debug.print("straddling paste step {d}\n", .{index});
+        // The page's answers for Enter: the panel takes it.
+        try std.testing.expectEqual(expected.effects, step(&state, Case.facts(.plain, .enter), expected.input));
+        try std.testing.expectEqual(Case.layer(expected.layer), state.layer);
+        try std.testing.expectEqual(expected.pasting, state.pasting);
+    }
 }
 
 test "Layer answers settings and sign-in open from the one union" {

@@ -67,7 +67,9 @@ pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
 }
 
 /// Settings takes the place of the main pane; it is no content of a feed.
+/// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.settings_page.refresh();
     try self.navigate(ctx, .open_settings);
 }
 
@@ -80,14 +82,21 @@ pub fn closeSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.navigate(ctx, .close_sign_in);
 }
 
+/// Signing in closes the page and any settings under it, showing main.
+pub fn signedIn(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.navigate(ctx, .signed_in);
+}
+
 fn navigate(self: *Self, ctx: *vxfw.EventContext, request: app_input.Input) !void {
     const effects = app_input.step(&self.input, self.facts(null), request);
     std.debug.assert(effects.route == .pass);
     try self.apply(ctx, effects, null);
 }
 
-/// The settings page's answers for this event, read by value.
+/// The settings page's answers for this event, read by value, and only
+/// while the page is open.
 fn facts(self: *const Self, key: ?vaxis.Key) app_input.Facts {
+    if (!self.input.layer.settingsOpen()) return .{};
     const page = &self.settings_page;
     return .{ .settings = .{
         .keys_open = page.keys_open,
@@ -107,10 +116,6 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
         .cancel_choice => self.settings_page.cancelChoice(),
         .reset => {
             self.settings_page.cancelChoice();
-            self.settings_page.keys_open = false;
-        },
-        .open => {
-            try self.settings_page.refresh();
             self.settings_page.keys_open = false;
         },
     }
@@ -138,7 +143,7 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
 /// leaves raw mode and no input stream is transferred between screens.
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.session = null;
-    if (!self.input.layer.settingsOpen()) try ctx.requestFocus(self.overview);
+    if (self.input.layer == .main) try ctx.requestFocus(self.overview);
     ctx.redraw = true;
 }
 

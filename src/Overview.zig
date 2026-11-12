@@ -1218,10 +1218,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         notice.len = writer.buffered().len;
         self.state.notice = notice;
     }
-    // Settings closes under the page first, so sign-in closes to the main
-    // pane and no focus request names a hidden page.
-    try self.root.showMain(ctx);
-    try self.root.closeSignIn(ctx);
+    try self.root.signedIn(ctx);
     if (self.root.session == null) try ctx.requestFocus(self.app_input.composer.widget());
 }
 
