@@ -686,73 +686,58 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             _ = try self.event(.{ .footer_input = .{ .click = null } });
             ctx.redraw = true;
         },
-        .key_press, .paste_start, .paste_end, .invalid_key => {
-            if (self.root.input.layer.settingsOpen()) {
-                // Under the settings page only the keys that are the whole
-                // app's stay live: leaving, and Esc for an Upgrade it can
-                // still cancel. Nothing edits the hidden draft or the list.
-                const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
-                const live = selected == .action and (selected.action == .exit or (selected.action == .clear and self.state.upgrade.takesEscape()));
-                if (!live) {
-                    ctx.consumeEvent();
-                    return;
-                }
-            }
-            if (!self.root.input.layer.settingsOpen()) {
-                if (self.root.settings_page.standaloneField() != null and input == .key_press and !self.root.input.pasting) {
-                    const named = TerminalEditor.named(input.key_press);
-                    if (named == .escape or named == .ctrl_g) {
-                        try self.closeStandaloneChoice(ctx);
-                        ctx.consumeAndRedraw();
-                        return;
-                    }
-                }
-                if (self.root.settings_page.standaloneOpen()) {
-                    const page = &self.root.settings_page;
-                    const choice_input = if (self.root.input.pasting or input != .key_press) page.takesPaste() else page.takesKey(input.key_press);
-                    if (choice_input) {
-                        try page.standaloneWidget().handleEvent(ctx, input);
-                        ctx.consumeAndRedraw();
-                        return;
-                    }
-                    // As on the regular Settings page, unbound text and a
-                    // paste into a row choice never edit the hidden draft.
-                    const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
-                    if (selected != .action or selected.action != .exit) {
-                        ctx.consumeEvent();
-                        return;
-                    }
-                } else {
-                    var footer_input: view.FooterInput = .other;
-                    if (input == .paste_start) {
-                        footer_input = .text;
-                    } else if (input == .key_press and !self.root.input.pasting) {
-                        const key = input.key_press;
-                        if (key.matchExact(vaxis.Key.tab, .{})) footer_input = .{ .tab = false } else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) footer_input = .{ .tab = true } else if (key.matchExact(vaxis.Key.enter, .{})) footer_input = .enter else if (TerminalEditor.named(key) == .escape or TerminalEditor.named(key) == .ctrl_g) footer_input = .escape else if (TerminalEditor.selectEvent(view.keys, input, false) == .text) footer_input = .text;
-                    }
-                    const routed = try self.eventResult(.{ .footer_input = footer_input });
-                    try self.appNext(ctx, routed.next);
-                    if (!routed.forward_input) {
-                        ctx.consumeAndRedraw();
-                        return;
-                    }
-                }
-            }
-            if (input == .key_press and !self.root.input.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and try requestHostStart(self, ctx)) {
-                ctx.consumeEvent();
-                return;
-            }
-            const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
-            const composed: view.Input = switch (self.state.route(selected)) {
-                .edit => .{ .composer = self.composer.appEvent(view.keys, input, self.root.input.pasting) },
-                .frozen => .{ .composer = if (selected == .action) .{ .action = selected.action } else .none },
-            };
-            try self.appNext(ctx, try self.event(.{ .composed = .{ .input = composed, .draft = self.composerDraft() } }));
-            ctx.consumeEvent();
-            ctx.redraw = true;
-        },
         else => {},
     }
+}
+
+/// Root hands the overview each key, paste mark and malformed key it
+/// routes here, with what it arrived under and whether it is pasted. The
+/// core decides what it means; this applies that and reads only the facts
+/// other owners hold: the draft, the footer choice's answer and whether the
+/// Host can start.
+fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const page = &self.root.settings_page;
+    const result = try self.eventResult(.{ .key = .{
+        .key = overviewKey(input),
+        .pasted = delivery.pasted,
+        .under = delivery.under,
+        .draft = self.composerDraft(),
+        .choice = if (page.standaloneField() != null) .{
+            .shown = page.standaloneOpen(),
+            .takes = if (delivery.pasted or input != .key_press) page.takesPaste() else page.takesKey(input.key_press),
+        } else null,
+        .host_startable = self.hostNext() != null,
+    } });
+    try self.appNext(ctx, result.next);
+    switch (result.take) {
+        .drop => {},
+        .taken => ctx.redraw = true,
+        .choice => {
+            try page.standaloneWidget().handleEvent(ctx, input);
+            ctx.redraw = true;
+        },
+        .close_choice => try self.closeStandaloneChoice(ctx),
+        .start_host => try self.requestedHostStart(ctx),
+        .edit => {
+            const composed = self.composer.appEvent(view.keys, input, delivery.pasted);
+            try self.appNext(ctx, try self.event(.{ .composed = .{ .input = .{ .composer = composed }, .draft = self.composerDraft() } }));
+            ctx.redraw = true;
+        },
+    }
+}
+
+/// The overview core's name for one terminal input. Bindings match exact
+/// modifiers, as the line editor's do.
+fn overviewKey(input: vxfw.Event) view.Key {
+    return switch (input) {
+        .paste_start => .paste_start,
+        .paste_end => .paste_end,
+        .invalid_key => .invalid,
+        .key_press => |key| if (TerminalEditor.named(key)) |name| .{ .named = name } else if (TerminalEditor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (SessionFrontend.hostStartKey(key)) .host_start else if (TerminalEditor.selectKey(view.keys, key) == .text) .text else .other,
+        // Root routes only these to the overview.
+        else => unreachable,
+    };
 }
 
 /// A click the screen's widgets name steps the core as a key does.
@@ -1269,7 +1254,7 @@ fn appEffortClick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 /// Both Escape and its drawn action close only this presentation.
 fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (self.root.settings_page.standaloneField() == null or self.root.input.pasting) return;
+    if (self.root.settings_page.standaloneField() == null) return;
     self.root.settings_page.closeStandaloneChoice();
     _ = try self.event(.{ .footer_input = .escape });
     try ctx.requestFocus(self.app_input.composer.widget());
@@ -1278,6 +1263,7 @@ fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn appChoiceClose(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.root.input.pasting) return;
     try self.closeStandaloneChoice(ctx);
 }
 
@@ -1402,7 +1388,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
@@ -1560,7 +1546,7 @@ fn event(self: *Self, value: view.Event) !?Next {
     return (try self.eventResult(value)).next;
 }
 
-const EventResult = struct { next: ?Next = null, archive_admission: view.ArchiveAdmission = .refused, forward_input: bool = false };
+const EventResult = struct { next: ?Next = null, archive_admission: view.ArchiveAdmission = .refused, take: view.Take = .drop };
 
 /// Keep the core's synchronous admission with the jobs this exact step queued.
 fn eventResult(self: *Self, value: view.Event) !EventResult {
@@ -1573,12 +1559,10 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         self.queueHost();
     }
     var next: ?Next = null;
-    var forward_input = false;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
         .open_settings => next = .open_settings,
         .open_choice => |field| next = .{ .open_choice = field },
-        .forward_input => forward_input = true,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1600,15 +1584,15 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
             .refused => |why| refused = why,
             else => {},
         },
-        .exit => return .{ .next = .leave, .archive_admission = effects.archive_admission },
+        .exit => return .{ .next = .leave, .archive_admission = effects.archive_admission, .take = effects.take },
     };
     if (refused) |why| if (next == null) {
         const settled = try self.eventResult(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
-        return .{ .next = settled.next, .archive_admission = effects.archive_admission };
+        return .{ .next = settled.next, .archive_admission = effects.archive_admission, .take = effects.take };
     };
     self.askSkills();
     self.sendStatuses();
-    return .{ .next = next, .archive_admission = effects.archive_admission, .forward_input = forward_input };
+    return .{ .next = next, .archive_admission = effects.archive_admission, .take = effects.take };
 }
 
 /// Brings the terminal's program status records to what the core wants:
@@ -2282,10 +2266,15 @@ fn queueHostStart(self: *Self) void {
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.hostNext() == null) return false;
+    try self.requestedHostStart(ctx);
+    return true;
+}
+
+/// Starts the stopped Host that `hostNext` says a start can mend.
+fn requestedHostStart(self: *Self, ctx: *vxfw.EventContext) !void {
     self.queueHostStart();
     try self.dispatch(if (self.root.session == null) .all else .lent);
     ctx.redraw = true;
-    return true;
 }
 
 fn hostNotice(raw: *anyopaque) ?vxfw.Widget {
@@ -6714,10 +6703,16 @@ test "App settings Enter reaches Root at both widths with and without a retained
             _ = try overview.root.widget().draw(draw_context);
             // Real parser/overview handlers select the last list row;
             // do not synthesize a core click or set selected directly.
-            try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
-            try std.testing.expect(overview.state.selected == .settings);
-            try std.testing.expect(!overview.root.input.layer.settingsOpen());
-            try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
+            // While a Session is the main pane Root gives it the keys, so
+            // there the Settings row's own press opens the page.
+            if (retained) {
+                try appClick(overview, &ctx, .settings);
+            } else {
+                try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
+                try std.testing.expect(overview.state.selected == .settings);
+                try std.testing.expect(!overview.root.input.layer.settingsOpen());
+                try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
+            }
             try std.testing.expect(overview.root.input.layer.settingsOpen());
             try std.testing.expect(overview.state.selected == .settings);
             try std.testing.expect(!ctx.quit);
