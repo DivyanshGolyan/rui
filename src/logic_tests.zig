@@ -118,6 +118,7 @@ const cores = .{
     .{ "skill_reference.zig", @import("skill_reference.zig") },
     .{ "skill_suggestions.zig", @import("skill_suggestions.zig") },
     .{ "slash_commands.zig", @import("slash_commands.zig") },
+    .{ "start_report.zig", @import("start_report.zig") },
     .{ "status_page.zig", @import("status_page.zig") },
     .{ "store/engine/mysql_refusal.zig", @import("store/engine/mysql_refusal.zig") },
     .{ "store/wire/mysql.zig", @import("store/wire/mysql.zig") },
