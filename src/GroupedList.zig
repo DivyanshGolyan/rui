@@ -10,6 +10,7 @@ const List = @import("widgets/List.zig");
 pub const Segment = overview_view.Segment;
 /// What a press on a row means, as the screen's core takes it.
 pub const Target = overview_view.Click;
+pub const Region = struct { start: u16, end: u16, target: Target };
 pub const Row = struct {
     segments: []const Segment,
     heading: bool = false,
@@ -18,6 +19,7 @@ pub const Row = struct {
     /// What a left press on this row means; null for a row that takes
     /// none, as a heading or a gap.
     target: ?Target = null,
+    regions: []const Region = &.{},
 };
 
 /// The list's rows, built one at a time as they come on screen, so a long
@@ -89,7 +91,17 @@ const Frame = struct {
             if (selected) role.background = .selection;
             dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, role) };
         }
-        if (built.target) |target| try self.targets.append(arena, .{ .id = @intCast(index), .target = target });
+        const target_id: ?u32 = if (built.target) |target| blk: {
+            const id: u32 = @intCast(self.targets.items.len);
+            try self.targets.append(arena, .{ .id = id, .target = target });
+            break :blk id;
+        } else null;
+        const regions = try arena.alloc(List.Region, built.regions.len);
+        for (built.regions, regions) |region, *dest| {
+            const id: u32 = @intCast(self.targets.items.len);
+            try self.targets.append(arena, .{ .id = id, .target = region.target });
+            dest.* = .{ .start = region.start, .end = region.end, .target = id };
+        }
         const lines = try arena.alloc(List.Line, built.height);
         lines[0] = segments;
         for (lines[1..]) |*line| line.* = &.{};
@@ -98,7 +110,7 @@ const Frame = struct {
             for (second, converted) |segment, *dest| dest.* = .{ .text = segment.text, .style = widget_style.of(owner.caps, segment.style) };
             lines[1] = converted;
         }
-        return .{ .lines = lines, .target = if (built.target != null) @intCast(index) else null };
+        return .{ .lines = lines, .target = target_id, .regions = regions };
     }
 };
 

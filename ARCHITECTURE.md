@@ -2899,6 +2899,12 @@ Neither the set nor any output is saved.
 An open row is marked by its heading's selection background alone; the footer names no close key, because Ctrl-O acts on the lowest openable row in view, which need not be the open one.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
+Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
+New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
+Hover never changes keyboard selection or focus.
+Rows and fields take the selection background or monochrome reverse while preserving their foreground; chips and peer links underline and show the pointer shape.
+Only drawn, clipped action regions take clicks, and their existing paste, consent, stale-content and availability guards still apply.
+Headings, fixed status fields and unkeyed summary aggregates remain inert.
 Rui does not enable alternate scroll mode 1007.
 libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.

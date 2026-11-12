@@ -41,6 +41,37 @@
       ]
     },
     {
+      "name": "settings-field-hover",
+      "note": "Pointer over Notifications; L2 SGR motion, selection unchanged",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "End",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Rui"
+        },
+        {
+          "wait": "Notifications"
+        },
+        {
+          "mouse": {
+            "at": "Notifications",
+            "do": "move"
+          }
+        }
+      ],
+      "expect": [
+        "Rui",
+        "Notifications",
+        "Sign-in",
+        "Version"
+      ]
+    },
+    {
       "name": "start",
       "note": "02-overview",
       "open": "overview",
@@ -127,6 +158,55 @@
       ]
     },
     {
+      "name": "list-hover",
+      "note": "Pointer over Release notes for 0.60; L2 SGR motion, selection unchanged",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Schema migration"
+        },
+        {
+          "wait": "Profile the Host under load"
+        },
+        {
+          "mouse": {
+            "at": "Release notes for 0.60",
+            "do": "move"
+          }
+        }
+      ],
+      "expect": [
+        "Schema migration",
+        "Settings",
+        "■",
+        "Release notes for 0.60"
+      ]
+    },
+    {
+      "name": "settings-hover",
+      "note": "Pointer over Settings; L2 SGR motion, selection unchanged",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Schema migration"
+        },
+        {
+          "wait": "Profile the Host under load"
+        },
+        {
+          "mouse": {
+            "at": "Settings",
+            "do": "move"
+          }
+        }
+      ],
+      "expect": [
+        "Schema migration",
+        "Settings",
+        "■"
+      ]
+    },
+    {
       "name": "start-busy",
       "note": "03-overview-busy: two-line working Sessions",
       "open": "overview",
@@ -204,6 +284,49 @@
         "× Fail with an excerpt · exit 1",
         "The project has a README",
         "retry policy notes"
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends"
+      ]
+    },
+    {
+      "name": "fold-hover",
+      "note": "Pointer over Fail with an excerpt; L2 SGR motion, selection unchanged",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "send": {
+            "to": "Docs build",
+            "text": "Summarise the build results.",
+            "wait": true
+          }
+        },
+        {
+          "send": {
+            "to": "Benchmark idle memory",
+            "text": "Summarise the benchmark.",
+            "wait": true
+          }
+        },
+        {
+          "wait": "The project has a README"
+        },
+        {
+          "mouse": {
+            "at": "Fail with an excerpt",
+            "do": "move"
+          }
+        }
+      ],
+      "expect": [
+        "✓ List project files",
+        "× Fail with exit 127 · exit 127",
+        "× Fail with an excerpt · exit 1",
+        "The project has a README",
+        "retry policy notes",
+        "Fail with an excerpt"
       ],
       "absent": [
         "asks before Bash/MCP",
@@ -791,6 +914,34 @@
       ]
     },
     {
+      "name": "approval-hover",
+      "note": "Pointer over Deny; L2 SGR motion, selection unchanged",
+      "open": "Schema migration",
+      "steps": [
+        {
+          "wait": "Allow once"
+        },
+        {
+          "wait": "Deny"
+        },
+        {
+          "mouse": {
+            "at": "Deny",
+            "do": "move"
+          }
+        }
+      ],
+      "absent": [
+        "asks before Bash/MCP",
+        "Type a message",
+        "enter sends",
+        "more lines · shift+↓"
+      ],
+      "expect": [
+        "Deny"
+      ]
+    },
+    {
       "name": "approval-typing",
       "note": "17c-approval-typing: the retained draft does not hide request overflow",
       "open": "Schema migration",
@@ -923,6 +1074,33 @@
       ],
       "absent": [
         "/help"
+      ]
+    },
+    {
+      "name": "slash-hover",
+      "note": "Pointer over /effort; L2 SGR motion, selection unchanged",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "text": "/"
+        },
+        {
+          "wait": "/effort"
+        },
+        {
+          "gone": "/details"
+        },
+        {
+          "mouse": {
+            "at": "/effort",
+            "do": "move"
+          }
+        }
+      ],
+      "expect": [
+        "/copy",
+        "code · file",
+        "/effort"
       ]
     },
     {
