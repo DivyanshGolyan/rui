@@ -148,7 +148,7 @@ def editor(fixture, row):
     tty.marker("TD4 exact answer")
     tty.draft("", 2)
     assert_submitted(fixture.endpoint.requests, [row["expected"]])
-    tty.send(b"/exit\r")
+    tty.send(b"\x03")
     tty.finish()
     assert_submitted(fixture.endpoint.requests, [row["expected"]])
 
@@ -163,7 +163,7 @@ def rejection(fixture, row):
     tty.send(b"valid\r")
     tty.marker("TD4 valid after rejection")
     assert_submitted(fixture.endpoint.requests, ["valid"])
-    tty.send(b"/exit\r")
+    tty.send(b"\x03")
     tty.finish()
 
 
@@ -197,7 +197,7 @@ def recovery(fixture, row):
     assert next_request["text"]["value"] == "next cafXYé!", next_request
     assert next_request["key"] != json.loads(original)["key"], "next draft reused original key"
     assert_submitted(fixture.endpoint.requests, ["original éZ", "next cafXYé!"])
-    tty.send(b"/exit\r")
+    tty.send(b"\x03")
     tty.finish()
 
 
@@ -287,7 +287,7 @@ def navigation(fixture, row):
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"
-    tty.send(b"/exit\r")
+    tty.send(b"\x03")
     tty.finish()
 
 

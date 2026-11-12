@@ -129,7 +129,7 @@ Fixture policy, chosen by the latest user text:
 
 The fixture never runs out of replies, so an extra submission shows up as an extra request and doesn't fail.
 
-The scripted proof journey (compose → draft cells → submit → answer → exactly one provider request and one new capture key whose saved text is exactly the draft → `/exit` restoration):
+The scripted proof journey (compose → draft cells → submit → answer → exactly one provider request and one new capture key whose saved text is exactly the draft → Ctrl-C restoration):
 
 ```sh
 $V journey "$RUN" j1 --surface tmux-detached   # or pty / tmux-attached
@@ -181,7 +181,7 @@ It never kills by process name. Evidence under `~/.cache/verify-rui/runs/ID/` su
 ## Gotchas
 
 - Opening a terminal in tmux makes Rui receive DECRPM replies (`ESC[?2027;0$y ESC[?1007;0$y`). These are terminal reports, not typed input. A PTY run receives none.
-- Rui exits 0 after `/exit`, Ctrl-C and SIGTERM, and prints `Detached. Host work continues.` on the main screen.
+- Rui exits 0 after Ctrl-C and SIGTERM, and prints `Detached. Host work continues.` on the main screen.
 - Esc completes only after the decoder's lone-Esc deadline. Wait for the next frame before sending more bytes, or they join it as Alt-key input.
 - PENDIN can be set after exit when input is queued. It is kernel-owned and masked in `termios_restored`, and the raw `stty_after` is kept.
 - The tap's wrapper shell (`/bin/sh -c`) is the session leader. Rui is its only child, and `signal` resolves and verifies that child.
