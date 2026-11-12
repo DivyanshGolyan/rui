@@ -1870,7 +1870,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     }
     if (launched) |frame| {
         const endpoint = providers.endpointUnder(init.arena.allocator(), frame.base_url.slice()) catch |err| {
-            if (err == error.InvalidBaseUrl) launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "provider.baseUrl must be an https URL with a host and no query" });
+            if (err == error.InvalidBaseUrl) return launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "provider.baseUrl must be an https URL with a host and no query" });
             return err;
         };
         served.ca_file = if (frame.ca_file.len == 0) null else frame.ca_file.slice();
@@ -1908,7 +1908,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     ) catch |err| {
         // A launched Host stops when its stdin closes; that is its clean end.
         if (launched != null and err == error.EffectAwareShutdown) return;
-        if (launched) |frame| if (launch_frame.startRefusal(frame.store, err)) |refusal| launch_frame.writeRefusal(io, refusal);
+        if (launched) |frame| if (launch_frame.startRefusal(frame.store, err)) |refusal| return launch_frame.writeRefusal(io, refusal);
         return err;
     };
 }
@@ -1920,7 +1920,7 @@ noinline fn readLaunchFrame(init: std.process.Init) !*launch_frame.Frame {
     frame.* = .{};
     var refusal: launch_frame.Refusal = undefined;
     launch_frame.read(init.io, .stdin(), std.heap.c_allocator, frame, &refusal) catch |err| {
-        if (err == error.LaunchFrameInvalid) launch_frame.writeRefusal(init.io, refusal);
+        if (err == error.LaunchFrameInvalid) return launch_frame.writeRefusal(init.io, refusal);
         return err;
     };
     return frame;
