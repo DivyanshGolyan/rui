@@ -1,6 +1,7 @@
 //! What an activity page and an activity search read, as plain values: the
 //! Store fills them and the Host writes them (`activity_reply.zig`).
 const std = @import("std");
+const session_list = @import("session_list.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const activity_read = @import("activity_read.zig");
 const change_ring = @import("change_ring.zig");
@@ -119,7 +120,10 @@ pub const Queued = struct {
 /// consent and first Action show with that page, beside the revision and
 /// Workspace a permission prompt shows.
 pub const PageWork = struct {
+    read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     work: session_work.Work = .{ .state = .{ .idle = .{ .since = 0 } } },
+    /// From the same live read as work, even when history has a pinned end.
+    last_line: ?session_list.SavedLastLine = null,
     revision: u64 = 0,
     workspace: Bounded(workspace_path.max_bytes) = .{},
 };

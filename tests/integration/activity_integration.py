@@ -249,10 +249,15 @@ def main():
             valid = {"version": host_process.WIRE_VERSION, "type": "activity_page", "delta": "full", "since": None, "end": str(2**63-1), "direction": "forward", "more": False,
                 "call_activity": {"total": "0", "entries": []},
                 "queued": {"count": "0", "oldest_position": "0", "newest_admission": "0", "newest_position": "0"},
-                "work": {"state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "revision": "1", "workspace": "/w"},
+                "work": {"read_version": "0"*32 + ".0", "state": {"kind": "idle", "since": "1"}, "turn": None, "operation": None, "first_action": None, "last_line": None, "revision": "1", "workspace": "/w"},
                 "items": [{"position": str(i+1), "ordinal": "0", "at": str(2**63-1), "value": {"admission": {"admission": str(i+1), "key": "\0"*128,
                     "turn": None, "state": "queued", "admitted_at": str(2**63-1), "sender": None, "content": {"bytes": "0", "sha256": digest(b"").hex()}}}} for i in range(16)]}
             mock_reply(fields["socket"], store, "page", json.dumps(valid).encode(), ok=True)
+            for version in (None, "missing", "malformed"):
+                wire = copy.deepcopy(valid)
+                if version == "missing": del wire["work"]["read_version"]
+                else: wire["work"]["read_version"] = version
+                mock_reply(fields["socket"], store, "page", json.dumps(wire).encode())
             for fault in ("missing", "count", "duplicate", "order", "retired", "overflow"):
                 wire = copy.deepcopy(valid)
                 if fault == "missing": del wire["call_activity"]

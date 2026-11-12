@@ -45,6 +45,7 @@ pub const ListSessions = struct {
 /// One list row as the Store read it. Its slices borrow the Store's read
 /// scratch and are valid only during the visitor's `row` call.
 pub const Row = struct {
+    read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     archive_state: session_archive.State,
     reference: []const u8,
     parent: ?[]const u8,
@@ -69,6 +70,19 @@ pub const Row = struct {
 /// call. Text borrows the row visitor's scratch; failures, stops and private
 /// answers have no text.
 pub const LastLine = struct { position: u64, text: ?[]const u8 };
+
+/// Owned form of the same Store projection, retained with a completed read.
+pub const SavedLastLine = struct {
+    position: u64,
+    text: ?Bounded(max_last_line_bytes) = null,
+};
+
+/// All work-dependent facts a list row presents, from one Store read.
+pub const Snapshot = struct {
+    read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
+    work: session_work.Work,
+    last_line: ?SavedLastLine = null,
+};
 
 /// A Session's first admitted Message.
 pub const FirstMessage = struct {
