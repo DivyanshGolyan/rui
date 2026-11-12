@@ -230,13 +230,17 @@
       "steps": [
         {
           "keys": [
-            "M-a"
+            "M-i"
           ]
         },
         {
-          "keys": [
-            "Enter"
-          ]
+          "wait": "Copy last answer"
+        },
+        {
+          "mouse": {
+            "at": "Archive",
+            "do": "click"
+          }
         },
         {
           "wait": "· Archived"

@@ -838,9 +838,9 @@ def persistent_copy_case():
             read_terminal(master, "› ")
             capture = terminal_capture(master)
             chat_info_open(master)
-            panel_frame(master, lambda frame: "No answer to copy" in frame, b"\x1b[B" * 6 + b"\r")
+            panel_frame(master, lambda frame: "Copy: couldn't copy" in frame, b"\x1b[B" * 6 + b"\r")
             assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
-            panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
+            panel_frame(master, lambda frame: "esc close" not in frame and "Type a task" in frame, b"\x1b")
             terminal_step(master, "Copy request", "Done.", composer=True)
             # A left drag over the answer's last word copies exactly the text
             # it covered, in one OSC 52 sequence, once the button is released.
@@ -866,7 +866,8 @@ def persistent_copy_case():
             terminal_step(master, "Large request", "More — Ctrl-O for whole message", composer=True)
             before = len(capture.clipboard)
             chat_info_open(master)
-            panel_frame(master, lambda frame: "Too large for the clipboard" in frame, b"\x1b[B" * 6 + b"\r")
+            panel_frame(master, lambda frame: "Copy: couldn't copy" in frame, b"\x1b[B" * 6 + b"\r")
+            panel_frame(master, lambda frame: "esc close" not in frame and "alt+i info" in frame, b"\x1b")
             assert len(capture.clipboard) == before, "an answer over the limit is never sent"
             assert not any(here.iterdir()), "clipboard copy creates no export file"
             terminal_step(master, "\x03", "Detached.")
