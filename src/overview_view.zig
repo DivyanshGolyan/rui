@@ -7775,13 +7775,14 @@ fn drawnCommandList(state: *State, skills: ?[]const []const u8) !Draft {
 }
 
 test "overview command list click takes the drawn row only from the list the frame drew, as arrows and Enter do" {
-    const Case = enum { unchanged, unchanged_skill, edited, replaced, closed };
+    const Case = enum { unchanged, unchanged_skill, choice, run, edited, replaced, closed, closed_skill };
     const Mode = enum { editable, frozen, pasting };
     const first_page = [_][]const u8{ "refactor", "review" };
+    var setup_line = "/setup".*;
     for (std.enums.values(Case)) |case| for (std.enums.values(Mode)) |mode| {
         errdefer std.debug.print("case={s} mode={s}\n", .{ @tagName(case), @tagName(mode) });
-        const skill = case == .unchanged_skill or case == .replaced;
-        const index: usize = if (skill or case == .edited) 1 else 3;
+        const skill = case == .unchanged_skill or case == .replaced or case == .closed_skill;
+        const index: usize = if (skill or case == .edited or case == .choice) 1 else if (case == .run) 5 else 3;
         var clicked = try opened(&mixed);
         defer clicked.deinit();
         var keyed = try opened(&mixed);
@@ -7789,14 +7790,14 @@ test "overview command list click takes the drawn row only from the list the fra
         var drafts: [2]Draft = undefined;
         var pressed: slash_commands.Shown.Pick = undefined;
         for ([_]*State{ &clicked, &keyed }, &drafts) |state, *draft| {
-            draft.* = try drawnCommandList(state, if (skill) &first_page else null);
+            draft.* = if (case == .choice) try typeText(state, "/configure --permission-mode ") else try drawnCommandList(state, if (skill) &first_page else null);
             // The frame drew the row; the press names it in that list.
             if (state == &clicked) pressed = state.commands.?.pick(index);
             // What changed after the frame drew the list and before the
             // click: the draft gained `s`, a new skills page replaced the
             // rows of the same draft, or Esc closed the list.
             switch (case) {
-                .unchanged, .unchanged_skill => {},
+                .unchanged, .unchanged_skill, .choice, .run => {},
                 .edited => {
                     draft.* = .{ .bytes = "/s", .cursor = 2, .edits = draft.edits +% 1 };
                     try expectEffects(&.{}, try step(state, .{ .composed = .{ .input = .{ .composer = .append }, .draft = draft.* } }));
@@ -7811,7 +7812,15 @@ test "overview command list click takes the drawn row only from the list the fra
                     for (entries, [_][]const u8{ "release", "rename" }) |*entry, name| entry.* = .{ .name = try state.gpa.dupe(u8, name), .description = try state.gpa.dupe(u8, "a skill") };
                     skillsRead(state, read.read, .{ .entries = entries, .total = 2 }, draft.*);
                 },
-                .closed => try expectEffects(&.{}, try press(state, draft.*, .clear)),
+                .closed => {
+                    // Esc consumes a command through command_input.consumesDraft.
+                    // Apply the shell's clear before delivering the stale press.
+                    try expectEffects(&.{.clear_draft}, try press(state, draft.*, .clear));
+                    draft.* = .{ .edits = draft.edits +% 1 };
+                },
+                // Closing skill suggestions keeps the Message, so this also
+                // checks a closed list while its nonempty draft still matches.
+                .closed_skill => try expectEffects(&.{}, try press(state, draft.*, .clear)),
             }
             if (mode == .frozen) {
                 // A start begins; the shell keeps the list its frame drew.
@@ -7824,12 +7833,20 @@ test "overview command list click takes the drawn row only from the list the fra
         const before = clicked.commands;
         const selected = clicked.selected;
         const effects = try step(&clicked, .{ .clicked = .{ .target = .{ .command = pressed }, .draft = drafts[0], .pasting = mode == .pasting } });
-        if ((case == .unchanged or case == .unchanged_skill) and mode == .editable) {
+        if ((case == .unchanged or case == .unchanged_skill or case == .choice or case == .run) and mode == .editable) {
             // Independent expectation: the arrows to that row, then Enter.
             for (0..index) |_| _ = try press(&keyed, drafts[1], .next);
             const entered = try submit(&keyed, drafts[1]);
             try std.testing.expect(entered.len != 0);
             try expectEffects(entered.slice(), effects);
+            // Completed commands consume their draft, not just their list.
+            // These are independent expectations, in addition to key parity.
+            if (case == .choice) {
+                try expectEffects(&.{.clear_draft}, effects);
+                try std.testing.expectEqualStrings("bypass", clicked.settings.get(startOption("permission-mode").?).?);
+            } else if (case == .run) {
+                try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &setup_line } } }, effects);
+            }
             try std.testing.expectEqual(keyed.selected, clicked.selected);
             try std.testing.expectEqual(keyed.panel, clicked.panel);
             try std.testing.expectEqual(keyed.commands != null, clicked.commands != null);
