@@ -573,6 +573,23 @@ export interface components {
                     dropped: components["schemas"]["Decimal"];
                 };
             };
+        } | {
+            position: components["schemas"]["Decimal"];
+            ordinal: components["schemas"]["Decimal"];
+            at: components["schemas"]["Decimal"];
+            value: {
+                model_call: {
+                    model: string;
+                    served_model: string | null;
+                    input_tokens: components["schemas"]["Decimal"] | null;
+                    output_tokens: components["schemas"]["Decimal"] | null;
+                    cached_tokens: components["schemas"]["Decimal"] | null;
+                    latency_ms: components["schemas"]["Decimal"] | null;
+                    first_event_ms: components["schemas"]["Decimal"] | null;
+                    status: string;
+                    attempts: components["schemas"]["Decimal"];
+                };
+            };
         };
         ActivityItemContent: {
             bytes: components["schemas"]["Decimal"];
@@ -616,7 +633,7 @@ export interface components {
             /** @enum {string} */
             direction: "forward" | "backward";
             /** @description Each at most once, in the order the enum lists them. */
-            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            kinds: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call")[];
             limit: components["schemas"]["Decimal"];
             since?: string | null;
         };
@@ -633,7 +650,7 @@ export interface components {
             position: components["schemas"]["Decimal"];
             ordinal: components["schemas"]["Decimal"];
             /** @enum {string} */
-            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted";
+            kind: "admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call";
             hits: components["schemas"]["ActivitySearchFactsHit"][];
         };
         ActivitySearchReply: {
@@ -653,7 +670,7 @@ export interface components {
             session: string;
             query: string;
             /** @description Each at most once, in the order the enum lists them. */
-            kinds?: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted")[];
+            kinds?: ("admission" | "user" | "assistant" | "call" | "tool_result" | "hosted_call" | "turn_ended" | "stop" | "sent" | "send_failed" | "received" | "approval_requested" | "session_changed" | "compacted" | "model_call")[];
             before_position?: components["schemas"]["Decimal"] | null;
             before_ordinal?: components["schemas"]["Decimal"] | null;
             limit?: components["schemas"]["Decimal"];

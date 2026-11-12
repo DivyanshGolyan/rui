@@ -2015,7 +2015,7 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
         const rejected: store_module.ModelFailure = .{ .correlated = .{ .code = "provider_http_401", .request_id = active.request_id, .report = "" } };
         switch (result) {
             .refreshed => |refreshed| settleFailure(host, active.owner.token, active.owner.binding, rejected, if (refreshed) .refreshed else .ordinary),
-            .failed => |err| settleUnansweredFailure(host, active.owner.token, active.owner.binding, providers.leaseFailureCode(err), .ordinary),
+            .failed => |err| settleFailure(host, active.owner.token, active.owner.binding, .{ .uncorrelated = providers.leaseFailureCode(err) }, .ordinary),
             .ready => unreachable,
         }
     }
@@ -2129,6 +2129,7 @@ fn launchPreparedRequest(
     const active = &slot.provider;
     active.transfer.start(reactor, request, binding, .{
         .fields = headers.fields(),
+        .timing = host.custody.modelTiming(token) catch unreachable,
         .credential = headers.takeCredential(),
         .routing = .{ .turn_id = binding.turn_id, .owner = served.credential.routingOwner(lease) },
         .faults = host.hooks.transferFaults(host.hook_progress.response_write_once_spent),
@@ -2278,7 +2279,7 @@ fn completeTransfer(
                     .length = response.length,
                     .transfer = if (completion.outcome == .response_capture_failed) .capture_failed else .interrupted,
                 }, .{ .binding = owner.binding, .code = code, .request_id = active.transfer.requestId() });
-                settleUnansweredFailure(host, owner.token, owner.binding, code, disposition);
+                settleFailure(host, owner.token, owner.binding, .{ .uncorrelated = code }, disposition);
             }
         },
     }

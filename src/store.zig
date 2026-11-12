@@ -69,6 +69,7 @@ pub const ModelAdmissionKind = model_admission_domain.ModelAdmissionKind;
 pub const DispatchWork = model_admission_domain.DispatchWork;
 pub const ModelFailure = model_settlement_domain.ModelFailure;
 pub const ModelFailureClass = model_settlement_domain.ModelFailureClass;
+pub const ModelTimings = model_settlement_domain.ModelTimings;
 pub const ModelInterruptionReply = command_domain.ModelInterruptionReply;
 pub const ModelInterruptionTarget = command_domain.ModelInterruptionTarget;
 pub const OpenOptions = store_core.OpenOptions;

@@ -1581,7 +1581,7 @@ pub fn tight(value: protocol.ActivityItem.Value) bool {
         .hosted_call => |presentation| presentation.code == .succeeded,
         .sent => true,
         .admission, .received, .user => |message_| message_.sender != null,
-        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted => false,
+        .assistant, .call, .turn_ended, .stop, .send_failed, .approval_requested, .session_changed, .compacted, .model_call => false,
     };
 }
 
@@ -1664,7 +1664,7 @@ pub fn render(requests: client.Requests, store: []const u8, session: []const u8,
         .sent => |sent| try peerLine(sink, .outbound, sent.target, sent.admitted_at),
         .send_failed => |failed| try sendFailed(sink, failed.target),
         // The call's own line and the work status show the wait.
-        .approval_requested, .session_changed, .compacted => {},
+        .approval_requested, .session_changed, .compacted, .model_call => {},
     }
     return false;
 }

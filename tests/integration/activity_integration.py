@@ -193,7 +193,13 @@ def main():
             stop_session(state, store, "stop", SESSION)
             stopped_end, stopped = wait_for(lambda: (h := history(store)) and (h if any(kind(r) == "turn_ended" and r["value"]["turn_ended"]["ending"] == "stopped" for r in h[1]) else None), "stopped outcome")
             assert history(store, third[0])[1] == third[1]
-            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "approval_requested", "tool_result", "turn_ended", "stop"}
+            assert {kind(r) for r in stopped} == {"admission", "user", "assistant", "call", "approval_requested", "tool_result", "turn_ended", "stop", "model_call"}
+            model_calls = [r["value"]["model_call"] for r in stopped if kind(r) == "model_call"]
+            # One immutable record per resolved Operation, including the calls
+            # awaiting approval at stop, across fixed-end/reverse/restart reads.
+            assert [r["status"] for r in model_calls] == ["tool_proposals", "answer", "tool_proposals"], model_calls
+            assert all(r["attempts"] == "1" for r in model_calls), model_calls
+            assert all(r["latency_ms"] is not None and r["first_event_ms"] is not None for r in model_calls), model_calls
             excluded = next(r["value"]["admission"] for r in stopped if kind(r) == "admission" and r["value"]["admission"]["key"] == "excluded")
             assert excluded["state"] == "excluded" and excluded["turn"] is None
             assert all(r["value"]["stop"]["completion"] == "completed" for r in stopped if kind(r) == "stop")
@@ -315,7 +321,7 @@ def main():
             mock_reply(fields["socket"], store, "page", encoded.replace(b'"version": "' + host_process.WIRE_VERSION.encode() + b'"', b'"version":"' + host_process.WIRE_VERSION.encode() + b'","version":"' + host_process.WIRE_VERSION.encode() + b'"'))
             assert mock_reply(fields["socket"], store, "content", b"abc", 9) == b""
             assert mock_reply(fields["socket"], store, "content", b"p" * 4096 + b"abc", 4105) == b"p" * 4096
-            print("activity typed native: seven kinds/complete content/proposals/fixed-end/reverse/ties/catch-up/restart/provenance/malformed/truncation passed")
+            print("activity typed native: model calls/mixed kinds/complete content/proposals/fixed-end/reverse/ties/catch-up/restart/provenance/malformed/truncation passed")
         finally:
             if process is not None: stop_process(process)
             endpoint.shutdown()
