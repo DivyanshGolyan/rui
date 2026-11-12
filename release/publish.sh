@@ -30,29 +30,33 @@ rui_publish() {
     ) || :
 }
 
-# _rui_path PREFIX BUILD MODE -> BUILD's PATH advice. When a released install's
-# ~/.local/bin is missing from PATH, add it to the login shell's profile
-# instead, so a new terminal finds rui; RUI_NO_MODIFY_PATH=1 keeps the advice.
+# _rui_path PREFIX BUILD MODE -> BUILD's PATH advice. When BUILD reports
+# ~/.local/bin missing from PATH for a released install, add it to the shell's
+# startup file instead, so a new terminal finds rui; RUI_NO_MODIFY_PATH=1 keeps
+# the advice. The decision reads BUILD's state, never its advice text.
 _rui_path() {
-    _rui_advice=$("$2/bin/rui" --installation-path </dev/null) || _rui_advice=
-    case $_rui_advice in
-        *' is not on your PATH'*)
-            if [ "$3" = released-install ] && [ "$1" = "$HOME/.local" ] && [ -z "${RUI_NO_MODIFY_PATH:-}" ] \
-                && _rui_rc=$(_rui_profile) && _rui_add_path "$_rui_rc"; then
-                printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal to use it.\n' "$(_rui_show "$_rui_rc")"
-                return 0
-            fi ;;
-    esac
-    if [ -n "$_rui_advice" ]; then printf '%s\n' "$_rui_advice"; fi
+    _rui_state=$("$2/bin/rui" --installation-path-state </dev/null 2>/dev/null) || _rui_state=
+    if [ "$_rui_state" = missing ] && [ "$3" = released-install ] && [ "$1" = "$HOME/.local" ] \
+        && [ -z "${RUI_NO_MODIFY_PATH:-}" ] && _rui_rc=$(_rui_profile) && _rui_add_path "$_rui_rc"; then
+        printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal to use it.\n' "$(_rui_show "$_rui_rc")"
+        return 0
+    fi
+    "$2/bin/rui" --installation-path </dev/null || :
 }
 
-# _rui_profile -> the file the login shell reads at startup, or failure for a
-# shell whose syntax differs (fish): the advice covers those.
+# _rui_profile -> the startup file a new terminal's shell reads, or failure for
+# a shell whose syntax differs (fish): the advice covers those. Terminals start
+# Bash as a login shell on macOS, which reads only the first of .bash_profile,
+# .bash_login and .profile that exists, so never create one ahead of another.
 _rui_profile() {
     case ${SHELL##*/} in
         zsh) printf '%s/.zshrc' "${ZDOTDIR:-$HOME}" ;;
         bash)
-            if [ "$(uname -s)" = Darwin ]; then printf '%s/.bash_profile' "$HOME"; else printf '%s/.bashrc' "$HOME"; fi ;;
+            if [ "$(uname -s)" != Darwin ]; then printf '%s/.bashrc' "$HOME"; return 0; fi
+            for _rui_f in .bash_profile .bash_login .profile; do
+                if [ -e "$HOME/$_rui_f" ]; then printf '%s/%s' "$HOME" "$_rui_f"; return 0; fi
+            done
+            printf '%s/.bash_profile' "$HOME" ;;
         fish) return 1 ;;
         *) printf '%s/.profile' "$HOME" ;;
     esac
