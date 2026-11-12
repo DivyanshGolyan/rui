@@ -6551,13 +6551,15 @@ test "persisted tool label corruption fences every publication route" {
     }
 }
 
-test "an Activity page costs the same steps after 10 or 10,000 earlier rows" {
+test "an Activity page costs the same steps after 32 or 10,000 earlier rows" {
     // Each Store holds `history` earlier units, a Message, its call item, the
     // call's rejection and its Turn's outcome, then the same Session tail: a
     // Message, twenty rejected calls and a stop. The opening's page and a
-    // forward page from the tail's first row read only the tail.
+    // forward page from the tail's first row read only the tail. At least
+    // 17 history units saturate every source's bounded lookahead, including
+    // model_call rows at admissions, before comparing exact VM steps.
     var steps: [2][2]i64 = undefined;
-    for ([_]usize{ 10, 10_000 }, &steps) |history, *cost| {
+    for ([_]usize{ 32, 10_000 }, &steps) |history, *cost| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var storage: Store = undefined;
@@ -8607,13 +8609,13 @@ test "an exhausted Attempt still retains its effort refusal for the next Operati
     var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store_testing.exec(&storage, "UPDATE model_operation SET attempt_ordinal=?1 WHERE operation_id=?2", .{ retry_policy.maximum_attempts, binding.operation_id });
     binding.attempt_ordinal = retry_policy.maximum_attempts;
-    try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: high" } }, .effort_change_refused, .{});
+    try store_testing.settleModelFailureWithTimings(&storage, binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: high" } }, .effort_change_refused, .{ .latency_ms = 37, .first_event_ms = 7 }, .{});
     try std.testing.expect(try storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
     const observed = try storage.inspectSessionForTesting(session.slice());
     try std.testing.expectEqual(revision, observed.revision);
     try std.testing.expectEqual(@as(?protocol.ReasoningEffort, .low), observed.reasoning_effort);
     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_change WHERE session_ref=?1 AND revision=?2 AND field='reasoning_effort_refused' AND provider_text='unsupported_value: high'", .{ session.slice(), revision }));
-    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='retry_exhausted'", .{binding.operation_id}));
+    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code='retry_exhausted' AND latency_ms=37 AND first_event_ms=7", .{binding.operation_id}));
     try submitTestMessage(&storage, &tmp, "exhausted-effort-next-input", "exhausted-effort-next", session.slice(), "next Operation");
     const next = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     var view: historical_domain.HistoricalView = undefined;
@@ -8704,7 +8706,7 @@ test "the previous Store format preserves change rows and admits bounded effort 
         inline for (store_schema.migrations) |step| if (step.from < previous) {
             inline for (step.sqlite) |sql| try sqlite.exec(raw, sql ++ ";");
         };
-        // Populate the exact old shape before the final step rebuilds it.
+        // Populate the exact old shape before the format-66 step rebuilds it.
         try sqlite.exec(raw, "INSERT INTO core_command(command_key,kind,target,input_digest,accepted,code,revision,created,command_seq) VALUES('effort-migration',1,'d8mv7p',zeroblob(32),1,'',2,0,100)");
         try sqlite.exec(raw, "INSERT INTO session_revision(session_ref,revision,command_key,workspace,provider,model,instructions_content_id,instructions_updated,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,reasoning_effort,label) " ++
             "SELECT session_ref,2,'effort-migration',workspace,provider,model,instructions_content_id,0,tool_set_id,permission_mode,output_schema_content_id,compaction_trigger,output_reservation,'high',label FROM session_revision WHERE session_ref='d8mv7p' AND revision=1");

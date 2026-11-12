@@ -72,6 +72,7 @@ const cores = .{
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_catalog.zig", @import("model_catalog.zig") },
     .{ "model_catalog_snapshot.zig", @import("model_catalog_snapshot.zig") },
+    .{ "model_evidence.zig", @import("model_evidence.zig") },
     .{ "model_list.zig", @import("model_list.zig") },
     .{ "model_picker.zig", @import("model_picker.zig") },
     .{ "model_picker_view.zig", @import("model_picker_view.zig") },
