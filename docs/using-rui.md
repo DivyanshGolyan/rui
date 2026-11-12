@@ -17,11 +17,8 @@ Enter these at the `›` prompt. Typing `/` lists names only; fixed choices appe
 
 | Command | What it does |
 | --- | --- |
-| `/status` | Shows settings, including the Bash permission mode, and current work. |
 | `/requests` | Lists saved requests for recovery. |
-| `/configure` | Changes settings for the current Session only. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
-| `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 
 While the model works on a reply, the work line says `Thinking` with elapsed time.
 Rate-limited retries keep their countdown, and running tools show their descriptions.
@@ -44,14 +41,31 @@ The check names the discovered Host count, Stores and unsupported reasons. Resta
 The panel retains your draft, selected Session and unresolved capture handles without replaying uncertain effects.
 It reports installation separately from activation, including when an application-owned or unsupported Host cannot be restarted safely.
 
+## Chat info
+
+Press **Alt+I** in a conversation, or click its Session/model/effort line or **alt+i info**, to open the same info panel above the input.
+Clicking that line again while info is open leaves the panel and any open choice alone.
+The panel has its own ground and never becomes part of the feed; your draft stays below it unchanged.
+It uses only the height it needs, leaving recent messages visible above it.
+Opening Model grows the panel into that feed space, and filtering gives space back; the input and bottom footer stay in place.
+Its one footer replaces the usual chat footer below the input’s lower divider, on the physical last row; there is no second footer inside the panel or blank notice row below it.
+Up and Down select Effort, Permissions, Tools or Model, and Enter opens the field's choices.
+Folder is read-only: HOME is shown as `~`, and a long path keeps its right edge with a leading ellipsis.
+It prefers whole trailing directory components; if the basename itself is too wide, it shows the longest grapheme-aligned basename suffix that fits, never an arbitrary right-side cut or an ellipsis hiding the whole name.
+Context is read-only and appears only when a context estimate is available; a missing estimate is not shown as unknown or zero, while a known zero is shown as zero.
+A blank row separates the fields from Rename, Archive and Copy last answer, including when those actions stack.
+Model changes stay within the Session's provider.
+Its filter is the Model field’s editable value, with indented matches below it and no separate `Filter:` row.
+The list shrinks as matches narrow; a quiet `↓ N more` only reports models below the viewport.
+Esc closes an open choice first, then the panel.
+The panel contains no Session IDs, Store paths or request-recovery records; use `/requests` for recovery handles.
+While an original submission is held unresolved or rejected, **Alt+D** or the footer’s **alt+d details** opens its separate repair and identity page, not chat info.
+An environment-too-large notice also has clickable **details**.
+
 ## Approve Bash commands
 
 By default, Bash runs without asking (`bypass`).
-To review each command first, enter this before your first request in each new Session:
-
-```text
-/configure --permission-mode ask
-```
+To review each command first, open chat info with **Alt+I**, select **Permissions**, press Enter and choose **ask first** before your first request in each new Session.
 
 Rui then shows each proposed command above an Allow once / Deny choice, with Allow once highlighted. ← and → move the highlight and Enter confirms it.
 Enter confirms only the option on screen.
@@ -95,8 +109,8 @@ Ctrl-X stops the selected Session, and Ctrl-D leaves.
 | Key in the overview | What it does |
 | --- | --- |
 | Up, Down, Home, End | Select a Session while the composer is empty. In a draft, Home and End move the caret, and Up and Down select a Session once past its first or last line. While a start waits for its answer, all four select. |
-| Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds and while `/model` is open. |
-| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. `/model` lists the models your sign-ins offer, your default first; ↑ and ↓ move, and Enter picks one as the default for new Sessions. When both ChatGPT and an API key offer it, Enter shows a Use ChatGPT / API key choice, where ← and → move and Enter picks. Esc steps back. A pick replaces a model `/configure` held. On a screen too short for the list, `/model` says so instead. On a blank composer, opens the selected Session. |
+| Shift-Up, Shift-Down | Select the Session above or below, whatever the composer holds. |
+| Enter | Sends the composer's text: a task starts a new Session, and `/configure` sets the next start's settings. Select **Settings** in the overview, then its **Model** field, to pick the default for new Sessions; type to filter, use ↑ and ↓ to move, and Enter to save. Esc closes the choice before settings. On a blank composer, opens the selected Session. |
 | Esc, Ctrl-G | Clears the composer's draft. On an empty composer, clears the settings `/configure` held. A start already sent keeps its own text and settings. In a conversation's latest view, returns to the overview. |
 | Ctrl-X | Asks to stop the selected Session while it works, waits or needs approval. Press Ctrl-X again to stop it; any other key cancels. The row reads `stopping` until the Host answers, then `■ stopped`; if the stop fails, a message says why and the row keeps its state. On any other row a message says why nothing was stopped. |
 | Ctrl-D | Leaves, when the composer is empty or a start waits for its answer. |
@@ -168,13 +182,13 @@ It does not mean that your account can use every listed model.
 
 Rui also takes a model it does not list, such as one your provider's model list offers.
 It says `Rui does not list ID; it uses default limits`, and runs that model with a 128,000-token context.
-If the provider does not know the ID, the Session's first request fails and says to pick another with `/model` in the overview.
+If the provider does not know the ID, the Session's first request fails and says to pick another in the overview’s app settings **Model** field.
 
 Without `--model`, a new Session uses your saved default.
 With no saved default, it uses `gpt-6.1-sol`.
-To pick the default from a list, type `/model` in the overview.
+To pick the default from a list, open **Settings** in the overview and press Enter on **Model**.
 
-To switch an existing Session within its provider, run `rui session configure --session SESSION --model ID`.
+To switch an existing Session within its provider, select **Model** in chat info, or run `rui session configure --session SESSION --model ID`.
 The next model request replays visible conversation without the old model’s private reasoning or compacted state.
 This preserves the Session and its attached agents, but costs one cache miss.
 
@@ -211,11 +225,11 @@ The release-supported Codex model IDs start compaction at an estimated 244,800 t
 A model Rui does not list is assumed to have a 128,000-token context, so it starts compaction at an estimated 115,200 tokens unless you set a threshold.
 A context-overflow error from the provider can still start compaction.
 
-To change the threshold for the current Session, enter:
+To change the threshold for the current Session, use the shell:
 
-```text
-/configure --compaction-trigger 200000 --output-reservation 8000
-/status
+```sh
+rui session configure --session SESSION --compaction-trigger 200000 --output-reservation 8000
+rui session inspect --session SESSION
 ```
 
 The trigger is an estimate, not a limit on message size.
@@ -223,10 +237,10 @@ The output reservation adds headroom to that estimate.
 It does not guarantee an output budget.
 Rui never truncates messages to fit.
 
-To return to the provider and model defaults, enter:
+To return to the provider and model defaults:
 
-```text
-/configure --compaction-trigger default --output-reservation default
+```sh
+rui session configure --session SESSION --compaction-trigger default --output-reservation default
 ```
 
 Omitting either flag keeps its current setting.

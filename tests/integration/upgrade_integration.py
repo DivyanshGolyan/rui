@@ -1106,10 +1106,15 @@ def conversation_case(root, binary, releases, artifacts):
             proof_ready(c, previous, old_host)
             screen.send("X")
             screen.draft("conXversation β draft", 6)
-            # A bare relaunch entry restored the open conversation, not just
-            # an overview row. A command from that conversation still works.
-            screen.send("\x01\x0b/status\r")
-            screen.contains("Notifications")
+            # The selected image restored the actual conversation and caret,
+            # not just an overview row. Its info panel reads from the new Host
+            # without replacing or submitting the restored unsent draft.
+            screen.send("\x1bi")
+            screen.until(lambda: "unavailable" not in screen.capture.completed
+                         and all(value in screen.capture.completed for value in
+                                 ("Copy last answer", "Model", "Folder", "gpt-6-luna")),
+                         "ready chat info reads the relaunched Host")
+            screen.contains("› conXversation β draft")
             screen.save(artifacts, "conversation-returned")
         after = c.json("session", "inspect", "--store", c.store, "--session", session)
         assert after["session"] == before["session"], "Upgrade submitted work or changed the open Session"

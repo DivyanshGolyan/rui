@@ -6,7 +6,10 @@ const vxfw = vaxis.vxfw;
 const Self = @This();
 const Hover = @import("Hover.zig");
 
-pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true };
+/// Aligned field values start here; callers may fit bounded values to it.
+pub const value_column: u16 = 19;
+
+pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true, visible: bool = true };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
 /// A field's full-width choice. The child owns its selection and scrolling.
 pub const CustomChoice = struct {
@@ -19,6 +22,9 @@ pub const CustomChoice = struct {
 const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bool = false };
 
 title: []const u8,
+/// Fit hosted content, including one trailing ground row; full pages fill by default.
+natural_height: bool = false,
+unicode: bool = true,
 title_widget: ?vxfw.Widget = null,
 action_gap: u16 = 0,
 stacked_actions: bool = false,
@@ -50,7 +56,7 @@ pub fn widget(self: *Self) vxfw.Widget {
 }
 
 pub fn openChoice(self: *Self, labels: []const []const u8, current: ?usize) void {
-    if (self.selected >= self.fields.len or !self.fields[self.selected].selectable or labels.len == 0) return;
+    if (self.selected >= self.fields.len or (!self.fields[self.selected].selectable or !self.fields[self.selected].visible) or labels.len == 0) return;
     const checked = if (current) |at| if (at < labels.len) current else null else null;
     self.choice = .{ .field = self.selected, .labels = labels, .current = checked, .selected = checked orelse 0 };
 }
@@ -60,7 +66,7 @@ pub fn closeChoice(self: *Self) void {
 }
 
 fn selectable(self: *const Self, at: usize) bool {
-    return at < self.fields.len + self.actions.len and (at >= self.fields.len or self.fields[at].selectable);
+    return at < self.fields.len + self.actions.len and (at >= self.fields.len or (self.fields[at].selectable and self.fields[at].visible));
 }
 
 fn move(self: *Self, down: bool) void {
@@ -149,7 +155,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 }
 
 fn rowOf(self: *const Self, field: usize) usize {
-    var row = if (field >= self.fields.len and !self.stacked_actions) self.fields.len else field;
+    // Hiding a fact compacts presentation, never its semantic field/action ID.
+    var row: usize = 0;
+    for (self.fields[0..@min(field, self.fields.len)]) |before| row += @intFromBool(before.visible);
+    if (field >= self.fields.len and self.stacked_actions) row += field - self.fields.len;
     if (self.choice) |choice| if (field > choice.field) {
         row += choice.labels.len;
     };
@@ -161,72 +170,81 @@ fn rowOf(self: *const Self, field: usize) usize {
 }
 
 fn activeRow(self: *const Self) usize {
-    if (self.custom_choice) |choice| return choice.field + @as(usize, if (choice.value_widget == null) 1 else 0);
-    if (self.choice) |choice| return choice.field + 1 + choice.selected;
+    if (self.custom_choice) |choice| return self.rowOf(choice.field) + @as(usize, if (choice.value_widget == null) 1 else 0);
+    if (self.choice) |choice| return self.rowOf(choice.field) + 1 + choice.selected;
     return self.rowOf(@min(self.selected, (self.fields.len + self.actions.len) -| 1));
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const size = ctx.max.size();
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
-    @memset(surface.buffer, .{ .style = self.ground });
+    const available = ctx.max.size();
     self.targets = &.{};
     self.custom_origin = 0;
     self.custom_height = 0;
     self.hover.targets = &.{};
+    // At tiny heights, content takes precedence over the trailing ground row.
+    const bottom_padding: u16 = @intFromBool(self.natural_height and available.height > 3);
+    const available_body = available.height -| 2 -| bottom_padding;
+    // Measure a custom choice once. Its actual result count is also the sole
+    // height used for later rows, scrolling and mouse dispatch this frame.
+    var custom_surface: ?vxfw.Surface = null;
+    if (available.width > 0) if (self.custom_choice) |choice| if (available_body > 1) {
+        custom_surface = try choice.widget.draw(ctx.withConstraints(.{}, .{ .width = available.width, .height = @min(choice.height, available_body - 1) }));
+        self.custom_height = custom_surface.?.size.height;
+    };
+    var visible_fields: usize = 0;
+    for (self.fields) |field| visible_fields += @intFromBool(field.visible);
+    const rows = visible_fields + self.custom_height + (if (self.actions.len > 0) (if (self.stacked_actions) self.actions.len else @as(usize, 1)) + self.action_gap else 0) + if (self.choice) |choice| choice.labels.len else @as(usize, 0);
+    var size = available;
+    if (self.natural_height) size.height = @intCast(@min(available.height, @max(ctx.min.height, 2 + rows + bottom_padding)));
+    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+    @memset(surface.buffer, .{ .style = self.ground });
     if (size.width == 0 or size.height == 0) return surface;
-    for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.rule_style });
+    for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = if (self.unicode) "─" else "-", .width = 1 }, .style = self.rule_style });
     if (size.height == 1) return surface;
-    _ = paint(ctx, surface, self.title, 1, 1, self.title_style);
+    _ = paint(ctx, surface, try displayText(ctx.arena, self.title, self.unicode), 1, 1, self.title_style);
     var children: std.array_list.Managed(vxfw.SubSurface) = .init(ctx.arena);
     if (self.title_widget) |title_widget| if (size.width > 1) {
         try children.append(.{ .origin = .{ .row = 1, .col = 1 }, .surface = try title_widget.draw(ctx.withConstraints(.{}, .{ .width = size.width - 1, .height = 1 })) });
     };
-    if (size.height == 2) {
+    const body_height = size.height -| 2 -| bottom_padding;
+    if (body_height == 0) {
         surface.children = children.items;
         return surface;
     }
     const count = self.fields.len + self.actions.len;
     if (count > 0) self.selected = @min(self.selected, count - 1);
-    const body_height = size.height - 2;
-    // The bounded child reports its actual height before subsequent rows are
-    // laid out. Filtering a choice must not leave its old reserved rows.
-    var custom_surface: ?vxfw.Surface = null;
-    if (self.custom_choice) |choice| if (body_height > 1) {
-        custom_surface = try choice.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(choice.height, body_height - 1) }));
-        self.custom_height = custom_surface.?.size.height;
-    };
-    const rows = self.fields.len + self.custom_height + (if (self.actions.len > 0) (if (self.stacked_actions) self.actions.len else @as(usize, 1)) + self.action_gap else 0) + if (self.choice) |choice| choice.labels.len else @as(usize, 0);
     const active = self.activeRow();
     if (active < self.scroll) self.scroll = active;
-    const active_end = if (self.custom_choice) |choice| choice.field + self.custom_height else active;
+    const active_end = if (self.custom_choice) |choice| self.rowOf(choice.field) + self.custom_height else active;
     if (active_end >= self.scroll + body_height) self.scroll = active_end - body_height + 1;
     self.scroll = @min(self.scroll, rows -| body_height);
     var targets: std.array_list.Managed(Target) = .init(ctx.arena);
     for (self.fields, 0..) |field, index| {
-        if (self.visible(self.rowOf(index), size.height)) |row| {
+        if (!field.visible) continue;
+        if (self.visible(self.rowOf(index), body_height)) |row| {
             const selected = self.choice == null and self.custom_choice == null and self.selected == index and field.selectable;
             const style = if (self.custom_choice == null and field.selectable) self.look(selected, .{ .row = row, .width = size.width }) else self.ground;
             fillRow(surface, row, style);
-            _ = paintTo(ctx, surface, field.label, 3, row, style, @min(19, size.width));
+            _ = paintTo(ctx, surface, try displayText(ctx.arena, field.label, self.unicode), 3, row, style, @min(value_column, size.width));
             // Status/failure words belong to the field, even beside a long
             // saved value. Reserve them here for every Panel consumer.
             const value_widget = if (self.custom_choice) |choice| if (choice.field == index) choice.value_widget else null else null;
             if (value_widget) |value| {
-                if (size.width > 19) {
-                    const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = size.width - 19, .height = 1 }));
-                    try children.append(.{ .origin = .{ .row = row, .col = 19 }, .surface = drawn });
+                if (size.width > value_column) {
+                    const drawn = try value.draw(ctx.withConstraints(.{}, .{ .width = size.width - value_column, .height = 1 }));
+                    try children.append(.{ .origin = .{ .row = row, .col = value_column }, .surface = drawn });
                     if (drawn.cursor) |cursor| {
                         surface.cursor = cursor;
                         surface.cursor.?.row += row;
-                        surface.cursor.?.col += 19;
+                        surface.cursor.?.col += value_column;
                     }
                 }
             } else {
-                const limit: u16 = @intCast(size.width -| ctx.stringWidth(field.tail orelse ""));
-                const end = paintTo(ctx, surface, field.value, 19, row, style, limit);
-                if (field.tail) |tail| {
+                const tail = try displayText(ctx.arena, field.tail orelse "", self.unicode);
+                const limit: u16 = @intCast(size.width -| ctx.stringWidth(tail));
+                const end = paintTo(ctx, surface, try displayText(ctx.arena, field.value, self.unicode), value_column, row, style, limit);
+                if (tail.len > 0) {
                     var quiet = self.quiet;
                     quiet.bg = style.bg;
                     quiet.reverse = style.reverse;
@@ -238,17 +256,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
         if (self.choice) |choice| if (choice.field == index) {
             for (choice.labels, 0..) |label, at| {
-                const row = self.visible(index + 1 + at, size.height) orelse continue;
+                const row = self.visible(self.rowOf(index) + 1 + at, body_height) orelse continue;
                 const style = self.look(at == choice.selected, .{ .row = row, .width = size.width });
                 fillRow(surface, row, style);
-                _ = paint(ctx, surface, if (choice.current == at) "✓" else " ", 5, row, style);
-                _ = paint(ctx, surface, label, 7, row, style);
+                _ = paint(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 5, row, style);
+                _ = paint(ctx, surface, try displayText(ctx.arena, label, self.unicode), 7, row, style);
                 try targets.append(.{ .row = row, .start = 0, .end = size.width, .index = at, .choice = true });
             }
         };
     }
     if (self.custom_choice) |choice| if (self.custom_height > 0) {
-        if (self.visible(choice.field + 1, size.height)) |row| {
+        if (self.visible(self.rowOf(choice.field) + 1, body_height)) |row| {
             self.custom_origin = row;
             try children.append(.{ .origin = .{ .row = row, .col = 0 }, .surface = custom_surface.? });
         }
@@ -256,13 +274,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     {
         var col: u16 = @min(3, size.width);
         for (self.actions, 0..) |action, at| {
-            const row = self.visible(self.rowOf(self.fields.len + at), size.height) orelse continue;
+            const row = self.visible(self.rowOf(self.fields.len + at), body_height) orelse continue;
             if (self.stacked_actions) col = @min(3, size.width);
             const start = col;
             const selected = self.choice == null and self.custom_choice == null and self.selected == self.fields.len + at;
-            col = paint(ctx, surface, action, col, row, if (selected) self.selection else self.ground);
+            const displayed = try displayText(ctx.arena, action, self.unicode);
+            col = paint(ctx, surface, displayed, col, row, if (selected) self.selection else self.ground);
             if (!selected and self.custom_choice == null and self.hover.contains(.{ .row = row, .col = start, .width = col - start })) {
-                _ = paint(ctx, surface, action, start, row, self.hover_style);
+                _ = paint(ctx, surface, displayed, start, row, self.hover_style);
             }
             if (col > start) try targets.append(.{ .row = row, .start = start, .end = col, .index = self.fields.len + at });
             col = @intCast(@min(@as(u32, col) + 5, size.width));
@@ -283,12 +302,44 @@ fn look(self: *const Self, selected: bool, rect: Hover.Rect) vaxis.Style {
 }
 
 fn visible(self: *const Self, logical: usize, height: u16) ?u16 {
-    if (logical < self.scroll or logical - self.scroll >= height - 2) return null;
+    if (logical < self.scroll or logical - self.scroll >= height) return null;
     return @intCast(logical - self.scroll + 2);
 }
 
 fn fillRow(surface: vxfw.Surface, row: u16, style: vaxis.Style) void {
     for (0..surface.size.width) |col| surface.writeCell(@intCast(col), row, .{ .style = style });
+}
+
+/// Presentation only: keep canonical text unchanged. Unicode and ASCII text
+/// are borrowed; an ASCII fallback for decoration or other scalars lives in
+/// the draw arena. Unknown non-ASCII scalars use the overview's `?` stand-in.
+pub fn displayText(arena: std.mem.Allocator, text: []const u8, unicode: bool) std.mem.Allocator.Error![]const u8 {
+    if (unicode) return text;
+    for (text) |byte| {
+        if (byte >= 0x80) break;
+    } else return text;
+    const out = try arena.alloc(u8, text.len);
+    var used: usize = 0;
+    var at: usize = 0;
+    while (at < text.len) {
+        const length = std.unicode.utf8ByteSequenceLength(text[at]) catch 1;
+        const end = @min(at + length, text.len);
+        const scalar = std.unicode.utf8Decode(text[at..end]) catch 0xfffd;
+        out[used] = switch (scalar) {
+            0...0x7f => @intCast(scalar),
+            '─' => '-',
+            '✓' => '+',
+            '·', '…' => '.',
+            '↑' => '^',
+            '↓' => 'v',
+            '‹' => '<',
+            '›' => '>',
+            else => '?',
+        };
+        used += 1;
+        at = end;
+    }
+    return out[0..used];
 }
 
 /// Single-line, terminal-cell clipping, including labels and quiet tails.
@@ -534,44 +585,148 @@ test "Panel reserves failure words beside long ASCII and Unicode field values" {
     };
 }
 
-test "Panel hover highlights fields choices and actions without changing keyboard state" {
-    var fixture: Fixture = .{};
-    var panel: Self = .{ .title = "Settings", .fields = &.{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" } }, .actions = &.{ "Rename", "Archive" }, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .userdata = &fixture, .on_activate = Fixture.activateRow, .on_pick = Fixture.pickRow };
+test "Panel shared ASCII rendering keeps rules choices tails and canonical values" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
-    _ = try panel.widget().draw(ctx);
-    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try panel.widget().handleEvent(&events, .mouse_enter);
-    for ([_]struct { row: i16, col: i16 }{ .{ .row = 3, .col = 39 }, .{ .row = 4, .col = 14 } }) |point| {
-        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = point.col, .row = point.row, .button = .none, .type = .motion, .mods = .{} } });
-        const surface = try panel.widget().draw(ctx);
-        try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(@intCast(point.col), @intCast(point.row)).style.bg);
-        try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 2).style.bg);
-        try std.testing.expectEqual(@as(usize, 0), panel.selected);
-        try std.testing.expectEqual(@as(?usize, null), fixture.activated);
-        try std.testing.expect(panel.hover.pointing);
+    try std.testing.expectEqualStrings("- + . . ^v <> ?", try displayText(arena.allocator(), "─ ✓ · … ↑↓ ‹› 界", false));
+    const original = "model 界";
+    var panel: Self = .{ .title = "Title", .unicode = false, .fields = &.{.{ .label = "Model", .value = original, .tail = " · saving…" }} };
+    panel.openChoice(&.{ "one", "✓ two" }, 1);
+    for ([_]u16{ 1, 19, 28, 46, 99 }) |width| {
+        const drawn = try panel.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 9 }, .cell_size = .{} });
+        for (drawn.buffer) |cell| for (cell.char.grapheme) |byte| try std.testing.expect(byte < 0x80);
+        try std.testing.expectEqualStrings("-", drawn.readCell(0, 0).char.grapheme);
+        if (width > 7) try std.testing.expectEqualStrings("+", drawn.readCell(5, 4).char.grapheme);
     }
-    try panel.widget().handleEvent(&events, .mouse_leave);
-    var surface = try panel.widget().draw(ctx);
-    try std.testing.expectEqual(panel.ground.bg, surface.readCell(39, 3).style.bg);
-    panel.openChoice(&.{ "First", "Second" }, 0);
-    _ = try panel.widget().draw(ctx);
-    try panel.widget().handleEvent(&events, .mouse_enter);
-    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 3, .button = .none, .type = .motion, .mods = .{} } });
-    surface = try panel.widget().draw(ctx);
-    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
-    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .none, .type = .motion, .mods = .{} } });
-    surface = try panel.widget().draw(ctx);
-    try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(39, 4).style.bg);
-    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
-    try std.testing.expectEqual(@as(usize, 0), panel.choice.?.selected);
-    try std.testing.expectEqual(@as(?usize, null), fixture.picked);
-    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .left, .type = .press, .mods = .{} } });
-    try std.testing.expectEqual(@as(?usize, 1), fixture.picked);
-    try panel.widget().handleEvent(&events, .mouse_leave);
-    _ = try panel.widget().draw(ctx);
-    try std.testing.expect(!panel.hover.pointing);
+    try std.testing.expectEqualStrings(original, panel.fields[0].value);
+}
+
+test "Panel hidden fields compact rows while preserving navigation actions and choice identities" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]bool{ false, true }) |context_visible| for ([_]bool{ false, true }) |stacked| {
+        var fixture: Fixture = .{};
+        const fields: [4]Field = .{
+            .{ .label = "Effort", .value = "high" },
+            .{ .label = "Hidden", .value = "never shown", .visible = false },
+            .{ .label = "Context", .value = "18 of 244,800", .visible = context_visible, .selectable = false },
+            .{ .label = "Model", .value = "gpt-5.5" },
+        };
+        var panel: Self = .{ .title = "Chat", .fields = &fields, .actions = &.{ "Rename", "Archive" }, .action_gap = 1, .stacked_actions = stacked, .userdata = &fixture, .on_activate = Fixture.activateRow };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 16 }, .cell_size = .{} };
+        const drawn = try panel.widget().draw(ctx);
+        const model_row: u16 = if (context_visible) 4 else 3;
+        try std.testing.expectEqualStrings("M", drawn.readCell(3, model_row).char.grapheme);
+        const actions_row = model_row + 2;
+        for (0..46) |col| try std.testing.expectEqualStrings(" ", drawn.readCell(@intCast(col), actions_row - 1).char.grapheme);
+        try pressKey(&panel, &events, vaxis.Key.down);
+        try std.testing.expectEqual(@as(usize, 3), panel.selected);
+        try pressKey(&panel, &events, vaxis.Key.down);
+        try std.testing.expectEqual(@as(usize, 4), panel.selected);
+        try panel.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(actions_row), .col = 3 } });
+        try std.testing.expectEqual(@as(?usize, 4), fixture.activated);
+        panel.selected = 3;
+        panel.openChoice(&.{ "first", "second" }, 0);
+        const choice = try panel.widget().draw(ctx);
+        try std.testing.expectEqualStrings("f", choice.readCell(7, model_row + 1).char.grapheme);
+        panel.closeChoice();
+        const content: vxfw.Text = .{ .text = "Model choice" };
+        panel.custom_choice = .{ .field = 3, .widget = content.widget(), .height = 3 };
+        const custom = try panel.widget().draw(ctx);
+        try std.testing.expectEqual(@as(i17, model_row + 1), custom.children[0].origin.row);
+    };
+}
+
+test "Panel natural height counts visible rows choices gaps and stacked actions without changing fill pages" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ false, true }) |natural| for ([_]bool{ false, true }) |context| for ([_]bool{ false, true }) |actions| for ([_]bool{ false, true }) |stacked| for ([_]bool{ false, true }) |choice| {
+        const fields = [_]Field{
+            .{ .label = "Effort", .value = "high" },
+            .{ .label = "Context", .value = "0 of 100", .visible = context, .selectable = false },
+            .{ .label = "Model", .value = "model" },
+        };
+        var panel: Self = .{ .title = "Chat", .natural_height = natural, .fields = &fields, .actions = if (actions) &.{ "Rename", "Archive" } else &.{}, .action_gap = 1, .stacked_actions = stacked };
+        if (choice) panel.openChoice(&.{ "high", "low" }, 0);
+        const rows: u16 = @as(u16, 2) + @intFromBool(context) + (if (actions) @as(u16, if (stacked) 3 else 2) else 0) + (if (choice) @as(u16, 2) else 0);
+        for ([_]u16{ 0, 1, 19, 46, 99 }) |width| for (0..20) |height| {
+            const drawn = try panel.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = @intCast(height) }, .cell_size = .{} });
+            const expected = if (natural) @min(height, rows + 2 + @intFromBool(height > 3)) else height;
+            try std.testing.expectEqual(@as(u16, @intCast(expected)), drawn.size.height);
+            for (drawn.children) |child| {
+                try std.testing.expect(child.origin.row + child.surface.size.height <= drawn.size.height);
+                try std.testing.expect(child.origin.col + child.surface.size.width <= drawn.size.width);
+            }
+            _ = arena.reset(.retain_capacity);
+        };
+    };
+}
+
+test "Panel natural custom choice measures once shrinks and keeps cursor and mouse inside its bounded window" {
+    const Child = struct {
+        count: u16 = 5,
+        draws: usize = 0,
+        clicked: ?i16 = null,
+        fn widget(self: *@This()) vxfw.Widget {
+            return .{ .userdata = self, .drawFn = drawList, .eventHandler = click };
+        }
+        fn drawList(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.draws += 1;
+            return vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = ctx.max.width.?, .height = @min(self.count, ctx.max.height.?) });
+        }
+        fn drawValue(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            var shown = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
+            if (shown.size.width > 0 and shown.size.height > 0) shown.cursor = .{ .row = 0, .col = @min(2, shown.size.width - 1) };
+            return shown;
+        }
+        fn click(raw: *anyopaque, _: *vxfw.EventContext, input: vxfw.Event) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (input == .mouse) self.clicked = input.mouse.row;
+        }
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    var child: Child = .{};
+    var panel: Self = .{ .title = "Chat", .natural_height = true, .fields = &.{ .{ .label = "Effort", .value = "high" }, .{ .label = "Hidden", .value = "", .visible = false }, .{ .label = "Model", .value = "model" }, .{ .label = "Context", .value = "0 of 100" } }, .actions = &.{ "Rename", "Archive" }, .action_gap = 1, .custom_choice = .{ .field = 2, .widget = child.widget(), .value_widget = .{ .userdata = &child, .drawFn = Child.drawValue } } };
+    const roomy: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 99, .height = 40 }, .cell_size = .{} };
+    const initial = try panel.widget().draw(roomy);
+    try std.testing.expectEqual(@as(u16, 13), initial.size.height);
+    try std.testing.expectEqual(@as(u16, 5), panel.custom_height);
+    try std.testing.expectEqual(@as(usize, 1), child.draws);
+    try std.testing.expectEqual(@as(u16, 3), initial.cursor.?.row);
+    try std.testing.expectEqual(@as(u16, 21), initial.cursor.?.col);
+    child.count = 2;
+    const narrowed = try panel.widget().draw(roomy);
+    try std.testing.expectEqual(@as(u16, 10), narrowed.size.height);
+    try std.testing.expectEqual(@as(u16, 2), panel.custom_height);
+    try std.testing.expectEqual(@as(usize, 2), child.draws);
+    for ([_]u16{ 0, 1, 19, 20, 46, 99 }) |width| for (0..21) |height| {
+        child.count = 8;
+        child.clicked = null;
+        const before = child.draws;
+        const drawn = try panel.widget().draw(roomy.withConstraints(.{}, .{ .width = width, .height = @intCast(height) }));
+        try std.testing.expect(drawn.size.height <= height);
+        try std.testing.expect(child.draws - before <= 1);
+        if (drawn.cursor) |cursor| {
+            try std.testing.expect(cursor.row < drawn.size.height);
+            try std.testing.expect(cursor.col < drawn.size.width);
+        }
+        for (drawn.children) |part| {
+            try std.testing.expect(part.origin.row + part.surface.size.height <= drawn.size.height);
+            try std.testing.expect(part.origin.col + part.surface.size.width <= drawn.size.width);
+        }
+        try panel.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(panel.custom_origin + panel.custom_height), .col = 0 } });
+        try std.testing.expect(child.clicked == null);
+        if (panel.custom_height > 0) {
+            try panel.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(panel.custom_origin + panel.custom_height - 1), .col = 0 } });
+            try std.testing.expectEqual(@as(?i16, @intCast(panel.custom_height - 1)), child.clicked);
+        }
+        _ = arena.reset(.retain_capacity);
+    };
 }
 
 /// A read-only reference in fitting columns, without selection or input ownership.
@@ -642,4 +797,44 @@ test "Panel KeyList fits measured columns and aligns values after the widest key
             }
         }
     }
+}
+
+test "Panel hover highlights fields choices and actions without changing keyboard state" {
+    var fixture: Fixture = .{};
+    var panel: Self = .{ .title = "Settings", .fields = &.{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" } }, .actions = &.{ "Rename", "Archive" }, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .userdata = &fixture, .on_activate = Fixture.activateRow, .on_pick = Fixture.pickRow };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
+    _ = try panel.widget().draw(ctx);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try panel.widget().handleEvent(&events, .mouse_enter);
+    for ([_]struct { row: i16, col: i16 }{ .{ .row = 3, .col = 39 }, .{ .row = 4, .col = 14 } }) |point| {
+        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = point.col, .row = point.row, .button = .none, .type = .motion, .mods = .{} } });
+        const surface = try panel.widget().draw(ctx);
+        try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(@intCast(point.col), @intCast(point.row)).style.bg);
+        try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 2).style.bg);
+        try std.testing.expectEqual(@as(usize, 0), panel.selected);
+        try std.testing.expectEqual(@as(?usize, null), fixture.activated);
+        try std.testing.expect(panel.hover.pointing);
+    }
+    try panel.widget().handleEvent(&events, .mouse_leave);
+    var surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.ground.bg, surface.readCell(39, 3).style.bg);
+    panel.openChoice(&.{ "First", "Second" }, 0);
+    _ = try panel.widget().draw(ctx);
+    try panel.widget().handleEvent(&events, .mouse_enter);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 3, .button = .none, .type = .motion, .mods = .{} } });
+    surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .none, .type = .motion, .mods = .{} } });
+    surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(39, 4).style.bg);
+    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
+    try std.testing.expectEqual(@as(usize, 0), panel.choice.?.selected);
+    try std.testing.expectEqual(@as(?usize, null), fixture.picked);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqual(@as(?usize, 1), fixture.picked);
+    try panel.widget().handleEvent(&events, .mouse_leave);
+    _ = try panel.widget().draw(ctx);
+    try std.testing.expect(!panel.hover.pointing);
 }
