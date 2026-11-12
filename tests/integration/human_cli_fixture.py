@@ -250,8 +250,11 @@ def overview_frame(master, accept, keys=b"", timeout=15):
 
 
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b"", fresh=False):
-    """Wait until a committed frame shows `marker`; return the frames shown.
+    """Wait until the conversation column shows `marker`; return the frames shown.
 
+    The wide Session list can show the same answer before the conversation
+    reads it; only `conversation_text` owns the response marker. Plain output
+    after leaving the screen still counts.
     The renderer replaces whole frames, so each committed frame is checked as
     it arrives, not only the last. `composer` also requires a later (or the
     same) frame whose cursor is at the composer: the reply has been drawn and
@@ -275,7 +278,7 @@ def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer
             state["retained"] += len(screen.encode()) + 1
             while state["retained"] >= limit and len(frames) > 1:
                 state["retained"] -= len(frames.pop(0).encode()) + 1
-        if not state["marker"] and marker in screen:
+        if not state["marker"] and marker in conversation_text(screen):
             state["marker"] = True
         if state["marker"] and composer_ready(screen, x, y):
             state["ready"] = True
@@ -415,7 +418,7 @@ def await_screen(master, marker, *, composer=False, timeout=15):
     redrawn, so a wait must not depend on seeing it again."""
     capture = terminal_capture(master)
     shown = capture.completed
-    if marker in shown and (not composer or composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
+    if marker in conversation_text(shown) and (not composer or composer_ready(shown, capture.screen.cursor.x, capture.screen.cursor.y)):
         return shown
     return read_terminal(master, marker, timeout, composer=composer)
 
@@ -459,7 +462,7 @@ def terminal_step(master, command, marker, *, composer=False):
     check on the result describes that shown frame.
     """
     if composer:
-        return command_frame(master, command, lambda frame: marker in frame)
+        return command_frame(master, command, lambda frame: marker in conversation_text(frame))
     os.write(master, (command + "\r").encode())
     return read_terminal(master, marker, fresh=True)
 
