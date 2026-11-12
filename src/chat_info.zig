@@ -50,7 +50,11 @@ pub const Backend = struct {
 
 pub const Row = enum { model, effort };
 
-standalone_row: ?Row = null,
+const Phase = enum { open, pending, failed };
+// Context remains the existing Session inspection, never a second facts cache.
+const Standalone = struct { row: Row, phase: Phase = .open };
+
+standalone: ?Standalone = null,
 backend: Backend,
 /// The process's HOME, borrowed; only the workspace is shortened with it.
 home: []const u8 = "",
@@ -91,33 +95,36 @@ pub fn footerWidget(self: *Self) vxfw.Widget {
 pub fn openStandaloneChoice(self: *Self, ctx: *vxfw.EventContext, row: Row) !void {
     if (self.pending != null) return;
     self.closeStandaloneChoice();
-    self.standalone_row = row;
+    self.standalone = .{ .row = row };
     const index: usize = if (row == .model) 4 else 0;
-    self.panel.choice_only = index;
     self.bind();
     self.panel.selected = index;
     try activate(self, ctx, index);
 }
 
 pub fn standaloneOpen(self: *const Self) bool {
-    return self.standalone_row != null and self.pending == null;
+    return if (self.standalone) |shown| shown.phase != .pending else false;
+}
+
+/// The presentation intent, including an admitted save hidden while pending.
+pub fn standaloneField(self: *const Self) ?Row {
+    return if (self.standalone) |shown| shown.row else null;
 }
 
 pub fn closeStandaloneChoice(self: *Self) void {
-    self.cancelChoice();
-    self.standalone_row = null;
-    self.panel.choice_only = null;
+    self.standalone = null;
+    self.cancelEdit();
 }
 
 pub fn standaloneWidget(self: *Self) vxfw.Widget {
-    return .{ .userdata = self, .eventHandler = event, .drawFn = drawStandalone };
+    return .{ .userdata = self, .eventHandler = standaloneEvent, .drawFn = drawStandalone };
 }
 
 fn drawStandalone(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.bind();
     if (!self.standaloneOpen()) return .empty(self.standaloneWidget());
-    var surface = try self.panel.widget().draw(ctx);
+    var surface = try self.panel.drawChoice(ctx, if (self.standalone.?.row == .model) 4 else 0);
     surface.widget = self.standaloneWidget();
     return surface;
 }
@@ -126,9 +133,13 @@ pub fn hasChoice(self: *const Self) bool {
     return self.renaming or self.panel.choice != null or self.model_choice.active;
 }
 
-/// Cancel only the topmost edit. The enclosing Layer closes this panel only
-/// when hasChoice is false, preserving the chat input and its draft beneath.
+/// Cancel the current edit. A standalone edit ends its whole presentation;
+/// an ordinary Chat page retains the enclosing page beneath its topmost edit.
 pub fn cancelChoice(self: *Self) void {
+    if (self.standalone != null) {
+        self.closeStandaloneChoice();
+        return;
+    }
     if (self.renaming) {
         // Cancel deliberately discards an unfinished paste or refused edit.
         _ = self.rename_editor.blur();
@@ -142,6 +153,17 @@ pub fn cancelChoice(self: *Self) void {
     self.panel.custom_choice = null;
 }
 
+/// End all transient editing without changing admitted backend work.
+fn cancelEdit(self: *Self) void {
+    if (self.renaming) _ = self.rename_editor.blur();
+    self.renaming = false;
+    self.panel.closeChoice();
+    self.model_choice.cancel();
+    self.panel.custom_choice = null;
+    self.tool_draft = null;
+    self.pasting = false;
+}
+
 pub fn refresh(self: *Self) void {
     self.closeStandaloneChoice();
     self.readSession();
@@ -149,7 +171,7 @@ pub fn refresh(self: *Self) void {
 
 /// Read the same Session without discarding a standalone retry's field.
 fn readSession(self: *Self) void {
-    self.cancelChoice();
+    self.cancelEdit();
     self.backend.read(self.backend.context, &self.session) catch {
         self.read_failed = true;
         self.ready = false;
@@ -167,7 +189,7 @@ fn title(self: *const Self) []const u8 {
 
 fn bind(self: *Self) void {
     const model_was_active = self.model_choice.active;
-    if (!self.model_choice.validate() and model_was_active and self.standalone_row != null) self.closeStandaloneChoice();
+    if (!self.model_choice.validate() and model_was_active and self.standalone != null) self.closeStandaloneChoice();
     self.panel.userdata = self;
     self.panel.on_activate = activate;
     self.panel.on_pick = pick;
@@ -194,12 +216,12 @@ fn bind(self: *Self) void {
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
-    if (self.standalone_row != null) {
+    if (self.standalone != null) {
         self.panel.ground = widget_style.of(caps, .{});
         self.panel.title_style = widget_style.of(caps, .{ .colour = .strong, .bold = true });
         self.panel.quiet = widget_style.of(caps, .{ .colour = .quiet });
     }
-    self.model_choice.show_more = self.standalone_row == null;
+    self.model_choice.show_more = self.standalone == null;
     self.model_choice.ground = self.panel.ground;
     self.model_choice.selection = self.panel.selection;
     self.model_choice.hover_style = self.panel.hover_style;
@@ -211,6 +233,9 @@ fn bind(self: *Self) void {
 fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.pending != null) return;
+    defer if (self.standalone) |*shown| {
+        if (self.pending == null) shown.phase = if (self.failures[row] != null) .failed else .open;
+    };
     self.readSession();
     if (self.read_failed) {
         self.failures[row] = " · couldn't read chat";
@@ -222,7 +247,7 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
         0 => {
             self.effort_labels[0] = "model default";
             self.effort_count = 1;
-            const shown = if (self.standalone_row != null or self.session.effort_override) self.session.effort else null;
+            const shown = if (self.standalone != null or self.session.effort_override) self.session.effort else null;
             var current: ?usize = if (shown == null) 0 else null;
             for (std.enums.values(catalog.ReasoningEffort)) |effort| {
                 if (!capability.supportsReasoningEffort(catalog.shipped, self.session.model.slice(), effort)) continue;
@@ -303,10 +328,12 @@ fn save(self: *Self, ctx: *vxfw.EventContext, row: usize, edit: Edit) !void {
     self.failures[row] = null;
     self.backend.configure(self.backend.context, edit) catch {
         self.failures[row] = " · couldn't save";
+        if (self.standalone) |*shown| shown.phase = .failed;
         ctx.redraw = true;
         return;
     };
     self.pending = row;
+    if (self.standalone) |*shown| shown.phase = .pending;
     self.poll();
     ctx.redraw = true;
 }
@@ -315,10 +342,12 @@ fn poll(self: *Self) void {
     const row = self.pending orelse return;
     const state = self.backend.state(self.backend.context);
     if (state == .idle or state == .pending) return;
-    const standalone = self.standalone_row;
-    self.refresh();
-    if (state == .failed or self.read_failed) self.standalone_row = standalone;
-    if (self.standalone_row != null) self.panel.choice_only = if (standalone.? == .model) 4 else 0;
+    self.readSession();
+    if (state == .failed or self.read_failed) {
+        if (self.standalone) |*shown| shown.phase = .failed;
+    } else {
+        self.closeStandaloneChoice();
+    }
     self.failures[row] = if (state == .failed) switch (row) {
         7 => " · couldn't archive",
         8 => " · couldn't copy",
@@ -330,7 +359,7 @@ fn poll(self: *Self) void {
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.model_choice.active and !self.model_choice.validate()) {
-        if (self.standalone_row != null) self.closeStandaloneChoice();
+        if (self.standalone != null) self.closeStandaloneChoice();
         self.panel.custom_choice = null;
         ctx.consumeAndRedraw();
         return;
@@ -345,8 +374,8 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     defer if (input == .paste_end) {
         self.pasting = false;
     };
-    if (input == .key_press and (Editor.named(input.key_press) == .escape or Editor.named(input.key_press) == .ctrl_g) and self.hasChoice() and !self.pasting) {
-        self.cancelChoice();
+    if (input == .key_press and (Editor.named(input.key_press) == .escape or Editor.named(input.key_press) == .ctrl_g) and (self.hasChoice() or self.standalone != null) and !self.pasting) {
+        if (self.standalone != null) self.closeStandaloneChoice() else self.cancelChoice();
         ctx.consumeAndRedraw();
         return;
     }
@@ -390,7 +419,17 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         }
     }
     self.bind();
-    try self.panel.widget().handleEvent(ctx, input);
+    if (self.standalone) |shown| {
+        if (shown.phase == .pending) return;
+        try self.panel.choiceEvent(ctx, input, if (shown.row == .model) 4 else 0);
+    } else {
+        try self.panel.widget().handleEvent(ctx, input);
+    }
+}
+
+fn standaloneEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (input == .tick or self.standaloneOpen()) try event(raw, ctx, input);
 }
 
 fn safe(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -1481,7 +1520,7 @@ test "Chat info standalone choices reuse edits hide pending preserve failures an
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try page.openStandaloneChoice(&ctx, .effort);
     try std.testing.expect(page.standaloneOpen());
-    try std.testing.expectEqual(@as(?usize, 0), page.panel.choice_only);
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
     const drawn = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} });
     try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
     try std.testing.expectEqual(@as(u16, @intCast(1 + page.effort_count)), drawn.size.height);
@@ -1490,7 +1529,7 @@ test "Chat info standalone choices reuse edits hide pending preserve failures an
     try std.testing.expect(!page.standaloneOpen());
     try std.testing.expectEqual(@as(?usize, 0), page.pending);
     try page.openStandaloneChoice(&ctx, .model);
-    try std.testing.expectEqual(@as(?Row, .effort), page.standalone_row);
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
     fixture.state_value = .failed;
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(page.standaloneOpen());
@@ -1512,7 +1551,7 @@ test "Chat info standalone choices reuse edits hide pending preserve failures an
     fixture.state_value = .saved;
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(!page.standaloneOpen());
-    try std.testing.expect(page.panel.choice_only == null);
+    try std.testing.expect(page.standalone == null);
     try page.openStandaloneChoice(&ctx, .effort);
     page.refresh();
     try std.testing.expect(!page.standaloneOpen());
@@ -1596,13 +1635,13 @@ test "Chat info standalone failure retry preserves field-only presentation and t
     try page.widget().handleEvent(&ctx, .tick);
     try std.testing.expect(page.standaloneOpen());
     try press(&page, &ctx, vaxis.Key.enter);
-    try std.testing.expectEqual(@as(?Row, .effort), page.standalone_row);
-    try std.testing.expectEqual(@as(?usize, 0), page.panel.choice_only);
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
+    try std.testing.expectEqual(Row.effort, page.standalone.?.row);
     try std.testing.expectEqual(@as(?usize, 1), page.panel.choice.?.current);
     try press(&page, &ctx, vaxis.Key.enter);
     fixture.state_value = .saved;
     try page.widget().handleEvent(&ctx, .tick);
-    try std.testing.expect(!page.standaloneOpen() and page.panel.choice_only == null);
+    try std.testing.expect(!page.standaloneOpen() and page.standalone == null);
     try page.openStandaloneChoice(&ctx, .effort);
     page.refresh();
     try std.testing.expect(!page.standaloneOpen());
@@ -1629,6 +1668,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
             fixture.fail_submit = false;
             if (failure == .save) {
                 try std.testing.expect(!page.standaloneOpen());
+                try std.testing.expectEqual(Phase.pending, page.standalone.?.phase);
                 const pending = try page.standaloneWidget().draw(draw_ctx);
                 try std.testing.expectEqual(@as(u16, 0), pending.size.height);
                 const reads = fixture.read_calls;
@@ -1642,6 +1682,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
             }
         }
         try std.testing.expect(page.standaloneOpen() and !page.hasChoice());
+        try std.testing.expectEqual(Phase.failed, page.standalone.?.phase);
         try std.testing.expectEqualStrings(if (failure == .read) " · couldn't read chat" else " · couldn't save", page.failures[index].?);
         const retained = try page.standaloneWidget().draw(draw_ctx);
         try std.testing.expectEqual(@as(u16, 2), retained.size.height);
@@ -1653,8 +1694,7 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
         try std.testing.expectEqual(before_read + 1, fixture.read_calls);
         try std.testing.expectEqual(before_save, fixture.save_calls);
         try std.testing.expect(page.standaloneOpen() and page.hasChoice());
-        try std.testing.expectEqual(@as(?Row, field), page.standalone_row);
-        try std.testing.expectEqual(@as(?usize, index), page.panel.choice_only);
+        try std.testing.expectEqual(field, page.standalone.?.row);
         try std.testing.expect(page.failures[index] == null);
         if (field == .model) {
             try std.testing.expect(page.model_choice.active);
@@ -1676,4 +1716,73 @@ test "Chat info standalone Model and Effort retry read and save failures by draw
         try std.testing.expectEqual(saves, fixture.save_calls);
         try std.testing.expect(!page.standaloneOpen());
     };
+}
+
+test "Chat info standalone lifetime domain closes every phase without cancelling admitted work or reopening late" {
+    const Cases = @import("session_chrome.zig").StandaloneCases;
+    const Outcome = enum { saved, failed, unread };
+    for (Cases.all) |case| {
+        if (case.screen != .chat) continue;
+        for (std.enums.values(Outcome)) |outcome| {
+            var fixture: Fixture = .{ .fail_read = case.phase == .read_failed };
+            fixture.init();
+            var page: Self = .{ .backend = fixture.backend() };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            const row: Row = if (case.field == .model) .model else .effort;
+            const index: usize = if (row == .model) 4 else 0;
+            try page.openStandaloneChoice(&ctx, row);
+            if (case.phase == .pending or case.phase == .save_failed) {
+                try press(&page, &ctx, vaxis.Key.enter);
+                if (case.phase == .save_failed) {
+                    fixture.state_value = .failed;
+                    try page.widget().handleEvent(&ctx, .tick);
+                }
+            }
+            const phase: Phase = switch (case.phase) {
+                .open => .open,
+                .pending => .pending,
+                .read_failed, .save_failed => .failed,
+            };
+            try std.testing.expectEqual(@as(?Row, row), page.standaloneField());
+            try std.testing.expectEqual(phase, page.standalone.?.phase);
+            try std.testing.expectEqual(case.phase != .pending, page.standaloneOpen());
+            const admitted = page.pending;
+            switch (case.ending) {
+                .refresh => page.refresh(),
+                .escape, .close_click, .navigate => page.closeStandaloneChoice(),
+            }
+            try std.testing.expect(!page.standaloneOpen());
+            try std.testing.expect(page.standaloneField() == null);
+            try std.testing.expect(page.standalone == null);
+            try std.testing.expectEqual(admitted, page.pending);
+            try std.testing.expect(!page.hasChoice());
+            if (admitted != null) {
+                fixture.fail_read = outcome == .unread;
+                fixture.state_value = if (outcome == .failed) .failed else .saved;
+                const reads = fixture.read_calls;
+                try page.standaloneWidget().handleEvent(&ctx, .tick);
+                try std.testing.expectEqual(reads + 1, fixture.read_calls);
+                try std.testing.expect(page.pending == null);
+                if (outcome != .saved) try std.testing.expect(page.failures[index] != null);
+            }
+            try std.testing.expect(page.standaloneField() == null);
+            try std.testing.expect(!page.standaloneOpen());
+            const surface = try page.standaloneWidget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} });
+            try std.testing.expectEqual(@as(u16, 0), surface.size.height);
+            try std.testing.expectEqual(@as(usize, 0), surface.buffer.len);
+            try std.testing.expectEqual(@as(usize, 0), surface.children.len);
+            const reads = fixture.read_calls;
+            const saves = fixture.save_calls;
+            try page.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+            try page.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'x', .text = "x" } });
+            try page.standaloneWidget().handleEvent(&ctx, .{ .mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+            try std.testing.expectEqual(reads, fixture.read_calls);
+            try std.testing.expectEqual(saves, fixture.save_calls);
+            try std.testing.expect(page.standaloneField() == null);
+            page.bind();
+            try std.testing.expect(page.model_choice.show_more);
+        }
+    }
 }

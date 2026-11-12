@@ -24,8 +24,6 @@ const Target = struct { row: u16, start: u16, end: u16, index: usize, choice: bo
 title: []const u8,
 /// Fit hosted content, including one trailing ground row; full pages fill by default.
 natural_height: bool = false,
-/// Present only this field's existing choice, without page chrome.
-choice_only: ?usize = null,
 unicode: bool = true,
 title_widget: ?vxfw.Widget = null,
 action_gap: u16 = 0,
@@ -71,8 +69,8 @@ fn selectable(self: *const Self, at: usize) bool {
     return at < self.fields.len + self.actions.len and (at >= self.fields.len or (self.fields[at].selectable and self.fields[at].visible));
 }
 
-fn move(self: *Self, down: bool) void {
-    if (self.choice_only) |field| if (self.choice == null) {
+fn move(self: *Self, down: bool, only: ?usize) void {
+    if (only) |field| if (self.choice == null) {
         self.selected = field;
         return;
     };
@@ -92,12 +90,12 @@ fn move(self: *Self, down: bool) void {
     }
 }
 
-fn activate(self: *Self, ctx: *vxfw.EventContext) !void {
+fn activate(self: *Self, ctx: *vxfw.EventContext, only: ?usize) !void {
     if (self.choice) |choice| {
         self.closeChoice();
         if (self.on_pick) |callback| try callback(self.userdata.?, ctx, choice.field, choice.selected);
-    } else if (self.selectable(self.choice_only orelse self.selected)) {
-        self.selected = self.choice_only orelse self.selected;
+    } else if (self.selectable(only orelse self.selected)) {
+        self.selected = only orelse self.selected;
         if (self.on_activate) |callback| try callback(self.userdata.?, ctx, self.selected);
     }
 }
@@ -107,8 +105,18 @@ pub fn takesKey(key: vaxis.Key) bool {
     return key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.enter, .{});
 }
 
+/// The caller derives this field from its current standalone presentation.
+/// No presentation lifetime or mode is retained by Panel.
+pub fn choiceEvent(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, field: usize) !void {
+    try self.eventFor(ctx, input, field);
+}
+
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.eventFor(ctx, input, null);
+}
+
+fn eventFor(self: *Self, ctx: *vxfw.EventContext, input: vxfw.Event, only: ?usize) !void {
     if (self.custom_choice) |choice| {
         // The child owns all input while open, including pointer feedback.
         try self.hover.handleEvent(ctx, .mouse_leave);
@@ -125,18 +133,18 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     switch (input) {
         .key_press => |key| {
             if (key.matches(vaxis.Key.up, .{})) {
-                self.move(false);
+                self.move(false, only);
             } else if (key.matches(vaxis.Key.down, .{})) {
-                self.move(true);
+                self.move(true, only);
             } else if (key.matches(vaxis.Key.enter, .{})) {
-                try self.activate(ctx);
+                try self.activate(ctx, only);
             } else return;
             ctx.consumeAndRedraw();
         },
         .mouse => |mouse| {
             switch (mouse.button) {
-                .wheel_up => self.move(false),
-                .wheel_down => self.move(true),
+                .wheel_up => self.move(false, only),
+                .wheel_down => self.move(true, only),
                 .left => {
                     if (mouse.type != .press) return;
                     for (self.targets) |target| {
@@ -147,7 +155,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                             self.closeChoice();
                             self.selected = target.index;
                         }
-                        try self.activate(ctx);
+                        try self.activate(ctx, only);
                         ctx.consumeAndRedraw();
                         return;
                     }
@@ -184,7 +192,6 @@ fn activeRow(self: *const Self) usize {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.choice_only) |field| return self.drawChoiceOnly(ctx, field);
     const available = ctx.max.size();
     self.targets = &.{};
     self.custom_origin = 0;
@@ -313,8 +320,9 @@ fn bindTargets(self: *Self, arena: std.mem.Allocator, targets: []const Target) s
     self.hover.targets = hover_targets;
 }
 
-/// Uses the same choice state and callbacks as the field presentation.
-fn drawChoiceOnly(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allocator.Error!vxfw.Surface {
+/// Draw the current owner's field without retaining a standalone mode.
+/// Its wrapper routes events through choiceEvent with the same current field.
+pub fn drawChoice(self: *Self, ctx: vxfw.DrawContext, index: usize) std.mem.Allocator.Error!vxfw.Surface {
     self.targets = &.{};
     self.hover.targets = &.{};
     self.custom_origin = 0;
@@ -922,7 +930,6 @@ test "Panel choice-only renders title checked rows and bounded natural content w
         .fields = &.{ .{ .label = "Hidden", .value = "hidden" }, .{ .label = "Effort", .value = "high" } },
         .actions = &.{"No action"},
         .selected = 1,
-        .choice_only = 1,
         .userdata = &fixture,
         .on_pick = Fixture.pickRow,
     };
@@ -930,18 +937,18 @@ test "Panel choice-only renders title checked rows and bounded natural content w
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 30 }, .cell_size = .{} };
-    const drawn = try panel.widget().draw(ctx);
+    const drawn = try panel.drawChoice(ctx, 1);
     try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
     try std.testing.expectEqualStrings("E", drawn.readCell(1, 0).char.grapheme);
     try std.testing.expectEqualStrings("✓", drawn.readCell(1, 2).char.grapheme);
     try std.testing.expectEqualStrings("h", drawn.readCell(3, 2).char.grapheme);
     var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-    try panel.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 3, .col = 2 } });
+    try panel.choiceEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 3, .col = 2 } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.picked_field);
     try std.testing.expectEqual(@as(?usize, 2), fixture.picked);
     for ([_]u16{ 0, 1, 2, 3, 46 }) |width| for (0..8) |height| {
         panel.openChoice(&.{ "low", "high", "xhigh" }, 1);
-        const tiny = try panel.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = @intCast(height) }));
+        const tiny = try panel.drawChoice(ctx.withConstraints(.{}, .{ .width = width, .height = @intCast(height) }), 1);
         try std.testing.expect(tiny.size.height <= height);
         try std.testing.expect(tiny.size.width <= width);
         for (tiny.children) |child| {
@@ -957,7 +964,6 @@ test "Panel choice-only outcome navigation never activates hidden fields" {
         .title = "Settings",
         .fields = &.{ .{ .label = "Permissions", .value = "ask" }, .{ .label = "Effort", .value = "high", .tail = " · couldn't save" }, .{ .label = "Notifications", .value = "on" } },
         .selected = 1,
-        .choice_only = 1,
         .userdata = &fixture,
         .on_activate = Fixture.activateRow,
     };
@@ -965,20 +971,20 @@ test "Panel choice-only outcome navigation never activates hidden fields" {
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]u21{ vaxis.Key.up, vaxis.Key.down }) |key| {
-        try pressKey(&panel, &ctx, key);
+        try panel.choiceEvent(&ctx, .{ .key_press = .{ .codepoint = key } }, 1);
         try std.testing.expectEqual(@as(usize, 1), panel.selected);
-        try pressKey(&panel, &ctx, vaxis.Key.enter);
+        try panel.choiceEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
         try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
     }
     for ([_]vaxis.Mouse.Button{ .wheel_up, .wheel_down }) |button| {
-        try panel.widget().handleEvent(&ctx, .{ .mouse = .{ .button = button, .type = .press, .mods = .{}, .row = 1, .col = 0 } });
+        try panel.choiceEvent(&ctx, .{ .mouse = .{ .button = button, .type = .press, .mods = .{}, .row = 1, .col = 0 } }, 1);
         try std.testing.expectEqual(@as(usize, 1), panel.selected);
-        try pressKey(&panel, &ctx, vaxis.Key.enter);
+        try panel.choiceEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
         try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
     }
     // Even stale field selection cannot grant Enter authority over a hidden field.
     panel.selected = 2;
-    try pressKey(&panel, &ctx, vaxis.Key.enter);
+    try panel.choiceEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
     try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
 }
 
@@ -992,22 +998,21 @@ test "Panel retained standalone fields share field targets hover and clipping wi
         var panel: Self = .{
             .title = "Settings",
             .fields = &.{ .{ .label = "Hidden", .value = "never" }, .{ .label = "Effort", .value = "high", .tail = " · couldn't save", .selectable = selectable_field } },
-            .choice_only = if (standalone) 1 else null,
             .selected = 0,
             .userdata = &fixture,
             .on_activate = Fixture.activateRow,
             .hover_style = .{ .ul_style = .single },
         };
         const row: u16 = if (standalone) 1 else 3;
-        _ = try panel.widget().draw(draw_ctx);
-        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .none, .type = .motion, .mods = .{} } });
-        const hovered = try panel.widget().draw(draw_ctx);
+        _ = if (standalone) try panel.drawChoice(draw_ctx, 1) else try panel.widget().draw(draw_ctx);
+        if (standalone) try panel.choiceEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .none, .type = .motion, .mods = .{} } }, 1) else try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .none, .type = .motion, .mods = .{} } });
+        const hovered = if (standalone) try panel.drawChoice(draw_ctx, 1) else try panel.widget().draw(draw_ctx);
         try std.testing.expectEqual(if (selectable_field) panel.hover_style.ul_style else panel.ground.ul_style, hovered.readCell(45, row).style.ul_style);
         try std.testing.expectEqual(@as(?usize, null), fixture.activated);
         // Tail/blank cells belong to the same full-width field action.
-        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .release, .mods = .{} } });
+        if (standalone) try panel.choiceEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .release, .mods = .{} } }, 1) else try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .release, .mods = .{} } });
         try std.testing.expectEqual(@as(?usize, null), fixture.activated);
-        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
+        if (standalone) try panel.choiceEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } }, 1) else try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 45, .row = @intCast(row), .button = .left, .type = .press, .mods = .{} } });
         try std.testing.expectEqual(if (selectable_field) @as(?usize, 1) else null, fixture.activated);
     };
     for ([_]u16{ 0, 1, 2, 46, 140 }) |width| for ([_]u16{ 0, 1, 2, 8 }) |height| {
@@ -1015,29 +1020,55 @@ test "Panel retained standalone fields share field targets hover and clipping wi
         var panel: Self = .{
             .title = "Settings",
             .fields = &.{ .{ .label = "Hidden", .value = "never" }, .{ .label = "Model", .value = "unavailable", .tail = " · couldn't read settings" } },
-            .choice_only = 1,
             .selected = 0,
             .userdata = &fixture,
             .on_activate = Fixture.activateRow,
         };
         // Draw a larger frame first: clipping must replace, not retain, targets.
-        _ = try panel.widget().draw(draw_ctx);
-        const drawn = try panel.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = width, .height = height }));
+        _ = try panel.drawChoice(draw_ctx, 1);
+        const drawn = try panel.drawChoice(draw_ctx.withConstraints(.{}, .{ .width = width, .height = height }), 1);
         const actionable = width > 0 and height > 1;
         try std.testing.expectEqual(@as(usize, @intFromBool(actionable)), panel.targets.len);
         for (drawn.buffer, 0..) |cell, at| try std.testing.expect(at % @max(width, 1) + cell.char.width <= width);
-        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+        try panel.choiceEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .left, .type = .press, .mods = .{} } }, 1);
         try std.testing.expectEqual(if (actionable) @as(?usize, 1) else null, fixture.activated);
         if (!actionable) continue;
         fixture.activated = null;
         panel.openChoice(&.{ "one", "two" }, 0);
-        _ = try panel.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = width, .height = height }));
+        _ = try panel.drawChoice(draw_ctx.withConstraints(.{}, .{ .width = width, .height = height }), 1);
         try std.testing.expect(panel.targets.len > 0);
         for (panel.targets) |target| try std.testing.expect(target.choice);
         panel.closeChoice();
-        _ = try panel.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = width, .height = 1 }));
+        _ = try panel.drawChoice(draw_ctx.withConstraints(.{}, .{ .width = width, .height = 1 }), 1);
         try std.testing.expectEqual(@as(usize, 0), panel.targets.len);
-        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+        try panel.choiceEvent(&events, .{ .mouse = .{ .col = 0, .row = 1, .button = .left, .type = .press, .mods = .{} } }, 1);
         try std.testing.expectEqual(@as(?usize, null), fixture.activated);
     };
+}
+
+test "Panel explicit choice scope never persists into normal page events or drawing" {
+    var fixture: Fixture = .{};
+    var panel: Self = .{
+        .title = "Settings",
+        .fields = &.{ .{ .label = "Model", .value = "model" }, .{ .label = "Effort", .value = "high" } },
+        .userdata = &fixture,
+        .on_activate = Fixture.activateRow,
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} };
+    _ = try panel.drawChoice(ctx, 1);
+    try panel.choiceEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
+    try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
+    // No mode reset is needed: a later ordinary page draw/event is ordinary.
+    const page = try panel.widget().draw(ctx);
+    try std.testing.expectEqualStrings("─", page.readCell(0, 0).char.grapheme);
+    try std.testing.expectEqualStrings("M", page.readCell(3, 2).char.grapheme);
+    try pressKey(&panel, &events, vaxis.Key.up);
+    try pressKey(&panel, &events, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(?usize, 0), fixture.activated);
+    // The next standalone event likewise carries its own field, not page selection.
+    try panel.choiceEvent(&events, .{ .key_press = .{ .codepoint = vaxis.Key.enter } }, 1);
+    try std.testing.expectEqual(@as(?usize, 1), fixture.activated);
 }

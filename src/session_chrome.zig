@@ -684,3 +684,22 @@ test "footer standalone actions describe pick retry and close from one owner" {
     }
     try std.testing.expect(footerKeys(.closed).choice == null);
 }
+
+/// Shared native-test inputs for the standalone lifetime contract. These are
+/// scenarios, not another presentation or backend state machine.
+pub const StandaloneCases = struct {
+    pub const Screen = enum { new_chat, chat };
+    pub const Phase = enum { open, pending, read_failed, save_failed };
+    pub const Ending = enum { escape, close_click, navigate, refresh };
+    pub const Case = struct { screen: Screen, field: FooterField, phase: Phase, ending: Ending };
+
+    pub const all: [64]Case = blk: {
+        var result: [64]Case = undefined;
+        var index: usize = 0;
+        for (std.enums.values(Screen)) |screen| for (std.enums.values(FooterField)) |field| for (std.enums.values(Phase)) |phase| for (std.enums.values(Ending)) |ending| {
+            result[index] = .{ .screen = screen, .field = field, .phase = phase, .ending = ending };
+            index += 1;
+        };
+        break :blk result;
+    };
+};

@@ -471,10 +471,8 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
 /// The chat's own line is the only entry to its settings panel.
 fn openInfo(self: *Self, _: *vxfw.EventContext) !void {
     if (self.info_open) return;
+    self.closePresentation();
     self.info_open = true;
-    self.footer.focus = .input;
-    self.footer.pending = null;
-    self.app_info.closeStandaloneChoice();
     if (self.inspection.status != null) self.app_info.refresh();
     self.inspection.status_requested = true;
     self.poll_at = 0;
@@ -498,11 +496,17 @@ fn footerEvent(self: *Self, ctx: *vxfw.EventContext, input: session_chrome.Foote
     return decision.forward;
 }
 
-fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (!self.app_info.standaloneOpen() or self.app_hooks.root.pasting) return;
-    self.footer.pending = null;
+/// Navigation ends the presentation, never the admitted backend effect.
+/// The application owner also calls this before showing Settings/sign-in.
+pub fn closePresentation(self: *Self) void {
     self.app_info.closeStandaloneChoice();
-    self.footer.focus = .input;
+    _ = self.footer.step(false, .escape);
+    self.info_open = false;
+}
+
+fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (self.app_info.standaloneField() == null or self.app_hooks.root.pasting) return;
+    self.closePresentation();
     try ctx.requestFocus(self.app_input.composer.widget());
 }
 
@@ -822,7 +826,7 @@ fn appCapture(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void
         .key_press, .paste_start, .paste_end, .invalid_key => true,
         else => false,
     };
-    if (tabs or opens or ((self.info_open or self.footer.pending != null or self.app_info.standaloneOpen() or self.footer.focus != .input) and input)) {
+    if (tabs or opens or ((self.info_open or self.footer.pending != null or self.app_info.standaloneField() != null or self.footer.focus != .input) and input)) {
         try appEvent(raw, ctx, event);
         ctx.consumeEvent();
     }
@@ -885,10 +889,15 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
         .key_press, .paste_start, .paste_end, .invalid_key => {
             const pasting = self.app_hooks.root.pasting;
             self.shown_notice.dismiss();
+            if (!self.info_open and self.app_info.standaloneField() != null and event == .key_press and !pasting and (Editor.named(event.key_press) == .escape or Editor.named(event.key_press) == .ctrl_g)) {
+                try self.closeStandaloneChoice(ctx);
+                ctx.consumeAndRedraw();
+                try self.afterInput(ctx);
+                return;
+            }
             if (self.info_open or self.app_info.standaloneOpen()) {
                 if (self.info_open and event == .key_press and !pasting and self.submission.view() != null and event.key_press.matches('d', .{ .alt = true })) {
-                    self.app_info.cancelChoice();
-                    self.info_open = false;
+                    self.closePresentation();
                     try ctx.requestFocus(self.app_input.composer.widget());
                     try self.showSubmissionFailure();
                 } else if (session_keys.panelAction(Editor.selectEvent(conversation_keys, event, pasting))) |action| {
@@ -899,7 +908,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                     if (!self.info_open) {
                         try self.closeStandaloneChoice(ctx);
                     } else if (self.app_info.hasChoice()) self.app_info.cancelChoice() else {
-                        self.info_open = false;
+                        self.closePresentation();
                         try ctx.requestFocus(self.app_input.composer.widget());
                     }
                 } else try self.app_info.widget().handleEvent(ctx, event);
@@ -1035,6 +1044,7 @@ fn afterInput(self: *Self, ctx: *vxfw.EventContext) !void {
 /// Hands the Session back to the overview once it is leaving.
 fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.leaving) |outcome| {
+        self.closePresentation();
         const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
         if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
         if (self.app_hooks.drafts) |drafts| {
@@ -9257,11 +9267,11 @@ test "chat footer pending save retains the original choice owner when another wo
     try std.testing.expect(self.app_info.standaloneOpen());
     try held.keys("\x1b[B\r");
     try std.testing.expectEqual(@as(?usize, 0), self.app_info.pending);
-    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standalone_row);
+    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standaloneField());
     const edit = self.info_edit.?;
     try chromeClick(.{ .footer = .model })(self, &ctx);
     try std.testing.expectEqual(@as(?usize, 0), self.app_info.pending);
-    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standalone_row);
+    try std.testing.expectEqual(@as(?ChatInfo.Row, .effort), self.app_info.standaloneField());
     try std.testing.expectEqualDeep(edit, self.info_edit.?);
     self.info_effect = .failed;
     try self.app_info.widget().handleEvent(&ctx, .tick);
@@ -9468,7 +9478,12 @@ test "chat footer permission transitions follow the current line with absent cur
     };
 }
 
-test "chat standalone footer close clicks match Escape preserve paste and ignore admitted saves" {
+test "chat standalone footer close clicks match Escape preserve paste and preserve admitted saves" {
+    const Rejected = struct {
+        fn configure(_: *anyopaque, _: ChatInfo.Edit) !void {
+            return error.AccessDenied;
+        }
+    };
     for ([_]u16{ 140, 46 }) |width| for ([_]ChatInfo.Row{ .model, .effort }) |row| {
         const held = try HeldFrontend.create();
         defer held.destroy();
@@ -9481,8 +9496,10 @@ test "chat standalone footer close clicks match Escape preserve paste and ignore
         for ([_]bool{ false, true }) |failed| {
             try self.app_info.openStandaloneChoice(&ctx, row);
             if (failed) {
-                self.app_info.cancelChoice();
-                self.app_info.failures[if (row == .model) @as(usize, 4) else 0] = " · couldn't save";
+                const configure = self.app_info.backend.configure;
+                self.app_info.backend.configure = Rejected.configure;
+                try self.app_info.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+                self.app_info.backend.configure = configure;
             }
             _ = try held.draw();
             const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
@@ -9522,9 +9539,99 @@ test "chat standalone footer close clicks match Escape preserve paste and ignore
         const pending = self.app_info.pending;
         try std.testing.expect(pending != null);
         for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, stale_footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
-        try std.testing.expect(self.app_info.standalone_row != null);
+        try std.testing.expect(self.app_info.standaloneField() == null);
         try std.testing.expectEqual(pending, self.app_info.pending);
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
         try std.testing.expectEqual(cursor, self.input.composition().cursor);
+    };
+}
+
+test "chat standalone lifetime shared domain closes every phase through real screen endings" {
+    const Cases = session_chrome.StandaloneCases;
+    const Fault = struct {
+        fn read(_: *anyopaque, _: *status_page.Session) !void {
+            return error.AccessDenied;
+        }
+        fn configure(_: *anyopaque, _: ChatInfo.Edit) !void {
+            return error.AccessDenied;
+        }
+        fn close(raw: *anyopaque) void {
+            const self: *Self = @ptrCast(@alignCast(raw));
+            self.closePresentation();
+        }
+    };
+    for (Cases.all) |case| {
+        if (case.screen != .chat) continue;
+        errdefer std.debug.print("Chat lifecycle {s}/{s}/{s}\n", .{ @tagName(case.field), @tagName(case.phase), @tagName(case.ending) });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        self.app_hooks.root.main_presentation = .{ .context = self, .close = Fault.close };
+        try held.keys("kept draft");
+        const cursor = self.input.composition().cursor;
+        const row: ChatInfo.Row = if (case.field == .model) .model else .effort;
+        var ctx = held.context();
+        if (case.phase == .read_failed) self.app_info.backend.read = Fault.read;
+        if (case.phase == .save_failed) self.app_info.backend.configure = Fault.configure;
+        try self.app_info.openStandaloneChoice(&ctx, row);
+        _ = try held.draw();
+        const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
+        const close = for (footer.children) |child| {
+            if (child.surface.widget.eql(self.chrome.close.widget())) break child;
+        } else return error.TestExpectedCloseTarget;
+        if (case.phase == .pending or case.phase == .save_failed) try self.app_info.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expectEqual(@as(?ChatInfo.Row, row), self.app_info.standaloneField());
+        try std.testing.expectEqual(case.phase == .pending, self.app_info.pending != null);
+        try std.testing.expectEqual(case.phase != .pending, self.app_info.standaloneOpen());
+        switch (case.ending) {
+            .escape => try held.keys("\x1b"),
+            .close_click => for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind }),
+            .navigate => {
+                try self.app_hooks.root.openSettings(&ctx);
+                try std.testing.expect(!self.app_info.standaloneOpen() and self.app_info.standaloneField() == null);
+                try self.app_hooks.root.showMain(&ctx);
+            },
+            .refresh => self.app_info.refresh(),
+        }
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        try std.testing.expect(self.app_info.standaloneField() == null);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        if (case.phase == .pending) {
+            try std.testing.expect(self.app_info.pending != null);
+            self.info_effect = .failed;
+            try self.app_info.widget().handleEvent(&ctx, .tick);
+            try std.testing.expect(self.app_info.pending == null);
+            try std.testing.expect(!self.app_info.standaloneOpen() and self.app_info.standaloneField() == null);
+        }
+        try held.keys("!");
+        try std.testing.expectEqualStrings("kept draft!", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor - 1);
+    }
+}
+
+test "chat standalone accepted departure ends presentation before handing back an intact draft" {
+    for ([_]ChatInfo.Row{ .model, .effort }) |row| for ([_]bool{ false, true }) |pending| {
+        var drafts: session_drafts.Drafts = .{};
+        defer drafts.deinit(std.testing.allocator);
+        const held = try HeldFrontend.createWithDrafts("aaaaaa", &drafts);
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        try held.keys("kept draft");
+        var ctx = held.context();
+        try self.app_info.openStandaloneChoice(&ctx, row);
+        if (pending) try self.app_info.standaloneWidget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        const admitted = self.app_info.pending;
+        try held.keys("\x03");
+        try std.testing.expectEqual(@as(?Outcome, .detached), held.left);
+        try std.testing.expect(self.app_info.standaloneField() == null);
+        try std.testing.expectEqual(admitted, self.app_info.pending);
+        try std.testing.expect(self.footer.pending == null);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        const saved = drafts.take(std.testing.allocator, "aaaaaa").?;
+        defer saved.deinit(std.testing.allocator);
+        try std.testing.expectEqualStrings("kept draft", saved.snapshot.bytes);
     };
 }
