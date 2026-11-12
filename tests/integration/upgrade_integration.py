@@ -1073,7 +1073,8 @@ def terminal_cases(root, binary, releases, artifacts):
             proof_relaunched(c, screen, process)
             proof_ready(c, previous, old_host)
             assert "alt+i info" not in screen.observe(), "overview reopened as a conversation"
-            screen.overview()
+            # The proven relaunch retains its Upgrade reply in Footer.
+            screen.overview(ready=False)
             screen.save(artifacts, "overview-installed")
             screen.ignored_overview_input("/x\x1b[200~returned γ paste\x1b[201~", "returned γ paste")
             screen.save(artifacts, "overview-returned")
@@ -1348,7 +1349,8 @@ def startup_cases(root, binary, releases, artifacts):
                         screen.send("X")
                         screen.draft("staXrtup α draft", 6)
                     else:
-                        screen.overview()
+                        # proof_relaunched already observed the retained Footer reply.
+                        screen.overview(ready=False)
                         screen.contains(session)
                         assert "alt+i info" not in screen.observe(), "overview opened a conversation"
                         screen.ignored_overview_input("/xreturned γ ignored\x1b[200~returned δ paste\x1b[201~",
