@@ -125,6 +125,15 @@ fn run(init: std.process.Init) !void {
         try advice.write(&output.writer, &observed, home);
         return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
     }
+    // The installer's PATH decision reads this state, never the advice text (#1316).
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path-state")) {
+        const advice = @import("installation_path.zig");
+        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+        defer observed.deinit(allocator);
+        var line: [16]u8 = undefined;
+        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
+    }
     if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
         const schema = @import("store.zig");
         var output: [128]u8 = undefined;
@@ -298,7 +307,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
         .request_recover => try recover(init, parsed),
         .request_read_result => try readResult(init, parsed),
         .request_list => try requests(init),
-        .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?, false),
+        .action_inspect => try inspectAction(init, .{ .io = init.io }, parsed.get("store"), parsed.get("session").?, (try parsed.number(u64, "action")).?),
         .action_allow => try decideAction(init, parsed, .allow_once),
         .action_deny => try decideAction(init, parsed, .deny),
         .action_read_call_id => try readActionContent(init, parsed, .call_id),
@@ -2487,28 +2496,6 @@ pub fn sessionCommand(init: std.process.Init, read: client.ReadContext, destinat
     const argument = input_buffer[@intFromPtr(command.argument.ptr) - @intFromPtr(input_buffer.ptr) ..][0..command.argument.len];
     const live: LiveAddress = .{ .store = destination, .session = reference };
     switch (command.name) {
-        .@"inspect-action" => {
-            const report = try inspectWork(init, requests_context, destination, reference);
-            defer report.file.close(init.io);
-            if (report.current.first_action) |action| {
-                var buffer: [20]u8 = undefined;
-                const id = try std.fmt.bufPrint(&buffer, "{d}", .{action});
-                try writeSafeField(init.io, "Workspace: ", report.current.settings.workspace.slice());
-                try inspectAction(init, requests_context, destination, reference, action, true);
-                try std.Io.File.stdout().writeStreamingAll(init.io, "Inspection only; no decision sent.\n");
-                inline for (.{ "allow", "deny" }, .{ "Allow once: ", "Deny: " }) |decision, label| {
-                    try std.Io.File.stdout().writeStreamingAll(init.io, label ++ "rui action " ++ decision ++ " --store ");
-                    try writeShellWord(init.io, destination);
-                    var session_buffer: [2 * protocol.max_session_bytes + 32]u8 = undefined;
-                    var session_writer = std.Io.File.stdout().writerStreaming(init.io, &session_buffer);
-                    try TerminalText.writeShellSession(&session_writer.interface, reference, false);
-                    try session_writer.flush();
-                    try std.Io.File.stdout().writeStreamingAll(init.io, " --action ");
-                    try std.Io.File.stdout().writeStreamingAll(init.io, id);
-                    try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
-                }
-            } else try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No actionable permission in this Current snapshot; no decision sent.\n");
-        },
         .setup => {
             const setup_usage = "Usage: /setup [--store PATH] [--provider codex] [--model ID | --clear-model] [--notifications on|off] [--reasoning-effort LEVEL|default]; no changes saved. See rui session configure --help for model IDs.\n";
             var setup_args: [setup_capacity][]const u8 = undefined;
@@ -3922,17 +3909,6 @@ const SessionObservation = struct {
     file: std.Io.File,
 };
 
-fn inspectWork(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8) !SessionObservation {
-    var buffer: [256]u8 = undefined;
-    var writer = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-    // A typed inspection failure stays primary if diagnostic flushing fails.
-    defer writer.flush() catch {};
-    const report = try inspectWorkTo(init, requester, store, session_ref, &writer.interface);
-    errdefer report.file.close(init.io);
-    try writer.flush();
-    return report;
-}
-
 fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []const u8, session_ref: []const u8, out: *std.Io.Writer) !SessionObservation {
     const file = try renderScratch(init);
     errdefer file.close(init.io);
@@ -3951,67 +3927,33 @@ fn inspectWorkTo(init: std.process.Init, requester: client.Requests, store: []co
     }
 }
 
-fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]const u8, reference: []const u8, target: u64, interactive: bool) !void {
+fn inspectAction(init: std.process.Init, requester: client.Requests, store: ?[]const u8, reference: []const u8, target: u64) !void {
     const io = init.io;
     var selected_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const selected = try selectedStore(init, store, &selected_buffer);
     const file = try renderScratch(init);
     defer file.close(io);
-    if (interactive) {
-        if (try session_view.actionTool(requester, selected, reference, target, file)) |tool| {
-            if (try tool.runner() == .mcp) {
-                var output_buffer: [256]u8 = undefined;
-                var output = std.Io.File.stdout().writerStreaming(io, &output_buffer);
-                var sink: JsonOutput.Sink = .{ .writer = &output.interface };
-                try output.interface.print("Action {d}\n", .{target});
-                _ = try session_view.permissionForTool(requester, selected, reference, target, file, &sink, false, &tool);
-                return output.flush();
-            }
-        }
-        // The metadata lookup used scratch; the raw inspection starts empty.
-        try io.vtable.fileSeekTo(io.userdata, file, 0);
-        try file.setLength(io, 0);
-    }
     var buffer: client.ReplyBuffer = .{};
-    var call_bytes: u64 = 0;
-    if (!interactive) {
-        const call = requester.readActionCallId(selected, reference, target, file, &buffer) catch |err| return readTransportFailure(io, selected, err);
-        if (call == .command) {
-            try writeCommandReply(io, call.command, .stdout);
-            return error.ActionReadFailed;
-        }
-        call_bytes = call.answer.bytes;
+    const call = requester.readActionCallId(selected, reference, target, file, &buffer) catch |err| return readTransportFailure(io, selected, err);
+    if (call == .command) {
+        try writeCommandReply(io, call.command, .stdout);
+        return error.ActionReadFailed;
     }
+    const call_bytes = call.answer.bytes;
     const arguments = requester.readActionArguments(selected, reference, target, file, &buffer) catch |err| return readTransportFailure(io, selected, err);
     if (arguments == .command) {
         try writeCommandReply(io, arguments.command, .stdout);
         return error.ActionReadFailed;
     }
     var line: [96]u8 = undefined;
-    if (!interactive) {
-        // People review this before `action allow`; escaping every non-ASCII
-        // code point keeps provider-chosen control and bidi characters from
-        // disguising the proposal, while JSON still decodes the exact bytes.
-        try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
-        try writeJsonFileAt(io, file, 0, call_bytes, true);
-        try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
-        try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
-        return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
-    }
-    // Quote provider-controlled fields so control and bidi bytes cannot alter the
-    // proposal visible next to the human approval prompt.
-    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "Action {d}\n", .{target}));
-    try std.Io.File.stdout().writeStreamingAll(io, "Arguments: \"");
+    // People review this before `action allow`; escaping every non-ASCII
+    // code point keeps provider-chosen control and bidi characters from
+    // disguising the proposal, while JSON still decodes the exact bytes.
+    try std.Io.File.stdout().writeStreamingAll(io, try std.fmt.bufPrint(&line, "{{\"action\":\"{d}\",\"call_id\":\"", .{target}));
+    try writeJsonFileAt(io, file, 0, call_bytes, true);
+    try std.Io.File.stdout().writeStreamingAll(io, "\",\"arguments\":\"");
     try writeJsonFileAt(io, file, call_bytes, arguments.answer.bytes, true);
-    try std.Io.File.stdout().writeStreamingAll(io, "\"\n");
-}
-
-// Diagnostics preserve opaque selectors without printable shell ambiguity.
-fn writeShellWord(io: std.Io, value: []const u8) !void {
-    var storage: [256]u8 = undefined;
-    var writer = std.Io.File.stdout().writerStreaming(io, &storage);
-    try TerminalText.writeShellWord(&writer.interface, value);
-    try writer.flush();
+    return std.Io.File.stdout().writeStreamingAll(io, "\"}\n");
 }
 
 fn writeJsonFileAt(io: std.Io, file: std.Io.File, start: u64, length: u64, escape_unicode: bool) !void {

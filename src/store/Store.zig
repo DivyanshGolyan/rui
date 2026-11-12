@@ -133,6 +133,12 @@ pub const Store = struct {
     // Source-level proof only: no counters/storage in the production Store.
     testing_content_work: if (@import("builtin").is_test) TestingContentWork else void = if (@import("builtin").is_test) .{} else {},
 
+    /// Borrowed live observations, installed before Host workers start and
+    /// cleared after their joins. Stored beside the existing change ring.
+    pub fn modelTimingSource(self: *Store) *@import("../model_timing.zig").Source {
+        return &@as(*OutOfLine, @fieldParentPtr("ring", self.changes)).model_timings;
+    }
+
     /// The identity allocator already lives beside the change ring. Derive
     /// its address instead of retaining a redundant pointer in the Store;
     /// these eight bytes pay for the engine union's tag on both engines.
@@ -535,9 +541,9 @@ pub const Store = struct {
         return @ptrCast(self.scratch(.configuration));
     }
 
-    /// A report's large state, a `T` such as its tool names, in the
-    /// Store's scratch so no Host stack frame holds it. A report takes it
-    /// for one value at a time: the next take overwrites the last.
+    /// Transient large state, such as a report's tool names or a model-call
+    /// row, in entry-owned scratch so no Host stack frame holds it. The
+    /// caller consumes each value before the next decode overwrites it.
     pub fn reportScratch(self: *Store, comptime T: type) *T {
         comptime std.debug.assert(@sizeOf(T) <= scratch_bytes and @alignOf(T) <= scratch_align);
         return @ptrCast(@alignCast(self.scratch(.report)));
@@ -1800,6 +1806,7 @@ comptime {
 
 /// The Store's state too large for the frame that holds it.
 const OutOfLine = struct {
+    model_timings: @import("../model_timing.zig").Source,
     ring: change_ring.Ring,
     queue: Queue,
     ids: HostValues,
@@ -1853,6 +1860,7 @@ comptime {
 fn createRing() error{OutOfMemory}!*change_ring.Ring {
     const bytes = std.heap.page_allocator.rawAlloc(@sizeOf(OutOfLine), .of(OutOfLine), @returnAddress()) orelse return error.OutOfMemory;
     const owned: *OutOfLine = @ptrCast(@alignCast(bytes));
+    owned.model_timings = .{};
     owned.control_generation = .init(0);
     owned.commit_wake = .init(null);
     const ring: *change_ring.Ring = &owned.ring;

@@ -380,6 +380,7 @@ pub const Reactor = struct {
     pub fn launch(self: *Reactor, transfer: *Transfer) void {
         self.mutex.lockUncancelable(self.io);
         defer self.unlockWaking();
+        if (transfer.timing) |timing| timing.begin(std.Io.Clock.awake.now(self.io));
         self.client.launch(&transfer.stream);
     }
 
@@ -495,6 +496,9 @@ pub const Reactor = struct {
             };
         }
         const transfer: *Transfer = @fieldParentPtr("stream", stream);
+        if (event == .head or event == .body) {
+            if (transfer.timing) |timing| timing.responseEvent(std.Io.Clock.awake.now(self.io));
+        }
         switch (event) {
             .head => |head| {
                 transfer.releaseCredential();
@@ -723,9 +727,13 @@ const Observed = struct {
     }
 };
 
+pub const AttemptTiming = @import("model_timing.zig").Attempt;
+
 /// Embedded in an execution slot and built there: h2 holds the stream's
 /// address from launch until `nextCompletion` or `cancel`.
 pub const Transfer = struct {
+    /// Borrowed custody-owned storage; outlives this Transfer and its cleanup.
+    timing: ?*AttemptTiming = null,
     stream: h2.Stream,
     reactor: *Reactor,
     request: RetainedRequest,
@@ -749,6 +757,7 @@ pub const Transfer = struct {
         /// receives; null for neither.
         routing: ?Routing = null,
         faults: Faults = .{},
+        timing: ?*AttemptTiming = null,
     };
 
     /// What a Transfer keeps of its request.
@@ -798,6 +807,7 @@ pub const Transfer = struct {
             .response = response,
             .headers = .{},
             .credential = options.credential,
+            .timing = options.timing,
         };
         errdefer {
             self.response.deinit(reactor.io, reactor.budget);
@@ -1037,6 +1047,8 @@ test "a Transfer's credential use ends at its first response head, once" {
     reactor.credentials = .{ .allocator = std.testing.allocator, .io = std.testing.io };
     var transfer: Transfer = undefined;
     transfer.reactor = &reactor;
+    var timing: AttemptTiming = .{};
+    transfer.timing = &timing;
     transfer.headers = .{};
     transfer.credential = try reactor.credentials.share("token", "account");
     // A sibling Transfer still presenting the same credential.
@@ -1249,4 +1261,91 @@ test "catalog listing captures a bounded ETag and rejects duplicates without obs
     reactor.listings.set(.provider, &fetch);
     try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&fetch.stream, head));
     try std.testing.expect(fetch.etag == null);
+}
+
+test "model timings start at handoff and capture only the first HTTP response event on each retry" {
+    const Clock = struct {
+        var awake_ns: i96 = 0;
+
+        fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
+            if (clock == .awake) return .fromNanoseconds(awake_ns);
+            return std.testing.io.vtable.now(userdata, clock);
+        }
+    };
+    var vtable = std.testing.io.vtable.*;
+    vtable.now = Clock.now;
+    var io = std.testing.io;
+    io.vtable = &vtable;
+    var used: std.atomic.Value(u64) = .init(0);
+    var reactor: Reactor = undefined;
+    try reactor.init(std.testing.allocator, io, .{
+        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
+        .capacity = 1,
+        .inactivity_seconds = 1,
+        .scratch_path = "/nonexistent",
+        .budget = .{ .used = &used, .limit = 0 },
+    });
+    defer reactor.deinit();
+    var transfer: Transfer = undefined;
+    transfer.stream = .idle;
+    transfer.reactor = &reactor;
+    var timing: AttemptTiming = .{};
+    transfer.timing = &timing;
+    transfer.headers = .{};
+    transfer.credential = null;
+    transfer.request_open = false;
+    transfer.response.charged = 0;
+    var sink: [1]u8 = undefined;
+    try std.testing.expectEqual(@as(?u64, null), transfer.timing.?.elapsedMs(.fromNanoseconds(99)));
+    // Reuse the timing storage deliberately: each real launch must erase its
+    // predecessor's start/event, even when the final retry has no event.
+    for (0..4) |ordinal| {
+        Clock.awake_ns = @as(i96, @intCast(ordinal + 1)) * std.time.ns_per_s;
+        try reactor.client.prepare(&transfer.stream, .{
+            .endpoint = reactor.endpoints.get(.codex).?,
+            .fields = &.{},
+            .body = .{ .bytes = "" },
+            .sink = .{ .buffer = &sink },
+        });
+        defer {
+            reactor.client.cancel(&transfer.stream);
+            transfer.stream.deinit();
+        }
+        reactor.launch(&transfer);
+        const sent_at = Clock.awake_ns;
+        try std.testing.expectEqual(@as(i64, @intCast(@divTrunc(sent_at, std.time.ns_per_ms))), transfer.timing.?.sent_at_ms.load(.acquire));
+        try std.testing.expectEqual(@as(?u64, null), transfer.timing.?.firstEventMs());
+        _ = reactor.observe(&transfer.stream, .body_retired);
+        try std.testing.expectEqual(@as(?u64, null), transfer.timing.?.firstEventMs());
+        switch (ordinal) {
+            0 => {
+                Clock.awake_ns = sent_at + 5 * std.time.ns_per_ms;
+                _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .interim, .status = 100, .fields = &.{} } });
+                Clock.awake_ns = sent_at + 9 * std.time.ns_per_ms;
+                _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &.{} } });
+                // Even a body refused by the scratch budget is an event;
+                // it must not overwrite the earlier interim response head.
+                try std.testing.expectEqual(h2.Verdict.refuse, reactor.observe(&transfer.stream, .{ .body = 1 }));
+                try std.testing.expectEqual(@as(?u64, 5), transfer.timing.?.firstEventMs());
+            },
+            1 => {
+                Clock.awake_ns = sent_at + 7 * std.time.ns_per_ms;
+                try std.testing.expectEqual(h2.Verdict.refuse, reactor.observe(&transfer.stream, .{ .body = 1 }));
+                Clock.awake_ns = sent_at + 11 * std.time.ns_per_ms;
+                _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 503, .fields = &.{} } });
+                try std.testing.expectEqual(@as(?u64, 7), transfer.timing.?.firstEventMs());
+            },
+            2 => {
+                // Same-millisecond arrival is a real zero, not absence.
+                Clock.awake_ns = sent_at;
+                _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .final, .status = 200, .fields = &.{} } });
+                Clock.awake_ns = sent_at + 3 * std.time.ns_per_ms;
+                _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .trailers, .status = 0, .fields = &.{} } });
+                try std.testing.expectEqual(@as(?u64, 0), transfer.timing.?.firstEventMs());
+            },
+            else => try std.testing.expectEqual(@as(?u64, null), transfer.timing.?.firstEventMs()),
+        }
+        Clock.awake_ns = sent_at + 19 * std.time.ns_per_ms + 999_999;
+        try std.testing.expectEqual(@as(?u64, 19), transfer.timing.?.elapsedMs(.fromNanoseconds(Clock.awake_ns)));
+    }
 }

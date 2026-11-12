@@ -180,3 +180,35 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     try palette.widget().handleEvent(&ctx, .{ .mouse = press });
     try std.testing.expect(selected.index == null);
 }
+
+test "Palette renders names-only slash lists on conversation and overview" {
+    const cases = .{
+        .{ commands.conversation, &[_][]const u8{ "/archive", "/configure", "/copy           code · file", "/effort", "/help", "/model", "/reload-skills", "/rename", "/setup", "/status", "/unarchive" } },
+        .{ commands.overview, &[_][]const u8{ "/archive", "/configure", "/help", "/model", "/rename", "/sessions   unarchived · archived · all", "/setup", "/unarchive" } },
+    };
+    inline for (cases) |case| {
+        var shown = commands.Shown.next(null, 1, case[0].suggest("/", .{})).?;
+        var palette: Self = .{ .shown = &shown };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{} };
+        const surface = try palette.widget().draw(ctx);
+        try std.testing.expectEqual(case[1].len, surface.size.height);
+        std.debug.print("\n{s} / list:\n", .{if (case[0] == commands.conversation) "Conversation" else "Overview"});
+        for (case[1], 0..) |expected, row| {
+            var text: [256]u8 = undefined;
+            var used: usize = 0;
+            for (surface.buffer[row * 80 ..][0..80]) |cell| {
+                @memcpy(text[used..][0..cell.char.grapheme.len], cell.char.grapheme);
+                used += cell.char.grapheme.len;
+            }
+            const line = std.mem.trimEnd(u8, text[0..used], " ");
+            try std.testing.expectEqualStrings(expected, line);
+            std.debug.print("{s}\n", .{line});
+            if (std.mem.indexOf(u8, expected, " · ") != null) {
+                try std.testing.expect(!surface.readCell(0, @intCast(row)).style.dim);
+                try std.testing.expect(surface.readCell(@intCast(shown.list.descriptionColumn()), @intCast(row)).style.dim);
+            }
+        }
+    }
+}
