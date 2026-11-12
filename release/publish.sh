@@ -42,8 +42,7 @@ _rui_path() {
     _rui_state=$("$2/bin/rui" --installation-path-state </dev/null 2>/dev/null) || _rui_state=
     if [ "$_rui_state" = missing ] && [ "$3" = released-install ] && [ "$1" = "$HOME/.local" ] \
         && [ -z "${RUI_NO_MODIFY_PATH:-}" ] && _rui_rc=$(_rui_profile) && _rui_add_path "$_rui_rc"; then
-        _rui_shown=$(_rui_show "$_rui_rc")
-        printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal, or run . %s, to use it.\n' "$_rui_shown" "$_rui_shown"
+        printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal to use it.\n' "$(_rui_show "$_rui_rc")"
         return 0
     fi
     "$2/bin/rui" --installation-path </dev/null || :

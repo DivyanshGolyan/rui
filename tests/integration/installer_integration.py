@@ -29,7 +29,7 @@ PLATFORM = os_semantics.native_release_target()
 KEPT = "Saved work and sign-in were kept."
 HOST = "Rui's background Host (the process that runs your Sessions)"
 NEXT = "Next: run rui in your project directory. It signs you in first (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)."
-ADDED = "Added ~/.local/bin to your PATH in ~/.zshrc. Open a new terminal, or run . ~/.zshrc, to use it."
+ADDED = "Added ~/.local/bin to your PATH in ~/.zshrc. Open a new terminal to use it."
 PATH_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
 
 
@@ -216,7 +216,7 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         advice = [installed, NEXT, missing, f"  export PATH=$'{self.bin}':\"$PATH\""]
         added = "# Added by the Rui installer\n" + PATH_LINE + "\n"
         def into(name):
-            return [installed, NEXT, f"Added ~/.local/bin to your PATH in ~/{name}. Open a new terminal, or run . ~/{name}, to use it."]
+            return [installed, NEXT, f"Added ~/.local/bin to your PATH in ~/{name}. Open a new terminal to use it."]
         bash = {"SHELL": "/bin/bash"}
         darwin = sys.platform == "darwin"
         cases = {
