@@ -107,6 +107,9 @@ fn run(init: std.process.Init) !void {
     const args = try allocator.alloc([]const u8, raw_args.len);
     defer allocator.free(args);
     for (raw_args, args) |raw, *arg| arg.* = raw;
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--host-coordinator")) {
+        return @import("host_coordinator.zig").run(init, allocator);
+    }
     if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
         return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     }
@@ -330,6 +333,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
         .host_start, .host_pause, .host_status => try host(init, command, parsed),
+        .host_restart => try @import("host_coordinator.zig").restartAll(init, init.gpa),
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
