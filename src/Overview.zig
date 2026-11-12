@@ -800,7 +800,7 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
-    self.state.conversing = reference;
+    _ = try self.event(.{ .conversation = reference });
     try self.root.openSession(ctx, child);
 }
 
@@ -821,7 +821,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             }
             try self.retired.append(self.init.gpa, .{ .left = left.*, .frame = self.root.frames });
             self.app_session = null;
-            self.state.conversing = null;
+            _ = try self.event(.{ .conversation = null });
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
@@ -1044,7 +1044,7 @@ fn selectedListLine(self: *const Self) ?u32 {
     var line: usize = 0;
     while (view.listItem(&self.state, line)) |item| : (line += 1) {
         const target = view.clickOf(&self.state, item) orelse continue;
-        if (target == .open and std.mem.eql(u8, &target.open, &open)) return @intCast(line);
+        if (target == .open and std.mem.eql(u8, &target.open, &open.reference)) return @intCast(line);
     }
     return null;
 }
@@ -5520,7 +5520,7 @@ test "a command output panel stays above the pinned Settings row, with or withou
             const row = &state.rows.items[state.order.items[0]];
             row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
             try row.state.failed.code.set("provider_http_401");
-            try std.testing.expect(view.band(state.rows.items, state.now_ms, state.login_at) != null);
+            try std.testing.expect(view.band(state) != null);
         }
         var clipped = false;
         var whole = false;
@@ -6425,7 +6425,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     try std.testing.expect(try rig.settle() == null);
     var peer: Peer = .{};
     overview.root.session = peer.widget();
-    overview.state.conversing = "k7m2qx".*;
+    _ = try overview.event(.{ .conversation = "k7m2qx".* });
     overview.state.selected = .{ .session = "b4n8wd".* };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

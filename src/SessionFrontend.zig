@@ -4743,10 +4743,66 @@ const ArchiveOverview = struct {
         return self.state.upgrade;
     }
 
+    fn observed(raw: *anyopaque, work: protocol.session_work.Work, opening: bool) !void {
+        const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
+        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .work = work, .opening = opening } });
+        try std.testing.expectEqual(@as(usize, 0), effects.len);
+    }
+
     fn lender(self: *ArchiveOverview) Lender {
-        return .{ .context = self, .step = ArchiveOverview.step, .line = ArchiveOverview.line, .service = quiet_overview.service, .observed = quiet_overview.observed, .upgrade = ArchiveOverview.upgrade };
+        return .{ .context = self, .step = ArchiveOverview.step, .line = ArchiveOverview.line, .service = quiet_overview.service, .observed = ArchiveOverview.observed, .upgrade = ArchiveOverview.upgrade };
     }
 };
+
+test "one settled stop read updates the chat and its list row without a listing" {
+    const fixture = try FeedFixture.createWithDrafts("k7m2qx", null);
+    defer fixture.destroy();
+    const held = fixture.held;
+    const self = &held.self;
+    var overview: ArchiveOverview = .{ .state = undefined };
+    try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+    defer overview.state.deinit();
+    const ref = "k7m2qx".*;
+    const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
+    const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
+    _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
+    _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
+        .rows = &.{.{ .reference = ref, .workspace = "/work", .label = "Stop the slow job", .state = stopping, .turn = 7 }},
+        .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
+    } } });
+    _ = try overview_view.step(&overview.state, .{ .conversation = ref });
+    self.lender = overview.lender();
+    self.live.work.state = stopping;
+    // One completed activity read publishes the chat's stop row and its
+    // current work together, through the production reader handoff.
+    const job = self.freeze(.activity);
+    const text = "■ Stopped\n";
+    try fixture.file.writePositionalAll(std.testing.io, text, 0);
+    job.result = .{
+        .work = .{ .work = stopped },
+        .row_count = 1,
+        .new_rows = 1,
+        .at_start = true,
+        .at_end = true,
+        .low = .{ .position = 1 },
+        .high = .{ .position = 1 },
+        .cursor = .{ .position = 1, .end = 1 },
+    };
+    job.result.rows[0] = .{ .key = .{ .position = 1 }, .offset = 0, .length = text.len, .tight = false, .provisional = false };
+    try self.launch(job, struct {
+        fn complete(_: *anyopaque, _: *Task) !void {}
+    }.complete);
+    try self.settleReader();
+    const chat = try held.shown();
+    try std.testing.expect(std.mem.indexOf(u8, chat, "■ Stopped") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chat, "Stopping") == null);
+    try std.testing.expectEqualDeep(stopped.state, self.live.work.state);
+    const row = overview.state.find(ref).?;
+    try std.testing.expectEqualDeep(stopped.state, overview.state.workOf(row).state);
+    try std.testing.expectEqual(stopped.turn, overview.state.workOf(row).turn);
+    try std.testing.expect(!ArchiveOverview.line(&overview, .stopped).stoppable);
+    try std.testing.expectEqual(@as(usize, 0), overview.state.summary.counts.working);
+}
 
 test "Alt-A archives the open conversation at once without submitting or changing its draft or retained original" {
     for ([_][]const u8{ "\x1ba", "\x1b[97;3u", "\x1b[27;3;97~" }) |chord| for ([_]bool{ false, true }) |original| {

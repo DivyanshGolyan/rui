@@ -378,6 +378,8 @@ pub const Event = union(enum) {
     start_upgrade,
     /// A read the open conversation applied.
     observed: Observed,
+    /// The conversation now shown, or null on return to the list.
+    conversation: ?Reference,
     /// The command `step` asked the shell to run ended.
     ran: Ran,
     /// A pointer press on something a click acts on.
@@ -1015,13 +1017,17 @@ pub const Row = struct {
 
     /// An Action awaits a decision: alone, or beside running Bash.
     pub fn needsYou(self: *const Row) bool {
-        return switch (self.state) {
-            .approval => true,
-            .bash => |bash| bash.approvals != 0,
-            else => false,
-        };
+        return needsDecision(&self.state);
     }
 };
+
+fn needsDecision(work: *const WorkState) bool {
+    return switch (work.*) {
+        .approval => true,
+        .bash => |bash| bash.approvals != 0,
+        else => false,
+    };
+}
 
 /// The overview's one value: rows keyed by Session reference, the selection
 /// as a tagged value, the composer and its held start settings
@@ -1061,7 +1067,12 @@ pub const State = struct {
 
     selected: Selection = .new_session,
     /// The Session whose conversation holds the terminal, if any.
-    conversing: ?Reference = null,
+    conversing: ?struct {
+        reference: Reference,
+        /// One open conversation's completed activity snapshot. Listings
+        /// retain their own rows, so closing reveals their latest read.
+        work: ?session_work.Work = null,
+    } = null,
     notice: ?Notice = null,
     settings: StartSettings = .{},
     /// Every start and stop without an answer the overview showed, oldest first.
@@ -1241,6 +1252,21 @@ pub const State = struct {
         return &self.rows.items[at];
     }
 
+    fn observedWork(self: *const State, row: *const Row) ?*const session_work.Work {
+        const open = if (self.conversing) |*open| open else return null;
+        if (!std.mem.eql(u8, &open.reference, &row.reference)) return null;
+        return if (open.work) |*work| work else null;
+    }
+
+    /// The open row reads the chat's work; every other row reads its listing.
+    pub fn workOf(self: *const State, row: *const Row) session_work.Work {
+        return if (self.observedWork(row)) |work| work.* else row.work();
+    }
+
+    fn stateOf(self: *const State, row: *const Row) *const WorkState {
+        return if (self.observedWork(row)) |work| &work.state else &row.state;
+    }
+
     /// The first line read for `row`, if any. It borrows the state until the
     /// next `step`.
     pub fn lineOf(self: *const State, row: *const Row) ?[]const u8 {
@@ -1255,9 +1281,10 @@ pub const State = struct {
     pub fn wakeAt(self: *const State) ?u64 {
         var at: ?u64 = if (self.listing) null else self.next_list_ms;
         for (self.rows.items) |*row| {
-            if (row.state == .retrying) at = @min(at orelse row.state.retrying.due_at_ms, row.state.retrying.due_at_ms);
+            const work = self.stateOf(row);
+            if (work.* == .retrying) at = @min(at orelse work.retrying.due_at_ms, work.retrying.due_at_ms);
         }
-        if (band(self.rows.items, self.now_ms, self.login_at)) |trouble| if (trouble.resets_at) |resets| {
+        if (band(self)) |trouble| if (trouble.resets_at) |resets| {
             at = @min(at orelse resets *| 1000, resets *| 1000);
         };
         return at;
@@ -1331,9 +1358,14 @@ pub const State = struct {
         held.text.set(text[0..end]) catch unreachable;
     }
 
-    /// Records the state the open conversation opened on in `seen`: an
-    /// outcome the person has seen.
+    /// Uses the chat's completed read for the open row's presentation.
+    /// Only its opening read acknowledges an outcome the person has seen;
+    /// listings still own program status records.
     fn observe(self: *State, read: Observed) error{OutOfMemory}!void {
+        if (self.conversing) |*open| if (std.mem.eql(u8, &open.reference, &read.reference)) {
+            open.work = read.work;
+            try arrange(self);
+        };
         if (!read.opening or attention.Attention.of(read.work) == null) return;
         _ = attention.observe(&(try self.record(read.reference)).acknowledged, read.work);
     }
@@ -1781,6 +1813,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         },
         .resized => |size| state.size = size,
         .observed => |read| try state.observe(read),
+        .conversation => |ref| {
+            state.conversing = if (ref) |reference| .{ .reference = reference } else null;
+            try arrange(state);
+        },
         .open => |ref| {
             state.selected = .{ .session = ref };
             effects.add(.{ .open = ref });
@@ -1929,6 +1965,11 @@ pub fn writeDeparture(state: *const State, saved_effort: ?ReasoningEffort, write
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
     state.now_ms = now_ms;
     var changed = false;
+    if (state.conversing) |*open| if (open.work) |*work| {
+        const next = work.state.asOf(now_ms);
+        changed = std.meta.activeTag(next) != std.meta.activeTag(work.state);
+        work.state = next;
+    };
     for (state.rows.items) |*row| {
         const next = row.state.asOf(now_ms);
         if (std.meta.activeTag(next) == std.meta.activeTag(row.state)) continue;
@@ -2189,7 +2230,7 @@ fn counts(state: *const State) Counts {
 }
 
 fn orderClass(state: *const State, row: *const Row) OrderClass {
-    if (row.needsYou()) return .needs_you;
+    if (needsDecision(state.stateOf(row))) return .needs_you;
     return switch (shownKind(state, row)) {
         .approval => .needs_you,
         .working, .bash, .retrying, .stopping => .working,
@@ -2227,7 +2268,7 @@ fn readCommands(state: *State, effects: *Effects) void {
         if (reads.len == reads.items.len) break;
         const row = &state.rows.items[at];
         if (!row.needsYou() or row.command != .unread) continue;
-        if (state.conversing) |open| if (std.mem.eql(u8, &open, &row.reference)) continue;
+        if (state.conversing) |open| if (std.mem.eql(u8, &open.reference, &row.reference)) continue;
         const action = row.first_action orelse continue;
         row.command = .requested;
         reads.items[reads.len] = .{ .reference = row.reference, .action = action };
@@ -2399,7 +2440,7 @@ fn stopKey(state: *State, exact: ?StopTarget, effects: *Effects) void {
     const target = exact orelse selected: {
         state.closePanel();
         const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-        break :selected StopTarget{ .reference = row.reference, .work = row.state.asOf(state.now_ms) };
+        break :selected StopTarget{ .reference = row.reference, .work = state.stateOf(row).asOf(state.now_ms) };
     };
     const ref = target.reference;
     const kind = kindShown(state, ref, target.work);
@@ -2430,20 +2471,20 @@ fn stoppable(state: *const State, ref: Reference, work: Kind) bool {
 /// The kind a row shows, with a retry that has fallen due as the work it
 /// became.
 fn shownKind(state: *const State, row: *const Row) Kind {
-    if (state.openStop(row.reference) == null and row.needsYou()) return .approval;
-    return kindShown(state, row.reference, row.state.asOf(state.now_ms));
+    if (state.openStop(row.reference) == null and needsDecision(state.stateOf(row))) return .approval;
+    return kindShown(state, row.reference, state.stateOf(row).asOf(state.now_ms));
 }
 
 /// When the row's shown state began: a retry that has fallen due waits
 /// from its due time.
 fn shownSince(state: *const State, row: *const Row) u64 {
-    return row.state.asOf(state.now_ms).since();
+    return state.stateOf(row).asOf(state.now_ms).since();
 }
 
 /// What a row's work is doing now, as `shownKind` reads it; null for idle or
 /// ended work.
 fn workLine(words: *[work_line.max_words_bytes]u8, state: *const State, row: *const Row) ?work_line.Line {
-    return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, &row.state, null, state.now_ms);
+    return if (state.openStop(row.reference) != null) work_line.stopping else work_line.of(words, state.stateOf(row), null, state.now_ms);
 }
 
 /// One click on a row opens it, as selecting it and Enter on a blank draft
@@ -2614,7 +2655,7 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
         .selected_archive => |draft| {
             state.closePanel();
             const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, draft, effects);
+            askArchive(state, row.reference, state.stateOf(row).asOf(state.now_ms), row.archive_state, draft, effects);
         },
         .selected_restore => {
             state.closePanel();
@@ -2952,13 +2993,13 @@ fn quotaCode(code: []const u8) bool {
     };
 }
 
-pub fn band(rows: []const Row, now_ms: u64, login_at: ?u64) ?Band {
+pub fn band(state: *const State) ?Band {
     var finished: u64 = 0;
     var newest: [band_rules.len]?WorkState.Failed = @splat(null);
     var retrying: [band_rules.len]u32 = @splat(0);
-    for (rows) |*row| {
-        const state = row.state.asOf(now_ms);
-        switch (state) {
+    for (state.rows.items) |*row| {
+        const work = state.stateOf(row).asOf(state.now_ms);
+        switch (work) {
             .finished => |value| finished = @max(finished, value.since),
             .failed => |failed| for (band_rules, &newest) |rule, *held| {
                 if (rule.kind == .failed and rule.matches(failed.code.slice()) and (held.* == null or held.*.?.since < failed.since)) held.* = failed;
@@ -2976,8 +3017,8 @@ pub fn band(rows: []const Row, now_ms: u64, login_at: ?u64) ?Band {
         }
         const failed = held orelse continue;
         if (failed.since <= finished) continue;
-        if (rule.after_login) if (login_at) |at| if (failed.since <= at) continue;
-        if (rule.until_reset) if (failed.resets_at) |at| if (at <= now_ms / 1000) continue;
+        if (rule.after_login) if (state.login_at) |at| if (failed.since <= at) continue;
+        if (rule.until_reset) if (failed.resets_at) |at| if (at <= state.now_ms / 1000) continue;
         return .{ .trouble = rule.trouble, .resets_at = failed.resets_at };
     }
     return null;
@@ -3154,7 +3195,7 @@ fn statusRows(state: *const State) u16 {
 
 /// Provider bands, as `headerSegments` draws them.
 fn topRows(state: *const State) usize {
-    return @intFromBool(band(state.rows.items, state.now_ms, state.login_at) != null);
+    return @intFromBool(band(state) != null);
 }
 
 /// The list between the rule and the draft as it is now, while the person
@@ -3582,11 +3623,11 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
         .archived => try std.fmt.allocPrint(arena, "[Archived] {s}", .{named.text}),
     };
     var buffer: [8]u8 = undefined;
-    const age = if (orderClass(state, row) == .queued) "" else ageText(&buffer, (state.now_ms / 1000) -| row.state.since());
+    const age = if (orderClass(state, row) == .queued) "" else ageText(&buffer, (state.now_ms / 1000) -| state.stateOf(row).since());
     const end = width -| 1;
     const age_cells = @min(built.measure(age), end -| 3);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
-    const selected = if (state.conversing) |reference| std.mem.eql(u8, &reference, &row.reference) else state.selected == .session and std.mem.eql(u8, &state.selected.session, &row.reference);
+    const selected = if (state.conversing) |open| std.mem.eql(u8, &open.reference, &row.reference) else state.selected == .session and std.mem.eql(u8, &state.selected.session, &row.reference);
     _ = try built.put(3, name, name_end -| 3, .{ .colour = if (selected) .strong else .normal, .bold = selected });
     _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet });
     return segmentsOf(arena, try built.finish(), width, .{});
@@ -3620,7 +3661,7 @@ pub fn markSpins(state: *const State, item: Item, caps: Caps) bool {
 /// Provider recovery bands above the list. Archive views remain reachable
 /// through /sessions, without a counts row or a separate clickable view name.
 pub fn headerSegments(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const Segment {
-    const trouble = band(state.rows.items, state.now_ms, state.login_at) orelse return &.{};
+    const trouble = band(state) orelse return &.{};
     var built: Spans = .of(arena, caps, width);
     return segmentsOf(arena, try providerBand(&built, trouble, state.now_ms), width, .{});
 }
@@ -3736,10 +3777,15 @@ pub const max_second_line_bytes = @max(work_line.max_words_bytes + work_line.max
 
 pub fn secondLine(state: *const State, row: *const Row, buffer: *[max_second_line_bytes]u8) []const u8 {
     if (state.openStop(row.reference) != null) return "Stopping";
-    if (row.needsYou()) return switch (row.command) {
-        .read => |index| state.lines.items[index].slice(),
-        else => "",
-    };
+    if (needsDecision(state.stateOf(row))) {
+        // Command text belongs to the listed Action, not a newer one the
+        // chat read. The conversation renders that Action's own card.
+        if (state.observedWork(row)) |work| if (work.first_action != row.first_action) return "";
+        return switch (row.command) {
+            .read => |index| state.lines.items[index].slice(),
+            else => "",
+        };
+    }
     const kind = shownKind(state, row);
     const rule = rules.get(kind);
     if (rule.says or rule.spins) {
@@ -3752,7 +3798,7 @@ pub fn secondLine(state: *const State, row: *const Row, buffer: *[max_second_lin
     }
     if (kind == .pending) return "Queued";
     if (row.last_line) |*last| if (last.text) |*text| return text.slice();
-    return switch (row.state) {
+    return switch (state.stateOf(row).*) {
         .failed => |*failed| causeOf(failed.code.slice()),
         .stopped => "Stopped",
         else => "",
@@ -4491,9 +4537,9 @@ test "a needs-you row reads its waiting Action's command once, and again only wh
     // While its conversation is open, that conversation alone reads the
     // Action; the row asks once the conversation returns.
     next.first_action = 43;
-    state.conversing = "a5k1ng".*;
+    _ = try step(&state, .{ .conversation = "a5k1ng".* });
     for ((try refresh(&state, .changed, testToken(6), &.{next})).slice()) |effect| try std.testing.expect(effect != .read_commands);
-    state.conversing = null;
+    _ = try step(&state, .{ .conversation = null });
     var returned: ?Commands = null;
     for ((try refresh(&state, .changed, testToken(7), &.{next})).slice()) |effect| if (effect == .read_commands) {
         returned = effect.read_commands;
@@ -4658,6 +4704,57 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     try std.testing.expect(conversation(&state, ref, .working, .{}, &test_said).stoppable and !conversation(&state, ref, .finished, .{}, &test_said).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
     try expectNotice(&state, "k7m2qx is already finished.");
+}
+
+test "conversation work derives from its read while listings survive departure unchanged" {
+    const ref = "k7m2qx".*;
+    const old = session(&ref, .{ .stopping = ago(10) }, .{ .label = "Old label", .turn = 7 });
+    for ([_]Delta{ .full, .changed }) |delta| for ([_]bool{ false, true }) |newer| {
+        var state = try opened(&.{old});
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = ref });
+        _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+        const stopped: session_work.Work = .{ .state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .turn = 7 };
+        try expectEffects(&.{}, try step(&state, .{ .observed = .{ .reference = ref, .work = stopped, .opening = false } }));
+        try std.testing.expectEqualDeep(stopped, state.workOf(state.find(ref).?));
+        try std.testing.expectEqual(@as(u32, 0), state.summary.counts.working);
+        const text = try screenText(&state, 80, 24, .{});
+        defer std.testing.allocator.free(text);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Stopped") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Stopping") == null);
+        const listed = session(&ref, if (newer) .{ .working = ago(0) } else old.state, .{ .label = "New label", .turn = if (newer) 8 else 7 });
+        _ = try respond(&state, delta, testToken(2), &.{listed});
+        try std.testing.expectEqualDeep(stopped, state.workOf(state.find(ref).?));
+        try std.testing.expectEqualDeep(listed.state, state.find(ref).?.state);
+        try std.testing.expectEqualStrings("New label", state.find(ref).?.label.?.slice());
+        // No later successful activity read, including if that read failed:
+        // departure reveals the listing we already consumed, with no refresh.
+        _ = try step(&state, .{ .conversation = null });
+        try std.testing.expectEqualDeep(listed.state, state.workOf(state.find(ref).?).state);
+        try std.testing.expectEqual(@as(u32, 1), state.summary.counts.working);
+        _ = try refresh(&state, .not_modified, testToken(2), &.{});
+        try std.testing.expectEqualDeep(listed.state, state.workOf(state.find(ref).?).state);
+        // Reopening, even this same Session, cannot reuse its old override.
+        _ = try step(&state, .{ .conversation = ref });
+        try std.testing.expectEqualDeep(listed.state, state.workOf(state.find(ref).?).state);
+    };
+}
+
+test "conversation permissions never borrow another Action's listed command" {
+    const ref = "k7m2qx".*;
+    var state = try opened(&.{session(&ref, .{ .approval = ago(10) }, .{ .first_action = 7 })});
+    defer state.deinit();
+    // The listing's own command read is still valid for its snapshot.
+    _ = try step(&state, .{ .command = .{ .reference = ref, .action = 7, .text = "echo old" } });
+    _ = try step(&state, .{ .conversation = ref });
+    var buffer: [max_second_line_bytes]u8 = undefined;
+    for ([_]?u64{ 7, 8, null }) |action| {
+        const work: session_work.Work = .{ .state = if (action != null) .{ .approval = ago(0) } else .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .first_action = action };
+        _ = try step(&state, .{ .observed = .{ .reference = ref, .work = work, .opening = false } });
+        try std.testing.expectEqualStrings(if (action == 7) "echo old" else if (action == 8) "" else "Stopped", secondLine(&state, state.find(ref).?, &buffer));
+    }
+    _ = try step(&state, .{ .conversation = null });
+    try std.testing.expectEqualStrings("echo old", secondLine(&state, state.find(ref).?, &buffer));
 }
 
 test "an original Esc left unconfirmed is named at once and recovered on departure, until the ledger is full" {
@@ -5724,7 +5821,52 @@ fn retryRow(ref: *const [6]u8, cause: []const u8, due_in_s: u64) Listed {
 fn bandOf(rows: []const Listed, login_at: ?u64) !?Band {
     var state = try opened(rows);
     defer state.deinit();
-    return band(state.rows.items, state.now_ms, login_at);
+    state.login_at = login_at;
+    return band(&state);
+}
+
+test "provider bands derive from the same conversation work as rows" {
+    const ref = "aaaaaa".*;
+    for ([_]Listed{ retryRow(&ref, "provider_temporary_http_429", 10), failedRow(&ref, 10, "provider_quota", test_now_s + 60) }) |listed| {
+        var state = try opened(&.{listed});
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = ref });
+        _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+        try std.testing.expect(band(&state) != null);
+        for ([_]WorkState{ .{ .stopped = .{ .since = test_now_s, .cause = .stop } }, .{ .finished = ago(0) } }) |settled| {
+            _ = try step(&state, .{ .observed = .{ .reference = ref, .work = .{ .state = settled }, .opening = false } });
+            try std.testing.expectEqual(@as(?Band, null), band(&state));
+            try std.testing.expectEqual(@as(?u64, null), state.wakeAt());
+        }
+        for ([_][]const u8{ "provider_quota", "provider_http_401" }) |code| {
+            const failed = failedRow(&ref, 0, code, test_now_s + 120);
+            _ = try step(&state, .{ .observed = .{ .reference = ref, .work = .{ .state = failed.state }, .opening = false } });
+            try std.testing.expect(band(&state) != null);
+            try std.testing.expectEqual(@as(?u64, (test_now_s + 120) * 1000), state.wakeAt());
+        }
+        _ = try step(&state, .{ .conversation = null });
+        try std.testing.expect(band(&state) != null);
+    }
+}
+
+test "an observed retry's own deadline updates row order counts and wake through departure" {
+    const ref = "aaaaaa".*;
+    for ([_]u64{ 5, 20 }) |delay| {
+        var state = try opened(&.{ retryRow(&ref, "provider_temporary_http_429", 10), session("bbbbbb", .{ .finished = ago(10) }, .{}) });
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = ref });
+        _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+        const retry = retryRow(&ref, "provider_temporary_http_429", delay);
+        _ = try step(&state, .{ .observed = .{ .reference = ref, .work = .{ .state = retry.state }, .opening = false } });
+        try std.testing.expectEqual(@as(?u64, (test_now_s + delay) * 1000), state.wakeAt());
+        try std.testing.expectEqualStrings(&ref, &state.rows.items[state.order.items[0]].reference);
+        _ = try step(&state, .{ .tick = (test_now_s + delay) * 1000 });
+        try std.testing.expectEqual(Kind.pending, shownKind(&state, state.find(ref).?));
+        try std.testing.expectEqual(@as(u32, 1), state.summary.counts.queued);
+        try std.testing.expectEqualStrings("bbbbbb", &state.rows.items[state.order.items[0]].reference);
+        _ = try step(&state, .{ .conversation = null });
+        try std.testing.expectEqual(if (delay < 10) Kind.retrying else Kind.pending, shownKind(&state, state.find(ref).?));
+    }
 }
 
 test "the band derives provider trouble from rows, in priority order" {
@@ -5750,7 +5892,8 @@ test "the band derives provider trouble from rows, in priority order" {
     // A retry already due is pending, not retrying.
     var state = try opened(&.{retryRow("aaaaaa", "provider_temporary_http_429", 10)});
     defer state.deinit();
-    try std.testing.expectEqual(@as(?Band, null), band(state.rows.items, (test_now_s + 10) * 1000, null));
+    state.now_ms = (test_now_s + 10) * 1000;
+    try std.testing.expectEqual(@as(?Band, null), band(&state));
     // Priority: sign-in, then quota, then rate limit.
     try std.testing.expectEqual(Trouble.sign_in, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), failedRow("bbbbbb", 90, "provider_http_401", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);
     try std.testing.expectEqual(Trouble.quota, (try bandOf(&.{ failedRow("aaaaaa", 60, "provider_quota", null), retryRow("cccccc", "provider_temporary_http_429", 10) }, null)).?.trouble);

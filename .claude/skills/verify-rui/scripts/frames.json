@@ -830,7 +830,7 @@
     },
     {
       "name": "stop",
-      "note": "14c-stop-asked: after stop, no stale Stopping line; owns its slow Bash call",
+      "note": "14c-stop-asked: the settled activity read shows Stopped in chat and the list together; owns its slow Bash call",
       "open": "Stop the slow job",
       "cast": [
         {
