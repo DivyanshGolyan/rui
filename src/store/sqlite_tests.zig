@@ -18,6 +18,7 @@ const retry_policy = @import("../retry_policy.zig");
 const change_ring = @import("../change_ring.zig");
 const store_core = @import("Store.zig");
 const store_access = @import("access.zig");
+const transition = @import("transition.zig");
 const rsql = @import("rsql.zig");
 const Store = store_core.Store;
 const action_domain = @import("domain/action.zig");
@@ -1780,46 +1781,34 @@ test "a stale Action settlement leaves the Store byte-identical" {
     try std.testing.expectEqual(before.ids, after.ids);
     try std.testing.expectEqual(before.generation, after.generation);
 
-    // Round 1 finds `open` current; before the write round runs, the
+    // Round 1 finds `open` current; before the commit round runs, the
     // Action stops being attempted, so the resolve guard fails after the
     // result's content row and position were queued.
     const Interposed = struct {
-        const Inner = store_access.Access(.write, error{StaleActionAttemptBinding});
-        inner: *Inner,
-        action_id: u64,
+        const Inner = action_domain.SettleAttempt;
+        pub const rounds = Inner.rounds;
+        pub const round_budget = Inner.round_budget;
+        pub const commit = Inner.commit;
+        pub const begin = Inner.begin;
+        pub const Result = Inner.Result;
+        pub const Guards = Inner.Guards;
+        pub const Declined = Inner.Declined;
 
-        pub fn read(self: *@This(), comptime S: type, args: S.Args, destination: *S.Result) void {
-            self.inner.read(S, args, destination);
+        inner: Inner,
+        storage: *Store,
+
+        pub fn step(t: *@This(), r: *transition.Round(@This()), ran: ?rounds.At) !transition.Next(@This()) {
+            const next = try Inner.step(&t.inner, r, ran);
+            if (next == .commit) {
+                var sql: [160]u8 = undefined;
+                const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,attempt_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{t.inner.input.binding.action_id}, 0) catch unreachable;
+                sqlite.exec(t.storage.sqliteDatabase(), unattempt) catch unreachable;
+            }
+            return next;
         }
-        pub fn run(self: *@This()) Inner.Error!void {
-            return self.inner.run();
-        }
-        pub fn positions(self: *@This(), head: rsql.SessionHead) !*store_access.Positions {
-            return self.inner.positions(head);
-        }
-        pub fn write(self: *@This(), comptime S: type, args: S.Args) void {
-            self.inner.write(S, args);
-        }
-        pub fn identity(self: *@This(), comptime column: store_core.Identity) !u64 {
-            return self.inner.identity(column);
-        }
-        pub fn writeContent(self: *@This(), content_id: u64, bytes: []const u8) void {
-            self.inner.writeContent(content_id, bytes);
-        }
-        pub fn insertedContent(self: *const @This(), digest: *const [32]u8, length: u64, private: bool) ?u64 {
-            return self.inner.insertedContent(digest, length, private);
-        }
-        pub fn recordInserted(self: *@This(), digest: *const [32]u8, length: u64, private: bool, content_id: u64) void {
-            self.inner.recordInserted(digest, length, private, content_id);
-        }
-        pub fn recordContentRow(self: *@This(), content_id: u64) void {
-            self.inner.recordContentRow(content_id);
-        }
-        pub fn commit(self: *@This()) Inner.Error!void {
-            var sql: [160]u8 = undefined;
-            const unattempt = std.fmt.bufPrintSentinel(&sql, "UPDATE action_operation SET attempt_ordinal=0,attempt_timeout_ms=NULL,attempt_at=NULL,sender_handle=NULL WHERE action_id={d}", .{self.action_id}, 0) catch unreachable;
-            sqlite.exec(self.inner.store.sqliteDatabase(), unattempt) catch unreachable;
-            return self.inner.commit();
+
+        pub fn committed(t: *const @This()) Result {
+            return Inner.committed(&t.inner);
         }
     };
     const guarded = try Snapshot.take(&storage, tmp.dir);
@@ -1828,10 +1817,8 @@ test "a stale Action settlement leaves the Store byte-identical" {
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: Interposed.Inner = .open(&entry);
-        defer access.deinit();
-        var interposed: Interposed = .{ .inner = &access, .action_id = open.action_id };
-        try std.testing.expectError(error.StaleActionAttemptBinding, entry.finishTransaction(error{StaleActionAttemptBinding}, .{}, access.end(.{}, action_domain.settleActionAttempt(&interposed, open, .failed, "A result the guard refuses.", .{}))));
+        var interposed: Interposed = .{ .inner = .{ .input = .{ .binding = open, .code = .failed, .result = "A result the guard refuses." } }, .storage = &storage };
+        try std.testing.expectError(error.StaleActionAttemptBinding, entry.finishTransaction(error{StaleActionAttemptBinding}, .{}, transition.run(&entry, Interposed, &interposed, .{})));
     }
     try std.testing.expect(!storage.isFenced());
     const refused = try Snapshot.take(&storage, tmp.dir);

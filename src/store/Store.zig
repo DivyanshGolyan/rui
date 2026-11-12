@@ -1176,13 +1176,7 @@ pub const Store = struct {
         faults: Faults,
     ) !?ActionAttemptAdmission {
         if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var candidate: ReadAccess = .open(&entry);
-        defer candidate.deinit();
-        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitNextActionAttempt(&candidate, &access, self.io, timeout_ms, faults)));
+        return transition.apply(self, action_domain.AdmitNextAttempt, .{ .io = self.io, .timeout_ms = timeout_ms }, faults);
     }
 
     /// Admit a selected Rui-run Action; selection is rechecked under the writer.
@@ -1193,12 +1187,7 @@ pub const Store = struct {
     }
     fn admitActionAttemptHeld(self: *Store, selected: ReadyAction, timeout_ms: u64, faults: Faults) !?ActionAttemptAdmission {
         if (timeout_ms == 0 or timeout_ms > std.math.maxInt(i64)) return error.InvalidActionTimeout;
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
-        defer access.deinit();
-        const binding = try entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.admitActionAttempt(&access, self.io, selected, timeout_ms, faults)));
-        return if (binding) |value| .{ .permit = .{ .binding = value } } else null;
+        return transition.apply(self, action_domain.AdmitSelected, .{ .io = self.io, .selected = selected, .timeout_ms = timeout_ms }, faults);
     }
     /// `out` is decoded in place and valid only on success. The compile-time
     /// runner selects the adapter's existing read plan, not persisted state.
@@ -1291,11 +1280,7 @@ pub const Store = struct {
         faults: Faults,
     ) !ActionSettlement {
         if (result.len == 0) return error.InvalidActionResult;
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, action_domain.settleActionAttempt(&access, binding, code, result, faults)));
+        return transition.apply(self, action_domain.SettleAttempt, .{ .binding = binding, .code = code, .result = result }, faults);
     }
 
     /// Delivers the owed child ending (D39) `nextCoreWork` names, or only
@@ -1474,11 +1459,7 @@ pub const Store = struct {
     }
     fn resolveActionHeld(self: *Store, selected: ReadyAction, code: ActionResolutionCode, text: []const u8, faults: Faults) !void {
         if (text.len == 0) return error.InvalidActionResult;
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, action_domain.resolveAction(&access, selected, code, text, faults)));
+        return transition.apply(self, action_domain.ResolveSelected, .{ .selected = selected, .code = code, .text = text }, faults);
     }
 
     pub fn recoverOneUncertainAction(self: *Store, active: ActiveOperationFilter) !bool {
@@ -1486,13 +1467,7 @@ pub const Store = struct {
     }
 
     fn recoverOneUncertainActionHeld(self: *Store, active: ActiveOperationFilter) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var candidate: ReadAccess = .open(&entry);
-        defer candidate.deinit();
-        var access: Access(.write, error{ActionSelectionChanged}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, action_domain.recoverOneUncertainAction(&candidate, &access, active)));
+        return transition.apply(self, action_domain.RecoverUncertain, .{ .active = active }, .{});
     }
 
     /// Admits the oldest due retry no slot in `active` holds. `scheduled`,
@@ -1888,7 +1863,7 @@ pub const Ordinary = struct {
     pub const attempt_binding = error{ StaleAttemptBinding, SupersededByControl };
     pub const historical_entry = error{HistoricalPending};
     const model_success = attempt_binding || error{InvalidProviderEnvelope};
-    const action_attempt = error{StaleActionAttemptBinding};
+    pub const action_attempt = error{StaleActionAttemptBinding};
     const action_dispatch = action_attempt || error{SupersededByControl};
     /// A creation updates no Session, but shares configure's error set.
     const agent_start = action_attempt || error{SessionUpdateFailed};
