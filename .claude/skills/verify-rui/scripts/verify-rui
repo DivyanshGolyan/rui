@@ -1988,6 +1988,8 @@ def validate_scenario(data, sizes=None):
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
                                              and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
         require("note" not in state or isinstance(state["note"], str) and "\n" not in state["note"], f"{name}: note must be one line")
+        require(type(state.get("first_run", False)) is bool, f"{name}: first_run must be a boolean")
+        require(not state.get("first_run") or state.get("open") == "overview", f"{name}: first_run opens overview")
         state_sizes = parse_sizes(state["sizes"]) if "sizes" in state else default_sizes
         cast = state.get("cast", [])
         require(isinstance(cast, list), f"{name}: cast must be a list")
@@ -2303,6 +2305,16 @@ def cmd_frames(args):
                 run.tmux("set-option", "-g", "window-active-style", f"bg={bg},fg={fg}")
                 env = run.env(**{"COLORTERM": "truecolor", **state.get("env", {})})
                 argv = session_argv(run, state["open"])
+                if state.get("first_run"):
+                    # A separate HOME/Store keeps the seeded run and every
+                    # sibling state intact; this app has no credentials/Host.
+                    home = run.scratch / "first-run" / state["name"]
+                    home.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    env["HOME"] = str(home)
+                    for key in ("RUI_CODEX_CREDENTIAL_FILE", "RUI_OPENAI_KEY_FILE"):
+                        env.pop(key, None)
+                    argv = [str(run.rui), "--store", str(home / "store")]
+
                 command = "exec env -i " + shlex.join([f"{k}={v}" for k, v in env.items()]) + " " + shlex.join(argv)
                 # No client is attached: default-size sets the PTY before exec.
                 # Resizing only after exec can lose SIGWINCH during Rui startup.

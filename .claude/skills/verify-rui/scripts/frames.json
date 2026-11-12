@@ -5,6 +5,98 @@
   ],
   "states": [
     {
+      "name": "first-run",
+      "note": "No credentials: sign-in choice occupies the input row",
+      "open": "overview",
+      "first_run": true,
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        }
+      ],
+      "expect": [
+        "› ChatGPT    API key",
+        "API key",
+        "Sign in"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "Host stopped",
+        "Type a task",
+        "[ChatGPT]",
+        "[API key]"
+      ]
+    },
+    {
+      "name": "first-run-codex",
+      "note": "Fake device login: clickable link and code, no network",
+      "open": "overview",
+      "first_run": true,
+      "env": {
+        "RUI_TEST_LOGIN": "waiting"
+      },
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "BDL9-KI88H"
+        }
+      ],
+      "expect": [
+        "auth.openai.com/codex/device · BDL9-KI88H",
+        "Waiting for ChatGPT"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]",
+        "Open auth.openai.com",
+        "and enter"
+      ]
+    },
+    {
+      "name": "first-run-key",
+      "note": "API key entry is masked before publication",
+      "open": "overview",
+      "first_run": true,
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        },
+        {
+          "keys": [
+            "Right",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "API key"
+        },
+        {
+          "text": "sk-secret"
+        },
+        {
+          "wait": "•••••••••"
+        }
+      ],
+      "expect": [
+        "•••••••••",
+        "esc back"
+      ],
+      "absent": [
+        "sk-secret",
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]"
+      ]
+    },
+    {
       "name": "start-empty",
       "note": "01-overview-empty",
       "open": "overview",
@@ -366,9 +458,9 @@
         }
       ],
       "expect": [
-        "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 exit 127",
-        "\u00d7 Fail with an excerpt \u00b7 exit 1",
+        "✓ List project files",
+        "× Fail with exit 127 · 127",
+        "× Fail with an excerpt · 1",
         "The project has a README",
         "retry policy notes"
       ],
@@ -409,8 +501,8 @@
       ],
       "expect": [
         "✓ List project files",
-        "× Fail with exit 127 · exit 127",
-        "× Fail with an excerpt · exit 1",
+        "× Fail with exit 127 · 127",
+        "× Fail with an excerpt · 1",
         "The project has a README",
         "retry policy notes",
         "Fail with an excerpt"
@@ -418,7 +510,9 @@
       "absent": [
         "asks before Bash/MCP",
         "Type a message",
-        "enter sends"
+        "enter sends",
+        " · exit 127",
+        " · exit 1"
       ]
     },
     {
@@ -452,9 +546,9 @@
         }
       ],
       "expect": [
-        "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 exit 127",
-        "\u00d7 Fail with an excerpt \u00b7 exit 1",
+        "✓ List project files",
+        "× Fail with exit 127 · 127",
+        "× Fail with an excerpt · 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -539,8 +633,8 @@
         "    stdout tail:",
         "    README.md",
         "    src",
-        "\u00d7 Fail with exit 127 \u00b7 exit 127",
-        "\u00d7 Fail with an excerpt \u00b7 exit 1",
+        "× Fail with exit 127 · 127",
+        "× Fail with an excerpt · 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -550,7 +644,11 @@
         "46x30",
         "140x40"
       ],
-      "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears"
+      "note": "10b-tool-open-two: open the literal excerpt, scroll twelve rows from the narrow tail to select List, then show both quiet stored results before and after the sidebar appears",
+      "absent": [
+        " · exit 127",
+        " · exit 1"
+      ]
     },
     {
       "name": "tool-open-long",
@@ -631,9 +729,9 @@
         }
       ],
       "expect": [
-        "\u2713 List project files",
-        "\u00d7 Fail with exit 127 \u00b7 exit 127",
-        "\u00d7 Fail with an excerpt \u00b7 exit 1",
+        "✓ List project files",
+        "× Fail with exit 127 · 127",
+        "× Fail with an excerpt · 1",
         "    Bash failed. Exit code: 1.",
         "    stderr tail:",
         "    usage: example",
@@ -812,14 +910,14 @@
           ]
         },
         {
-          "wait": "Waiting"
+          "wait": "Thinking"
         },
         {
           "wait": "ctrl+x stop"
         }
       ],
       "expect": [
-        "Waiting",
+        "Thinking",
         "ctrl+x stop"
       ],
       "cast": [
@@ -832,6 +930,47 @@
             "Ready."
           ]
         }
+      ],
+      "absent": [
+        "Waiting"
+      ]
+    },
+    {
+      "name": "copy-no-code",
+      "note": "Copy without a fenced block reports only the missing state",
+      "open": "Copy plain answer",
+      "cast": [
+        {
+          "label": "Copy plain answer",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Ready."
+        },
+        {
+          "text": "/copy code"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "No code block"
+        }
+      ],
+      "expect": [
+        "No code block"
+      ],
+      "absent": [
+        "No code block in the last answer."
       ]
     },
     {
@@ -847,7 +986,7 @@
           }
         },
         {
-          "wait": "Waiting"
+          "wait": "Thinking"
         },
         {
           "wait": "ctrl+x stop"
@@ -874,6 +1013,9 @@
             "Ready."
           ]
         }
+      ],
+      "absent": [
+        "Waiting"
       ]
     },
     {

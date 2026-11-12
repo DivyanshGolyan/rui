@@ -3280,8 +3280,8 @@ fn showCopy(self: *Self) !void {
     };
     self.dirty = true;
     self.notice = switch (self.job.result.copied) {
-        .no_answer => "No answer to copy yet.",
-        .no_code => "No code block in the last answer.",
+        .no_answer => "No answer to copy",
+        .no_code => "No code block",
         .too_large => TerminalText.clipboard_too_large,
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
@@ -5797,12 +5797,12 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expectEqualStrings("⠹ Read docs/using-rui.md", shown[first + 2]);
     try std.testing.expectEqualStrings("+2 more running · info", shown[first + 3]);
     // No shown call carries the clock, so the work line follows, once.
-    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 13s"));
+    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 13s"));
     // The chip always reserves a row between the tail and the input rule.
     try std.testing.expectEqualStrings("", shown[first + 5]);
     try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "─"));
     var waiting: usize = 0;
-    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Waiting"));
+    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Thinking"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
     // Work ends: the tail goes, and history reaches the rule again.
     self.live.view = .{};
@@ -5824,7 +5824,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     const row = ChromeFixture.find(&three, "◌").?;
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     // The waiting row is the tail's last, under the work line.
-    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Waiting"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Thinking"));
     try std.testing.expectEqualStrings("", three[row + 1]);
     try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "─"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
@@ -6115,6 +6115,26 @@ test "App Session question mark encodings append ordinary text to empty and none
             try std.testing.expect(self.app_screen.overlay == null);
             try std.testing.expectEqualStrings(if (has_draft) "a??" else "??", self.input.composition().bytes);
         }
+    }
+}
+
+test "App Session copy notices are compact state phrases" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    for ([_]struct { result: reads.Copied, words: []const u8 }{
+        .{ .result = .no_answer, .words = "No answer to copy" },
+        .{ .result = .no_code, .words = "No code block" },
+        .{ .result = .too_large, .words = TerminalText.clipboard_too_large },
+        .{ .result = .saved, .words = "Saved to ./rui-k7m2qx-answer.md" },
+        .{ .result = .{ .clipboard = .{ .start = 0, .length = 0 } }, .words = "Sent to clipboard" },
+    }) |case| {
+        self.dirty = false;
+        self.job.result.copied = case.result;
+        try self.showCopy();
+        try std.testing.expectEqualStrings(case.words, self.notice.?);
+        try std.testing.expect(self.dirty);
     }
 }
 

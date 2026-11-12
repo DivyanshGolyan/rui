@@ -52,8 +52,8 @@ def main():
             value = json.loads(result.stdout)
             return value["provider"] == provider and value["model"] == "gpt-6-luna"
 
-        # Sign-in's screen is not implemented yet. Keep both providers' native
-        # Model-field persistence coverage with the retained CLI configure path.
+        # Isolate provider-fixed Model persistence from the Sign-in journey,
+        # whose first-run choices are covered by human_cli_integration.
         for sign_in, provider in (("API key", "openai"), ("ChatGPT", "codex")):
             changed = subprocess.run(
                 [str(fixture.RUI), "defaults", "configure", "--store", str(store),
