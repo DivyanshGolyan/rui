@@ -1481,8 +1481,38 @@ const model_call_row = rsql.Read(.{
         attempts: rsql.Positive,
         resolved_at: rsql.Positive,
     },
-    .cardinality = .one,
+    .cardinality = .each,
 });
+
+/// Decode model evidence once in the Store's entry-owned scratch, not once
+/// per page slot. Each visitor writes its public item before the next row
+/// reuses the buffer; neither the read state nor the item borrows that row.
+const ModelCallRead = struct {
+    operation: u64,
+    item: *activity_facts.Item,
+    decoded: *model_call_row.Row = undefined,
+    count: RowCount = .{},
+
+    pub fn visit(read: *ModelCallRead, row: *const model_call_row.Row) bool {
+        return visitRow(read, row);
+    }
+
+    fn keep(read: *ModelCallRead, row: *const model_call_row.Row) error{CorruptStore}!void {
+        const item = read.item;
+        item.at = row.resolved_at.get();
+        item.value = .{ .model_call = .{
+            .model = row.model,
+            .served_model = model_evidence.servedModel(if (row.model_evidence) |*evidence| evidence.slice() else null) catch return error.CorruptStore,
+            .input_tokens = if (row.uncached) |uncached| uncached +| (row.cached orelse return error.CorruptStore) +| (row.cache_write orelse return error.CorruptStore) else null,
+            .output_tokens = row.output,
+            .cached_tokens = row.cached,
+            .latency_ms = row.latency_ms,
+            .first_event_ms = row.first_event_ms,
+            .status = row.status,
+            .attempts = row.attempts.get(),
+        } };
+    }
+};
 
 const call_resolved = rsql.Read(.{
     .sql = "SELECT resolved_at FROM model_operation WHERE operation_id=?1 AND session_ref=?2",
@@ -1756,7 +1786,7 @@ const ItemRead = struct {
         // here would widen every slot of a page's read-state union.
         change: struct { row: session_change.Row = undefined, found: store_access.Found = undefined },
         compaction: compaction_row.Row,
-        model_call: struct { operation: u64, row: model_call_row.Row = undefined },
+        model_call: ModelCallRead,
     } = undefined,
 
     fn queue(read: *ItemRead, a: *ReadAccess, session: []const u8, end: u64) void {
@@ -1831,7 +1861,11 @@ const ItemRead = struct {
                 a.readInto(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &change.row, &change.found);
             },
             14 => a.read(compaction_row, .{ .operation = item.value.compacted.operation, .session = session }, &read.state.compaction),
-            15 => a.read(model_call_row, .{ .operation = read.state.model_call.operation, .session = session }, &read.state.model_call.row),
+            15 => {
+                const call = &read.state.model_call;
+                call.decoded = a.store.reportScratch(model_call_row.Row);
+                readRow(a, model_call_row, .{ .operation = call.operation, .session = session }, call);
+            },
             else => unreachable,
         }
     }
@@ -1951,21 +1985,7 @@ const ItemRead = struct {
                 item.value.compacted.dropped = read.state.compaction.dropped;
                 item.at = read.state.compaction.resolved_at.get();
             },
-            15 => {
-                const row = &read.state.model_call.row;
-                item.at = row.resolved_at.get();
-                item.value = .{ .model_call = .{
-                    .model = row.model,
-                    .served_model = model_evidence.servedModel(if (row.model_evidence) |*evidence| evidence.slice() else null) catch return error.CorruptStore,
-                    .input_tokens = if (row.uncached) |uncached| uncached +| (row.cached orelse return error.CorruptStore) +| (row.cache_write orelse return error.CorruptStore) else null,
-                    .output_tokens = row.output,
-                    .cached_tokens = row.cached,
-                    .latency_ms = row.latency_ms,
-                    .first_event_ms = row.first_event_ms,
-                    .status = row.status,
-                    .attempts = row.attempts.get(),
-                } };
-            },
+            15 => if (!try read.state.model_call.count.found()) return error.CorruptStore,
             else => unreachable,
         }
         read.done = true;
@@ -2033,7 +2053,7 @@ const ItemRead = struct {
                 item.value = .{ .compacted = .{ .operation = (row.id orelse return error.CorruptStore).get(), .dropped = undefined } };
                 read.state = .{ .compaction = undefined };
             },
-            15 => read.state = .{ .model_call = .{ .operation = (row.id orelse return error.CorruptStore).get() } },
+            15 => read.state = .{ .model_call = .{ .operation = (row.id orelse return error.CorruptStore).get(), .item = item } },
             else => return error.CorruptStore,
         }
     }

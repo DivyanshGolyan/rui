@@ -8609,7 +8609,7 @@ test "an exhausted Attempt still retains its effort refusal for the next Operati
     var binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     try store_testing.exec(&storage, "UPDATE model_operation SET attempt_ordinal=?1 WHERE operation_id=?2", .{ retry_policy.maximum_attempts, binding.operation_id });
     binding.attempt_ordinal = retry_policy.maximum_attempts;
-    try storage.settleModelAttemptFailureTimed(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: high" } }, .effort_change_refused, .{ .latency_ms = 37, .first_event_ms = 7 }, .{});
+    try store_testing.settleModelFailureWithTimings(&storage, binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: high" } }, .effort_change_refused, .{ .latency_ms = 37, .first_event_ms = 7 }, .{});
     try std.testing.expect(try storage.tryAdmitNextModelRetry(.empty(), .{}, null) == null);
     const observed = try storage.inspectSessionForTesting(session.slice());
     try std.testing.expectEqual(revision, observed.revision);

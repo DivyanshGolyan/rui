@@ -813,3 +813,21 @@ pub const EffortMigrationChoice = enum {
         };
     }
 };
+
+/// Synthetic duration fixture for existing settlement tests. Production always
+/// installs the custody registry; owner-boundary timing tests use live Attempts.
+pub fn timingSource(values: *@import("../model_timing.zig").Values) @import("../model_timing.zig").Source {
+    return .{ .context = values, .read = struct {
+        fn read(raw: *anyopaque, _: u64, _: std.Io.Timestamp) @import("../model_timing.zig").Values {
+            return @as(*@import("../model_timing.zig").Values, @ptrCast(@alignCast(raw))).*;
+        }
+    }.read };
+}
+
+pub fn settleModelFailureWithTimings(storage: *Store, binding: AttemptBinding, failure: @import("domain/model_settlement.zig").ModelFailure, disposition: @import("domain/model_settlement.zig").ModelFailureClass, timings: @import("../model_timing.zig").Values, faults: @import("Store.zig").Faults) !void {
+    var values = timings;
+    const original = storage.modelTimingSource().*;
+    storage.modelTimingSource().* = timingSource(&values);
+    defer storage.modelTimingSource().* = original;
+    return storage.settleModelAttemptFailure(binding, failure, disposition, faults);
+}

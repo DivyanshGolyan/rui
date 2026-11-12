@@ -1,5 +1,6 @@
 const std = @import("std");
 const attempt = @import("attempt.zig");
+const model_timing = @import("model_timing.zig");
 const transport_policy = @import("transport_policy.zig");
 
 const CaptureFailure = transport_policy.CaptureFailure;
@@ -297,6 +298,8 @@ pub const CustodyRecord = struct {
     delivered: std.atomic.Value(bool) = .init(false),
     launch_available: std.atomic.Value(bool) = .init(false),
     binding: CustodyBinding = undefined,
+    timing_operation: std.atomic.Value(u64) = .init(0),
+    timing: model_timing.Attempt = .{},
 };
 
 pub const CustodyPool = struct {
@@ -313,6 +316,8 @@ pub const CustodyPool = struct {
         for (self.records, 0..) |*record, index| {
             if (record.state.cmpxchgStrong(.free, .reserved, .acq_rel, .acquire) != null) continue;
             const generation = record.generation.fetchAdd(1, .acq_rel) + 1;
+            record.timing_operation.store(0, .release);
+            record.timing.reset();
             record.delivered.store(false, .release);
             return .{ .index = index, .generation = generation };
         }
@@ -330,9 +335,33 @@ pub const CustodyPool = struct {
         if (record.state.load(.acquire) != .reserved) return error.InvalidCustodyTransition;
         const attempt_binding = try permit.consume();
         record.binding = .of(attempt_binding);
+        if (record.binding == .model) record.timing_operation.store(record.binding.model.operation_id, .release);
         record.launch_available.store(true, .release);
         record.state.store(.attached, .release);
         return attempt_binding;
+    }
+
+    /// Borrow until this custody retires; the Transfer is deinitialized first.
+    pub fn modelTiming(self: *CustodyPool, token: CustodyToken) !*model_timing.Attempt {
+        const record = try self.current(token);
+        if (record.state.load(.acquire) != .attached or record.binding != .model) return error.CustodyDetached;
+        return &record.timing;
+    }
+
+    pub fn timingSource(self: *CustodyPool) model_timing.Source {
+        return .{ .context = self, .read = readTiming };
+    }
+
+    fn readTiming(raw: *anyopaque, operation: u64, now: std.Io.Timestamp) model_timing.Values {
+        const self: *CustodyPool = @ptrCast(@alignCast(raw));
+        for (self.records) |*record| {
+            const generation = record.generation.load(.acquire);
+            if (record.state.load(.acquire) != .attached or record.timing_operation.load(.acquire) != operation) continue;
+            const value = record.timing.snapshot(now);
+            if (record.generation.load(.acquire) == generation and record.timing_operation.load(.acquire) == operation and record.state.load(.acquire) == .attached)
+                return value;
+        }
+        return .{};
     }
 
     pub fn consumeLaunchAuthority(

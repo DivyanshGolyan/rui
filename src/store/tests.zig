@@ -2787,6 +2787,7 @@ test "Store entry points queue and fence only through canonical access" {
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
         @embedFile("domain/model_facts.zig"),
+        @embedFile("domain/model_resolution.zig"),
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/operation_effort.zig"),
         @embedFile("domain/reads.zig"),
@@ -10597,6 +10598,7 @@ test "every function that enters the Store has a round budget" {
         @embedFile("domain/history_floor.zig"),
         @embedFile("domain/model_admission.zig"),
         @embedFile("domain/model_facts.zig"),
+        @embedFile("domain/model_resolution.zig"),
         @embedFile("domain/model_settlement.zig"),
         @embedFile("domain/operation_effort.zig"),
         @embedFile("domain/reads.zig"),
@@ -12647,7 +12649,7 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
                 if (before == .after_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
                 try expectEffort(&storage, binding, rejected);
-                try storage.settleModelAttemptFailureTimed(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: effort update" } }, .effort_change_refused, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
+                try store_testing.settleModelFailureWithTimings(&storage, binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: effort update" } }, .effort_change_refused, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
                 // The refused Attempt retries; it has no resolved model_call or final timings.
                 try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL AND latency_ms IS NULL AND first_event_ms IS NULL", .{binding.operation_id}));
                 const refused = try storage.inspectSessionForTesting(session.slice());
@@ -14963,6 +14965,8 @@ test "model_call derives frozen model and usage from the resolved Operation" {
             try std.testing.expect(interpreted == .accepted);
             const accepted = &interpreted.accepted;
             const validated = &accepted.output;
+            var timings: @import("../model_timing.zig").Values = .{ .latency_ms = 23, .first_event_ms = 5 };
+            storage.modelTimingSource().* = store_testing.timingSource(&timings);
             try storage.settleModelSuccess(binding, &.{
                 .source = validated.source,
                 .source_length = validated.source_length,
@@ -14975,7 +14979,6 @@ test "model_call derives frozen model and usage from the resolved Operation" {
                 .response_id = validated.evidence.response_id,
                 .model_evidence = accepted.model_evidence,
                 .request_id = .{},
-                .timings = .{ .latency_ms = 23, .first_event_ms = 5 },
             }, .{});
             const page = try store_core.activityPageForTesting(&storage, request);
             try std.testing.expectEqual(@as(usize, 1), page.count);
@@ -15014,13 +15017,13 @@ test "model_call retry emits one row with final timings and no-event resolution 
             const first = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             const admission = try store_testing.queryU64(&storage, "SELECT admission_position FROM model_operation WHERE operation_id=?1", .{first.operation_id});
             const request: protocol.ActivityPage = .{ .session = session, .kinds = .initOne(.model_call) };
-            try storage.settleModelAttemptFailureTimed(first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
+            try store_testing.settleModelFailureWithTimings(&storage, first, .{ .uncorrelated = "temporary" }, .{ .retryable = .{ .waits_ms = .{ 60_000, 60_000, 60_000 } } }, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
             try std.testing.expectEqual(@as(usize, 0), (try store_core.activityPageForTesting(&storage, request)).count);
             try store_testing.exec(&storage, "UPDATE model_operation SET retry_due_at_ms=1 WHERE operation_id=?1", .{first.operation_id});
             const final = (try admitRetryForTesting(&storage)).?.permit.binding;
             try std.testing.expectEqual(first.operation_id, final.operation_id);
             try std.testing.expectEqual(@as(u64, 2), final.attempt_ordinal);
-            try storage.settleModelAttemptFailureTimed(final, .{ .uncorrelated = "provider_final" }, .ordinary, .{ .latency_ms = 37, .first_event_ms = 7 }, .{});
+            try store_testing.settleModelFailureWithTimings(&storage, final, .{ .uncorrelated = "provider_final" }, .ordinary, .{ .latency_ms = 37, .first_event_ms = 7 }, .{});
             // Check the durable public read after reopen, not just an in-memory projection.
             try storage.close();
             storage_open = false;
@@ -15040,7 +15043,7 @@ test "model_call retry emits one row with final timings and no-event resolution 
 
             try submitTestMessage(&storage, &tmp, "model-call-no-event", "model-call-no-event", session.slice(), "no response");
             const silent = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try storage.settleModelAttemptFailureTimed(silent, .{ .uncorrelated = "provider_transport_failure" }, .ordinary, .{ .latency_ms = 19 }, .{});
+            try store_testing.settleModelFailureWithTimings(&storage, silent, .{ .uncorrelated = "provider_transport_failure" }, .ordinary, .{ .latency_ms = 19 }, .{});
             var next = request;
             next.position = page.items[0].position;
             next.ordinal = page.items[0].ordinal;

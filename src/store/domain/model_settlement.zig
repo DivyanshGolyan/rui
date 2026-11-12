@@ -2,6 +2,7 @@
 //! reports, and fencing Attempts superseded by a control.
 
 const std = @import("std");
+const model_resolution = @import("model_resolution.zig");
 const tool_proposal = @import("../../tool_proposal.zig");
 const content_string = @import("../../content_string.zig");
 const idempotency_key = @import("../../idempotency_key.zig");
@@ -44,16 +45,9 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 const context_changed = model_admission_domain.context_changed;
 
-/// Every model Operation resolution ends its Attempt or retry wait at
-/// once, dated by the Access.
-pub const operation_resolved_now_sql = "resolved_at=@now,attempt_at=NULL,retry_scheduled_at=NULL";
-
 /// Durations of the final Attempt only, measured on the awake monotonic clock.
 /// A missing send or response event remains NULL, never a fabricated zero.
-pub const ModelTimings = struct {
-    latency_ms: ?u64 = null,
-    first_event_ms: ?u64 = null,
-};
+pub const ModelTimings = @import("../../model_timing.zig").Values;
 
 pub const ModelFailureClass = union(enum) {
     ordinary,
@@ -130,7 +124,6 @@ const OutputMetadataRecord = output_format.OutputMetadataRecord;
 const OutputMetadataReader = output_format.OutputMetadataReader;
 
 pub const ValidatedOutput = struct {
-    timings: ModelTimings = .{},
     source: std.Io.File,
     source_length: u64,
     metadata: std.Io.File,
@@ -336,11 +329,11 @@ pub fn claimModelAuthRefresh(a: anytype, binding: AttemptBinding) !bool {
 /// Resolves an unresolved Attempt with a failure: `ordinary`, a context
 /// overflow and an exhausted retry. `last_failure_code` null keeps the
 /// saved one.
-const resolve_failure = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
-        "last_failure_code=coalesce(?5,last_failure_code),latency_ms=?8,first_event_ms=?9," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?7) AND resolution_code IS NULL AND attempt_ordinal=?6",
-    .Args = struct { operation_id: u64, resolution: []const u8, content_id: ?u64, request_id: ?[]const u8, last_failure_code: ?[]const u8, attempt_ordinal: u64, session: rsql.SessionHead, latency_ms: ?u64, first_event_ms: ?u64 },
+const resolve_failure = model_resolution.Write(.{
+    .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,request_id=?4," ++
+        "last_failure_code=coalesce(?5,last_failure_code)",
+    .where = "operation_id=?1 AND session_ref=@session(?7) AND resolution_code IS NULL AND attempt_ordinal=?6",
+    .Args = struct { operation_id: u64, resolution: []const u8, content_id: ?u64, request_id: ?[]const u8, last_failure_code: ?[]const u8, attempt_ordinal: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
 
@@ -457,7 +450,6 @@ pub fn settleModelAttemptFailure(
     binding: AttemptBinding,
     failure: ModelFailure,
     requested_disposition: ModelFailureClass,
-    timings: ModelTimings,
     faults: Faults,
 ) !void {
     var exhausted_refusal: ?u64 = null;
@@ -505,14 +497,13 @@ pub fn settleModelAttemptFailure(
             };
             if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
             const diagnostic_id = try content.importDiagnostic(a, &failure);
-            a.write(resolve_failure, .{
+            resolve_failure.queue(a, .{
                 .operation_id = binding.operation_id,
                 .resolution = if (disposition == .context_overflow) @tagName(turn_policy.Resolution.context_overflow) else code,
                 .content_id = diagnostic_id,
                 .request_id = optionalText(failure.requestId()),
                 .last_failure_code = if (disposition == .context_overflow) code else null,
-                .latency_ms = timings.latency_ms,
-                .first_event_ms = timings.first_event_ms,
+
                 .attempt_ordinal = binding.attempt_ordinal,
                 .session = session,
             });
@@ -552,15 +543,13 @@ pub fn settleModelAttemptFailure(
             .exhausted => {
                 if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
                 const diagnostic_id = try content.importDiagnostic(a, &failure);
-                a.write(resolve_failure, .{
+                resolve_failure.queue(a, .{
                     .operation_id = binding.operation_id,
                     .resolution = "retry_exhausted",
                     .content_id = diagnostic_id,
                     // The settling Attempt's correlation, like a terminal failure.
                     .request_id = optionalText(failure.requestId()),
                     .last_failure_code = code,
-                    .latency_ms = timings.latency_ms,
-                    .first_event_ms = timings.first_event_ms,
                     .attempt_ordinal = binding.attempt_ordinal,
                     .session = session,
                 });
@@ -598,9 +587,9 @@ const exhausted_attempts = rsql.Read(.{
     .cardinality = .each,
 });
 
-const resolve_exhausted = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code='retry_exhausted'," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?2) AND " ++ retry_exhausted_sql,
+const resolve_exhausted = model_resolution.Write(.{
+    .set = "retry_due_at_ms=NULL,resolution_code='retry_exhausted'",
+    .where = "operation_id=?1 AND session_ref=@session(?2) AND " ++ retry_exhausted_sql,
     .Args = struct { operation_id: u64, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.SelectionChanged } },
 });
@@ -629,7 +618,7 @@ pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: A
     try store_access.runAs(candidate, error.RetryRecoveryFailed);
     const chosen = choice.chosen orelse return false;
     if (!chosen.turn_open) return error.SelectionChanged;
-    a.write(resolve_exhausted, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
+    resolve_exhausted.queue(a, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
     try turn_domain.queueCloseOr(a, try a.positions(chosen.session), chosen.turn_id.get(), .{ .retry_exhausted = null }, error.SelectionChanged);
     try a.commit();
     return true;
@@ -880,10 +869,10 @@ const insert_action = rsql.Write(.{
 });
 
 /// Resolves the settling Attempt with its output.
-const resolve_success = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
-        "usage_uncached_tokens=?8,usage_cache_read_tokens=?9,usage_cache_write_tokens=?10,usage_output_tokens=?11,latency_ms=?14,first_event_ms=?15," ++ operation_resolved_now_sql ++ " " ++
-        "WHERE operation_id=?1 AND session_ref=@session(?13) AND resolution_code IS NULL AND attempt_ordinal=?12",
+const resolve_success = model_resolution.Write(.{
+    .set = "retry_due_at_ms=NULL,resolution_code=?2,resolution_content_id=?3,response_id=?4,model_evidence=?5,request_id=?6,output_item_count=?7," ++
+        "usage_uncached_tokens=?8,usage_cache_read_tokens=?9,usage_cache_write_tokens=?10,usage_output_tokens=?11",
+    .where = "operation_id=?1 AND session_ref=@session(?13) AND resolution_code IS NULL AND attempt_ordinal=?12",
     .Args = struct {
         operation_id: u64,
         resolution: []const u8,
@@ -898,8 +887,6 @@ const resolve_success = rsql.Write(.{
         output: ?u64,
         attempt_ordinal: u64,
         session: rsql.SessionHead,
-        latency_ms: ?u64,
-        first_event_ms: ?u64,
     },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.StaleAttemptBinding } },
 });
@@ -1420,7 +1407,7 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
 
     const output_fact = turn_policy.outputFact(purpose, output.call_count);
     const usage = settlement.usage;
-    a.write(resolve_success, .{
+    resolve_success.queue(a, .{
         .operation_id = binding.operation_id,
         .resolution = @tagName(turn_policy.Resolution.of(output_fact)),
         .content_id = settlement.answer_id,
@@ -1433,8 +1420,6 @@ pub fn settleModelSuccess(a: anytype, io: std.Io, binding: AttemptBinding, outpu
         .cache_read = if (usage) |counts| counts.cache_read else null,
         .cache_write = if (usage) |counts| counts.cache_write else null,
         .output = if (usage) |counts| counts.output else null,
-        .latency_ms = output.timings.latency_ms,
-        .first_event_ms = output.timings.first_event_ms,
         .attempt_ordinal = binding.attempt_ordinal,
         .session = row.session,
     });
