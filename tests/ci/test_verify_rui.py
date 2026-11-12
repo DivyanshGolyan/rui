@@ -845,8 +845,13 @@ while True:
         self.assertEqual(state["expect_next"], {"■ Stop the slow job": "   Stopped"})
         narrow = states["stop-narrow"]
         self.assertEqual(narrow["sizes"], [(46, 30)])
-        self.assertEqual(narrow["steps"], state["steps"])
+        self.assertNotEqual(narrow["open"], state["open"])
+        self.assertEqual(narrow["cast"][0]["label"], narrow["open"])
+        self.assertEqual(narrow["cast"][0]["messages"], ["Ready."])
+        self.assertEqual(narrow["steps"][0], {"send": {"to": narrow["open"], "text": "long bash", "wait": False}})
+        self.assertEqual(narrow["steps"][1:], state["steps"][1:])
         self.assertEqual(narrow["expect"], ["■ Stopped"])
+        self.assertIn("ctrl+x stop", narrow["absent"])
         self.assertEqual(state["absent"], ["Stopping"])
         stopped = states["stopped"]
         self.assertEqual(stopped["open"], "Profile the Host under load")

@@ -1266,12 +1266,23 @@
     },
     {
       "name": "stop-narrow",
-      "note": "The same settled stop in the narrow chat; its list pane is hidden",
-      "open": "Stop the slow job",
+      "note": "A fresh settled stop in the narrow chat; its list pane is hidden",
+      "open": "Stop the narrow job",
+      "cast": [
+        {
+          "label": "Stop the narrow job",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
       "steps": [
         {
           "send": {
-            "to": "Stop the slow job",
+            "to": "Stop the narrow job",
             "text": "long bash",
             "wait": false
           }
@@ -1291,7 +1302,8 @@
       ],
       "expect": "■ Stopped",
       "absent": [
-        "Stopping"
+        "Stopping",
+        "ctrl+x stop"
       ],
       "sizes": [
         "46x30"
