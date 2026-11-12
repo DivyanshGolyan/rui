@@ -82,11 +82,11 @@
           ]
         },
         {
-          "wait": "Copied"
+          "wait": "Sent to clipboard"
         }
       ],
       "expect": [
-        "Copied",
+        "Sent to clipboard",
         "· Archived"
       ],
       "absent": [
