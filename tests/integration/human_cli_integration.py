@@ -72,7 +72,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -2650,8 +2650,12 @@ def main(selected="all"):
             model_choice_frame(master, b"gpt-6-sol", query="gpt-6-sol", more=False)
             configured = panel_frame(master, lambda frame: not model_choice_shown(frame) and "saving" not in frame, b"\r")
             assert "gpt-6-sol" in configured and "request:" not in configured, configured
+            # The natural body leaves the previous /setup result in the feed.
+            # A typed Configure adds no CLI receipt to the info body itself.
+            geometry = chat_info_geometry(configured)
+            configured_body = "\n".join(geometry["rows"][geometry["top"]:geometry["input"] - 1])
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
-                assert receipt not in configured, configured
+                assert receipt not in configured_body, configured
             panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
             chat_info_frame(master)
             assert "Detached. Host work continues." in terminal_step(master, "\x03", "Detached.")

@@ -278,7 +278,7 @@ def chat_info_geometry(screen):
     """Visible natural-height body, measured independently of the feed widget."""
     content = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
     effort = next(index for index, row in enumerate(content) if row.startswith("   Effort"))
-    composer = next(index for index, row in enumerate(content) if row.startswith((" › ", " > ")))
+    composer = next(index for index, row in enumerate(content) if row.rstrip() in (" ›", " >") or row.startswith((" › ", " > ")))
     actions = [index for index, row in enumerate(content)
                if row.strip().startswith(("Rename", "Archive", "Copy last answer"))]
     # The body's rule and title precede Effort. One deliberate ground row
@@ -286,6 +286,7 @@ def chat_info_geometry(screen):
     assert actions and actions[-1] == composer - 3, screen
     return {"top": effort - 2, "input": composer, "footer": len(content) - 1,
             "feed": content[:effort - 2], "rows": content}
+
 
 
 def footer_click(screen, *, column=None, marker=None, info=False):

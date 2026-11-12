@@ -428,14 +428,16 @@ def info_natural_height_case():
             opened = None
             for column in columns:
                 opened = chrome.frame(master, footer_click(live, column=column),
-                                      lambda screen: "Copy last answer" in screen and " · info" in screen)
+                                      lambda screen: "Copy last answer" in screen and " · info" in screen and "unavailable" not in screen)
                 assert_chat_info_layout(opened, context=True)
                 base = chat_info_geometry(opened)
                 if height >= 30:
                     assert base["top"] > 0 and any("FEED-" in row for row in base["feed"]), opened
                 # A click on the substituted footer is safe and idempotent.
-                clicked = chrome.frame(master, footer_click(opened, marker=" · info", info=True) + b"\x1b[B\x1b[A",
-                                       lambda screen: "Copy last answer" in screen)
+                chrome.frame(master, footer_click(opened, marker=" · info", info=True) + b"\x1b[B\r",
+                             lambda screen: "ask first" in screen and "run without asking" in screen)
+                clicked = chrome.frame(master, b"\x1b\x1b[A",
+                                       lambda screen: "ask first" not in screen and "Copy last answer" in screen)
                 assert chat_info_geometry(clicked) == base, clicked
                 live = chrome.frame(master, b"\x1b", lambda screen:
                                     "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
