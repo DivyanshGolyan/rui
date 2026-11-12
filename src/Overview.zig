@@ -594,6 +594,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             try self.paintCursor();
             try ctx.requestFocus(self.app_input.composer.widget());
             if (self.options.open) |reference| try self.appNext(ctx, try self.event(.{ .open = reference }));
+            if (self.options.sign_in) try self.root.openSignIn(ctx);
         },
         .focus_in => try ctx.requestFocus(self.app_input.composer.widget()),
         .color_report => |report| if (report.kind == .bg) {
@@ -611,7 +612,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .tick => {
             // A subsequent event is after App has replaced both the focus
             // path and mouse hit list, including their mouse_leave callbacks.
-            if (self.root.sign_in_open and self.state.default == null) return;
+            if (self.root.page == .sign_in and self.state.default == null) return;
             while (self.retired.items.len != 0 and self.retired.items[0].frame < self.root.frames) {
                 self.disposeSession(self.retired.orderedRemove(0).left);
             }
@@ -643,7 +644,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
-            if (self.root.settings_open) {
+            if (self.root.page == .settings) {
                 // Under the settings page only the keys that are the whole
                 // app's stay live: leaving, and Esc for an Upgrade it can
                 // still cancel. Nothing edits the hidden draft or the list.
@@ -1122,8 +1123,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .sign_in_open = options.sign_in };
-    self.root.sign_in_page = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn };
+    self.root = .{ .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version } };
+    self.root.sign_in_page = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_notice = signInNotice, .on_close = closeSignIn };
     self.paintDivider();
     // The status's rows sit above the one Footer row.
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" }, .facts_at = .bottom };
@@ -1139,23 +1140,16 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
 fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.root.sign_in_page.task.thread != null) return;
     if (!view.admitsDefaultsEdit(&self.state) or self.state.save.running != null or self.defaults_save == .pending) return error.DefaultsUnavailable;
-    self.root.sign_in_page.reset();
     self.root.sign_in_page.selectors = self.options.selectors;
     self.root.sign_in_page.selectors.store = self.options.store;
-    self.root.sign_in_open = true;
-    try ctx.requestFocus(self.root.sign_in_page.widget());
-    ctx.redraw = true;
+    try self.root.openSignIn(ctx);
 }
 
 fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     // With no sign-in the input remains the choice, not a task that cannot run.
     if (self.state.default == null) return;
-    self.root.sign_in_open = false;
-    if (self.root.settings_open) {
-        try ctx.requestFocus(self.root.settings_page.widget());
-    } else try self.root.showMain(ctx);
-    ctx.redraw = true;
+    try self.root.openSettings(ctx);
 }
 
 fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
@@ -1183,9 +1177,16 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         notice.len = writer.buffered().len;
         self.state.notice = notice;
     }
-    self.root.sign_in_open = false;
-    try self.root.showMain(ctx);
-    if (self.root.session == null) try ctx.requestFocus(self.app_input.composer.widget());
+}
+
+fn signInNotice(raw: *anyopaque, ctx: *vxfw.EventContext, text: []const u8) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    var notice: view.Notice = .{ .colour = .failure };
+    std.debug.assert(text.len <= notice.bytes.len);
+    @memcpy(notice.bytes[0..text.len], text);
+    notice.len = text.len;
+    self.state.notice = notice;
+    ctx.redraw = true;
 }
 
 /// Accept one typed preference edit. Only this owner writes its worker queue;
@@ -6610,7 +6611,7 @@ test "App root navigation shows and focuses the main pane before every Session s
         }
         fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
             try std.testing.expect(overview.root.session == null);
-            try std.testing.expect(!overview.root.settings_open);
+            try std.testing.expect(overview.root.page != .settings);
             try std.testing.expect((try focus(ctx)).eql(overview.widget()));
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
@@ -6714,7 +6715,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .open = target } }));
                         try std.testing.expect(!ctx.quit);
                         try std.testing.expect(ctx.redraw);
-                        try std.testing.expect(!overview.root.settings_open);
+                        try std.testing.expect(overview.root.page != .settings);
                         try std.testing.expect(!overview.root.settings_page.hasChoice());
                         try std.testing.expect(overview.follow.pending == null);
                         const kept = retained and (same or guard != .allowed);
@@ -6829,9 +6830,9 @@ test "App settings Enter reaches Root at both widths with and without a retained
             // do not synthesize a core click or set selected directly.
             try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
             try std.testing.expect(overview.state.selected == .settings);
-            try std.testing.expect(!overview.root.settings_open);
+            try std.testing.expect(overview.root.page != .settings);
             try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
-            try std.testing.expect(overview.root.settings_open);
+            try std.testing.expect(overview.root.page == .settings);
             try std.testing.expect(overview.state.selected == .settings);
             try std.testing.expect(!ctx.quit);
             try std.testing.expect(ctx.redraw);
@@ -6999,7 +7000,7 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     ctx.phase = .capturing;
     try overview.root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expect(overview.upgrade_job.cancelling);
-    try std.testing.expect(overview.root.settings_open);
+    try std.testing.expect(overview.root.page == .settings);
     // Under the page nothing reaches the hidden draft or moves the list,
     // and leaving works as on the overview.
     const page = overview.root.settings_page.widget();
@@ -7007,7 +7008,7 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     try app_events.send(&ctx, "x\x1b[H\x18", overview.root.widget(), page);
     try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
     try std.testing.expectEqual(selected, overview.state.selected);
-    try std.testing.expect(!ctx.quit and overview.root.settings_open);
+    try std.testing.expect(!ctx.quit and overview.root.page == .settings);
     try app_events.send(&ctx, "\x03", overview.root.widget(), page);
     try std.testing.expect(ctx.quit);
     ctx.quit = false;
@@ -7077,6 +7078,16 @@ test "App settings typed queued saves settle on departure and retain failures" {
 }
 
 test "Sign-in completion applies the core default and restores only a visible focus target" {
+    const Focus = struct {
+        fn last(ctx: *vxfw.EventContext) !vxfw.Widget {
+            var at = ctx.cmds.items.len;
+            while (at > 0) {
+                at -= 1;
+                if (ctx.cmds.items[at] == .request_focus) return ctx.cmds.items[at].request_focus;
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
     for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |warning| for ([_]bool{ false, true }) |default_failed| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -7089,17 +7100,23 @@ test "Sign-in completion applies the core default and restores only a visible fo
         const overview = rig.overview;
         const session: vxfw.Text = .{ .text = "Retained Session" };
         if (session_open) overview.root.session = session.widget();
-        overview.root.settings_open = true;
-        overview.root.sign_in_open = true;
         var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
         try activation.binding.provider.set("openai");
         try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
         try activation.store.set("/store");
         activation.default_failed = default_failed;
         if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved } } } } }, .warning = .invalid_openai_base_url };
-        var ctx = rig.context();
-        defer ctx.cmds.deinit(std.testing.allocator);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        defer ctx.cmds.deinit(ctx.alloc);
+        try overview.root.openSignIn(&ctx);
+        ctx.cmds.clearRetainingCapacity();
         try signedIn(overview, &ctx, activation);
+        overview.root.sign_in_page.state.stage = .done;
+        try overview.root.widget().handleEvent(&ctx, .tick);
+        const focus = try Focus.last(&ctx);
+        try focus.handleEvent(&ctx, .focus_in);
         if (warning or default_failed) {
             try std.testing.expectEqual(true, overview.state.notice != null);
             const text = overview.state.notice.?.text();
@@ -7111,9 +7128,9 @@ test "Sign-in completion applies the core default and restores only a visible fo
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
         try std.testing.expect(overview.state.login_at != null);
-        try std.testing.expect(!overview.root.sign_in_open and !overview.root.settings_open);
+        try std.testing.expectEqual(Root.Page.main, overview.root.page);
         const expected = if (session_open) session.widget() else overview.app_input.composer.widget();
-        try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(expected));
+        try std.testing.expect((try Focus.last(&ctx)).eql(expected));
         if (session_open) {
             for (ctx.cmds.items) |command| if (command == .request_focus) {
                 try std.testing.expect(command.request_focus.eql(session.widget()));
@@ -7138,12 +7155,203 @@ test "Sign-in admission waits for every pending default writer and Host upgrade"
             else => unreachable,
         }
         try std.testing.expectError(error.DefaultsUnavailable, overview.openSignIn(&ctx));
-        try std.testing.expect(!overview.root.sign_in_open);
+        try std.testing.expect(overview.root.page != .sign_in);
         try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
         overview.defaults_save = .idle;
         overview.state.save = .{};
         overview.state.upgrade = .{};
     }
     try overview.openSignIn(&ctx);
-    try std.testing.expect(overview.root.sign_in_open);
+    try std.testing.expect(overview.root.page == .sign_in);
+}
+
+test "Sign-in navigation domain settles choice key waiting and publication for Session Settings and Escape with or without a Session" {
+    const Stage = enum { choice, key_entry, waiting, publication };
+    const Destination = enum { session, settings, escape };
+    const Publication = enum { saved, default_failed, host_failed, both_failed };
+    const Nav = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        var entered: std.Io.Event = .unset;
+        var released: std.Io.Event = .unset;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+        fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
+            try std.testing.expectEqual(Root.Page.main, overview.root.page);
+            try std.testing.expect(overview.root.sign_in_page.task.thread == null);
+            Seen.now.conversations += 1;
+            Seen.now.conversed = overview.opened;
+            try overview.root.openSession(ctx, @This().widget(overview));
+        }
+        fn widget(overview: *Self) vxfw.Widget {
+            return .{ .userdata = overview, .drawFn = draw };
+        }
+        fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+            const overview: *Self = @ptrCast(@alignCast(raw));
+            return .{ .widget = @This().widget(overview), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
+        }
+        fn activate(init: std.process.Init, _: @import("new_session_selection.zig").Intent) !SignIn.Activation {
+            entered.set(init.io);
+            released.waitUncancelable(init.io);
+            if (init.environ_map.get("NAV_HOST_FAILED") != null) return error.HostReadinessUnconfirmed;
+            var answer: SignIn.Activation = .{ .binding = .{}, .store = .{} };
+            try answer.binding.provider.set("openai");
+            try answer.binding.model.set(@import("product_defaults.zig").recommended_model);
+            try answer.store.set("/store");
+            return answer;
+        }
+        fn codeReady(page: *SignIn) bool {
+            page.task.mutex.lockUncancelable(page.init.?.io);
+            defer page.task.mutex.unlock(page.init.?.io);
+            return page.code.len != 0;
+        }
+        fn completed(page: *SignIn) bool {
+            return page.task.completed();
+        }
+        fn origin(surface: vxfw.Surface, target: vxfw.Widget, at: vxfw.RelativePoint) ?vxfw.RelativePoint {
+            if (surface.widget.eql(target)) return at;
+            for (surface.children) |child| {
+                if (origin(child.surface, target, .{ .row = at.row + child.origin.row, .col = at.col + child.origin.col })) |found| return found;
+            }
+            return null;
+        }
+        fn focus(ctx: *vxfw.EventContext) !vxfw.Widget {
+            var i = ctx.cmds.items.len;
+            while (i > 0) {
+                i -= 1;
+                if (ctx.cmds.items[i] == .request_focus) return ctx.cmds.items[i].request_focus;
+            }
+            return error.TestUnexpectedResult;
+        }
+    };
+    const poll = @import("test_poll");
+    const io = std.testing.io;
+    for (std.enums.values(Stage)) |stage| for (std.enums.values(Destination)) |destination| for ([_]bool{ false, true }) |retained| for (std.enums.values(Publication)) |publication| {
+        if (stage != .publication and publication != .saved) continue;
+        errdefer std.debug.print("sign-in navigation: stage={s} to={s} retained={} publication={s}\n", .{ @tagName(stage), @tagName(destination), retained, @tagName(publication) });
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        Nav.dir = tmp.dir;
+        Nav.files = 0;
+        Nav.entered = .unset;
+        Nav.released = .unset;
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(io, &path)];
+        _ = try preferences.update(home, .{ .provider = .{ .set = "codex" } }, &.initFill(.configured));
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = home, .directory = "/requests", .provider = "codex", .model = "gpt-6-luna", .selectors = .{ .store = "/store", .provider = "openai", .model = @import("product_defaults.zig").recommended_model } }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        Seen.now.listed = 2;
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        try std.testing.expect(try rig.settle() == null);
+        defer {
+            Nav.released.set(io);
+            overview.root.sign_in_page.stop() catch @panic("navigation left sign-in unsettled");
+            if (overview.app_session) |left| {
+                if (left.frontend) |frontend| frontend.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+            for (overview.retired.items) |retired_session| overview.disposeSession(retired_session.left);
+            overview.retired.deinit(std.testing.allocator);
+        }
+        if (retained) {
+            overview.hooks.scratch = Nav.scratch;
+            overview.ops.open = openSession;
+            try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+            overview.app_session.?.frontend.?.reading.opening = false;
+        }
+        overview.ops.open = Nav.open;
+        try rig.environ.put("HOME", home);
+        try rig.environ.put("RUI_TEST_LOGIN", "waiting");
+        if (publication == .host_failed or publication == .both_failed) try rig.environ.put("NAV_HOST_FAILED", "1");
+        const page = &overview.root.sign_in_page;
+        page.activate = Nav.activate;
+        page.ready = null;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        try overview.openSignIn(&ctx);
+        const secret = "sk-navigation-secret";
+        if (stage == .key_entry or stage == .publication) {
+            try app_events.send(&ctx, "\x1b[C\r" ++ secret, overview.root.widget(), page.widget());
+            try std.testing.expectEqual(@import("sign_in.zig").Stage.key_entry, page.state.stage);
+        } else if (stage == .waiting) {
+            try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());
+            try poll.waitUntil(io, poll.after(io, .fromSeconds(5)), page, Nav.codeReady);
+        }
+        const default_failed = publication == .default_failed or publication == .both_failed;
+        const host_failed = publication == .host_failed or publication == .both_failed;
+        if (stage == .publication) {
+            if (default_failed) {
+                var config = try tmp.dir.openDir(io, ".config/rui", .{});
+                defer config.close(io);
+                var file = try config.createFile(io, "preferences", .{ .permissions = .fromMode(0o600) });
+                defer file.close(io);
+                try file.writeStreamingAll(io, "version=9\n");
+            }
+            try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());
+            Nav.entered.waitUncancelable(io); // Credentials/default have settled; activation has not.
+            Nav.released.set(io);
+            try poll.waitUntil(io, poll.after(io, .fromSeconds(5)), page, Nav.completed);
+            try std.testing.expectEqual(@import("sign_in.zig").Stage.saving, page.state.stage);
+        }
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const drawing: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{} };
+        const frame = try overview.root.widget().draw(drawing);
+        const previous_focus = try Nav.focus(&ctx);
+        ctx.cmds.clearRetainingCapacity();
+        switch (destination) {
+            .session => {
+                const at = Nav.origin(frame, overview.app_sessions.widget(), .{ .row = 0, .col = 0 }).?;
+                const row = for (overview.app_sessions.shown_at) |span| {
+                    if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, "b4n8wd")) break span.row;
+                } else return error.TestMissingSessionHit;
+                try app_events.mouse(&ctx, frame, .{ .col = 4, .row = @intCast(at.row + row), .button = .left, .type = .press, .mods = .{} });
+            },
+            .settings => try app_events.mouse(&ctx, frame, .{ .col = 4, .row = 39, .button = .left, .type = .press, .mods = .{} }),
+            .escape => try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget()),
+        }
+        const back_to_choice = destination == .escape and (stage == .key_entry or stage == .waiting);
+        const expected: Root.Page = if (back_to_choice) .sign_in else if (destination == .session) .main else .settings;
+        try std.testing.expectEqual(expected, overview.root.page);
+        try std.testing.expect(!ctx.quit);
+        if (back_to_choice) {
+            try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
+            if (page.task.thread != null) {
+                try poll.waitUntil(io, poll.after(io, .fromSeconds(5)), page, Nav.completed);
+                try page.widget().handleEvent(&ctx, .tick);
+            }
+        }
+        try std.testing.expect(page.task.thread == null and page.outcome == null);
+        try std.testing.expectEqual(@as(usize, 0), page.key.len);
+        const key_owner = @import("api_key.zig");
+        var key_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var installed: key_owner.Key = .{};
+        defer installed.wipe();
+        const credential = try key_owner.read(try key_owner.path(&rig.environ, &key_path), &installed);
+        try std.testing.expectEqual(stage == .publication, credential != null);
+        if (credential != null) try std.testing.expectEqualStrings(secret, installed.slice());
+        if (stage == .publication) {
+            if (default_failed) try std.testing.expectError(error.UnsupportedPreferencesVersion, preferences.load(home)) else try std.testing.expectEqualStrings("openai", (try preferences.load(home)).provider.slice());
+            try std.testing.expectEqual(host_failed, overview.state.login_at == null);
+            if (default_failed or host_failed) {
+                try std.testing.expect(overview.state.notice != null);
+                const text = overview.state.notice.?.text();
+                try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, text, if (host_failed) "default not saved" else "couldn't save default") != null);
+                try std.testing.expectEqual(host_failed, std.mem.indexOf(u8, text, "Host start timed out") != null);
+            }
+        } else try std.testing.expectEqualStrings("codex", (try preferences.load(home)).provider.slice());
+        const selected = try overview.root.widget().draw(drawing);
+        const focused = Nav.focus(&ctx) catch |err| if (back_to_choice) previous_focus else return err;
+        try std.testing.expectEqual(true, Nav.origin(selected, focused, .{ .row = 0, .col = 0 }) != null);
+        try std.testing.expectEqual(expected == .sign_in, Nav.origin(selected, page.widget(), .{ .row = 0, .col = 0 }) != null);
+        try std.testing.expectEqual(expected == .settings, Nav.origin(selected, overview.root.settings_page.widget(), .{ .row = 0, .col = 0 }) != null);
+        if (expected != .main) try std.testing.expectEqual(retained, overview.root.session != null);
+        if (destination == .session) try std.testing.expectEqualStrings("b4n8wd", &Seen.now.conversed);
+    };
 }

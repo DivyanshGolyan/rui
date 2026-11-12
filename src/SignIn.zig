@@ -26,7 +26,7 @@ pub const Activate = *const fn (std.process.Init, selection.Intent) anyerror!Act
 pub const Ready = *const fn (std.process.Init) core.Readinesses;
 const Published = struct { defaults: anyerror!void, activation: anyerror!Activation };
 const Outcome = union(enum) { cancelled, failed: anyerror, published: Published };
-const Presentation = union(enum) { screen: *vxfw.EventContext, departure: *std.Io.Writer };
+const Presentation = union(enum) { screen: *vxfw.EventContext, navigation: *vxfw.EventContext, departure: *std.Io.Writer };
 state: core.State = .{},
 init: ?std.process.Init = null,
 selectors: selection.Intent = .{},
@@ -34,6 +34,8 @@ activate: ?Activate = null,
 ready: ?Ready = null,
 userdata: ?*anyopaque = null,
 on_done: ?*const fn (*anyopaque, *vxfw.EventContext, Activation) anyerror!void = null,
+/// Screen-safe failure notice when navigation leaves the input row.
+on_notice: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
 on_close: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{},
@@ -87,6 +89,16 @@ fn stopTo(self: *Self, writer: *std.Io.Writer) !void {
     self.cancel();
     defer self.key.wipe();
     try self.settle(.{ .departure = writer });
+}
+
+/// Navigation has the same cancellation/publication settlement as stop,
+/// but reports through the app, never through stderr while it owns the screen.
+pub fn depart(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.cancel();
+    defer self.key.wipe();
+    if (self.task.thread == null and self.state.stage == .failed)
+        return self.reportFailure(.{ .navigation = ctx }, self.state.failure, error.Reported);
+    try self.settle(.{ .navigation = ctx });
 }
 
 fn cancelled() bool {
@@ -201,7 +213,10 @@ fn settle(self: *Self, presentation: Presentation) !void {
                 if (default_error) |err| try self.reportFailure(presentation, .defaults, err);
                 return;
             }
-            const ctx = presentation.screen;
+            const ctx = switch (presentation) {
+                .screen, .navigation => |ctx| ctx,
+                .departure => unreachable,
+            };
             activation.default_failed = default_error != null; // Borrowed report, not another stored outcome.
             _ = self.state.step(.done);
             if (self.on_done) |done| try done(self.userdata.?, ctx, activation);
@@ -214,6 +229,14 @@ fn reportFailure(self: *Self, presentation: Presentation, failure: core.Failure,
     switch (presentation) {
         .screen => |ctx| {
             _ = self.state.step(.{ .failed = failure });
+            ctx.redraw = true;
+        },
+        .navigation => |ctx| {
+            _ = self.state.step(.{ .failed = failure });
+            var bytes: [256]u8 = undefined;
+            var writer = std.Io.Writer.fixed(&bytes);
+            try self.writeFailure(&writer, failure, false);
+            if (self.on_notice) |notice| try notice(self.userdata.?, ctx, writer.buffered());
             ctx.redraw = true;
         },
         .departure => |writer| {
@@ -276,7 +299,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     if (key.matches(vaxis.Key.escape, .{})) {
         if (self.task.thread != null and self.state.stage == .choice) return;
         // Leave the running publication visible until its definite answer.
-        if (self.task.thread != null and self.gate.cmpxchgStrong(.cancellable, .cancelled, .acq_rel, .acquire) == .publishing) return;
+        if (self.task.thread != null and self.gate.cmpxchgStrong(.cancellable, .cancelled, .acq_rel, .acquire) == .publishing) {
+            if (self.on_close) |close| try close(self.userdata.?, ctx);
+            ctx.consumeAndRedraw();
+            return;
+        }
         effect = self.state.step(.escape);
         if (self.task.thread == null) {
             self.key.wipe();

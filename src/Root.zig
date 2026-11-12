@@ -11,6 +11,7 @@ const Self = @This();
 
 pub const list_width = 40;
 pub const split_at = 100;
+pub const Page = enum { main, settings, sign_in };
 
 overview: vxfw.Widget,
 list: vxfw.Widget,
@@ -18,9 +19,8 @@ compose: vxfw.Widget,
 divider: Split.Divider = .{},
 session: ?vxfw.Widget = null,
 settings_page: AppSettings = .{},
-settings_open: bool = false,
 sign_in_page: SignIn = .{},
-sign_in_open: bool = false,
+page: Page = .main,
 pasting: bool = false,
 frames: u64 = 0,
 size: vxfw.Size = .{},
@@ -45,7 +45,11 @@ const Layout = struct {
 fn chooseLayout(self: *const Self) Layout {
     return .{
         .split = self.size.width >= split_at,
-        .pane = if (self.sign_in_open) .sign_in else if (self.settings_open) .settings else if (self.session != null) .session else .overview,
+        .pane = switch (self.page) {
+            .sign_in => .sign_in,
+            .settings => .settings,
+            .main => if (self.session != null) .session else .overview,
+        },
     };
 }
 
@@ -61,17 +65,32 @@ pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !
 /// selects it before it is attempted, since a Session departure may stay
 /// here with a notice, and Esc from settings returns to it.
 pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
-    self.settings_open = false;
-    self.settings_page.cancelChoice();
-    try ctx.requestFocus(self.session orelse self.overview);
-    ctx.redraw = true;
+    try self.navigate(ctx, .main);
 }
 
-/// Settings takes the place of the main pane; it is no content of a feed.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
-    try self.settings_page.refresh();
-    self.settings_open = true;
-    try ctx.requestFocus(self.settings_page.widget());
+    try self.navigate(ctx, .settings);
+}
+
+pub fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
+    try self.navigate(ctx, .sign_in);
+}
+
+/// The only page transition. Settle the page being left before publishing
+/// its replacement or giving focus to it. Completion callbacks apply facts,
+/// never navigate, so a completed publication cannot override the target.
+fn navigate(self: *Self, ctx: *vxfw.EventContext, next: Page) !void {
+    if (self.page == .sign_in and next != .sign_in) try self.sign_in_page.depart(ctx);
+    if (next == .settings) try self.settings_page.refresh();
+    if (next != .settings) self.settings_page.cancelChoice();
+    if (next == .sign_in and self.page != .sign_in) self.sign_in_page.reset();
+    self.page = next;
+    const focus = switch (next) {
+        .main => self.session orelse self.overview,
+        .settings => self.settings_page.widget(),
+        .sign_in => self.sign_in_page.widget(),
+    };
+    try ctx.requestFocus(focus);
     ctx.redraw = true;
 }
 
@@ -79,7 +98,7 @@ pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
 /// leaves raw mode and no input stream is transferred between screens.
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
     self.session = null;
-    if (!self.settings_open) try ctx.requestFocus(self.overview);
+    if (self.page == .main) try self.showMain(ctx);
     ctx.redraw = true;
 }
 
@@ -88,7 +107,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     // The sign-in row owns input even if the list had focus before it opened.
     // In particular, key bytes must never reach a hidden task composer or the
     // settings page beneath it. Route paste boundaries with those same bytes.
-    if (self.sign_in_open) switch (input) {
+    if (self.page == .sign_in) switch (input) {
         .key_press, .paste_start, .paste_end, .invalid_key => {
             try self.sign_in_page.widget().handleEvent(ctx, input);
             ctx.consumeEvent();
@@ -111,7 +130,7 @@ fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         // The page takes its own keys. Every other key is the app's, so
         // leaving and an Upgrade's Esc work as on the overview, which owns
         // them and takes nothing else under the page.
-        .key_press => |key| if (self.settings_open and !self.sign_in_open) {
+        .key_press => |key| if (self.page == .settings) {
             const closes = key.matches(vaxis.Key.escape, .{}) or key.matches('g', .{ .ctrl = true });
             if (self.pasting) {
                 ctx.consumeEvent();
@@ -136,7 +155,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .init => {
             try ctx.requestFocus(self.overview);
             try self.overview.handleEvent(ctx, .init);
-            if (self.sign_in_open) try ctx.requestFocus(self.sign_in_page.widget());
+            try self.navigate(ctx, self.page);
             try ctx.tick(16, self.widget());
             ctx.redraw = true;
         },
@@ -148,7 +167,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             const first_command = ctx.cmds.items.len;
             try self.overview.handleEvent(ctx, .tick);
             if (self.session) |session| try session.handleEvent(ctx, .tick);
-            if (self.settings_open or self.sign_in_open) {
+            if (self.page != .main) {
                 // Hidden screens still settle their workers and consent state,
                 // but their presentation targets aren't in this focus tree.
                 // Retain every other command; a real openSession transition
@@ -160,9 +179,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     kept += 1;
                 }
                 ctx.cmds.items.len = kept;
-                if (self.settings_open) try self.settings_page.widget().handleEvent(ctx, .tick);
+                if (self.page == .settings) try self.settings_page.widget().handleEvent(ctx, .tick);
             }
             try self.sign_in_page.widget().handleEvent(ctx, .tick);
+            if (self.page == .sign_in and self.sign_in_page.state.stage == .done) try self.showMain(ctx);
             try ctx.tick(16, self.widget());
         },
         else => {},
@@ -383,7 +403,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
         _ = try root.widget().draw(draw_context);
         try root.openSettings(&ctx);
-        try std.testing.expect(root.settings_open);
+        try std.testing.expect(root.page == .settings);
         try std.testing.expect(ctx.cmds.items[0].request_focus.eql(root.settings_page.widget()));
         try std.testing.expectEqual(width >= split_at, root.listVisible());
         const opened = try root.widget().draw(draw_context);
@@ -402,12 +422,12 @@ test "App root opens settings in both layouts and Escape closes the choice, then
         try std.testing.expect(root.settings_page.hasChoice());
         ctx.phase = .capturing;
         try root.widget().captureEvent(&ctx, escape);
-        try std.testing.expect(root.settings_open);
+        try std.testing.expect(root.page == .settings);
         try std.testing.expect(!root.settings_page.hasChoice());
         try std.testing.expect(ctx.consume_event);
         ctx.consume_event = false;
         try root.widget().captureEvent(&ctx, escape);
-        try std.testing.expect(!root.settings_open);
+        try std.testing.expect(root.page != .settings);
         try std.testing.expect(ctx.consume_event);
         // Focus returns where it was before the page opened.
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(whole.widget()));
@@ -421,7 +441,7 @@ test "App root opens settings in both layouts and Escape closes the choice, then
 
         try root.openSettings(&ctx);
         try root.openSession(&ctx, session.widget());
-        try std.testing.expect(!root.settings_open);
+        try std.testing.expect(root.page != .settings);
         try std.testing.expect(root.session.?.eql(session.widget()));
         // Escape from settings shows the retained Session again at both
         // widths and focuses it, without changing custody.
@@ -502,7 +522,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
             try root.widget().captureEvent(&ctx, escape);
             try std.testing.expect(ctx.consume_event);
             try std.testing.expect(!root.settings_page.hasChoice());
-            try std.testing.expect(root.settings_open);
+            try std.testing.expect(root.page == .settings);
             try std.testing.expectEqual(@as(usize, 0), fixture.escapes);
         }
         // The run's own rule, not this table, says which phases take Escape.
@@ -511,7 +531,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         try root.widget().captureEvent(&ctx, escape);
         try std.testing.expect(ctx.consume_event);
         try std.testing.expectEqual(@as(usize, @intFromBool(cancels)), fixture.escapes);
-        try std.testing.expectEqual(cancels, root.settings_open);
+        try std.testing.expectEqual(cancels, root.page == .settings);
         if (!cancels) continue;
         // The page's own keys stay with it; every other key is the app's,
         // whose owner decides what it does under the page.
@@ -526,7 +546,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
             try root.widget().captureEvent(&ctx, .{ .key_press = key });
             try std.testing.expect(ctx.consume_event);
             try std.testing.expectEqual(count, fixture.others);
-            try std.testing.expect(root.settings_open);
+            try std.testing.expect(root.page == .settings);
         }
     };
     // No key of a paste reaches the page or closes it; keys after it do.
@@ -539,7 +559,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
         events.consume_event = false;
         try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = codepoint } });
         try std.testing.expect(events.consume_event);
-        try std.testing.expect(page.settings_open);
+        try std.testing.expect(page.page == .settings);
     }
     try page.widget().captureEvent(&events, .paste_end);
     events.consume_event = false;
@@ -548,10 +568,10 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
     try page.openSettings(&events);
     // Ctrl-G closes as Escape does.
     try page.widget().captureEvent(&events, .{ .key_press = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } });
-    try std.testing.expect(!page.settings_open);
+    try std.testing.expect(page.page != .settings);
     try page.openSettings(&events);
     try page.widget().captureEvent(&events, escape);
-    try std.testing.expect(!page.settings_open);
+    try std.testing.expect(page.page != .settings);
     // With settings closed Root leaves Escape to the focused screen.
     var fixture: Fixture = .{ .run = .checking };
     var root: Self = .{ .overview = fixture.widget(), .list = fixture.widget(), .compose = fixture.widget() };
@@ -582,7 +602,7 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     };
     const whole: vxfw.Text = .{ .text = "Overview" };
     var hidden: Hidden = .{};
-    var root: Self = .{ .overview = whole.widget(), .list = whole.widget(), .compose = whole.widget(), .session = hidden.widget(), .settings_open = true };
+    var root: Self = .{ .overview = whole.widget(), .list = whole.widget(), .compose = whole.widget(), .session = hidden.widget(), .page = .settings };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
@@ -590,14 +610,14 @@ test "App root keeps settings focus while a hidden Session ticks and retains oth
     try root.widget().handleEvent(&ctx, .tick);
     try std.testing.expectEqual(@as(usize, 1), hidden.ticks);
     try std.testing.expect(root.session.?.eql(hidden.widget()));
-    try std.testing.expect(root.settings_open);
+    try std.testing.expect(root.page == .settings);
     try std.testing.expect(ctx.redraw);
     try std.testing.expectEqual(@as(usize, 3), ctx.cmds.items.len);
     try std.testing.expect(ctx.cmds.items[0].request_focus.eql(root.settings_page.widget()));
     try std.testing.expect(ctx.cmds.items[1] == .tick);
     try std.testing.expect(ctx.cmds.items[2] == .tick);
     try root.showMain(&ctx);
-    try std.testing.expect(!root.settings_open);
+    try std.testing.expect(root.page != .settings);
     try std.testing.expect(root.session.?.eql(hidden.widget()));
     try std.testing.expect(ctx.cmds.items[3].request_focus.eql(hidden.widget()));
     // Closing settings returns presentation ownership to the retained Session.
@@ -611,7 +631,7 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
     defer arena.deinit();
     const empty: vxfw.Text = .{ .text = "" };
     const list: vxfw.Text = .{ .text = " rui" };
-    var root: Self = .{ .overview = empty.widget(), .list = list.widget(), .compose = empty.widget(), .sign_in_open = true };
+    var root: Self = .{ .overview = empty.widget(), .list = list.widget(), .compose = empty.widget(), .page = .sign_in };
     for ([_]u16{ 140, 46 }) |width| {
         for ([_]@import("sign_in.zig").Stage{ .choice, .codex_waiting, .key_entry }) |stage| {
             root.sign_in_page.state.stage = stage;
@@ -657,7 +677,7 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
 
 test "Sign-in input stays with the row over settings and a previously focused list" {
     const empty: vxfw.Text = .{ .text = "" };
-    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .settings_open = true, .sign_in_open = true };
+    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .page = .sign_in };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
@@ -674,7 +694,7 @@ test "Sign-in input stays with the row over settings and a previously focused li
     try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, root.sign_in_page.state.stage);
     try std.testing.expectEqual(@as(usize, 0), root.sign_in_page.key.len);
-    try std.testing.expect(root.settings_open);
+    try std.testing.expect(root.page == .sign_in);
     try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
     try std.testing.expect(ctx.quit);
 }
