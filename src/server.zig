@@ -76,6 +76,85 @@ fn captureFailedResponse(host: *Host, request: *const protocol.InspectSession, r
 // Only the two shared workers reserve these stacks, independent of exchanges.
 const intake_worker_stack_bytes = 1024 * 1024;
 
+/// SIGINT, SIGTERM and SIGHUP ask the Host to stop, as `host-stop` does:
+/// Ctrl-C on a foreground Host, closing its terminal or `kill <pid>` is a
+/// stop someone meant. The handler only
+/// records the ask and writes intake's wake socket; intake's loop applies it
+/// through `Host.stopAsked`, the one owner of the stop record. SIGKILL and a
+/// crash leave no record. Bash children start with every signal at its
+/// default (`rui_bash_spawn`), and exec resets a caught signal anyway.
+const StopSignals = struct {
+    const signals = .{ std.posix.SIG.INT, std.posix.SIG.TERM, std.posix.SIG.HUP };
+
+    var asked: std.atomic.Value(bool) = .init(false);
+    /// Intake's wake socket while it is open, else -1.
+    var wake: std.atomic.Value(std.posix.fd_t) = .init(-1);
+    /// Handlers between reading `wake` and finishing their write; `detach`
+    /// waits for none before intake may close the socket. With `wake`, a
+    /// store-buffering handshake: both sides store, then load the other's
+    /// value, all seq_cst, so either `detach` sees the handler in flight or
+    /// the handler sees -1.
+    var writing: std.atomic.Value(u32) = .init(0);
+
+    /// The handlers `install` replaced. Static, like the handlers themselves:
+    /// serve's frame stays resident for the Host's life.
+    var previous: [signals.len]std.posix.Sigaction = undefined;
+
+    /// Installed before startup, so an ask during startup stops the Host
+    /// once intake runs. `restore` puts the previous handlers back.
+    noinline fn install() void {
+        var blocked = std.posix.sigemptyset();
+        inline for (signals) |signal| std.posix.sigaddset(&blocked, signal);
+        var previous_mask: std.posix.sigset_t = undefined;
+        std.posix.sigprocmask(std.posix.SIG.BLOCK, &blocked, &previous_mask);
+        defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
+        asked.store(false, .release);
+        const action: std.posix.Sigaction = .{ .handler = .{ .handler = handle }, .mask = std.posix.sigemptyset(), .flags = 0 };
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &action, &previous[i]);
+    }
+
+    noinline fn restore() void {
+        inline for (signals, 0..) |signal, i| std.posix.sigaction(signal, &previous[i], null);
+    }
+
+    fn handle(_: std.posix.SIG) callconv(.c) void {
+        asked.store(true, .seq_cst);
+        _ = writing.fetchAdd(1, .seq_cst);
+        defer _ = writing.fetchSub(1, .seq_cst);
+        const fd = wake.load(.seq_cst);
+        if (fd < 0) return;
+        const saved = std.c._errno().*;
+        hint(fd);
+        std.c._errno().* = saved;
+    }
+
+    /// Coalesced: a full nonblocking socket is already readable. Never raises
+    /// SIGPIPE: MSG_NOSIGNAL on Linux, SO_NOSIGPIPE set by `Intake.init` on
+    /// Darwin.
+    fn hint(fd: std.posix.fd_t) void {
+        _ = std.c.send(fd, "x", 1, socket_os.send_flags);
+    }
+
+    fn attach(fd: std.posix.fd_t) void {
+        wake.store(fd, .seq_cst);
+        // An ask that arrived before this wake socket existed.
+        if (asked.load(.seq_cst)) hint(fd);
+    }
+
+    /// After it returns no handler holds the socket, so it may be closed.
+    fn detach() void {
+        wake.store(-1, .seq_cst);
+        // A handler writes one byte and returns; it never waits.
+        while (writing.load(.seq_cst) != 0) std.atomic.spinLoopHint();
+    }
+
+    /// Applies a pending ask on intake's loop. A repeated ask while the Host
+    /// is already stopping changes nothing (`Host.stopAsked`).
+    fn apply(host: *Host) void {
+        if (asked.swap(false, .seq_cst)) _ = host.stopAsked();
+    }
+};
+
 // One socket owner and one ordinary/one control local-work stack replace
 // per-exchange threads. Workers never wait on peers. Complete requests waiting
 // for Store access remain transient exchanges, not another pending authority.
@@ -515,7 +594,10 @@ const Intake = struct {
             _ = std.c.close(self.wake[0]);
             _ = std.c.close(self.wake[1]);
         }
-        for (self.wake) |fd| try setNonblocking(fd);
+        for (self.wake) |fd| {
+            try setNonblocking(fd);
+            if (!socket_os.suppressSigpipe(fd)) return error.SocketFlagsFailed;
+        }
         errdefer self.stopWorkers();
         for (&self.workers, &self.threads) |*worker, *thread| {
             worker.* = .{ .owner = self };
@@ -650,6 +732,7 @@ const Intake = struct {
             // readable, so the bounded poll below cannot sleep past it.
             var bytes: [256]u8 = undefined;
             while (std.c.read(self.wake[0], &bytes, bytes.len) > 0) {}
+            StopSignals.apply(self.host);
             if (self.host.stopping()) {
                 self.armShutdownDeadline();
                 for (self.exchanges.items) |exchange| exchange.retireUnhanded();
@@ -936,6 +1019,8 @@ pub fn serve(
         .flags = 0,
     };
     std.posix.sigaction(.CHLD, &child_action, null);
+    StopSignals.install();
+    defer StopSignals.restore();
     var descriptor_observation = try descriptor_limit.observe(io);
     var descriptor_requirement = try descriptor_capacity.calculate(
         descriptor_observation.open_descriptors,
@@ -1176,6 +1261,9 @@ fn serveOpened(
         intake.launched = true;
     }
     host.intake_wake = intake.wake[1];
+    StopSignals.attach(intake.wake[1]);
+    // Before intake.deinit closes the socket a handler would write.
+    defer StopSignals.detach();
     const execution_thread = try signal_stack.spawn(.{}, executionMain, .{&host});
     defer {
         // Stop admitting new connections before releasing any Host-owned
@@ -4942,4 +5030,124 @@ test "configure parent inherits the Host environment only after a fresh creation
     try std.testing.expect(refusal == .rejected);
     try std.testing.expectEqual(protocol.ConfigurationRejection.parent_provider_forbidden, refusal.rejected.code);
     try std.testing.expectEqual(count, environments.len);
+}
+
+test "SIGINT, SIGTERM and SIGHUP ask the Host to stop once through intake's loop, in every phase" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    var wake: [2]std.posix.fd_t = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wake));
+    defer for (wake) |fd| {
+        _ = std.c.close(fd);
+    };
+    for (wake) |fd| try setNonblocking(fd);
+    StopSignals.attach(wake[1]);
+    defer StopSignals.detach();
+    inline for (StopSignals.signals) |signal| for (std.enums.values(server_host.Phase)) |before| {
+        errdefer std.debug.print("signal {t}, phase before it: {t}\n", .{ signal, before });
+        StopSignals.asked.store(false, .release);
+        var lease = try platform.StoreLease.acquire(io, path);
+        defer lease.release();
+        try lease.prepareForServing(false);
+        var host = Host{ .io = io, .allocator = std.testing.allocator, .lease = &lease, .store = undefined };
+        _ = host.advance(before);
+        // No signal: the loop's pass changes nothing.
+        StopSignals.apply(&host);
+        try std.testing.expectEqual(before, host.phase.load(.acquire));
+        try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
+        // The handler, as the OS calls it, wakes intake and stops nothing.
+        StopSignals.handle(signal);
+        var bytes: [8]u8 = undefined;
+        try std.testing.expectEqual(@as(isize, 1), std.c.read(wake[0], &bytes, bytes.len));
+        try std.testing.expectEqual(before, host.phase.load(.acquire));
+        StopSignals.apply(&host);
+        try std.testing.expect(host.stopping());
+        // A stop the Host had already begun is not the ask's (Host.stopAsked).
+        const recorded: platform.StoreLease.LastStop = if (before != .stopping) .asked else .unasked;
+        try std.testing.expectEqual(recorded, platform.StoreLease.lastStop(io, path));
+        // A second signal while stopping changes nothing.
+        StopSignals.handle(signal);
+        StopSignals.apply(&host);
+        try std.testing.expect(host.stopping());
+        try std.testing.expectEqual(recorded, platform.StoreLease.lastStop(io, path));
+        while (std.c.read(wake[0], &bytes, bytes.len) > 0) {}
+    };
+}
+
+test "the Host's stop signals reach its handler until serve restores the previous ones" {
+    const ignored: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
+    var original: [StopSignals.signals.len]std.posix.Sigaction = undefined;
+    inline for (StopSignals.signals, 0..) |signal, i| std.posix.sigaction(signal, &ignored, &original[i]);
+    defer inline for (StopSignals.signals, 0..) |signal, i| std.posix.sigaction(signal, &original[i], null);
+    var unblocked = std.posix.sigemptyset();
+    inline for (StopSignals.signals) |signal| std.posix.sigaddset(&unblocked, signal);
+    var previous_mask: std.posix.sigset_t = undefined;
+    std.posix.sigprocmask(std.posix.SIG.UNBLOCK, &unblocked, &previous_mask);
+    defer std.posix.sigprocmask(std.posix.SIG.SETMASK, &previous_mask, null);
+    StopSignals.install();
+    inline for (StopSignals.signals) |signal| {
+        try std.testing.expect(!StopSignals.asked.load(.acquire));
+        // raise delivers to this thread before it returns.
+        try std.posix.raise(signal);
+        try std.testing.expect(StopSignals.asked.swap(false, .acq_rel));
+    }
+    StopSignals.restore();
+    inline for (StopSignals.signals) |signal| {
+        try std.posix.raise(signal);
+        try std.testing.expect(!StopSignals.asked.load(.acquire));
+    }
+}
+
+test "a stop signal handler racing detach never writes to the closed or a reused wake socket" {
+    const Hammer = struct {
+        calls: std.atomic.Value(u64) = .init(0),
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            while (!self.stop.load(.acquire)) {
+                StopSignals.handle(std.posix.SIG.INT);
+                _ = self.calls.fetchAdd(1, .release);
+            }
+        }
+
+        fn advance(self: *@This(), count: u64) void {
+            const target = self.calls.load(.acquire) + count;
+            while (self.calls.load(.acquire) < target) std.atomic.spinLoopHint();
+        }
+    };
+    var hammers: [3]Hammer = @splat(.{});
+    var threads: [hammers.len]std.Thread = undefined;
+    for (&hammers, &threads) |*hammer, *thread| thread.* = try std.Thread.spawn(.{}, Hammer.run, .{hammer});
+    defer {
+        for (&hammers) |*hammer| hammer.stop.store(true, .release);
+        for (threads) |thread| thread.join();
+        StopSignals.asked.store(false, .seq_cst);
+    }
+    var bytes: [256]u8 = undefined;
+    for (0..20000) |round| {
+        errdefer std.debug.print("round {d}\n", .{round});
+        var wake: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wake));
+        for (wake) |fd| try setNonblocking(fd);
+        StopSignals.attach(wake[1]);
+        for (&hammers) |*hammer| hammer.advance(1);
+        StopSignals.detach();
+        // Closing the peer first would turn a late write into EPIPE.
+        _ = std.c.close(wake[0]);
+        _ = std.c.close(wake[1]);
+        // The lowest free numbers: a late handler's write would land here.
+        var reused: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &reused));
+        defer for (reused) |fd| {
+            _ = std.c.close(fd);
+        };
+        for (reused) |fd| try setNonblocking(fd);
+        for (&hammers) |*hammer| hammer.advance(1);
+        for (reused) |fd| try std.testing.expect(std.c.read(fd, &bytes, bytes.len) < 0);
+    }
 }
