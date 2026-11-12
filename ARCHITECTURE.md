@@ -1666,7 +1666,7 @@ No running Hosts prints `No running Hosts.` and starts nothing.
 Source/release installers and `rui upgrade` use this one install-wide restart owner; only installation eligibility differs.
 
 Lifecycle control observation is separate from ordinary client readiness.
-Upgrade can read the complete bounded Host-info envelope using only the current wire or the released wire `9`, with matching HTTP and body versions and peer PID from that same connection.
+Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
 Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
 A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
 Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.
@@ -3963,7 +3963,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-For a pre-ChatGPT Host on the same wire, an absent `chatgpt` route means `unserved`; the shared Host-information decoder normalizes it for status, discovery and exact-instance activation.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-14 facts require the provider; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
