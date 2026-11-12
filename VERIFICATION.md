@@ -363,6 +363,11 @@ The targets are portable: a baseline CPU, glibc 2.34 on Linux and macOS 15 on Ap
 Each build must report the version and exact SHA from `rui --version`.
 The Linux executables are stripped, and their debug info ships as a separate `-debug` archive that crash traces read once it is extracted beside them.
 The release attaches the archives, `SHA256SUMS` and an `install.sh` that pins the archive digests.
+Before publishing, the publish job measures the released linux-x86_64 executable with [host_memory.py](tests/ci/host_memory.py) from the release's own source and adds its table to the release notes, so Host memory can be tracked release by release.
+Each scenario in its `SCENARIOS` list is one row: a fresh Host brought to one state by the `tests/integration` fixtures without network, its `/proc/PID/smaps_rollup` field read once it stops changing, over a fixed number of runs, reported as median and range in KiB with the runner's image, CPU, kernel and glibc.
+The rows are an empty Host and 100 agents waiting on the model (`Private_Dirty`), and a Host holding an OpenAI model listing or an MCP `tools/list` open at start (`Anonymous`); a feature adds a row by adding an entry.
+Numbers compare only release to release on the same runner type, and nothing fails on them: a scenario that cannot be measured says `not measured` with its reason in its row, and a measuring step that fails or passes its five minutes leaves one `not measured` line, never a failed release.
+`test_host_memory.py` checks the table and the `not measured` path; only a real release run measures on the hosted runner.
 
 `test_release.py` uses fake archives.
 It covers version planning, template filling with the shared publication fragment, every report state (first install, update, reinstall, Store format change, Host and `PATH` states) and the installer's update, digest, version and preservation behavior.
@@ -370,7 +375,7 @@ It covers version planning, template filling with the shared publication fragmen
 One manual check installed tagged archives through the filled installer on macOS 15, and under dash on Ubuntu 22.04 x86-64 with glibc 2.35.
 Debian 11, with glibc 2.31, refuses to load the Linux build.
 Another manual check built the Linux release, ran the stripping step, extracted the debug archive into an installer-shaped build, and sent `rui host serve` SIGSEGV: the trace showed source lines, and without the debug files it showed `???`.
-No hosted job runs a published archive or checks a trace.
+No hosted job checks a trace; the only hosted run of a released archive is that Host memory measurement.
 
 ### Measurement and release evidence
 
@@ -865,6 +870,8 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 ## Release demonstrations
 
 `upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
+The historical Host-info profiles include wire 14 (v0.70.0), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise it alongside wires 13 and 9; ordinary readiness remains current-wire only. Format 71 migration tests cover the conditional saved-wire 14-to-15 update, populated SQLite reopen and live MySQL when configured.
+
 Its `restart_all_cases` suite also runs alone with `python3 tests/integration/upgrade_integration.py REAL_RUI restart-all` as an isolated non-root user.
 Two real retained managed builds serve separate Stores; `host restart --all` must replace both instances with the selected pinned executable and retire both old PIDs, preserve capacity/environment, then leave both current instances unchanged on retry.
 The suite checks no-Host/no-start behavior, mandatory `--all`, refusal of per-Store selection, a live unreadable socket as an operational failure, a legacy stale refused socket without a Store hint as unconfirmed rather than an inferred absence, and application-owned and unknown-managed Hosts as explained successful skips even without an installed target.
