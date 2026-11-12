@@ -16317,7 +16317,7 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
             var text: std.Io.Writer.Allocating = .init(std.testing.allocator);
             defer text.deinit();
             if (reply.rejected.message) |detail| try detail.write(&text.writer);
-            try std.testing.expectEqualStrings(if (unavailable) message else "", text.written());
+            try std.testing.expectEqualStrings(message, text.written());
             try std.testing.expectEqual(replayed, reply.rejected.replayed);
         }
 
@@ -16353,8 +16353,10 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const unavailable = mode < 2;
                 const detail = if (mode == 1)
                     "spec.tools: lookup is not a known tool; MCP servers notes, other are unavailable and may provide it"
+                else if (unavailable)
+                    "spec.tools: lookup is not a known tool; MCP server notes is unavailable and may provide it"
                 else
-                    "spec.tools: lookup is not a known tool; MCP server notes is unavailable and may provide it";
+                    "spec.tools: lookup is not a known tool";
                 var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
                 var create = try completeConfiguration("mcp-missing-parent", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
                 const parent_names: []const []const u8 = if (mode == 2 or mode == 3) &.{ "kept", "start_agent" } else &.{"start_agent"};
@@ -16362,12 +16364,13 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                 const parent = (try storage.configure(&create, .{})).accepted.session;
 
                 try create.key.set("mcp-missing-create");
-                create.configuration.tools = try .of(&.{"lookup"});
+                // Captured specs hold canonical name order; skip known names.
+                create.configuration.tools = try .of(&.{ "bash", "lookup", "zz_absent" });
                 try check(try storage.configure(&create, .{}), unavailable, detail, false);
                 try check(try storage.configure(&create, .{}), unavailable, detail, true);
                 var update: wire_request.ConfigureCommand = .{ .session = parent };
                 try update.key.set("mcp-missing-update");
-                update.configuration.tools = try .of(&.{"lookup"});
+                update.configuration.tools = create.configuration.tools;
                 try check(try storage.configure(&update, .{}), unavailable, detail, false);
                 try check(try storage.configure(&update, .{}), unavailable, detail, true);
                 var message: wire_request.MessageCommand = .{ .configuration = create.configuration, .text = .{ .state = .value, .borrowed = "task".ptr, .length = 4, .digest = protocol.contentDigest("task") } };
@@ -16533,6 +16536,15 @@ test "configure parent inherits binding without a task, uses the create round bu
             try std.testing.expect(try storage.configure(&child, .{}) == .conflict);
             try submitTestMessage(&storage, &tmp, "native-child-task", "native-child-task", session.slice(), "answer");
             const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            {
+                var view: HistoricalView = undefined;
+                storage.openHistoricalView(model, &view);
+                defer view.close();
+                var settings: HistoricalSettings = undefined;
+                try view.settings(&settings);
+                try std.testing.expect(settings.parent != null);
+                try std.testing.expectEqualStrings(parent.slice(), settings.parent.?.slice());
+            }
             const item = "{\"type\":\"message\",\"id\":\"native-child-answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}";
             try settleItemsForTesting(&storage, &tmp, model, &.{item}, "hello");
             const ending = (try storage.nextCoreWork()).?.ending;

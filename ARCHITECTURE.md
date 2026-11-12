@@ -469,7 +469,8 @@ Each Session evolves independently; sharing a settings object creates no shared 
 Tool names remain exactly as supplied by MCP servers, without an inferred server namespace (D120).
 At Host startup, an unreachable server keeps its saved tool copies; a configured server with no records contributes no tools (D147).
 When a create or update spec names a tool absent from the catalog, admission refuses it as `mcp_server_unavailable` if any configured MCP server contributes no tools, otherwise `unknown_tool`.
-This is deliberately not an ownership claim: the refusal's advisory `message` says the name is unknown and lists every empty server that may provide it.
+The refusal's advisory `message` names the first unknown tool in canonical tool-name order for either code (D241).
+This is deliberately not an ownership claim: when servers are empty, it lists every empty server that may provide the tool.
 The same catalog decision applies to a creating Message and `start_agent`; the latter returns a failed tool result naming `spec.tools`, without starting a Session.
 Known tools, including saved copies of an unreachable server's tools, remain admissible subject to the existing provider and child-narrowing rules.
 Only the rejection code is durable; direct replies derive the advisory message from the current Host's catalog and launch configuration, including on replay, with no extra Store read or format change.
@@ -1671,7 +1672,7 @@ No running Hosts prints `No running Hosts.` and starts nothing.
 Source/release installers and `rui upgrade` use this one install-wide restart owner; only installation eligibility differs.
 
 Lifecycle control observation is separate from ordinary client readiness.
-Upgrade can read the complete bounded Host-info envelope using only the current wire or the released wire `9`, with matching HTTP and body versions and peer PID from that same connection.
+Upgrade can read the complete bounded Host-info envelope using only the current wire or the historical wire `13` and `9` profiles, with matching HTTP and body versions and peer PID from that same connection.
 Only an explicit wrong-wire response permits the historical read-only profile; malformed, unavailable or unknown profiles grant no authority.
 A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
 Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.
@@ -2912,8 +2913,11 @@ A stop finds excluded Messages by walking Admission-only pages backward from its
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
-The `chatgpt` provider key and the `chatgpt_plan` route extend `host_info`'s `capabilities.providers` within wire version 13; earlier wire-13 Hosts did not report that provider.
-Different wire versions still refuse each other.
+Wire version 14 requires the `chatgpt` provider key, and supports the `chatgpt_plan` route, in `host_info`'s `capabilities.providers`; ordinary clients and Hosts on different wire versions refuse each other.
+A wire bump also appends a Store format step because the Store saves its wire label: format 70 moves the saved label from 13 to 14 on SQLite and MySQL, without changing ordinary rows.
+The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
+`tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
+Upgrade and restart-all control recognize wire 13 as a historical Host-info profile: v0.69.1 may omit `chatgpt`, while v0.69.2 reports it. Historical observation never grants ordinary client readiness; exact-instance shutdown uses the observed Host's own executable before the new build starts it.
 
 Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
@@ -3987,7 +3991,7 @@ A client first probes the existing `host.lock` with a nonblocking shared lock, w
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
 A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
-For a pre-ChatGPT Host on the same wire, an absent `chatgpt` route means `unserved`; the shared Host-information decoder normalizes it for status, discovery and exact-instance activation.
+Only the historical wire-13 Host-info profile accepts an absent `chatgpt` route as `unserved`, covering v0.69.1 alongside v0.69.2's complete provider facts. Current wire-14 facts require the provider; historical normalization serves upgrade/restart discovery and exact-instance activation, never ordinary status or client readiness.
 Codex, OpenAI and the existing required identity/control fields remain required; unknown, duplicate and malformed fields still fail decoding.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
@@ -4324,7 +4328,8 @@ An untruncated stream is complete in the result and names no file.
 
 MCP answers are bounded by the existing 4 MiB per-call answer buffer.
 Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
-When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+When bytes are omitted and the Operation's frozen offer includes Bash, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+Without Bash in that frozen offer, keep the omitted-byte suffix but retain no full answer and append no path or retention hint (D242); later Session settings do not change this choice.
 MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
 Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
 The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.

@@ -7,6 +7,8 @@ These standards own engineering methods, not runtime behavior or qualification r
 
 Each requirement has one home: [Architecture](ARCHITECTURE.md) owns accepted behavior, terminology, decisions and rationale; [Verification](VERIFICATION.md) owns required evidence and gates; GitHub issues hold unresolved decisions and research.
 Implementation slices link accepted contracts and define proof.
+A Store format change appends one version, bootstrap digest row and forward step for each dialect; main's existing rows and steps remain immutable, and `python3 tests/ci/schema_number.py --check` confirms the number against current main. A wire-label move is a Store format change, owned by that migration step rather than a new finalization special case.
+The [wire-version gate](tests/ci/test_wire_version.py) requires a version greater than the newest release's when generated `openapi.json` changes beyond `info.version` and documentation-only annotations, under the [wire contract rule](ARCHITECTURE.md#staged-persistent-input).
 
 Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only when a change alters user-visible behavior, the Store format or a gate.
 Accepted behavior changes only by the user's decision: when an implementation departs from it, raise the conflict and change the code or ask, keeping the contract text as accepted.
