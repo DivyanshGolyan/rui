@@ -1,0 +1,349 @@
+//! Root's one input owner: which layer covers the main pane, the bracketed
+//! paste in progress, and which pane takes each terminal event. Root reads
+//! the facts other owners hold, calls `step`, and applies the `Effects` it
+//! returns without deciding anything itself. Navigation between layers is an
+//! input to the same `step`, so keys and navigation share one owner.
+const std = @import("std");
+const keymap = @import("keymap.zig");
+
+/// What covers the main pane. The main pane itself is the open Session, else
+/// the overview: `session != null` stays the one fact for that.
+pub const Layer = union(enum) {
+    main,
+    /// The app settings page in the main pane's place.
+    settings,
+    /// The sign-in page, which closes back to what it covered.
+    sign_in: struct { over: Covered },
+
+    pub const Covered = enum { main, settings };
+
+    /// The settings page is open: shown, or under sign-in.
+    pub fn settingsOpen(self: Layer) bool {
+        return switch (self) {
+            .main => false,
+            .settings => true,
+            .sign_in => |sign_in| sign_in.over == .settings,
+        };
+    }
+
+    pub fn signInOpen(self: Layer) bool {
+        return self == .sign_in;
+    }
+};
+
+pub const State = struct {
+    layer: Layer = .main,
+    /// Between a bracketed paste's start and end. Keys inside it are pasted
+    /// text, never actions.
+    pasting: bool = false,
+};
+
+/// What the shell read this event, owned elsewhere and passed by value.
+pub const Facts = struct {
+    settings: Settings = .{},
+
+    pub const Settings = struct {
+        /// The Keys reference is open over the page.
+        keys_open: bool = false,
+        /// A choice (including the Model filter) is open on the page.
+        choice_open: bool = false,
+        /// The page takes this event's key itself.
+        takes_key: bool = false,
+        /// Only the Model filter edits text, so only it takes pasted keys.
+        takes_paste: bool = false,
+        /// An Upgrade can still be cancelled, so Esc is its.
+        upgrade_takes_escape: bool = false,
+    };
+};
+
+/// One terminal event, or a navigation request from the screen's owner.
+pub const Input = union(enum) {
+    key: Key,
+    invalid_key,
+    paste_start,
+    paste_end,
+    mouse: Mouse,
+    key_release,
+    /// A terminal colour report or scheme change.
+    colors,
+    /// Focus changes and every other event Root does not route.
+    other,
+    open_settings,
+    /// Show the main pane: close settings, keeping any sign-in over it.
+    show_main,
+    open_sign_in,
+    close_sign_in,
+
+    pub const Key = struct {
+        /// The editor's name for the key; null for text and Enter.
+        named: ?keymap.Key,
+    };
+    pub const Mouse = enum { click, wheel, motion };
+};
+
+/// The whole decision for one input. Root applies it in field order: the
+/// settings page change, the focus change, the route, then the redraw.
+pub const Effects = struct {
+    page: Page = .keep,
+    focus: ?Focus = null,
+    route: Route = .pass,
+    redraw: bool = false,
+
+    pub const Page = enum {
+        keep,
+        close_keys,
+        cancel_choice,
+        /// Leaving the page: cancel its choice and close its keys.
+        reset,
+        /// Opening the page: reload its values and close its keys.
+        open,
+    };
+    pub const Focus = enum { main, settings, sign_in };
+    pub const Route = enum {
+        /// vxfw's own focus or hit-test path delivers it to the shown pane;
+        /// Root leaves the event alone. Navigation requests always pass.
+        pass,
+        /// Root hands it to the sign-in page and stops it.
+        sign_in,
+        /// Root hands it to the overview, which owns leaving and an
+        /// Upgrade's Esc under the settings page, stops it and redraws.
+        app_keys,
+        /// Root hands it to the overview, which owns the palette, and stops it.
+        colors,
+        /// Root stops it; nothing takes it.
+        swallow,
+    };
+};
+
+/// The pane drawn in the main pane's place.
+pub const Pane = enum { overview, session, settings, sign_in };
+
+pub fn pane(layer: Layer, session_open: bool) Pane {
+    return switch (layer) {
+        .main => if (session_open) .session else .overview,
+        .settings => .settings,
+        .sign_in => .sign_in,
+    };
+}
+
+const main_shown: Effects = .{ .page = .reset, .focus = .main, .redraw = true };
+
+pub fn step(state: *State, facts: Facts, input: Input) Effects {
+    switch (input) {
+        .open_settings => {
+            state.layer = switch (state.layer) {
+                .main, .settings => .settings,
+                .sign_in => .{ .sign_in = .{ .over = .settings } },
+            };
+            return .{ .page = .open, .focus = .settings, .redraw = true };
+        },
+        .show_main => {
+            state.layer = switch (state.layer) {
+                .main, .settings => .main,
+                .sign_in => .{ .sign_in = .{ .over = .main } },
+            };
+            return main_shown;
+        },
+        .open_sign_in => {
+            state.layer = switch (state.layer) {
+                .main => .{ .sign_in = .{ .over = .main } },
+                .settings => .{ .sign_in = .{ .over = .settings } },
+                .sign_in => state.layer,
+            };
+            return .{ .focus = .sign_in, .redraw = true };
+        },
+        .close_sign_in => {
+            state.layer = switch (state.layer) {
+                .main, .settings => state.layer,
+                .sign_in => |sign_in| switch (sign_in.over) {
+                    .main => .main,
+                    .settings => .settings,
+                },
+            };
+            return if (state.layer == .settings) .{ .focus = .settings, .redraw = true } else main_shown;
+        },
+        .key_release => return .{ .route = .swallow },
+        .colors => return .{ .route = .colors },
+        .other => return .{},
+        .key, .invalid_key, .paste_start, .paste_end, .mouse => {},
+    }
+    // The sign-in page owns keys and pastes even over settings or a list
+    // that had focus before it opened, and no click navigates behind it.
+    // Its paste boundaries are its own: they don't open a paste here.
+    if (state.layer == .sign_in) return switch (input) {
+        .mouse => .{ .route = .swallow },
+        else => .{ .route = .sign_in },
+    };
+    switch (input) {
+        .paste_start => state.pasting = true,
+        .paste_end => state.pasting = false,
+        .key => |key| if (state.layer == .settings) return settingsKey(state, facts.settings, key),
+        else => {},
+    }
+    return .{};
+}
+
+/// One router for every key while settings is shown. A pasted key goes
+/// only to the Model filter, never a choice or action. Esc (or Ctrl-G, as
+/// everywhere) closes the topmost thing only: the Keys reference or a
+/// choice, else the page, unless an Upgrade can still be cancelled. The
+/// page takes its own keys; every other key is the app's.
+fn settingsKey(state: *State, page: Facts.Settings, key: Input.Key) Effects {
+    if (state.pasting) return if (page.takes_paste) .{} else .{ .route = .swallow };
+    const closes = key.named == .escape or key.named == .ctrl_g;
+    if (closes and page.keys_open) return .{ .page = .close_keys, .route = .swallow, .redraw = true };
+    if (closes and page.choice_open) return .{ .page = .cancel_choice, .route = .swallow, .redraw = true };
+    if (closes and !page.upgrade_takes_escape) {
+        state.layer = .main;
+        var closed = main_shown;
+        closed.route = .swallow;
+        return closed;
+    }
+    if (!page.takes_key) return .{ .route = .app_keys, .redraw = true };
+    return .{};
+}
+
+test "Root input routing over every layer, main pane, settings state and input" {
+    // Expectations are the routing Root.capture, openSettings, showMain and
+    // the sign-in open/close made before this owner existed (main 5df5531).
+    // Each combination matches exactly one row, and every row matches some.
+    const LayerCase = enum { main, settings, sign_in_over_main, sign_in_over_settings };
+    const Page = enum { plain, keys_open, choice_open, model_filter, upgrade_cancellable };
+    const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, wheel, key_release, colors, invalid_key, focus_out, open_settings, show_main, open_sign_in, close_sign_in };
+    const all_layers = std.enums.values(LayerCase);
+    const all_pages = std.enums.values(Page);
+    const shown = [_]LayerCase{ .main, .settings };
+    const signing = [_]LayerCase{ .sign_in_over_main, .sign_in_over_settings };
+    const keys = [_]Event{ .printable, .pasted_printable, .enter, .pasted_enter, .escape, .ctrl_g, .ctrl_c };
+    const closing = [_]Event{ .escape, .ctrl_g };
+    const Row = struct {
+        layers: []const LayerCase = all_layers,
+        pages: []const Page = all_pages,
+        events: []const Event,
+        effects: Effects,
+        /// The layer after the input; null leaves it as it was.
+        layer: ?LayerCase = null,
+        /// Pasting after the input; null leaves it as it was.
+        pasting: ?bool = null,
+    };
+    const closed: Effects = .{ .page = .reset, .focus = .main, .route = .swallow, .redraw = true };
+    const rows = [_]Row{
+        // Every layer.
+        .{ .events = &.{.key_release}, .effects = .{ .route = .swallow } },
+        .{ .events = &.{.colors}, .effects = .{ .route = .colors } },
+        .{ .events = &.{.focus_out}, .effects = .{} },
+        // Sign-in takes keys, pastes and invalid keys; its paste is its own.
+        .{ .layers = &signing, .events = &(keys ++ [_]Event{ .paste_start, .paste_end, .invalid_key }), .effects = .{ .route = .sign_in } },
+        .{ .layers = &signing, .events = &.{ .click, .wheel }, .effects = .{ .route = .swallow } },
+        // Under main and settings, vxfw's path takes the rest.
+        .{ .layers = &shown, .events = &.{.paste_start}, .effects = .{}, .pasting = true },
+        .{ .layers = &shown, .events = &.{.paste_end}, .effects = .{}, .pasting = false },
+        .{ .layers = &shown, .events = &.{ .click, .wheel, .invalid_key }, .effects = .{} },
+        .{ .layers = &.{.main}, .events = &keys, .effects = .{} },
+        // Settings keys.
+        .{ .layers = &.{.settings}, .pages = &.{.model_filter}, .events = &.{ .pasted_printable, .pasted_enter, .printable }, .effects = .{} },
+        .{ .layers = &.{.settings}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{ .pasted_printable, .pasted_enter }, .effects = .{ .route = .swallow } },
+        .{ .layers = &.{.settings}, .pages = &.{ .plain, .keys_open, .choice_open, .upgrade_cancellable }, .events = &.{.printable}, .effects = .{ .route = .app_keys, .redraw = true } },
+        .{ .layers = &.{.settings}, .events = &.{.enter}, .effects = .{} },
+        .{ .layers = &.{.settings}, .events = &.{.ctrl_c}, .effects = .{ .route = .app_keys, .redraw = true } },
+        .{ .layers = &.{.settings}, .pages = &.{.keys_open}, .events = &closing, .effects = .{ .page = .close_keys, .route = .swallow, .redraw = true } },
+        .{ .layers = &.{.settings}, .pages = &.{ .choice_open, .model_filter }, .events = &closing, .effects = .{ .page = .cancel_choice, .route = .swallow, .redraw = true } },
+        .{ .layers = &.{.settings}, .pages = &.{.plain}, .events = &closing, .effects = closed, .layer = .main },
+        .{ .layers = &.{.settings}, .pages = &.{.upgrade_cancellable}, .events = &closing, .effects = .{ .route = .app_keys, .redraw = true } },
+        // Navigation.
+        .{ .layers = &.{ .main, .settings }, .events = &.{.open_settings}, .effects = .{ .page = .open, .focus = .settings, .redraw = true }, .layer = .settings },
+        .{ .layers = &signing, .events = &.{.open_settings}, .effects = .{ .page = .open, .focus = .settings, .redraw = true }, .layer = .sign_in_over_settings },
+        .{ .layers = &.{ .main, .settings }, .events = &.{.show_main}, .effects = main_shown, .layer = .main },
+        .{ .layers = &signing, .events = &.{.show_main}, .effects = main_shown, .layer = .sign_in_over_main },
+        .{ .layers = &.{ .main, .sign_in_over_main }, .events = &.{.open_sign_in}, .effects = .{ .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_main },
+        .{ .layers = &.{ .settings, .sign_in_over_settings }, .events = &.{.open_sign_in}, .effects = .{ .focus = .sign_in, .redraw = true }, .layer = .sign_in_over_settings },
+        .{ .layers = &.{ .main, .sign_in_over_main }, .events = &.{.close_sign_in}, .effects = main_shown, .layer = .main },
+        .{ .layers = &.{ .settings, .sign_in_over_settings }, .events = &.{.close_sign_in}, .effects = .{ .focus = .settings, .redraw = true }, .layer = .settings },
+    };
+    const Case = struct {
+        fn layer(case: LayerCase) Layer {
+            return switch (case) {
+                .main => .main,
+                .settings => .settings,
+                .sign_in_over_main => .{ .sign_in = .{ .over = .main } },
+                .sign_in_over_settings => .{ .sign_in = .{ .over = .settings } },
+            };
+        }
+        fn has(comptime T: type, set: []const T, value: T) bool {
+            return std.mem.indexOfScalar(T, set, value) != null;
+        }
+        /// The page's own answers, as AppSettings gives them for these keys.
+        fn facts(page: Page, event: Event) Facts {
+            const filter = page == .model_filter;
+            return .{
+                .settings = .{
+                    .keys_open = page == .keys_open,
+                    .choice_open = page == .choice_open or filter,
+                    // The panel takes Enter; the Model filter also takes text.
+                    .takes_key = switch (event) {
+                        .enter, .pasted_enter => true,
+                        .printable, .pasted_printable => filter,
+                        else => false,
+                    },
+                    .takes_paste = filter,
+                    .upgrade_takes_escape = page == .upgrade_cancellable,
+                },
+            };
+        }
+        fn input(event: Event) Input {
+            return switch (event) {
+                .printable, .pasted_printable, .enter, .pasted_enter => .{ .key = .{ .named = null } },
+                .escape => .{ .key = .{ .named = .escape } },
+                .ctrl_g => .{ .key = .{ .named = .ctrl_g } },
+                .ctrl_c => .{ .key = .{ .named = .ctrl_c } },
+                .paste_start => .paste_start,
+                .paste_end => .paste_end,
+                .click => .{ .mouse = .click },
+                .wheel => .{ .mouse = .wheel },
+                .key_release => .key_release,
+                .colors => .colors,
+                .invalid_key => .invalid_key,
+                .focus_out => .other,
+                .open_settings => .open_settings,
+                .show_main => .show_main,
+                .open_sign_in => .open_sign_in,
+                .close_sign_in => .close_sign_in,
+            };
+        }
+    };
+    var used: [rows.len]bool = @splat(false);
+    for (all_layers) |layer| for ([_]bool{ false, true }) |session| for (all_pages) |page| for (std.enums.values(Event)) |event| {
+        errdefer std.debug.print("layer={s} session={} page={s} event={s}\n", .{ @tagName(layer), session, @tagName(page), @tagName(event) });
+        var matched: ?usize = null;
+        for (rows, 0..) |row, index| {
+            if (!Case.has(LayerCase, row.layers, layer) or !Case.has(Page, row.pages, page) or !Case.has(Event, row.events, event)) continue;
+            try std.testing.expectEqual(@as(?usize, null), matched);
+            matched = index;
+        }
+        const row = rows[matched.?];
+        used[matched.?] = true;
+        // A pasted key arrives inside a paste; paste_end closes one.
+        const pasting = event == .pasted_printable or event == .pasted_enter or event == .paste_end;
+        var state: State = .{ .layer = Case.layer(layer), .pasting = pasting };
+        try std.testing.expectEqual(row.effects, step(&state, Case.facts(page, event), Case.input(event)));
+        try std.testing.expectEqual(Case.layer(row.layer orelse layer), state.layer);
+        try std.testing.expectEqual(row.pasting orelse pasting, state.pasting);
+        // The main pane shows the Session when one is open, under any layer.
+        const expected_pane: Pane = switch (state.layer) {
+            .main => if (session) .session else .overview,
+            .settings => .settings,
+            .sign_in => .sign_in,
+        };
+        try std.testing.expectEqual(expected_pane, pane(state.layer, session));
+    };
+    for (used) |hit| try std.testing.expect(hit);
+}
+
+test "Layer answers settings and sign-in open from the one union" {
+    try std.testing.expect(!Layer.settingsOpen(.main) and !Layer.signInOpen(.main));
+    try std.testing.expect(Layer.settingsOpen(.settings) and !Layer.signInOpen(.settings));
+    const over_main: Layer = .{ .sign_in = .{ .over = .main } };
+    const over_settings: Layer = .{ .sign_in = .{ .over = .settings } };
+    try std.testing.expect(!over_main.settingsOpen() and over_main.signInOpen());
+    try std.testing.expect(over_settings.settingsOpen() and over_settings.signInOpen());
+}
