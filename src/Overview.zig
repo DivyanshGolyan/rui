@@ -5592,6 +5592,51 @@ fn statusRowsShown(shown: *Shown, height: u16) ![]const []const u8 {
     return rows;
 }
 
+test "Footer notice domain uses production clipping sanitization and colour" {
+    const overflowing = "01234567890123456789012345678901234567890123456789" ++
+        "01234567890123456789012345678901234567890123456789" ++
+        "01234567890123456789012345678901234567890123456789" ++
+        "01234567890123456789012345678901234567890123456789";
+    const cases = [_]struct { raw: []const u8, displayed: []const u8 }{
+        .{ .raw = "Configured.", .displayed = "Configured." },
+        .{ .raw = overflowing, .displayed = overflowing },
+        .{ .raw = "Saved.\nNext", .displayed = "Saved. Next" },
+        .{ .raw = "Saved.\rNext", .displayed = "Saved. Next" },
+        .{ .raw = "First\nSecond\rThird\x1b", .displayed = "First Second Third\\x1b" },
+        .{ .raw = "! Unknown command /status", .displayed = "! Unknown command /status" },
+        .{ .raw = "Configured.\n! label saved locally only", .displayed = "Configured. ! label saved locally only" },
+    };
+    const rig = try openComposer();
+    defer rig.close();
+    for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| for ([_]view.Colour{ .quiet, .attention }) |colour| for (cases) |case| for ([_]u16{ 40, 46, 99, 140 }) |width| {
+        errdefer std.debug.print("depth={s}, colour={s}, width={d}, notice={s}\n", .{ @tagName(depth), @tagName(colour), width, case.raw });
+        rig.overview.caps.depth = depth;
+        var notice: view.Notice = .{ .colour = colour, .len = case.raw.len };
+        @memcpy(notice.bytes[0..notice.len], case.raw);
+        rig.overview.state.notice = notice;
+        // Draw the real Overview, including noticeLine and Footer. Expected
+        // single-line text above is independent of either implementation.
+        var shown = try rig.shown(width, 24);
+        defer shown.deinit();
+        const pane_start: u16 = if (width >= Root.split_at) Root.list_width + 1 else 0;
+        const pane_width = width - pane_start;
+        const visible = case.displayed[0..@min(case.displayed.len, pane_width)];
+        const footer = try shown.line(23);
+        try std.testing.expectEqualStrings(visible, footer[footer.len - @min(footer.len, visible.len) ..]);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, try shown.text(), visible));
+        try std.testing.expectEqual(@as(usize, 0), (try statusRowsShown(&shown, 24)).len);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "enter start") == null);
+        const style = @import("widget_style.zig").of(rig.overview.caps, .{ .colour = colour, .background = .bar });
+        // Compare actual cells: Footer keeps a prefix, not an ellipsis, and
+        // notice colour survives sanitizing, clipping and terminal mapping.
+        for (visible, width - visible.len..width) |byte, col| {
+            const cell = shown.screen.readCell(@intCast(col), 23).?;
+            try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
+            try std.testing.expectEqual(style, cell.style);
+        }
+    };
+}
+
 test "Footer notices fit or truncate on the right without adding rows; persistent recovery keeps its rows" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

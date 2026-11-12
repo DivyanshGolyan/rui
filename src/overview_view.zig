@@ -3991,29 +3991,12 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     }
 }
 
-/// A notice, which reads whole on a 40-column overview in the rows under
-/// its input, a row for each line.
+/// The core's raw notice value. Production Footer rendering is covered by
+/// Overview's widget tests, not by the logical list/status Frame below.
 fn expectNotice(state: *State, expected: ?[]const u8) !void {
-    return expectNoticeAt(state, expected, true);
-}
-
-/// A notice whose data (a Host's code, the list of start settings) may be
-/// cut at the edge of a narrow overview; its wording is not.
-fn expectNoticeWithData(state: *State, expected: []const u8) !void {
-    return expectNoticeAt(state, expected, false);
-}
-
-fn expectNoticeAt(state: *State, expected: ?[]const u8, whole_at_40: bool) !void {
     if (expected) |text| {
         const notice = state.notice orelse return error.TestExpectedNotice;
         try std.testing.expectEqualStrings(text, notice.text());
-        if (whole_at_40) {
-            const screen = try screenText(state, 140, 24, .{});
-            defer std.testing.allocator.free(screen);
-            const line = try std.mem.replaceOwned(u8, std.testing.allocator, text, "\n", " ");
-            defer std.testing.allocator.free(line);
-            if (line.len <= 140) try std.testing.expect(std.mem.endsWith(u8, screen, line));
-        }
     } else if (state.notice) |*notice| try std.testing.expectEqualStrings("", notice.text());
 }
 
@@ -4025,26 +4008,17 @@ fn screenText(state: *State, width: u16, height: u16, caps: Caps) ![]u8 {
     return frameText(state, width, height, caps, 0);
 }
 
-/// What the App overview's rows show at a size, from the segments each of
-/// its widgets draws: the provider header, two-line list or panel rows,
-/// the status's rows and one Footer under `draft`. Settings has its own widget tests. This keeps
-/// only their order, with the panel given the rows the core's layout gives
-/// it.
+/// Logical header, list/panel and persistent status segments from the core.
+/// Footer text and cells belong to Overview's production widget tests.
 const Frame = struct {
     arena: std.heap.ArenaAllocator,
     lines: []const []const Segment,
     /// The list's or panel's lines.
     list: []const []const Segment,
     caps: Caps,
-    width: u16,
-
     fn of(state: *State, width: u16, height: u16, caps: Caps, frame: u64) !Frame {
-        return drafted(state, .{}, width, height, caps, frame);
-    }
-
-    fn drafted(state: *State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) !Frame {
         try expectEffects(&.{}, try step(state, .{ .resized = .{ .width = width, .height = height } }));
-        var self: Frame = .{ .arena = .init(std.testing.allocator), .lines = &.{}, .list = &.{}, .caps = caps, .width = width };
+        var self: Frame = .{ .arena = .init(std.testing.allocator), .lines = &.{}, .list = &.{}, .caps = caps };
         errdefer self.arena.deinit();
         const gpa = self.arena.allocator();
         const top = try headerSegments(gpa, state, width, caps);
@@ -4055,7 +4029,7 @@ const Frame = struct {
         } else {
             while (listItem(state, list_count) != null) : (list_count += 1) {}
         }
-        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows + 1);
+        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows);
         var count: usize = 0;
         var start: usize = 0;
         for (top, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
@@ -4094,14 +4068,6 @@ const Frame = struct {
             lines[count] = notice[start_..];
             count += 1;
         }
-        var footer: Spans = .of(gpa, caps, width);
-        footer.begin();
-        const right = if (footerNotice(state)) |notice| try std.mem.replaceOwned(u8, gpa, notice, "\n", " ") else footerRight(state, draft);
-        const right_width: u16 = @intCast(@min(footer.measure(right), width));
-        _ = try footer.put(0, try footerLeft(gpa, state, width -| right_width, caps), width -| right_width, .{ .colour = .quiet });
-        _ = try footer.put(width -| right_width, right, right_width, .{ .colour = .quiet });
-        lines[count] = try segmentsOf(gpa, try footer.finish(), width, .{});
-        count += 1;
         self.lines = lines[0..count];
         self.list = lines[first..last];
         return self;
@@ -4688,7 +4654,7 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
     try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, .{}, &test_said).text);
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
-    try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
+    try expectNotice(&state, "! k7m2qx not stopped: session_not_found");
     // Ended work takes no stop.
     try std.testing.expect(conversation(&state, ref, .working, .{}, &test_said).stoppable and !conversation(&state, ref, .finished, .{}, &test_said).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
@@ -4836,7 +4802,7 @@ test "the composer starts a Session with its text and opens it" {
     draft = try typeText(&state, "Try again");
     _ = try submit(&state, draft);
     try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
-    try expectNoticeWithData(&state, "! Not started: model_capability_unavailable");
+    try expectNotice(&state, "! Not started: model_capability_unavailable");
     try std.testing.expect(!state.starting());
 }
 
@@ -4846,20 +4812,13 @@ test "the composer starts text with one slash from //, as a conversation does" {
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-    try expectNoticeWithData(&state, "! Unknown command /home/me/project");
+    try expectNotice(&state, "! Unknown command /home/me/project");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
 }
 
-/// The lines of `state` with `draft` at `width` by `height`.
-fn draftLines(state: *State, draft: Draft, width: u16, height: u16) ![]u8 {
-    var shown: Frame = try .drafted(state, draft, width, height, .{}, 0);
-    defer shown.deinit();
-    return shown.text();
-}
-
-/// The status row under `draft` reads `expected`.
+/// The core chooses this Footer action for `draft`.
 fn expectLastLine(state: *State, draft: Draft, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, footerRight(state, draft));
 }
@@ -5058,7 +5017,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
     }) |case| {
         draft = try typeText(&state, case[0]);
         try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-        try if (case[1].ptr == configure_usage.ptr) expectNoticeWithData(&state, case[1]) else expectNotice(&state, case[1]);
+        try expectNotice(&state, case[1]);
         try std.testing.expect(state.settings.empty());
     }
     // Alone, /configure waits for an option: Enter on it in the list adds
@@ -5808,8 +5767,8 @@ test "the overview's rows draw an empty Store" {
     for ([_]u16{ 40, 80, 200 }) |width| {
         const text = try screenText(&state, width, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session\n\n"));
-        try std.testing.expect(std.mem.endsWith(u8, text, "enter start"));
+        try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session\n"));
+        try std.testing.expectEqualStrings("enter start", footerRight(&state, .{}));
         try std.testing.expect(std.mem.indexOf(u8, text, "new Session ·") == null);
     }
 }
@@ -5866,8 +5825,7 @@ fn repeated(comptime text: []const u8, comptime count: usize) []const u8 {
     }
 }
 
-test "every line fits the screen as the terminal measures it" {
-    var draft: Draft = .{};
+test "every logical row fits the screen as the terminal measures it" {
     const rockets = comptime repeated("🚀", 50);
     var state = try opened(&.{
         session("k7m2qx", .{ .working = ago(1) }, .{ .label = rockets[0..max_label_bytes] }),
@@ -5876,9 +5834,9 @@ test "every line fits the screen as the terminal measures it" {
         session("m3n8pd", .{ .failed = .{ .since = test_now_s - 120, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = comptime repeated("Cafe\u{301} ", 14) }),
     });
     defer state.deinit();
-    draft = try typeText(&state, rockets);
+    _ = try typeText(&state, rockets);
     for ([_]Caps{ .{ .width = .unicode }, .{ .width = .wcwidth }, .{ .unicode = false } }) |caps| for ([_]u16{ 80, 41, 24 }) |width| {
-        var shown: Frame = try .drafted(&state, draft, width, 24, caps, 0);
+        var shown: Frame = try .of(&state, width, 24, caps, 0);
         defer shown.deinit();
         const text = try shown.text();
         defer std.testing.allocator.free(text);
@@ -6517,16 +6475,13 @@ test "a save that ends after the person left is told on the way out" {
     }
 }
 
-test "the unknown-command notice fits a 40-column screen" {
+test "an unknown command returns an attention notice" {
     var state = try pickerState(null);
     defer state.deinit();
     const draft = try typeText(&state, "/status");
     _ = try submit(&state, draft);
-    const screen = try screenText(&state, 40, 24, .{ .unicode = true });
-    defer std.testing.allocator.free(screen);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "Unknown command") != null);
-    try std.testing.expect(std.mem.endsWith(u8, screen, "! Unknown command /status"));
-    try std.testing.expectEqualStrings("! Unknown command /status", state.notice.?.text());
+    try expectNotice(&state, "! Unknown command /status");
+    try std.testing.expectEqual(Colour.attention, state.notice.?.colour);
 }
 
 test "a start the Host refuses for want of its sign-in names the sign-in and its login, if it has one" {
@@ -6557,8 +6512,8 @@ test "a picker survives a tiny screen" {
 }
 
 /// The rows the Sessions' list or a panel takes on an 80 by 24 screen.
-fn listRows(state: *State, draft: Draft) ![]u8 {
-    var shown: Frame = try .drafted(state, draft, 80, 24, .{}, 0);
+fn listRows(state: *State) ![]u8 {
+    var shown: Frame = try .of(state, 80, 24, .{}, 0);
     defer shown.deinit();
     const text = try Frame.textOf(shown.list);
     defer std.testing.allocator.free(text);
@@ -6641,10 +6596,6 @@ test "/rename names the selected Session through the shell, as a conversation do
         try expectNotice(&state, case[1]);
         try std.testing.expectEqual(case[2], state.notice.?.colour);
     }
-    // Both lines show under the input.
-    const shown = try screenText(&state, 80, 24, .{});
-    defer std.testing.allocator.free(shown);
-    try std.testing.expect(std.mem.endsWith(u8, shown, "Configured. ! label saved locally only"));
 }
 
 test "/rename under a panel brings the Sessions back, so the list shows the row it names" {
@@ -6665,7 +6616,7 @@ test "/setup needs no Session, and output of more than a line takes the Sessions
     try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
     try ranWith(&state, .{ .output = "Saved defaults for future Sessions.\nStore: /s (saved)\nNotifications: off\n" });
     try expectNotice(&state, null);
-    const shown = try listRows(&state, .{});
+    const shown = try listRows(&state);
     defer std.testing.allocator.free(shown);
     try expectLines(shown, 1, &.{ " Saved defaults for future Sessions.", " Store: /s (saved)", " Notifications: off", "" });
     try std.testing.expect(std.mem.startsWith(u8, shown, " /setup "));
@@ -6674,7 +6625,7 @@ test "/setup needs no Session, and output of more than a line takes the Sessions
     // Output past what the overview keeps says it was cut.
     _ = try submit(&state, try typeText(&state, "/setup"));
     try ranWith(&state, .{ .output = "Defaults (read only):", .cut = true });
-    const cut = try listRows(&state, .{});
+    const cut = try listRows(&state);
     defer std.testing.allocator.free(cut);
     try expectLines(cut, 1, &.{ " Defaults (read only):", " Output cut at 8 KiB." });
     // Typing "/" lists /setup's options as a conversation does.
