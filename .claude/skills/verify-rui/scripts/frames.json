@@ -5,8 +5,8 @@
   ],
   "states": [
     {
-      "name": "archive-notice",
-      "note": "Archive reply occupies only the footer right side, using the chat name",
+      "name": "archive-state",
+      "note": "Archive confirmation is the durable left facts badge only, with no blank row below Footer",
       "cast": [
         {
           "label": "Archive audit",
@@ -28,16 +28,18 @@
           ]
         },
         {
-          "wait": "Archived"
+          "wait": "· Archived"
         }
       ],
       "expect": [
-        "Archived Archive audit"
+        "Archive audit",
+        "· Archived"
       ],
       "absent": [
         "[Archived]",
         "/unarchive",
-        "{session:Archive audit}"
+        "{session:Archive audit}",
+        "Archived Archive audit"
       ]
     },
     {
@@ -62,6 +64,59 @@
       ],
       "absent": [
         "[Archived]",
+        "/unarchive",
+        "{session:Archive audit}"
+      ]
+    },
+    {
+      "name": "transient-chat",
+      "note": "A chat copy reply appears once on Footer, alongside durable archive state",
+      "open": "Archive audit",
+      "steps": [
+        {
+          "text": "/copy"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Copied"
+        }
+      ],
+      "expect": [
+        "Copied",
+        "· Archived"
+      ],
+      "absent": [
+        "Archived Archive audit",
+        "/unarchive",
+        "{session:Archive audit}"
+      ]
+    },
+    {
+      "name": "transient-overview",
+      "note": "An overview command error occupies Footer once, without a separate reply row",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/nope"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Unknown command /nope"
+        }
+      ],
+      "expect": [
+        "Unknown command /nope"
+      ],
+      "absent": [
+        "Archived Archive audit",
         "/unarchive",
         "{session:Archive audit}"
       ]

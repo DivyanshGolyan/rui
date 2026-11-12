@@ -1012,8 +1012,8 @@ test "App Session retains the draft across a permission card arriving during pas
         try std.testing.expectEqual(style.of(case.caps, .{ .colour = .quiet }).fg, user.style.fg);
         try std.testing.expect(!user.style.dim);
         try std.testing.expectEqual(case.ground, rendered.readCell(79, 10).?.style.bg);
-        try std.testing.expectEqual(case.band, rendered.readCell(79, 22).?.style.bg);
-        try std.testing.expectEqual(case.ground, rendered.readCell(79, 23).?.style.bg);
+        try std.testing.expectEqual(case.ground, rendered.readCell(79, 22).?.style.bg);
+        try std.testing.expectEqual(case.band, rendered.readCell(79, 23).?.style.bg);
     }
     self.app_caps = .{ .depth = .none };
     _ = self.input.append("headTAIL");
@@ -3481,9 +3481,9 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 defer file.close(std.testing.io);
                 if (typing) try held.keys("kept draft");
                 const before = try held.shown();
-                // Footer/state, selector or single-line draft (five rows),
+                // Footer and selector or single-line draft (four rows),
                 // then one quiet row reporting the undisplayed request rows.
-                const expected = if (size.height.? == 30) "… 16 more lines" else "… 6 more lines";
+                const expected = if (size.height.? == 30) "… 15 more lines" else "… 5 more lines";
                 try std.testing.expect(std.mem.indexOf(u8, before, expected) != null);
                 try std.testing.expect(std.mem.indexOf(u8, before, "row 039") == null);
                 try std.testing.expectEqual(.action, held.screen.view);
@@ -5728,9 +5728,9 @@ test "App Session shell gutter and back control follow list visibility through r
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent).?.char.grapheme);
         try std.testing.expectEqualStrings(" ", screen.readCell(start, sent + 1).?.char.grapheme);
         try std.testing.expectEqualStrings("✓", screen.readCell(start + 1, sent + 1).?.char.grapheme);
-        try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 24).?.char.grapheme);
+        try std.testing.expectEqualStrings(if (wide) "d" else "‹", screen.readCell(start + 1, 25).?.char.grapheme);
         var facts: std.Io.Writer.Allocating = .init(arena);
-        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 24).?.char.grapheme);
+        for (start..width) |column| try facts.writer.writeAll(screen.readCell(@intCast(column), 25).?.char.grapheme);
         try std.testing.expectEqualStrings(if (wide) " demo · gpt-5.5 · low · 100% left" else " ‹ demo · gpt-5.5 · low · 100% left", std.mem.trimEnd(u8, facts.written(), " "));
         try std.testing.expect(fixture.root.session.?.eql(fixture.widget));
         try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
@@ -5827,7 +5827,7 @@ test "App Session's status bar never says Sent: an accepted Message's row is its
     const self = fixture.self;
     // Accepted with no original held: the bar is empty, so the overview's
     // line shows there.
-    try std.testing.expectEqualStrings("‹ k7m2qx", (try fixture.rows())[22]);
+    try std.testing.expectEqualStrings("‹ k7m2qx", (try fixture.rows())[23]);
     ChromeFixture.overview_says = "Port overview to vxfw finished";
     defer ChromeFixture.overview_says = null;
     try std.testing.expect(ChromeFixture.findEnding(&try fixture.rows(), "Port overview to vxfw finished") != null);
@@ -5895,8 +5895,8 @@ test "App Session Footer clips identity in terminal cells" {
     try self.line.label.?.set("Port the overview to vxfw and keep its key table");
     try self.line.model.set("gpt-6-sol");
     const shown = try fixture.rows();
-    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
-    try std.testing.expect(session_line.cells(shown[22], .unicode) <= 80);
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ Port the overview to vxfw and keep its key table · gpt-6-sol · low"));
+    try std.testing.expect(session_line.cells(shown[23], .unicode) <= 80);
 }
 
 test "App Session Footer notice replaces the stop hint without changing stoppability" {
@@ -5909,9 +5909,9 @@ test "App Session Footer notice replaces the stop hint without changing stoppabi
     defer ChromeFixture.overview_says = null;
     const shown = try fixture.rows();
     try std.testing.expect(ChromeFixture.findEnding(&shown, "Port overview to vxfw finished") != null);
-    try std.testing.expect(std.mem.startsWith(u8, shown[22], "‹ k7m2qx"));
-    try std.testing.expect(std.mem.endsWith(u8, shown[22], "Port overview to vxfw finished"));
-    try std.testing.expect(std.mem.indexOf(u8, shown[22], "ctrl+x stop") == null);
+    try std.testing.expect(std.mem.startsWith(u8, shown[23], "‹ k7m2qx"));
+    try std.testing.expect(std.mem.endsWith(u8, shown[23], "Port overview to vxfw finished"));
+    try std.testing.expect(std.mem.indexOf(u8, shown[23], "ctrl+x stop") == null);
     try std.testing.expect(self.chrome.stoppable);
     // Work ends: the stop key goes; the overview's notice stays its own.
     self.live.work.state = .{ .idle = .{ .since = 0 } };
@@ -6170,11 +6170,11 @@ test "App Session footer takes list visibility from Root across desktop and phon
         surface.render(window, fixture.self.app_input.composer.widget());
         const chat_col: u16 = if (case.list) Root.list_width + 1 else 0;
         var row: std.Io.Writer.Allocating = .init(arena);
-        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 28).?.char.grapheme);
+        for (chat_col..case.width) |col| try row.writer.writeAll(screen.readCell(@intCast(col), 29).?.char.grapheme);
         try std.testing.expectEqual(@as(usize, if (case.list) 0 else 1), std.mem.count(u8, row.written(), "‹"));
         try std.testing.expect(std.mem.indexOf(u8, row.written(), "k7m2qx") != null);
-        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 27).?.char.grapheme);
-        for (chat_col..case.width) |col| try std.testing.expectEqualStrings(" ", screen.readCell(@intCast(col), 29).?.char.grapheme);
+        try std.testing.expectEqualStrings("─", screen.readCell(chat_col, 28).?.char.grapheme);
+        try std.testing.expect(std.mem.trim(u8, row.written(), " ").len != 0);
     }
 }
 
@@ -6406,7 +6406,8 @@ test "SessionFrontend feed jump after high eviction keeps old rows until the ope
     try std.testing.expect(held.self.reading.opening);
     try std.testing.expectEqualDeep(anchor, held.screen.anchor.anchor);
     try std.testing.expectEqual(feed_reads.Read.opening, FeedPolicy.nextRead(held.self.feedState()).?);
-    try std.testing.expectEqualStrings(firstRows(old, held.screen.height), firstRows(try held.shown(), held.screen.height));
+    const opening = try held.shown();
+    try std.testing.expectEqualStrings(firstRows(old, held.screen.height), firstRows(opening, held.screen.height));
     try fixture.longPage(.opening, 300);
     try std.testing.expect(held.screen.anchor.following());
     try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "entry 315 line 7") != null);
@@ -7390,16 +7391,16 @@ test "SessionFrontend history physical feed geometry" {
     try fixture.page(.opening, &.{.{ .key = 1, .text = words.buffered() }}, true, true);
     // Every feed row sits one column in: the shell owns that gutter.
     const initial = try held.shown();
-    try std.testing.expectEqual(@as(u16, 18), held.screen.height);
+    try std.testing.expectEqual(@as(u16, 19), held.screen.height);
     var initial_rows = std.mem.splitScalar(u8, initial, '\n');
-    for (83..100) |line| {
+    for (82..100) |line| {
         var expected: [32]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, " History line{d:0>3}", .{line}), std.mem.trimEnd(u8, initial_rows.next().?, " "));
     }
     try std.testing.expectEqualStrings(" TD4 history end", std.mem.trimEnd(u8, initial_rows.next().?, " "));
     try held.keys("\x1b[5~");
     var older_rows = std.mem.splitScalar(u8, try held.shown(), '\n');
-    for (74..92) |line| {
+    for (73..92) |line| {
         var expected: [32]u8 = undefined;
         try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, " History line{d:0>3}", .{line}), std.mem.trimEnd(u8, older_rows.next().?, " "));
     }

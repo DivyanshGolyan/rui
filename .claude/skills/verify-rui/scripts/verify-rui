@@ -2450,8 +2450,8 @@ def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
                   allow_exit=allow_exit)
 
 
-def frame_ready(terminal, state, allow_exit=False):
-    expected, absent = frame_expectations(state), frame_absences(state)
+def frame_ready(terminal, state, allow_exit=False, sessions=None):
+    expected, absent = frame_expectations(state), frame_absences(state, sessions)
     terminal.wait(lambda c: all(text in c.completed for text in expected)
                   and all(text not in c.completed for text in absent),
                   "state expectations: " + repr({"expect": expected, "absent": absent}),
@@ -2568,7 +2568,7 @@ def cmd_frames(args):
                 first_wait = state["steps"][0].get("wait") if state["steps"] else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
                 exiting = frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
-                frame_ready(target, state, allow_exit=exiting)
+                frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
             except (Exception, SystemExit) as error:
                 reason = str(error)
                 if state["name"] in selected:
@@ -2593,7 +2593,7 @@ def cmd_frames(args):
                                 if target is None:
                                     raise FrameFailure("terminal did not launch")
                                 target.resize(size)
-                                frame_ready(target, state, allow_exit=exiting)
+                                frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
                             # The first viewport is already sized. Capture directly
                             # after its steps/wait, while a transient is still visible.
                             record = frame_capture(run, target, out, state, size, reason)

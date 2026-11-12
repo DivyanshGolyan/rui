@@ -7480,8 +7480,9 @@ test "relaunch startup restores copied drafts open conversation and ending notic
     try std.testing.expectEqual(overview_draft.cursor, rig.overview.composer.cursor);
     try std.testing.expectEqual(overview_draft.rejected, rig.overview.composer.rejected);
     try std.testing.expectEqualStrings("bbbbbb", &rig.overview.options.open.?);
+    try std.testing.expectEqualStrings(line, view.footerNotice(&rig.overview.state).?);
     var status: view.StatusBuffer = undefined;
-    try std.testing.expectEqualStrings(line, view.statusLine(&rig.overview.state, rig.overview.caps, &status).?.text);
+    try std.testing.expect(view.statusLine(&rig.overview.state, rig.overview.caps, &status) == null);
     for ([_][]const u8{ "aaaaaa", "bbbbbb" }) |id| {
         const draft = rig.overview.session_drafts.take(gpa, id).?;
         defer draft.deinit(gpa);

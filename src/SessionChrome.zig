@@ -297,11 +297,11 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
         self.place(&screen, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived } });
         const idle = try input.widget().draw(ctx);
-        self.place(&screen, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .notice = "Archived Archive audit", .stoppable = true });
+        self.place(&screen, .{ .width = width, .facts = .{ .name = "Archive audit", .archive = .archived }, .notice = "Copied 3 lines", .stoppable = true });
         const noticed = try input.widget().draw(ctx);
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
         const footer = try input.facts.draw(ctx);
-        for ("Archived Archive audit", width - "Archived Archive audit".len..) |byte, col| try std.testing.expectEqual(byte, footer.readCell(col, 0).char.grapheme[0]);
+        for ("Copied 3 lines", width - "Copied 3 lines".len..) |byte, col| try std.testing.expectEqual(byte, footer.readCell(col, 0).char.grapheme[0]);
         // Only the back target remains: no invisible stop or restore hint.
         try std.testing.expectEqual(@as(usize, 1), footer.children.len);
     }
@@ -350,6 +350,55 @@ test "SessionChrome footer keeps identity left and active keys right, with back 
         const tiny = try input.facts.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= width and tiny.size.height <= height);
         for (tiny.children) |child| try std.testing.expect(child.origin.col + child.surface.size.width <= width);
+    };
+}
+
+test "SessionChrome archive confirmation is one durable badge at both widths, with no empty row" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    var bytes: [16]u8 = undefined;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var screen: AppScreen.Session = undefined;
+    screen.input = &input;
+    for ([_]u16{ 46, 99, 140 }) |width| {
+        self.place(&screen, .{ .width = width, .facts = .{ .current = .{ .name = "Archive audit", .model = "gpt-6.1-sol", .effort = .low, .left = 100 }, .archive = .archived } });
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} };
+        const drawn = try input.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
+        try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
+        const footer = drawn.children[1].surface;
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Archived"));
+        try std.testing.expect(std.mem.endsWith(u8, std.mem.trimEnd(u8, text.written(), " "), " · Archived"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Archive audit"));
+        try std.testing.expectEqualStrings("", self.state.text);
+        try std.testing.expect(self.status.bar.notice == null);
+    }
+}
+
+test "SessionChrome transient reply categories appear once in Footer and never in status" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    var bytes: [16]u8 = undefined;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
+    var input: @import("InputArea.zig") = .{ .composer = .{ .editor = &editor } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var screen: AppScreen.Session = undefined;
+    screen.input = &input;
+    for ([_][]const u8{ "Copied 3 lines", "Configured.", "! Unknown command /nope", "! Copy unavailable", "Opening tool output…", "No earlier message.", "Restored chat", "Upgraded to 0.60.0" }) |notice| for ([_]u16{ 46, 99 }) |width| {
+        self.place(&screen, .{ .width = width, .facts = .{ .name = "Chat" }, .notice = notice });
+        const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
+        try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
+        var text: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (drawn.children[1].surface.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), notice));
+        try std.testing.expectEqualStrings("", self.state.text);
     };
 }
 

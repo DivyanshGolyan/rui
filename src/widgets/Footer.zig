@@ -100,13 +100,13 @@ test "Footer notice fits right, truncates in terminal cells, and the next notice
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 32, .height = 4 }, .cell_size = .{} };
-    var footer: Self = .{ .left = "Chat", .right = "/unarchive", .notice = "Archived Archive audit" };
+    var footer: Self = .{ .left = "Chat", .right = "ctrl+x stop", .notice = "Copied 12 lines" };
     const fitted = try footer.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 1), fitted.size.height);
-    for ("Archived Archive audit", 10..) |byte, col| try std.testing.expectEqual(byte, fitted.readCell(col, 0).char.grapheme[0]);
+    for ("Copied 12 lines", 17..) |byte, col| try std.testing.expectEqual(byte, fitted.readCell(col, 0).char.grapheme[0]);
     const clipped = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = 12, .height = 4 }));
     try std.testing.expectEqual(@as(u16, 1), clipped.size.height);
-    for ("Archived Arc", 0..) |byte, col| try std.testing.expectEqual(byte, clipped.readCell(col, 0).char.grapheme[0]);
+    for ("Copied 12 li", 0..) |byte, col| try std.testing.expectEqual(byte, clipped.readCell(col, 0).char.grapheme[0]);
     footer.notice = "Copied 3 lines";
     const next = try footer.widget().draw(ctx);
     for ("Copied 3 lines", 18..) |byte, col| try std.testing.expectEqual(byte, next.readCell(col, 0).char.grapheme[0]);
@@ -115,5 +115,5 @@ test "Footer notice fits right, truncates in terminal cells, and the next notice
     try std.testing.expectEqualStrings("界", unicode.readCell(0, 0).char.grapheme);
     try std.testing.expectEqualStrings("e\u{301}", unicode.readCell(2, 0).char.grapheme);
     footer.notice = null;
-    try std.testing.expectEqualStrings("/unarchive", footer.rightText());
+    try std.testing.expectEqualStrings("ctrl+x stop", footer.rightText());
 }
