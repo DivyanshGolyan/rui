@@ -677,29 +677,29 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     try self.dispatch(.all);
                 }
             }
-            if (!self.root.settings_open) try self.root.settings_page.widget().handleEvent(ctx, .tick);
+            if (!self.root.input.layer.settingsOpen()) try self.root.settings_page.widget().handleEvent(ctx, .tick);
             if (self.wantsFrame()) ctx.redraw = true;
             const open: ?[]const u8 = if (self.app_session) |shown| if (shown.frontend) |frontend| frontend.titleName() else null else null;
             if (self.title.next(open, self.state.summary.counts.needs_you)) |text| try ctx.setTitle(text);
         },
-        .mouse => |mouse| if (mouse.button == .left and mouse.type == .press and !self.root.settings_open and !self.root.settings_page.standaloneOpen()) {
+        .mouse => |mouse| if (mouse.button == .left and mouse.type == .press and !self.root.input.layer.settingsOpen() and !self.root.settings_page.standaloneOpen()) {
             _ = try self.event(.{ .footer_input = .{ .click = null } });
             ctx.redraw = true;
         },
         .key_press, .paste_start, .paste_end, .invalid_key => {
-            if (self.root.settings_open) {
+            if (self.root.input.layer.settingsOpen()) {
                 // Under the settings page only the keys that are the whole
                 // app's stay live: leaving, and Esc for an Upgrade it can
                 // still cancel. Nothing edits the hidden draft or the list.
-                const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
+                const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
                 const live = selected == .action and (selected.action == .exit or (selected.action == .clear and self.state.upgrade.takesEscape()));
                 if (!live) {
                     ctx.consumeEvent();
                     return;
                 }
             }
-            if (!self.root.settings_open) {
-                if (self.root.settings_page.standaloneField() != null and input == .key_press and !self.root.pasting) {
+            if (!self.root.input.layer.settingsOpen()) {
+                if (self.root.settings_page.standaloneField() != null and input == .key_press and !self.root.input.pasting) {
                     const named = TerminalEditor.named(input.key_press);
                     if (named == .escape or named == .ctrl_g) {
                         try self.closeStandaloneChoice(ctx);
@@ -709,7 +709,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                 }
                 if (self.root.settings_page.standaloneOpen()) {
                     const page = &self.root.settings_page;
-                    const choice_input = if (self.root.pasting or input != .key_press) page.takesPaste() else page.takesKey(input.key_press);
+                    const choice_input = if (self.root.input.pasting or input != .key_press) page.takesPaste() else page.takesKey(input.key_press);
                     if (choice_input) {
                         try page.standaloneWidget().handleEvent(ctx, input);
                         ctx.consumeAndRedraw();
@@ -717,7 +717,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     }
                     // As on the regular Settings page, unbound text and a
                     // paste into a row choice never edit the hidden draft.
-                    const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
+                    const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
                     if (selected != .action or selected.action != .exit) {
                         ctx.consumeEvent();
                         return;
@@ -726,7 +726,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     var footer_input: view.FooterInput = .other;
                     if (input == .paste_start) {
                         footer_input = .text;
-                    } else if (input == .key_press and !self.root.pasting) {
+                    } else if (input == .key_press and !self.root.input.pasting) {
                         const key = input.key_press;
                         if (key.matchExact(vaxis.Key.tab, .{})) footer_input = .{ .tab = false } else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) footer_input = .{ .tab = true } else if (key.matchExact(vaxis.Key.enter, .{})) footer_input = .enter else if (TerminalEditor.named(key) == .escape or TerminalEditor.named(key) == .ctrl_g) footer_input = .escape else if (TerminalEditor.selectEvent(view.keys, input, false) == .text) footer_input = .text;
                     }
@@ -738,13 +738,13 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     }
                 }
             }
-            if (input == .key_press and !self.root.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and try requestHostStart(self, ctx)) {
+            if (input == .key_press and !self.root.input.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and try requestHostStart(self, ctx)) {
                 ctx.consumeEvent();
                 return;
             }
-            const selected = TerminalEditor.selectEvent(view.keys, input, self.root.pasting);
+            const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
             const composed: view.Input = switch (self.state.route(selected)) {
-                .edit => .{ .composer = self.composer.appEvent(view.keys, input, self.root.pasting) },
+                .edit => .{ .composer = self.composer.appEvent(view.keys, input, self.root.input.pasting) },
                 .frozen => .{ .composer = if (selected == .action) .{ .action = selected.action } else .none },
             };
             try self.appNext(ctx, try self.event(.{ .composed = .{ .input = composed, .draft = self.composerDraft() } }));
@@ -758,7 +758,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.pasting } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.input.pasting } }));
     if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
 }
@@ -1269,7 +1269,7 @@ fn appEffortClick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 /// Both Escape and its drawn action close only this presentation.
 fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (self.root.settings_page.standaloneField() == null or self.root.pasting) return;
+    if (self.root.settings_page.standaloneField() == null or self.root.input.pasting) return;
     self.root.settings_page.closeStandaloneChoice();
     _ = try self.event(.{ .footer_input = .escape });
     try ctx.requestFocus(self.app_input.composer.widget());
@@ -1283,7 +1283,7 @@ fn appChoiceClose(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 fn appChoicePick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (!self.root.settings_page.standaloneOpen() or self.root.pasting) return;
+    if (!self.root.settings_page.standaloneOpen() or self.root.input.pasting) return;
     try self.root.settings_page.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
 }
 
@@ -1399,7 +1399,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .sign_in_open = options.sign_in };
+    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
@@ -1428,14 +1428,10 @@ fn closeMainPresentation(raw: *anyopaque) void {
 fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.sign_in.task.thread != null) return;
     if (!view.admitsDefaultsEdit(&self.state) or self.defaults_save == .pending) return error.DefaultsUnavailable;
-    self.root.settings_page.closeStandaloneChoice();
-    self.root.closeMainPresentation();
     self.sign_in.reset();
     self.sign_in.selectors = self.options.selectors;
     self.sign_in.selectors.store = self.options.store;
-    self.root.sign_in_open = true;
-    try ctx.requestFocus(self.sign_in.widget());
-    ctx.redraw = true;
+    try self.root.openSignIn(ctx);
 }
 
 fn listVisible(raw: *anyopaque) bool {
@@ -1446,17 +1442,13 @@ fn listVisible(raw: *anyopaque) bool {
 /// The first-run screen is the only thing the app can do, so it stays until
 /// sign-in gives a default; a screen opened from Settings always returns there.
 fn signInIsFirstRun(self: *const Self) bool {
-    return self.root.sign_in_open and !self.root.settings_open and self.state.default == null;
+    return self.root.input.layer.signInOpen() and !self.root.input.layer.settingsOpen() and self.state.default == null;
 }
 
 fn closeSignIn(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.signInIsFirstRun()) return;
-    self.root.sign_in_open = false;
-    if (self.root.settings_open) {
-        try ctx.requestFocus(self.root.settings_page.widget());
-    } else try self.root.showMain(ctx);
-    ctx.redraw = true;
+    try self.root.closeSignIn(ctx);
 }
 
 fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activation) !void {
@@ -1484,8 +1476,7 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
         notice.len = writer.buffered().len;
         self.state.notice = notice;
     }
-    self.root.sign_in_open = false;
-    try self.root.showMain(ctx);
+    try self.root.signedIn(ctx);
     if (self.root.session == null) try ctx.requestFocus(self.app_input.composer.widget());
 }
 
@@ -5331,10 +5322,10 @@ test "Settings Keys opens from the overview and Esc returns to settings" {
         try std.testing.expect(std.mem.indexOf(u8, text, "Ctrl-X twice") == null);
         try std.testing.expect(try rig.press("\x1b") == null);
         try std.testing.expect(!overview.root.settings_page.keys_open);
-        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
         try std.testing.expect(overview.root.session == null);
         try std.testing.expect(try rig.press("\x1b") == null);
-        try std.testing.expect(!overview.root.settings_open);
+        try std.testing.expect(!overview.root.input.layer.settingsOpen());
         try std.testing.expectEqual(selected, overview.state.selected);
     }
 }
@@ -6457,7 +6448,7 @@ test "App root navigation shows and focuses the main pane before every Session s
         }
         fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
             try std.testing.expect(overview.root.session == null);
-            try std.testing.expect(!overview.root.settings_open);
+            try std.testing.expect(!overview.root.input.layer.settingsOpen());
             try std.testing.expect((try focus(ctx)).eql(overview.widget()));
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
@@ -6561,7 +6552,7 @@ test "App root navigation shows and focuses the main pane before every Session s
                         try overview.appNext(&ctx, try overview.event(.{ .clicked = .{ .target = .{ .open = target } } }));
                         try std.testing.expect(!ctx.quit);
                         try std.testing.expect(ctx.redraw);
-                        try std.testing.expect(!overview.root.settings_open);
+                        try std.testing.expect(!overview.root.input.layer.settingsOpen());
                         try std.testing.expect(!overview.root.settings_page.hasChoice());
                         try std.testing.expect(overview.follow.pending == null);
                         const kept = retained and (same or guard != .allowed);
@@ -6676,9 +6667,9 @@ test "App settings Enter reaches Root at both widths with and without a retained
             // do not synthesize a core click or set selected directly.
             try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
             try std.testing.expect(overview.state.selected == .settings);
-            try std.testing.expect(!overview.root.settings_open);
+            try std.testing.expect(!overview.root.input.layer.settingsOpen());
             try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
-            try std.testing.expect(overview.root.settings_open);
+            try std.testing.expect(overview.root.input.layer.settingsOpen());
             try std.testing.expect(overview.state.selected == .settings);
             try std.testing.expect(!ctx.quit);
             try std.testing.expect(ctx.redraw);
@@ -6842,7 +6833,7 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     ctx.phase = .capturing;
     try overview.root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
     try std.testing.expect(overview.upgrade_job.cancelling);
-    try std.testing.expect(overview.root.settings_open);
+    try std.testing.expect(overview.root.input.layer.settingsOpen());
     // Under the page nothing reaches the hidden draft or moves the list,
     // and leaving works as on the overview.
     const page = overview.root.settings_page.widget();
@@ -6850,7 +6841,7 @@ test "App settings typed admission and Upgrade stay within the Overview owner" {
     try app_events.send(&ctx, "x\x1b[H\x18", overview.root.widget(), page);
     try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
     try std.testing.expectEqual(selected, overview.state.selected);
-    try std.testing.expect(!ctx.quit and overview.root.settings_open);
+    try std.testing.expect(!ctx.quit and overview.root.input.layer.settingsOpen());
     try app_events.send(&ctx, "\x03", overview.root.widget(), page);
     try std.testing.expect(ctx.quit);
     ctx.quit = false;
@@ -7073,7 +7064,7 @@ test "App settings Model borrow ends on every Overview menu replacement or relea
         try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
         try std.testing.expect(!page.hasChoice());
         try std.testing.expectEqual(AppSettings.SaveState.idle, overview.defaults_save);
-        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
     }
 }
 
@@ -7097,7 +7088,7 @@ test "App settings Model keeps every named app binding live while filter text st
         try std.testing.expectEqual(action == .exit, ctx.quit);
         try std.testing.expectEqual(selected, overview.state.selected);
         try std.testing.expectEqual(@as(usize, 0), overview.composerDraft().bytes.len);
-        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
         // Terminal departure ends the transient edit; every non-exit app
         // binding retains the same filter ownership as before.
         try std.testing.expectEqual(action != .exit and key != .escape and key != .ctrl_g, page.hasChoice());
@@ -7156,7 +7147,7 @@ test "App settings Model filters live choices and saves the next Session at both
         try std.testing.expectEqual(@as(?protocol.PermissionMode, .ask), saved.permission_mode);
         try std.testing.expectEqualStrings(id, overview.state.default.?.model.slice());
         try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
-        try std.testing.expect(!overview.root.settings_open);
+        try std.testing.expect(!overview.root.input.layer.settingsOpen());
         try std.testing.expect(try rig.press("\r") == null);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqualStrings("kept draft", Seen.now.start.text.slice());
@@ -7335,7 +7326,7 @@ test "Overview mouse Settings hover persists across frames and never changes sel
     defer left.deinit();
     try std.testing.expectEqual(plain.screen.readCell(4, row).?.style, left.screen.readCell(4, row).?.style);
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
-    try std.testing.expect(rig.overview.root.settings_open);
+    try std.testing.expect(rig.overview.root.input.layer.settingsOpen());
 }
 
 test "Overview mouse Palette hover survives redraw and a click follows Enter except during paste" {
@@ -7370,11 +7361,11 @@ test "Overview mouse Palette hover survives redraw and a click follows Enter exc
     var left = try rig.shown(80, 24);
     defer left.deinit();
     try std.testing.expectEqual(plain.screen.readCell(4, row).?.style, left.screen.readCell(4, row).?.style);
-    rig.overview.root.pasting = true;
+    rig.overview.root.input.pasting = true;
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
     try std.testing.expectEqualStrings("/", rig.overview.composerDraft().bytes);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
-    rig.overview.root.pasting = false;
+    rig.overview.root.input.pasting = false;
     try std.testing.expect(try rig.click(4, row, 80, 24) == null);
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
     try std.testing.expect(std.mem.startsWith(u8, rig.overview.composerDraft().bytes, "/rename"));
@@ -7415,7 +7406,7 @@ test "Overview mouse New Session forwards blank whitespace task command and past
         const row: u16 = for (0..24) |y| {
             if (std.mem.indexOf(u8, try shown.line(@intCast(y)), "+ New Session") != null) break @intCast(y);
         } else return error.TestExpectedNewRow;
-        rig.overview.root.pasting = pasting;
+        rig.overview.root.input.pasting = pasting;
         try std.testing.expect(try rig.click(4, row, 80, 24) == null);
         try std.testing.expect(try rig.settle() == null);
         const starts = !pasting and std.mem.eql(u8, draft, "a mouse task");
@@ -7594,8 +7585,8 @@ test "App settings Sign-in Enter and click use the Overview owner and return to 
             page.select(.sign_in);
             try app_events.send(&ctx, "\r", overview.root.widget(), page.widget());
         }
-        try std.testing.expectEqual(!busy, overview.root.sign_in_open);
-        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expectEqual(!busy, overview.root.input.layer.signInOpen());
+        try std.testing.expect(overview.root.input.layer.settingsOpen());
         try std.testing.expect(!page.hasChoice());
         if (busy) {
             try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
@@ -7607,8 +7598,8 @@ test "App settings Sign-in Enter and click use the Overview owner and return to 
         // Defaultless Settings is not first-run: its owner returns here on Esc.
         try std.testing.expect(!overview.signInIsFirstRun());
         try app_events.send(&ctx, "\x1b", overview.root.widget(), overview.sign_in.widget());
-        try std.testing.expect(!overview.root.sign_in_open);
-        try std.testing.expect(overview.root.settings_open and !ctx.quit);
+        try std.testing.expect(!overview.root.input.layer.signInOpen());
+        try std.testing.expect(overview.root.input.layer.settingsOpen() and !ctx.quit);
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(page.widget()));
     };
 }
@@ -7626,16 +7617,17 @@ test "Sign-in completion applies the core default and restores only a visible fo
         const overview = rig.overview;
         const session: vxfw.Text = .{ .text = "Retained Session" };
         if (session_open) overview.root.session = session.widget();
-        overview.root.settings_open = true;
-        overview.root.sign_in_open = true;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        try overview.root.openSignIn(&ctx);
+        ctx.cmds.clearRetainingCapacity();
         var activation: SignIn.Activation = .{ .binding = .{}, .store = .{} };
         try activation.binding.provider.set("openai");
         try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
         try activation.store.set("/store");
         activation.default_failed = default_failed;
         if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
-        var ctx = rig.context();
-        defer ctx.cmds.deinit(std.testing.allocator);
         try signedIn(overview, &ctx, activation);
         if (warning or default_failed) {
             try std.testing.expectEqual(true, overview.state.notice != null);
@@ -7648,7 +7640,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
         try std.testing.expect(overview.state.login_at != null);
-        try std.testing.expect(!overview.root.sign_in_open and !overview.root.settings_open);
+        try std.testing.expect(!overview.root.input.layer.signInOpen() and !overview.root.input.layer.settingsOpen());
         const expected = if (session_open) session.widget() else overview.app_input.composer.widget();
         try std.testing.expect(ctx.cmds.items[ctx.cmds.items.len - 1].request_focus.eql(expected));
         if (session_open) {
@@ -7676,14 +7668,14 @@ test "Sign-in admission waits for every pending default writer and Host upgrade"
             .upgrade_blocked => overview.state.upgrade = .{ .after = .blocked },
         }
         try std.testing.expectError(error.DefaultsUnavailable, overview.openSignIn(&ctx));
-        try std.testing.expect(!overview.root.sign_in_open);
+        try std.testing.expect(!overview.root.input.layer.signInOpen());
         try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
         overview.defaults_save = .idle;
         overview.state.left = false;
         overview.state.upgrade = .{};
     }
     try overview.openSignIn(&ctx);
-    try std.testing.expect(overview.root.sign_in_open);
+    try std.testing.expect(overview.root.input.layer.signInOpen());
 }
 
 test "Sign-in keeps the pane through Session and Settings clicks with and without a Session" {
@@ -7757,7 +7749,7 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
             try overview.root.openSettings(&ctx);
             try overview.openSignIn(&ctx);
         }
-        try std.testing.expect(overview.root.sign_in_open);
+        try std.testing.expect(overview.root.input.layer.signInOpen());
         const typed = "sk-typed-before-click";
         if (stage == .key_entry) try app_events.send(&ctx, "\x1b[C\r" ++ typed, overview.root.widget(), page.widget());
         try std.testing.expectEqual(stage, page.state.stage);
@@ -7782,8 +7774,8 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
             try app_events.mouse(&ctx, frame, .{ .col = @intCast(at.col), .row = @intCast(at.row), .button = .left, .type = kind, .mods = .{} });
         }
         try std.testing.expect(!ctx.quit);
-        try std.testing.expect(overview.root.sign_in_open);
-        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
+        try std.testing.expect(overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
         try std.testing.expectEqual(session != null, overview.root.session != null);
         if (session) |kept| try std.testing.expect(overview.root.session.?.eql(kept));
         if (frontend) |held| try std.testing.expect(overview.app_session.?.frontend.? == held);
@@ -7806,13 +7798,13 @@ test "Sign-in keeps the pane through Session and Settings clicks with and withou
         ctx.cmds.clearRetainingCapacity();
         try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
         if (stage == .key_entry) {
-            try std.testing.expect(overview.root.sign_in_open);
+            try std.testing.expect(overview.root.input.layer.signInOpen());
             try std.testing.expectEqual(Stage.choice, page.state.stage);
             try std.testing.expectEqual(@as(usize, 0), page.key.len);
             try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
         }
-        try std.testing.expect(!overview.root.sign_in_open);
-        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
+        try std.testing.expect(!overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
         const back = if (from == .settings) overview.root.settings_page.widget() else overview.root.session orelse overview.widget();
         try std.testing.expect(Nav.focus(&ctx).?.eql(back));
     };
@@ -7882,7 +7874,7 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
             try overview.root.openSettings(&ctx);
             try overview.openSignIn(&ctx);
         }
-        try std.testing.expect(overview.root.sign_in_open);
+        try std.testing.expect(overview.root.input.layer.signInOpen());
         try std.testing.expectEqual(@import("sign_in.zig").Stage.choice, page.state.stage);
         const stays = from == .first_run and !default;
         // Only the first-run screen with no default holds the overview's
@@ -7893,8 +7885,8 @@ test "Sign-in Esc at the choice leaves unless the first-run screen has no defaul
         ctx.cmds.clearRetainingCapacity();
         try app_events.send(&ctx, "\x1b", overview.root.widget(), page.widget());
         try std.testing.expect(!ctx.quit);
-        try std.testing.expectEqual(stays, overview.root.sign_in_open);
-        try std.testing.expectEqual(from == .settings, overview.root.settings_open);
+        try std.testing.expectEqual(stays, overview.root.input.layer.signInOpen());
+        try std.testing.expectEqual(from == .settings, overview.root.input.layer.settingsOpen());
         if (stays) {
             try std.testing.expect(Nav.focus(&ctx) == null);
             continue;
@@ -8299,10 +8291,10 @@ test "Overview standalone footer close clicks match Escape preserve paste and pr
             } else return error.TestExpectedCloseTarget;
             try std.testing.expectEqual(@as(u16, 9), close.surface.size.width);
             try std.testing.expect(close.origin.col + close.surface.size.width <= width);
-            self.root.pasting = true;
+            self.root.input.pasting = true;
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
             try std.testing.expect(page.standaloneOpen());
-            self.root.pasting = false;
+            self.root.input.pasting = false;
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
             try std.testing.expect(!page.standaloneOpen());
             try std.testing.expectEqual(view.FooterFocus.input, self.state.footer.focus);
@@ -8417,7 +8409,7 @@ test "Overview settings and admitted sign-in navigation end deferred footer inte
     try self.root.settings_page.openStandaloneChoice(&ctx, .effort, self.state.nextStart());
     self.state.footer.pending = .model;
     try self.openSignIn(&ctx);
-    try std.testing.expect(self.root.sign_in_open);
+    try std.testing.expect(self.root.input.layer.signInOpen());
     try std.testing.expect(self.root.settings_page.standaloneField() == null);
     try std.testing.expect(self.state.footer.pending == null);
     try std.testing.expectEqualStrings("kept draft", self.composerDraft().bytes);
