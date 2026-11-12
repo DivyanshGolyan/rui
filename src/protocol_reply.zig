@@ -445,11 +445,21 @@ pub const HostInfoProfile = enum {
         };
     }
 
-    /// The providers this profile's Host reports: version 9 knew only
-    /// Codex and OpenAI, and serves no other.
+    /// Providers are decoded at this boundary, not inferred by consumers.
+    /// Same-wire additions may be absent; historical profiles stay strict.
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
-            .current => protocol.Routes,
+            .current => current: {
+                // Keep the provider inventory with Routes; only its decoding
+                // default differs for v0.69.1's same-wire omission.
+                const fields = @typeInfo(protocol.Routes).@"struct";
+                var attrs = fields.field_attrs[0..fields.field_names.len].*;
+                const unserved: protocol.Route = .unserved;
+                for (fields.field_names, 0..) |name, i| {
+                    if (std.mem.eql(u8, name, "chatgpt")) attrs[i].default_value_ptr = &unserved;
+                }
+                break :current @Struct(.auto, null, fields.field_names, fields.field_types, &attrs);
+            },
             .released_9 => struct { codex: protocol.Route, openai: protocol.Route },
         };
     }
@@ -634,15 +644,74 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
 }
 
+test "Host information accepts same-wire provider additions and rejects malformed facts" {
+    // v0.69.1 spoke the current wire before ChatGPT was a provider. Its facts
+    // are complete for that Host, not a partially readable current Host.
+    const previous = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
+    const current = try std.mem.replaceOwned(u8, std.testing.allocator, previous, "\"openai\":\"unserved\"", "\"openai\":\"unserved\",\"chatgpt\":\"unserved\"");
+    defer std.testing.allocator.free(current);
+    const facts = (try parseHostInfo(previous, "/one")).ready;
+    try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.providers.codex);
+    try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.openai);
+    try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.chatgpt);
+    try std.testing.expectEqualDeep(facts, (try parseHostInfo(current, "/one")).ready);
+    try std.testing.expectEqualDeep(facts, try parseHostInfoForProfile(previous, "/one", .current));
+
+    // Every explicit current route is retained, independently of the default
+    // for an absent new provider. Keep the producer's Routes fully required.
+    inline for (@typeInfo(protocol.Routes).@"struct".field_names) |provider| {
+        for (std.meta.tags(protocol.Route)) |route| {
+            const before = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(@field(facts.capabilities.providers, provider)) });
+            defer std.testing.allocator.free(before);
+            const after = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(route) });
+            defer std.testing.allocator.free(after);
+            const body = try std.mem.replaceOwned(u8, std.testing.allocator, current, before, after);
+            defer std.testing.allocator.free(body);
+            var expected = facts;
+            @field(expected.capabilities.providers, provider) = route;
+            try std.testing.expectEqualDeep(expected, (try parseHostInfo(body, "/one")).ready);
+        }
+    }
+    for ([_][]const u8{ previous, current }) |body| {
+        for ([_]struct { from: []const u8, to: []const u8, failure: anyerror }{
+            .{ .from = "\"codex\":\"endpoint\",", .to = "", .failure = error.MissingField },
+            .{ .from = ",\"openai\":\"unserved\"", .to = "", .failure = error.MissingField },
+            .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":null", .failure = error.UnexpectedToken },
+            .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unknown\"", .failure = error.InvalidEnumTag },
+            .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":\"endpoint\",\"codex\":\"unserved\"", .failure = error.DuplicateField },
+            .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unserved\",\"openai\":\"unserved\"", .failure = error.DuplicateField },
+            .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unserved\",\"unknown\":\"unserved\"", .failure = error.UnknownField },
+        }) |case| {
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, body, case.from, case.to);
+            defer std.testing.allocator.free(bad);
+            try std.testing.expectError(case.failure, parseHostInfo(bad, "/one"));
+        }
+    }
+    for ([_]struct { value: []const u8, failure: anyerror }{
+        .{ .value = "\"unknown\"", .failure = error.InvalidEnumTag },
+        .{ .value = "null", .failure = error.UnexpectedToken },
+        .{ .value = "false", .failure = error.UnexpectedToken },
+        .{ .value = "{}", .failure = error.UnexpectedToken },
+        .{ .value = "[]", .failure = error.UnexpectedToken },
+        .{ .value = "\"unserved\",\"chatgpt\":\"unserved\"", .failure = error.DuplicateField },
+    }) |case| {
+        const field = try std.fmt.allocPrint(std.testing.allocator, "\"chatgpt\":{s}", .{case.value});
+        defer std.testing.allocator.free(field);
+        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"chatgpt\":\"unserved\"", field);
+        defer std.testing.allocator.free(bad);
+        try std.testing.expectError(case.failure, parseHostInfo(bad, "/one"));
+    }
+}
+
 test "upgrade Host information profiles retain the entire strict shape" {
     const legacy_wire = comptime HostInfoProfile.released_9.wire();
     const legacy_field = "\"version\":\"" ++ legacy_wire ++ "\"";
     const old = "{" ++ legacy_field ++ ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
     try std.testing.expectEqualStrings(protocol.wire_version, HostInfoProfile.current.wire());
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
-    // Version 9 names only Codex and OpenAI; the current shape adds ChatGPT,
-    // so neither profile reads the other's reply.
-    try std.testing.expectError(error.MissingField, parseHostInfo(old, "/one"));
+    // Provider additions do not relax wire identity: neither profile reads
+    // the other's reply, even when the provider fields happen to match.
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(old, "/one"));
     const versioned = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
     defer std.testing.allocator.free(versioned);
     const current = try std.mem.replaceOwned(u8, std.testing.allocator, versioned, "\"openai\":\"unserved\"", "\"openai\":\"unserved\",\"chatgpt\":\"unserved\"");
