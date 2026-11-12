@@ -1491,6 +1491,9 @@ The step to 60 adds `message_skill` and the Conversation's skill entries (kind 4
 The step to 61 widens saved call descriptions on `model_tool_call` and `model_output_item` to 200 UTF-8 bytes on both engines; existing rows need no rewrite.
 The step to 63 drops `model_operation.usage_content_id`, rebuilding `model_operation` on SQLite, and deletes each saved raw usage report no other row references; the four counts are unchanged, and the file keeps the freed pages until it is vacuumed.
 The step to 64 renames `host_catalog` to `host_tool_set` and `action_operation.bash_timeout_ms` to `attempt_timeout_ms`, without changing their contents.
+The step to 65 freezes each Operation's effective tool offer, retaining its settings revision's offer for old Operations.
+The step to 66 freezes configured effort sources and admitted effort emission/fallback, records immutable refusal provenance in `session_change`, and moves saved wire 12 metadata to 13.
+The step to 68 (D179, D219) adds nullable final-attempt `latency_ms` and `first_event_ms` to `model_operation`, without backfilling old resolutions.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2343,6 +2346,10 @@ It captures canonical cwd before starting/attaching the selected Host (default A
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
+When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · r start`; `r` on an empty draft, or a click on the line, starts it through the same launch owner.
+A Host that ended without being asked to stop (a crash or a kill) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap) or by its launcher closing stdin is not, nor while an Upgrade holds the Host.
+The stopping Host leaves a stop record beside its Store lease, which every Host start removes; an unreadable record counts as a stop someone asked for.
+At most one automatic start runs per overview: a failed start or a second crash leaves the line to `r`, with no retry or backoff.
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 `/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
@@ -3345,7 +3352,7 @@ Permission preparation consumes the same normal Activity scan before showing the
 Current's active attention and history-independent query contract remain unchanged.
 This projection has fixed resident storage, not history-independent query cost.
 
-`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`, `session_changed`; and decimal-string `limit`, from 1 to 16.
+`POST /v1/activity-page` takes `kind:"activity_page"`, `session`, nullable `end`, decimal-string `position`, nullable decimal-string `ordinal`, `direction:"forward"|"backward"`, `kinds`, the row kinds to list as a non-empty array of their names, each at most once and in this order: `admission`, `user`, `assistant`, `call`, `tool_result`, `hosted_call`, `turn_ended`, `stop`, `sent`, `send_failed`, `received`, `approval_requested`, `session_changed`, `compacted`, `model_call`; and decimal-string `limit`, from 1 to 16.
 The cursor may name a row of any kind; the page lists only the asked kinds, and each row source is gated by the kinds before it reads, so a kind not asked for costs no read unless it shares a source with an asked one: `user` and `assistant` share the Conversation entries, and a `received`-only page passes over the person's admissions.
 A person's Messages alone are one seek in the index of Messages without a Session sender, whatever the history's length; a page that lists received Messages reads all of a Session's Messages by position, as every unfiltered page does.
 Null end captures the current committed end; zero freezes empty history.
@@ -3361,11 +3368,19 @@ The revision's commit writes those rows at one position, never edited; creation 
 A refused effort update is also an immutable row, with `field:"reasoning_effort_refused"`, the revision whose effort was refused, and the provider report in `provider_text`, using the same bounded, control-normalized report as other provider failures.
 Settlement writes it once at its own position even though it changes no setting, and never edits the revision or its original change rows.
 A `compacted` row (D217) is a compaction that succeeded, at its compaction item's position (taken at settlement, so no earlier page gains it), carrying `operation` and `dropped`: how many conversation entries its floor left out beyond the one before it, zero for a compaction that made no room.
+A `model_call` row (D179, D219) is one resolved model Operation, including failures and compactions, at its admission position with ordinal zero, dated by resolution.
+It derives `model` from the Operation's immutable settings revision; `served_model` from stored model evidence (body first, then OpenAI header, then alternate header), never from the requested model; `input_tokens` from uncached plus cache-read plus cache-write tokens; `cached_tokens` from cache-read tokens; `output_tokens` from output usage; `status` from the resolution code; and `attempts` from the final attempt ordinal.
+Missing served-model evidence, usage and timings are null, not zero.
+The Operation row owns the last ended attempt’s timing pair. One attempt-ending writer snapshots live observations in the existing resolution or retry-scheduling UPDATE, before custody retires. A backoff resolution preserves the saved pair regardless of whether old custody is still attached, retired or lost on restart; replacement admission clears both fields before the replacement can launch. Custody is only the bridge for live observations, not retention across retry waits. The timing owner reads the published event and send boundaries before sampling the monotonic cutoff, yielding one immutable pair with `first_event_ms <= latency_ms` whenever the event is known. Callbacks after those reads cannot amend the pair. No later write amends a resolution.
+Both timings describe the FINAL attempt only: `latency_ms` is request sent to the attempt-ending write (resolution or retry scheduling), and `first_event_ms` is request sent to the first HTTP response event (including an interim head), not the first token; a snapshot that observed no such event leaves it null.
+No per-attempt history is stored; schema 68 adds two nullable nonnegative integer duration columns to `model_operation` on both engines without backfill.
+D219 explicitly excepts these derived rows from fixed-prefix stability: resolution may reveal a `model_call` within an earlier captured end, at its original admission position, never relocated to settlement.
+A forward follower already past that position does not replay it automatically; reread the earlier range to observe it.
 A nonnull ordinal identifies an actual row in this Session and end.
 Continue from the last returned row with that ordinal and the same end/direction.
 Null ordinal denotes a sequence boundary, excluding all rows at position; position zero starts either traversal.
 Forward catch-up captures a fresh end from the preceding end with null ordinal, so group ties are not replayed.
-Later appends and group completion cannot backfill an earlier prefix.
+Apart from D219 model-call resolution above, later appends and group completion cannot backfill an earlier prefix.
 Query work may grow with history; item bounds do not promise traversal latency.
 
 `POST /v1/activity-search` takes `kind:"activity_search"`, `session`, `query`, `kinds`, nullable decimal-string `before_position` and `before_ordinal`, and decimal-string `limit` with the Activity page's kind and limit rules.

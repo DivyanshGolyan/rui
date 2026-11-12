@@ -20,6 +20,8 @@ const AppScreen = @import("AppScreen.zig");
 const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
 const host_identity = @import("host_identity.zig");
+const platform = @import("platform.zig");
+const host_restart = @import("host_restart.zig");
 const OverviewLines = @import("OverviewLines.zig");
 const Palette = @import("Palette.zig");
 const skill_completion = @import("skill_completion.zig");
@@ -169,7 +171,8 @@ const HostObservation = union(enum) {
     /// ready, so the first frames say nothing and hold nothing.
     unread,
     ready: struct { facts: view.Host, paused: bool = false },
-    stopped,
+    /// The lease is free; the stop record says whether someone asked.
+    stopped: platform.StoreLease.LastStop,
     /// A Host holds the Store and gave no answer: starting, stopping or lost.
     unavailable,
     /// A Host answered in another Rui version's protocol.
@@ -181,6 +184,14 @@ const HostObservation = union(enum) {
         return switch (self) {
             .ready => |ready| ready.facts,
             else => null,
+        };
+    }
+
+    fn restartSeen(self: HostObservation) host_restart.Seen {
+        return switch (self) {
+            .unread, .ready => .up,
+            .stopped => |stop| .{ .stopped = stop },
+            .unavailable, .incompatible, .unreadable => .held,
         };
     }
 };
@@ -515,6 +526,8 @@ host_process: ?struct { started_at: u64, pid: i32 } = null,
 host_observation: HostObservation = .unread,
 /// The last launch's typed summary, never a boolean standing in for a cause.
 host_launch: ?HostLaunch = null,
+/// This run's one automatic start after a crash (`host_restart`).
+restart_allowance: host_restart.Allowance = .unspent,
 upgrade_report: ?std.Io.Writer.Allocating = null,
 /// What the overview last said under the open conversation.
 conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
@@ -915,7 +928,7 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(self.state.order.items.len -| (first -| 1));
+        return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
     }
 
     fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
@@ -928,7 +941,7 @@ const SessionRows = struct {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
         const item = view.listItem(self.state, index).?;
         const built = try view.listSegments(arena, self.state, item, self.width, self.caps, self.frame);
-        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = 2, .heading = built.heading, .target = view.clickOf(self.state, item) };
+        return .{ .segments = built.segments, .second = if (item == .row) try view.rowSecondSegments(arena, self.state, item.row, self.width, self.caps) else null, .height = if (item == .row) 2 else 1, .heading = built.heading, .target = view.clickOf(self.state, item) };
     }
 };
 
@@ -1817,10 +1830,20 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
 
 /// The same observation feeds the notice, Session service and core counts.
 fn takeHostRead(self: *Self, read: HostRead) !?Next {
+    const previous = self.host_observation;
     self.host_observation = read.observation;
     // A ready Host outlives what the last start said: a failure lost to a
     // competing owner, and a warning once the next read has shown it.
     if (read.observation == .ready) self.host_launch = null;
+    const restart = host_restart.decide(.{
+        .previous = previous.restartSeen(),
+        .next = read.observation.restartSeen(),
+        .allowance = self.restart_allowance,
+        .upgrade_holds = self.state.holdsHost(),
+        .start_available = !self.hostStarting() and self.launchNext() != null,
+    });
+    self.restart_allowance = restart.allowance;
+    if (restart.start) self.queueHostStart();
     if (read.memory) |memory| _ = try self.event(.{ .memory = memory });
     return self.event(.{ .host = read.observation.facts() });
 }
@@ -1894,17 +1917,28 @@ fn queueHost(self: *Self) void {
 /// One rule admits the gesture and supplies the exact key tail to the line.
 fn hostNext(self: *const Self) ?HostLaunch.Next {
     if (self.state.holdsHost() or self.hostStarting() or self.host_observation != .stopped) return null;
+    return self.launchNext();
+}
+
+/// The key the last launch leaves for a stopped Host: a start, a retry, or
+/// none when no start can mend its failure.
+fn launchNext(self: *const Self) ?HostLaunch.Next {
     return if (self.host_launch) |launch| switch (launch) {
         .failed => |cause| cause.next(),
         .ready => .start,
     } else .start;
 }
 
+/// Queues the one start job, `r`'s or a restart's; the loop's dispatch runs it.
+fn queueHostStart(self: *Self) void {
+    self.host_launch = null;
+    self.queue(.start_host);
+}
+
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.hostNext() == null) return false;
-    self.host_launch = null;
-    self.queue(.start_host);
+    self.queueHostStart();
     try self.dispatch(if (self.root.session == null) .all else .lent);
     ctx.redraw = true;
     return true;
@@ -1962,7 +1996,7 @@ fn hostFacts(self: *Self) HostRead {
             .facts = .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied },
             .paused = host.paused,
         } },
-        .unavailable => .stopped,
+        .unavailable => .{ .stopped = platform.StoreLease.lastStop(self.init.io, self.options.store) },
         .owned_unavailable => .unavailable,
         .incompatible => .incompatible,
         .access_failure => .unreadable,
@@ -2460,6 +2494,36 @@ test "App overview paints its ground and both selvedge rows" {
         try std.testing.expectEqual(case.ground, shown.screen.readCell(79, 22).?.style.bg);
         try std.testing.expectEqual(case.band, shown.screen.readCell(79, 23).?.style.bg);
     }
+}
+
+test "a blank line on the ground sits under New Session, selected or not, at narrow and wide widths" {
+    var cancellation: client.Cancellation = .{};
+    const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, fake_operations, &cancellation);
+    defer rig.close();
+    const overview = rig.overview;
+    try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+    try std.testing.expect(try rig.settle() == null);
+    try std.testing.expect(overview.state.order.items.len != 0);
+    overview.caps = .{};
+    const ground = @import("widget_style.zig").of(overview.caps, .{}).bg;
+    const highlight = @import("widget_style.zig").of(overview.caps, .{ .background = .selection }).bg;
+    const first: view.Selection = .{ .session = overview.state.rows.items[overview.state.order.items[0]].reference };
+    for ([_]view.Selection{ .new_session, first }) |selection| for ([_]u16{ 46, 140 }) |width| {
+        errdefer std.debug.print("selection={s}, width={d}\n", .{ @tagName(selection), width });
+        overview.state.selected = selection;
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        try std.testing.expectEqual(selection == .new_session, std.meta.eql(highlight, shown.screen.readCell(1, 0).?.style.bg));
+        // The gap is blank ground in every column of the list, never part
+        // of the New Session row's highlight.
+        for (0..30) |col| {
+            const cell = shown.screen.readCell(@intCast(col), 1).?;
+            try std.testing.expect(std.mem.trim(u8, cell.char.grapheme, " ").len == 0);
+            try std.testing.expectEqual(ground, cell.style.bg);
+        }
+        try std.testing.expect((try shown.line(2)).len != 0);
+    };
 }
 
 test "App cursor contrasts with the painted ground after terminal theme reports" {
@@ -3558,6 +3622,8 @@ test "a failed terminal restore still prints the departure guidance" {
 const HostRecovery = struct {
     const Availability = enum { ready, paused, stopping, stopped, incompatible, unreadable };
     var availability: Availability = .ready;
+    /// What a stopped Host's record says. Asked by default: the manual line.
+    var last_stop: platform.StoreLease.LastStop = .asked;
     var starts: usize = 0;
     var fail_start: bool = false;
     var start_warning: ?HostLaunch.Warning = null;
@@ -3569,6 +3635,7 @@ const HostRecovery = struct {
 
     fn operations() Operations {
         availability = .ready;
+        last_stop = .asked;
         starts = 0;
         fail_start = false;
         start_warning = null;
@@ -3585,7 +3652,7 @@ const HostRecovery = struct {
     fn host(_: *Self) HostRead {
         return .{ .observation = switch (availability) {
             .ready, .paused => .{ .ready = .{ .facts = .{ .started_at = test_now_s, .slots = 4, .slots_in_use = 0 }, .paused = availability == .paused } },
-            .stopped => .stopped,
+            .stopped => .{ .stopped = last_stop },
             .stopping => .unavailable,
             .incompatible => .incompatible,
             .unreadable => .unreadable,
@@ -3861,7 +3928,7 @@ test "Host recovery paused shutting down and upgrading offer no start gesture" {
         overview.queue(.host);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expect(hostNotice(overview) == null);
-        overview.host_observation = .stopped;
+        overview.host_observation = .{ .stopped = .asked };
         overview.state.upgrade.after = .blocked;
         try std.testing.expectEqual(HostState.paused, overview.hostState());
         try std.testing.expect(!try requestHostStart(overview, &ctx));
@@ -4115,12 +4182,143 @@ test "Host recovery renders the launch result cause without confusing failure an
     };
 }
 
+/// Runs one Host read and steps the overview with it, leaving queued any job
+/// the read asked for.
+fn readHostOnce(rig: *Rig) !void {
+    const overview = rig.overview;
+    std.debug.assert(overview.job_count == 0 and overview.worker.thread == null);
+    overview.queue(.host);
+    try overview.dispatch(.all);
+    try rig.answered();
+    try std.testing.expect(try rig.next(try overview.complete()) == null);
+}
+
+test "a Host that stopped unasked starts again once by itself; any other stop waits for r" {
+    const Case = struct { availability: HostRecovery.Availability = .stopped, last_stop: platform.StoreLease.LastStop, upgrading: bool = false, starts: usize };
+    const cases = [_]Case{
+        .{ .last_stop = .unasked, .starts = 1 },
+        .{ .last_stop = .asked, .starts = 0 },
+        .{ .last_stop = .unknown, .starts = 0 },
+        .{ .last_stop = .unasked, .upgrading = true, .starts = 0 },
+        .{ .last_stop = .asked, .upgrading = true, .starts = 0 },
+        .{ .last_stop = .unknown, .upgrading = true, .starts = 0 },
+        // A Host that holds the Store unanswered, answers in another Rui
+        // version, or a Store that cannot be read is held, not crashed.
+        .{ .availability = .stopping, .last_stop = .unasked, .starts = 0 },
+        .{ .availability = .incompatible, .last_stop = .unasked, .starts = 0 },
+        .{ .availability = .unreadable, .last_stop = .unasked, .starts = 0 },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("case {any}\n", .{case});
+        const ops = HostRecovery.operations();
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(hostNotice(overview) == null);
+        if (case.upgrading) overview.state.upgrade.after = .blocked;
+        HostRecovery.availability = case.availability;
+        HostRecovery.last_stop = case.last_stop;
+        try readHostOnce(rig);
+        if (case.starts == 1) {
+            // The start is queued, not yet run: the line says so meanwhile.
+            try std.testing.expectEqual(HostState.starting, overview.hostState());
+            var starting = try rig.shown(46, 26);
+            defer starting.deinit();
+            const text = try starting.text();
+            try std.testing.expect(std.mem.indexOf(u8, text, "Host starting") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "r start") == null);
+        } else {
+            const held: HostState = switch (case.availability) {
+                .stopped => if (case.upgrading) .paused else .stopped,
+                .stopping => .paused,
+                .incompatible => .incompatible,
+                .unreadable => .unreadable,
+                .ready, .paused => unreachable,
+            };
+            try std.testing.expectEqual(held, overview.hostState());
+        }
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(case.starts, HostRecovery.starts);
+        if (case.starts == 1) {
+            try std.testing.expect(HostRecovery.worker_id.? != std.Thread.getCurrentId());
+            try std.testing.expect(hostNotice(overview) == null);
+        } else if (!case.upgrading and case.availability == .stopped) {
+            var shown = try rig.shown(46, 26);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "■ Host stopped · r start") != null);
+        }
+    }
+}
+
+test "the automatic start is spent once per run: a second crash and a failed start leave r" {
+    // A second crash after the one automatic start succeeded.
+    {
+        const ops = HostRecovery.operations();
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        try std.testing.expect(try rig.settle() == null);
+        HostRecovery.last_stop = .unasked;
+        HostRecovery.availability = .stopped;
+        try readHostOnce(rig);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+        try std.testing.expect(hostNotice(overview) == null);
+        HostRecovery.availability = .stopped;
+        try readHostOnce(rig);
+        try std.testing.expectEqual(HostState.stopped, overview.hostState());
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+        var shown = try rig.shown(46, 26);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "■ Host stopped · r start") != null);
+        // r still starts it, as before any crash.
+        try std.testing.expect(try rig.press("r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 2), HostRecovery.starts);
+        try std.testing.expect(hostNotice(overview) == null);
+    }
+    // The one automatic start fails: the line offers a retry and later
+    // reads of the same stop start nothing.
+    {
+        const ops = HostRecovery.operations();
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        _ = try overview.event(.{ .tick = test_now_s * 1000 });
+        try std.testing.expect(try rig.settle() == null);
+        HostRecovery.last_stop = .unasked;
+        HostRecovery.availability = .stopped;
+        HostRecovery.fail_start = true;
+        try readHostOnce(rig);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+        try std.testing.expectEqual(HostState.stopped, overview.hostState());
+        for (0..2) |_| {
+            try readHostOnce(rig);
+            try std.testing.expect(try rig.settle() == null);
+        }
+        try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
+        var shown = try rig.shown(46, 26);
+        defer shown.deinit();
+        const text = try shown.text();
+        try std.testing.expectEqual(HostLaunch.Failure.Kind.child_refused, overview.host_launch.?.failed.kind);
+        try std.testing.expect(std.mem.indexOf(u8, text, "× Host stopped · ") != null and std.mem.indexOf(u8, text, " · r retry") != null);
+    }
+}
+
 test "Host recovery retains a worker failure in the same typed launch result" {
     var cancellation: client.Cancellation = .{};
     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "/home", .directory = "/requests" }, HostRecovery.operations(), &cancellation);
     defer rig.close();
     const overview = rig.overview;
-    overview.host_observation = .stopped;
+    overview.host_observation = .{ .stopped = .asked };
     overview.job = .start_host;
     try std.testing.expect(try overview.deliver(error.SystemResources) == null);
     try std.testing.expectEqual(HostLaunch.Failure.Kind.worker, overview.host_launch.?.failed.kind);

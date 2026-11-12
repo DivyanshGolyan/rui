@@ -40,6 +40,9 @@ pub const Paths = struct {
     }
 };
 
+/// The stop record's name, in the directory that holds the lease.
+const stop_record_name = "host.stopped";
+
 pub const StoreLease = struct {
     io: std.Io,
     paths: Paths,
@@ -174,7 +177,41 @@ pub const StoreLease = struct {
             try validatePrivateDirectory(runtime_dir, self.io);
         }
 
+        // A record an earlier Host left describes that Host, not this one.
+        self.store_dir.deleteFile(self.io, stop_record_name) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
         try reclaimStaleSocket(self.io, self.paths.socket.slice());
+    }
+
+    /// Records that someone asked this Host to stop, beside its lease, so a
+    /// client that finds the lease free can tell that stop from a crash
+    /// (`lastStop`). No fsync: a record lost to power loss reads as a crash,
+    /// which costs one extra automatic start at most.
+    pub fn recordStopAsked(self: *StoreLease) !void {
+        const record = try self.store_dir.createFile(self.io, stop_record_name, .{ .permissions = .fromMode(0o600) });
+        record.close(self.io);
+    }
+
+    pub const LastStop = @import("host_restart.zig").LastStop;
+
+    /// How the last Host of the Store at `supplied_path` ended, read from
+    /// the record `recordStopAsked` leaves and every Host start removes.
+    /// Only meaningful while the lease is free. The record's presence is
+    /// its whole content; nothing else reads it.
+    pub fn lastStop(io: std.Io, supplied_path: []const u8) LastStop {
+        const directory = switch (resolveClientSelection(supplied_path)) {
+            .sqlite => |path| path,
+            .mysql => |value| value.runtime,
+        };
+        var dir = std.Io.Dir.cwd().openDir(io, directory, .{}) catch return .unknown;
+        defer dir.close(io);
+        const stat = dir.statFile(io, stop_record_name, .{ .follow_symlinks = false }) catch |err| return switch (err) {
+            error.FileNotFound => .unasked,
+            else => .unknown,
+        };
+        return if (stat.kind == .file) .asked else .unknown;
     }
 
     /// A launched Host binds in the caller's directory instead of the
@@ -541,6 +578,36 @@ test "Store lease observation owns probe mechanics and releases every descriptor
     try store.setPermissions(io, .fromMode(0o755));
     for (0..16) |_| try std.testing.expect(StoreLease.observe(io, path) == .access_failure);
     try std.testing.expectEqual(baseline + 1, (try descriptors.observe(io)).open_descriptors);
+}
+
+test "the stop record reads asked only when present as a file, and unknown when unreadable" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = root_buffer[0..try tmp.dir.realPath(io, &root_buffer)];
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/store", .{root});
+    // No Store directory to read: nothing says how a Host ended.
+    try std.testing.expectEqual(StoreLease.LastStop.unknown, StoreLease.lastStop(io, path));
+    {
+        var lease = try StoreLease.acquire(io, path);
+        defer lease.release();
+        try std.testing.expectEqual(StoreLease.LastStop.unasked, StoreLease.lastStop(io, path));
+        try lease.recordStopAsked();
+        try lease.recordStopAsked(); // Idempotent.
+    }
+    try std.testing.expectEqual(StoreLease.LastStop.asked, StoreLease.lastStop(io, path));
+    // The lease's release keeps the record; only a start removes it.
+    try tmp.dir.deleteFile(io, "store/" ++ stop_record_name);
+    try std.testing.expectEqual(StoreLease.LastStop.unasked, StoreLease.lastStop(io, path));
+    // Neither a directory nor a symlink in its place is a record.
+    try tmp.dir.createDir(io, "store/" ++ stop_record_name, .default_dir);
+    try std.testing.expectEqual(StoreLease.LastStop.unknown, StoreLease.lastStop(io, path));
+    try tmp.dir.deleteDir(io, "store/" ++ stop_record_name);
+    try tmp.dir.symLink(io, "host.lock", "store/" ++ stop_record_name, .{});
+    try std.testing.expectEqual(StoreLease.LastStop.unknown, StoreLease.lastStop(io, path));
+    try tmp.dir.deleteFile(io, "store/" ++ stop_record_name);
 }
 
 test "socket path uses the first 16 SHA-256 bytes in lowercase hex" {

@@ -48,6 +48,7 @@ const cores = .{
     .{ "find_tools_words.zig", @import("find_tools_words.zig") },
     .{ "home_path.zig", @import("home_path.zig") },
     .{ "host_reply.zig", @import("host_reply.zig") },
+    .{ "host_restart.zig", @import("host_restart.zig") },
     .{ "HostStartupWait.zig", @import("HostStartupWait.zig") },
     .{ "http1/Parser.zig", @import("http1/Parser.zig") },
     .{ "http1/request.zig", @import("http1/request.zig") },
@@ -72,6 +73,7 @@ const cores = .{
     .{ "model_capability.zig", @import("model_capability.zig") },
     .{ "model_catalog.zig", @import("model_catalog.zig") },
     .{ "model_catalog_snapshot.zig", @import("model_catalog_snapshot.zig") },
+    .{ "model_evidence.zig", @import("model_evidence.zig") },
     .{ "model_list.zig", @import("model_list.zig") },
     .{ "model_picker.zig", @import("model_picker.zig") },
     .{ "model_picker_view.zig", @import("model_picker_view.zig") },
@@ -407,7 +409,7 @@ test "overview benchmark: merging a 10,000-row listing, and building a 200x60 fr
                 const shown: *const overview_view.State = @ptrCast(@alignCast(userdata));
                 const item = overview_view.listItem(shown, index).?;
                 const built = try overview_view.listSegments(arena, shown, item, 200, .{}, 0);
-                return .{ .segments = built.segments, .heading = built.heading, .height = 2, .second = if (item == .row) try overview_view.rowSecondSegments(arena, shown, item.row, 200, .{}) else &.{} };
+                return .{ .segments = built.segments, .heading = built.heading, .height = if (item == .row) 2 else 1, .second = if (item == .row) try overview_view.rowSecondSegments(arena, shown, item.row, 200, .{}) else null };
             }
         };
         list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };

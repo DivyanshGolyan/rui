@@ -225,8 +225,8 @@ pub fn testingStoreWith(case: *const Case, storage: *Store, tmp: *std.testing.Tm
     }
 }
 
-/// Reconstruct the previous format's ending queues from production-created
-/// Turns, then perform the operator-run MySQL upgrade. SQLite upgrades at the
+/// Reconstruct format 66's ending queues from production-created Turns,
+/// then perform the operator-run MySQL upgrade. SQLite upgrades at the
 /// next production open. Kept here because this fixture intentionally uses DDL.
 pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !void {
     const schema = @import("schema.zig");
@@ -236,7 +236,12 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
             return sqlite.exec(store.sqliteDatabase(), sql);
         }
     };
-    const from = schema.schema_version - 1;
+    // K10 is the 66 -> 67 transition, even after later formats append steps.
+    const from: u32 = 66;
+    // Remove format 68's additions too, so both engines replay the complete
+    // pending chain from the genuine old shape rather than double-adding them.
+    try Native.exec(storage, "ALTER TABLE model_operation DROP COLUMN first_event_ms");
+    try Native.exec(storage, "ALTER TABLE model_operation DROP COLUMN latency_ms");
     const old = schema.migrations[53 - schema.migration_baseline];
     const suppress = schema.migrations[56 - schema.migration_baseline];
     // Use the historical definitions, not a second handwritten old format.
@@ -271,7 +276,9 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     }
     try Native.exec(storage, comptime std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{from}));
     if (storage.engine == .mysql) {
-        for (schema.migrations[from - schema.migration_baseline].mysql) |sql| try Native.exec(storage, sql);
+        for (schema.migrations[from - schema.migration_baseline ..]) |step| {
+            for (step.mysql) |sql| try Native.exec(storage, sql);
+        }
         try Native.exec(storage, comptime std.fmt.comptimePrint("UPDATE store_meta SET meta_value='{d}' WHERE meta_key='format'", .{schema.schema_version}));
     }
 }
@@ -864,3 +871,21 @@ pub const EffortMigrationChoice = enum {
         };
     }
 };
+
+/// Synthetic duration fixture for existing settlement tests. Production always
+/// installs the custody registry; owner-boundary timing tests use live Attempts.
+pub fn timingSource(values: *@import("../model_timing.zig").Values) @import("../model_timing.zig").Source {
+    return .{ .context = values, .read = struct {
+        fn read(raw: *anyopaque, _: u64, _: std.Io) @import("../model_timing.zig").Values {
+            return @as(*@import("../model_timing.zig").Values, @ptrCast(@alignCast(raw))).*;
+        }
+    }.read };
+}
+
+pub fn settleModelFailureWithTimings(storage: *Store, binding: AttemptBinding, failure: @import("domain/model_settlement.zig").ModelFailure, disposition: @import("domain/model_settlement.zig").ModelFailureClass, timings: @import("../model_timing.zig").Values, faults: @import("Store.zig").Faults) !void {
+    var values = timings;
+    const original = storage.modelTimingSource().*;
+    storage.modelTimingSource().* = timingSource(&values);
+    defer storage.modelTimingSource().* = original;
+    return storage.settleModelAttemptFailure(binding, failure, disposition, faults);
+}

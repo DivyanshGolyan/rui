@@ -2,6 +2,7 @@
 //! interruptions, permission decisions), their replay, and their observed results.
 
 const std = @import("std");
+const model_attempt = @import("model_attempt.zig");
 const command_reply = @import("../../command_reply.zig");
 const skills_domain = @import("skills.zig");
 const turn_ending = @import("../../turn_ending.zig");
@@ -25,7 +26,6 @@ const Store = store_core.Store;
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
-const model_settlement_domain = @import("model_settlement.zig");
 const reads_domain = @import("reads.zig");
 const report_domain = @import("report.zig");
 const store_schema = @import("../schema.zig");
@@ -1070,7 +1070,7 @@ fn stopRounds(a: anytype, command: *const command_input.SessionStopCommand, owed
     var cancellation = unattempted_stop_content;
     if (turn) |open| {
         if (open.running) {
-            a.write(interrupt_operation, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
+            interrupt_operation.queue(a, .{ .operation_id = open.operation_id.get(), .command_key = key, .session = head });
             interrupted_operation_id = open.operation_id.get();
         }
         if (open.cancellable != 0) try cancelActions(a, positions, head, &open, &cancellation, faults);
@@ -1328,9 +1328,10 @@ const save_interruption = rsql.Write(.{
 
 /// Interrupts the unresolved Operation `operation_id` of `session`'s
 /// Session, for the command `command_key`.
-const interrupt_operation = rsql.Write(.{
-    .sql = "UPDATE model_operation SET retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ ",interrupted_by_command_key=?2," ++
-        model_settlement_domain.operation_resolved_now_sql ++ " WHERE operation_id=?1 AND session_ref=@session(?3) AND resolution_code IS NULL",
+const interrupt_operation = model_attempt.Write(.{
+    .end = .resolution,
+    .set = "retry_due_at_ms=NULL," ++ store_schema.resolutionIs("resolution_code", .interrupted) ++ ",interrupted_by_command_key=?2",
+    .where = "operation_id=?1 AND session_ref=@session(?3) AND resolution_code IS NULL",
     .Args = struct { operation_id: u64, command_key: []const u8, session: rsql.SessionHead },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.InterruptionTargetChanged } },
 });
@@ -1412,7 +1413,7 @@ pub fn interruptModel(a: anytype, command: *const command_input.ModelInterruptio
     });
     if (rejection == null) {
         const head = target.?.session;
-        a.write(interrupt_operation, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
+        interrupt_operation.queue(a, .{ .operation_id = command.operation_id, .command_key = command.key.slice(), .session = head });
         if (!pending.pending) try turn_domain.queueCloseOr(a, try a.positions(head), command.turn_id, .cancelled, error.InterruptionTargetChanged);
     }
     if (faults.before_commit) return error.InjectedCommitFailure;

@@ -23,11 +23,60 @@ rui_publish() {
         if [ -n "$_rui_after" ]; then
             _rui_observe "$1" "${_rui_after%/bin/rui}" "$3"
             _rui_render "$1"
-            "$2/bin/rui" --installation-path </dev/null || :
+            _rui_path "$1" "$2" "${4:-intentional-source}"
         else
             printf 'Publication completed, but the selected command could not be inspected. Check %s.\n' "$_rui_link" >&2
         fi
     ) || :
+}
+
+# _rui_path PREFIX BUILD MODE -> BUILD's PATH advice. When BUILD reports
+# ~/.local/bin missing from PATH for a released install, add it to the shell's
+# startup file instead, so a new terminal finds rui; RUI_NO_MODIFY_PATH=1 keeps
+# the advice. The decision reads BUILD's state, never its advice text.
+_rui_path() {
+    # A GitHub Actions step that installs Rui hands later steps the directory.
+    if [ "$3" = released-install ] && [ -n "${GITHUB_PATH:-}" ]; then
+        printf '%s\n' "$1/bin" >>"$GITHUB_PATH" 2>/dev/null || :
+    fi
+    _rui_state=$("$2/bin/rui" --installation-path-state </dev/null 2>/dev/null) || _rui_state=
+    if [ "$_rui_state" = missing ] && [ "$3" = released-install ] && [ "$1" = "$HOME/.local" ] \
+        && [ -z "${RUI_NO_MODIFY_PATH:-}" ] && _rui_rc=$(_rui_profile) && _rui_add_path "$_rui_rc"; then
+        printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal to use it.\n' "$(_rui_show "$_rui_rc")"
+        return 0
+    fi
+    "$2/bin/rui" --installation-path </dev/null || :
+}
+
+# _rui_profile -> the startup file a new terminal's shell reads, or failure for
+# a shell whose syntax differs (fish): the advice covers those. Terminals start
+# Bash as a login shell on macOS, which reads only the first of .bash_profile,
+# .bash_login and .profile that exists, so never create one ahead of another.
+_rui_profile() {
+    case ${SHELL##*/} in
+        zsh) printf '%s/.zshrc' "${ZDOTDIR:-$HOME}" ;;
+        bash)
+            if [ "$(uname -s)" != Darwin ]; then printf '%s/.bashrc' "$HOME"; return 0; fi
+            for _rui_f in .bash_profile .bash_login .profile; do
+                if [ -e "$HOME/$_rui_f" ]; then printf '%s/%s' "$HOME" "$_rui_f"; return 0; fi
+            done
+            printf '%s/.bash_profile' "$HOME" ;;
+        fish) return 1 ;;
+        *) printf '%s/.profile' "$HOME" ;;
+    esac
+}
+
+# _rui_add_path FILE -> FILE ends with the PATH line, appended once.
+_rui_add_path() {
+    _rui_line='export PATH="$HOME/.local/bin:$PATH"'
+    if [ -f "$1" ] && grep -qxF "$_rui_line" "$1"; then return 0; fi
+    {
+        if [ -s "$1" ]; then
+            if [ -n "$(tail -c 1 "$1")" ]; then printf '\n'; fi
+            printf '\n'
+        fi
+        printf '# Added by the Rui installer\n%s\n' "$_rui_line"
+    } >>"$1" 2>/dev/null
 }
 
 # _rui_target LINK -> LINK's target when LINK is a symlink to an executable
@@ -223,6 +272,6 @@ _rui_render() {
             printf 'Could not inspect the Host for the defaults-selected Store. Its identity and status are unknown; installation did not restart it. The installation succeeded.\n' >&2 ;;
     esac
     if [ "$_rui_kind" = first ]; then
-        printf 'Next: %s auth login codex (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)\n' "$_rui_cmd"
+        printf 'Next: run rui in your project directory. It signs you in first (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation).\n'
     fi
 }

@@ -3193,8 +3193,12 @@ def main(selected="all"):
         observation_held, observation_continue = threading.Event(), threading.Event()
         master, slave = open_pty()
         original_terminal = termios.tcgetattr(slave)
+        # The TUI starts a crashed Host once by itself. The Host it starts
+        # inherits this https proxy and refuses it at startup, so that start
+        # fails without serving the accepted Message, which the fixture Host
+        # recovers below.
         entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
-            "--", empty_session], env={**os.environ, "HOME": str(home)},
+            "--", empty_session], env={**os.environ, "HOME": str(home), "HTTPS_PROXY": "https://proxy.invalid"},
             stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         proxy = None
         try:
@@ -3224,8 +3228,13 @@ def main(selected="all"):
                 "--key", saved_key)["observation"]["status"] == "accepted"
             fixture.crash_host(host, state, "accepted-before-observation-loss")
             observation_continue.set()
-            # The screen stays up and says so in one line; nothing is sent again.
-            stopped = read_terminal(master, "Host stopped · r start")
+            # Nobody asked the Host to stop, so the screen stays up and starts
+            # it once by itself; that start fails and leaves the person a
+            # retry. Nothing is sent again.
+            starting = read_terminal(master, "Host starting")
+            assert "Host stopped" not in starting, starting
+            stopped = read_terminal(master, " · r retry")
+            assert "× Host stopped · " in stopped, stopped
             assert "TruncatedResponse" not in stopped and "Not confirmed" not in stopped and "rui host start" not in stopped, stopped
             assert entered.poll() is None, "the Host's stop ended the TUI"
             assert proxy.mutations == [("/v1/message", original)], "a lost observation retransmitted the Message"

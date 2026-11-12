@@ -126,6 +126,15 @@ fn run(init: std.process.Init) !void {
         try advice.write(&output.writer, &observed, home);
         return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
     }
+    // The installer's PATH decision reads this state, never the advice text (#1316).
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path-state")) {
+        const advice = @import("installation_path.zig");
+        const home = init.environ_map.get("HOME") orelse return error.HomeUnavailable;
+        var observed = try advice.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+        defer observed.deinit(allocator);
+        var line: [16]u8 = undefined;
+        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\n", .{@tagName(observed.state)}));
+    }
     if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-facts")) {
         const schema = @import("store.zig");
         var output: [128]u8 = undefined;
