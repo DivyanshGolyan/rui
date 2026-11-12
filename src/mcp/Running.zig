@@ -6,6 +6,7 @@ const post = @import("post.zig");
 const result_text = @import("result_text.zig");
 const output_retention = @import("../output_retention.zig");
 const named_scratch = @import("../named_scratch.zig");
+const pages = @import("../os/pages.zig");
 const Allocator = std.mem.Allocator;
 const Running = @This();
 
@@ -62,7 +63,7 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
     self.scratch = try gpa.alloc(u8, input.arguments.len);
     const request_bytes = std.math.add(usize, input.arguments.len, request_margin) catch return error.OutOfMemory;
     self.request = try gpa.alloc(u8, request_bytes);
-    self.answer = try gpa.alloc(u8, max_answer_bytes);
+    self.answer = pages.mapZeroed(u8, max_answer_bytes) catch return error.OutOfMemory;
     self.call.init(.{
         .server = input.server,
         .client = input.client,
@@ -87,7 +88,7 @@ pub fn start(self: *Running, gpa: Allocator, input: Input, now_ms: u64) error{Ou
 pub fn deinit(self: *Running) void {
     if (self.state == .active) self.call.deinit();
     self.state = .done;
-    self.gpa.free(self.answer);
+    pages.unmapZeroed(self.answer);
     self.gpa.free(self.request);
     self.gpa.free(self.scratch);
     self.answer = &.{};
