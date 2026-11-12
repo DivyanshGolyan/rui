@@ -16,7 +16,7 @@ pub const Rows = struct {
     count: u32,
     rowFn: *const fn (*const anyopaque, usize, std.mem.Allocator) std.mem.Allocator.Error!Row,
     /// Number of selectable rows in [first, count), without building their text.
-    /// Required when belowFn is set; must agree with row targets.
+    /// Required when an indicator is set; excludes uncounted entries such as New Session.
     countFromFn: ?*const fn (*const anyopaque, first: u32) u32 = null,
 
     pub const none: Rows = .{ .userdata = undefined, .count = 0, .rowFn = undefined };
@@ -53,9 +53,10 @@ on_press: ?Press = null,
 base_style: vaxis.Style = .{},
 /// Only background and reverse override the row's styles; foregrounds stay intact.
 selection_style: vaxis.Style = .{ .reverse = true },
-/// Optional presentation for the below line; row styles are unaffected.
-below_style: ?vaxis.Style = null,
-below_align: @FieldType(vxfw.RichText, "text_align") = .left,
+/// Shared presentation for the above and below lines; row styles are unaffected.
+indicator_style: ?vaxis.Style = null,
+indicator_align: @FieldType(vxfw.RichText, "text_align") = .left,
+aboveFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
 belowFn: ?*const fn (count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line = null,
 list: vxfw.ListView = .{ .children = .{ .slice = &.{} }, .draw_cursor = false },
 shown: Range = .{},
@@ -195,34 +196,37 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     }
     var surface = try self.list.draw(ctx);
     if (building.failed) return error.OutOfMemory;
-    if (self.belowFn) |below| {
-        const count_from = self.rows.countFromFn orelse @panic("belowFn needs Rows.countFromFn");
-        const count = count_from(self.rows.userdata, self.fullyShownEnd(surface));
-        // Selection takes priority if a row cannot fit alongside the indicator.
+    // Preserve a selection already on screen as well as a navigation change.
+    // Wheel scrolling may intentionally leave the selection off screen.
+    const keep_selected = changed or if (self.selected) |selected| visible: {
+        for (surface.children, self.list.scroll.top..) |child, index| {
+            if (index == selected) break :visible child.origin.row >= 0 and child.origin.row + child.surface.size.height <= surface.size.height;
+        }
+        break :visible false;
+    } else false;
+    var above_rows: u16 = 0;
+    var below_rows: u16 = 0;
+    if (self.aboveFn != null or self.belowFn != null) {
+        const count_from = self.rows.countFromFn orelse @panic("indicators need Rows.countFromFn");
+        // A marker yields to the selected row, or at least one content line.
         const selected_height = for (building.built.items) |row| {
             if (self.selected == row.index) break row.row.?.lines.len;
-        } else 0;
-        if (count > 0 and size.height > selected_height) {
-            const wants_cursor = changed;
-            if (wants_cursor) self.list.ensureScroll();
-            surface = try self.list.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 }));
+        } else 1;
+        const available = size.height -| @max(1, selected_height);
+        // Shrinking the content can hide more rows (including above when the
+        // selection was at the bottom). Reserve each edge at most once; both
+        // counts are read again from the resulting ListView scroll state.
+        while (above_rows + below_rows < available) {
+            const above = count_from(self.rows.userdata, 0) - count_from(self.rows.userdata, self.list.scroll.top);
+            const below = count_from(self.rows.userdata, self.fullyShownEnd(surface));
+            if (above_rows == 0 and self.aboveFn != null and above > 0) {
+                above_rows = 1;
+            } else if (below_rows == 0 and self.belowFn != null and below > 0) {
+                below_rows = 1;
+            } else break;
+            if (keep_selected) self.list.ensureScroll();
+            surface = try self.list.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - above_rows - below_rows }));
             if (building.failed) return error.OutOfMemory;
-            const remaining = count_from(self.rows.userdata, self.fullyShownEnd(surface));
-            // Count includes a row whose bottom line does not fit, not headings.
-            var line = try below(remaining, ctx.arena);
-            if (self.below_style) |style| {
-                const styled = try ctx.arena.alloc(vaxis.Segment, line.len);
-                for (line, styled) |segment, *dest| dest.* = .{ .text = segment.text, .style = style };
-                line = styled;
-            }
-            const label = try ctx.arena.create(vxfw.RichText);
-            label.* = .{ .text = line, .text_align = self.below_align, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
-            const indicator = try label.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
-            const children = try ctx.arena.alloc(vxfw.SubSurface, surface.children.len + 1);
-            @memcpy(children[0..surface.children.len], surface.children);
-            children[surface.children.len] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = indicator };
-            surface.children = children;
-            // Keep the content height until hit spans have been clipped below.
         }
     }
     var spans: std.ArrayList(Span) = .empty;
@@ -235,12 +239,35 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         } else null;
         const top = @max(0, child.origin.row);
         const bottom = @min(surface.size.height, child.origin.row + child.surface.size.height);
-        try spans.append(ctx.arena, .{ .row = top, .height = @intCast(bottom - top), .target = target });
+        try spans.append(ctx.arena, .{ .row = top + above_rows, .height = @intCast(bottom - top), .target = target });
     }
     self.shown_at = spans.items;
+    // Build press spans before adding markers: markers never have row targets.
+    if (above_rows + below_rows > 0) {
+        const count_from = self.rows.countFromFn.?;
+        // Retain ListView's reduced clipping boundary. A partially visible
+        // first/last row must not paint into either indicator's line.
+        const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + above_rows + below_rows);
+        children[0] = .{ .origin = .{ .row = above_rows, .col = 0 }, .surface = surface };
+        if (above_rows > 0) children[1] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.indicator(ctx, self.aboveFn.?, count_from(self.rows.userdata, 0) - count_from(self.rows.userdata, self.list.scroll.top)) };
+        if (below_rows > 0) children[children.len - 1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try self.indicator(ctx, self.belowFn.?, count_from(self.rows.userdata, self.fullyShownEnd(surface))) };
+        surface = .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+    }
     surface.size = size;
     surface.widget = self.widget();
     return surface;
+}
+
+fn indicator(self: *const Self, ctx: vxfw.DrawContext, words: *const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!Line, count: u32) std.mem.Allocator.Error!vxfw.Surface {
+    var line = try words(count, ctx.arena);
+    if (self.indicator_style) |style| {
+        const styled = try ctx.arena.alloc(vaxis.Segment, line.len);
+        for (line, styled) |segment, *dest| dest.* = .{ .text = segment.text, .style = style };
+        line = styled;
+    }
+    const label = try ctx.arena.create(vxfw.RichText);
+    label.* = .{ .text = line, .text_align = self.indicator_align, .base_style = self.base_style, .width_basis = .parent, .softwrap = false };
+    return label.widget().draw(ctx.withConstraints(.{}, .{ .width = ctx.max.width.?, .height = 1 }));
 }
 
 const Testing = struct {
@@ -260,14 +287,19 @@ const Testing = struct {
         .{ .lines = &.{&.{.{ .text = "Four" }}}, .target = 44 },
     };
 
+    fn content(surface: vxfw.Surface) vxfw.Surface {
+        if (surface.children.len > 0 and surface.children[0].surface.buffer.len == 0) return surface.children[0].surface;
+        return surface;
+    }
+
     fn expectSelected(surface: vxfw.Surface, target_text: []const u8, height: u16) !void {
         var found = false;
-        for (surface.children) |child| {
-            if (child.origin.row < 0 or child.origin.row >= surface.size.height) continue;
+        for (content(surface).children) |child| {
+            if (child.origin.row < 0 or child.origin.row >= content(surface).size.height) continue;
             if (!std.mem.eql(u8, child.surface.readCell(0, 0).char.grapheme, target_text)) continue;
             found = true;
             try std.testing.expectEqual(height, child.surface.size.height);
-            try std.testing.expect(child.origin.row + height <= surface.size.height);
+            try std.testing.expect(child.origin.row + height <= content(surface).size.height);
             for (child.surface.buffer) |cell| try std.testing.expect(cell.style.reverse);
         }
         try std.testing.expect(found);
@@ -462,10 +494,10 @@ test "List wheel scrolls without changing selection and presses match the visibl
     try std.testing.expect(list.shown.first > 0);
     try std.testing.expectEqual(@as(?u32, null), list.selected);
     var checked = false;
-    for (surface.children, list.list.scroll.top..) |child, index| {
+    for (Testing.content(surface).children, list.list.scroll.top..) |child, index| {
         if (index >= rows.len or rows[index].target == null) continue;
         const top = @max(0, child.origin.row);
-        const bottom = @min(surface.size.height, child.origin.row + child.surface.size.height);
+        const bottom = @min(Testing.content(surface).size.height, child.origin.row + child.surface.size.height);
         var y = top;
         while (y < bottom) : (y += 1) {
             events.consume_event = false;
@@ -519,6 +551,146 @@ test "List updates its row count through exhausted resizes without building rows
             _ = try list.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
             try std.testing.expectEqual(@as(?u32, count), list.list.item_count);
             try std.testing.expectEqual(@as(usize, 0), list.shown_at.len);
+        }
+    }
+}
+
+test "List both markers count rows and preserve selection at viewport edges" {
+    const Source = struct {
+        fn row(_: *const anyopaque, index: usize, arena: std.mem.Allocator) std.mem.Allocator.Error!Row {
+            const lines = try arena.alloc(Line, 1);
+            lines[0] = try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "{c}", .{@as(u8, @intCast(index)) + 'A'}) }});
+            return .{ .lines = lines, .target = if (index == 0) null else @intCast(index) };
+        }
+        fn count(raw: *const anyopaque, first: u32) u32 {
+            const total: *const u32 = @ptrCast(@alignCast(raw));
+            return total.* -| @max(1, first);
+        }
+        fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+            return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
+        }
+        fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+            return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) }});
+        }
+        fn marker(surface: vxfw.Surface, y: i17, text: []const u8) !void {
+            const child = for (surface.children) |child| {
+                if (child.origin.row == y) break child;
+            } else return error.MissingMarker;
+            var actual: std.ArrayList(u8) = .empty;
+            defer actual.deinit(std.testing.allocator);
+            var first: ?u16 = null;
+            for (0..surface.size.width) |x| {
+                const cell = child.surface.readCell(@intCast(x), 0);
+                try actual.appendSlice(std.testing.allocator, cell.char.grapheme);
+                if (!std.mem.eql(u8, cell.char.grapheme, " ") and first == null) first = @intCast(x);
+                if (!std.mem.eql(u8, cell.char.grapheme, " ")) try std.testing.expectEqual(vaxis.Color{ .index = 8 }, cell.style.fg);
+            }
+            try std.testing.expectEqualStrings(text, std.mem.trim(u8, actual.items, " "));
+            try std.testing.expectEqual((surface.size.width - (text.len - 2)) / 2, first.?);
+        }
+    };
+    const Case = struct { count: u32 = 13, top: u32, selected: u32, first: u32, end: u32, above: ?[]const u8, below: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .count = 3, .top = 0, .selected = 2, .first = 0, .end = 3, .above = null, .below = null },
+        .{ .top = 0, .selected = 1, .first = 0, .end = 5, .above = null, .below = "↓ 8 more" },
+        .{ .top = 4, .selected = 4, .first = 4, .end = 8, .above = "↑ 3 more", .below = "↓ 5 more" },
+        .{ .top = 4, .selected = 7, .first = 4, .end = 8, .above = "↑ 3 more", .below = "↓ 5 more" },
+        .{ .top = 4, .selected = 8, .first = 5, .end = 9, .above = "↑ 4 more", .below = "↓ 4 more" },
+        .{ .top = 8, .selected = 12, .first = 8, .end = 13, .above = "↑ 7 more", .below = null },
+    };
+    for ([_]u16{ 140, 46 }) |width| for (cases) |case| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var pressed: Testing.Pressed = .{};
+        var list: Self = .{
+            .rows = .{ .userdata = &case.count, .count = case.count, .rowFn = Source.row, .countFromFn = Source.count },
+            .selected = case.selected,
+            .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed },
+            .aboveFn = Source.above,
+            .belowFn = Source.below,
+            .indicator_align = .center,
+            .indicator_style = .{ .fg = .{ .index = 8 } },
+        };
+        list.list.scroll.top = case.top;
+        const ctx = Testing.context(arena.allocator(), 6).withConstraints(.{}, .{ .width = width, .height = 6 });
+        // An unchanged redraw must resolve to exactly the same window.
+        for (0..2) |_| {
+            const surface = try list.widget().draw(ctx);
+            try std.testing.expectEqual(case.first, list.shown.first);
+            try std.testing.expectEqual(case.end, list.shown.end);
+            try std.testing.expectEqual(case.end - case.first, Testing.content(surface).children.len);
+            try std.testing.expectEqual(if (case.above != null or case.below != null) 1 + @as(usize, @intFromBool(case.above != null)) + @as(usize, @intFromBool(case.below != null)) else case.end - case.first, surface.children.len);
+            if (case.above) |text| try Source.marker(surface, 0, text);
+            if (case.below) |text| try Source.marker(surface, 5, text);
+            try Testing.expectSelected(surface, &.{@as(u8, @intCast(case.selected)) + 'A'}, 1);
+            const span = list.shown_at[case.selected - case.first];
+            try std.testing.expectEqual(@as(?u32, case.selected), span.target);
+            try std.testing.expect(span.row >= @intFromBool(case.above != null));
+            try std.testing.expect(span.row + span.height <= 6 - @as(u16, @intFromBool(case.below != null)));
+            var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+            try list.widget().handleEvent(&events, Testing.left(@intCast(span.row)));
+            try std.testing.expectEqual(@as(?u32, case.selected), pressed.target);
+            for ([_]?i16{ if (case.above != null) 0 else null, if (case.below != null) 5 else null }) |marker_row| {
+                if (marker_row) |y| {
+                    pressed.target = null;
+                    events.consume_event = false;
+                    try list.widget().handleEvent(&events, Testing.left(y));
+                    try std.testing.expectEqual(@as(?u32, null), pressed.target);
+                    try std.testing.expect(!events.consume_event);
+                }
+            }
+        }
+    };
+}
+
+test "List both markers yield to two-line selections through navigation and resizes" {
+    const rows: []const Row = &Testing.mixed;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var list: Self = .{ .rows = .of(&rows), .aboveFn = Testing.below, .belowFn = Testing.below };
+    for (2..11) |height| {
+        const ctx = Testing.context(arena.allocator(), @intCast(height));
+        for ([_]u32{ 1, 3, 4, 3, 1 }) |selected| {
+            list.selected = selected;
+            for (0..2) |_| {
+                const surface = try list.widget().draw(ctx);
+                try Testing.expectSelected(surface, if (selected == 1) "O" else if (selected == 3) "T" else "F", if (selected == 4) 1 else 2);
+                const span = for (list.shown_at) |span| {
+                    if (span.target == rows[selected].target) break span;
+                } else return error.SelectionMissing;
+                try std.testing.expect(span.row >= 0);
+                try std.testing.expect(span.row + span.height <= height);
+            }
+        }
+    }
+}
+
+test "List clips partially scrolled two-line rows between rendered markers" {
+    const Words = struct {
+        fn above(count: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!Line {
+            return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count}) }});
+        }
+    };
+    const data: [8]Row = @splat(.{ .lines = &.{ &.{.{ .text = "first" }}, &.{.{ .text = "second" }} }, .target = 0 });
+    const rows: []const Row = &data;
+    for ([_]u16{ 140, 46 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var list: Self = .{ .rows = .of(&rows), .aboveFn = Words.above, .belowFn = Testing.below };
+        const ctx = Testing.context(arena.allocator(), 7).withConstraints(.{}, .{ .width = width, .height = 7 });
+        // A settled wheel position with the first row's first line off screen.
+        list.last_size = ctx.max.size();
+        list.list.item_count = @intCast(rows.len);
+        list.list.scroll = .{ .top = 3, .offset = 1 };
+        const surface = try list.widget().draw(ctx);
+        try std.testing.expectEqual(@as(u32, 3), list.list.scroll.top);
+        try std.testing.expectEqual(@as(i17, 1), list.list.scroll.offset);
+        var screen: vaxis.Screen = try .init(arena.allocator(), .{ .cols = width, .rows = 7, .x_pixel = 0, .y_pixel = 0 });
+        surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = 7, .screen = &screen }, list.widget());
+        for ([_]struct { y: u16, text: []const u8 }{ .{ .y = 0, .text = "↑ 3 more" }, .{ .y = 1, .text = "second" }, .{ .y = 6, .text = "below 2" } }) |expected| {
+            var actual: std.ArrayList(u8) = .empty;
+            for (0..width) |x| try actual.appendSlice(arena.allocator(), screen.readCell(@intCast(x), expected.y).?.char.grapheme);
+            try std.testing.expectEqualStrings(expected.text, std.mem.trim(u8, actual.items, " "));
         }
     }
 }

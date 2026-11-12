@@ -1157,6 +1157,58 @@
         "↓",
         "more",
         "Settings"
+      ],
+      "absent": [
+        "↑",
+        "↓ 0 more"
+      ]
+    },
+    {
+      "name": "many-sessions-middle",
+      "note": "51a-many-sessions-middle",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down"
+          ]
+        },
+        {
+          "wait": "Settings"
+        }
+      ],
+      "sizes": [
+        "46x30",
+        "140x40"
+      ],
+      "expect": [
+        "↑",
+        "↓",
+        "more",
+        "Settings"
+      ],
+      "absent": [
+        "↑ 0 more",
+        "↓ 0 more"
       ]
     },
     {
@@ -1218,7 +1270,13 @@
       ],
       "expect": [
         "Settings",
-        "enter open"
+        "enter open",
+        "↑",
+        "more"
+      ],
+      "absent": [
+        "↓",
+        "↑ 0 more"
       ]
     },
     {

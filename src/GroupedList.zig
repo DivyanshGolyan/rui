@@ -55,6 +55,7 @@ inner: List = .{},
 /// What is pinned under the list, and the rows the screen's layout gives
 /// it (`overview_view.layout`'s `settings`), which the list never takes.
 tail: ?Tail = null,
+aboveFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 belowFn: ?*const fn (u32, std.mem.Allocator) std.mem.Allocator.Error!List.Line = null,
 /// Borrowed alias to the widget's scrolling owner, established by widget().
 list: *vxfw.ListView = undefined,
@@ -123,9 +124,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const frame = try ctx.arena.create(Frame);
     frame.* = .{ .owner = self };
     self.inner.rows = .{ .userdata = frame, .count = self.rows.count, .rowFn = Frame.row, .countFromFn = if (self.rows.countFromFn != null) Frame.count else null };
+    self.inner.aboveFn = self.aboveFn;
     self.inner.belowFn = self.belowFn;
-    self.inner.below_align = .center;
-    self.inner.below_style = widget_style.of(self.caps, .{ .colour = .quiet });
+    self.inner.indicator_align = .center;
+    self.inner.indicator_style = widget_style.of(self.caps, .{ .colour = .quiet });
     self.inner.selected = self.selected;
     self.inner.on_press = if (self.on_press != null) .{ .userdata = frame, .pressed = reportPress } else null;
     self.inner.base_style = widget_style.of(self.caps, .{});
@@ -336,7 +338,7 @@ test "GroupedList two-line rows select and press both lines with a pinned tail" 
     try std.testing.expectEqual(@as(usize, 2), presses.count);
 }
 
-test "GroupedList below line counts Sessions not the New Session entry and stays quiet centered" {
+test "GroupedList markers count Sessions not the New Session entry and stay quiet centered" {
     const Source = struct {
         fn row(_: *const anyopaque, index: usize, _: std.mem.Allocator) std.mem.Allocator.Error!Row {
             return .{ .segments = &.{.{ .text = "row", .style = .{} }}, .height = 2, .target = if (index == 0) .new_session else .{ .open = numbered(index) } };
@@ -344,20 +346,23 @@ test "GroupedList below line counts Sessions not the New Session entry and stays
         fn count(_: *const anyopaque, first: u32) u32 {
             return 6 -| (first -| 1);
         }
+        fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!List.Line {
+            return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
+        }
         fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!List.Line {
             return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) }});
         }
     };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
-    for ([_]overview_view.Caps.Depth{ .direct, .none }) |depth| {
-        var list: Self = .{ .rows = .{ .userdata = undefined, .count = 7, .rowFn = Source.row, .countFromFn = Source.count }, .selected = 0, .belowFn = Source.below, .caps = .{ .depth = depth } };
+    for ([_]overview_view.Caps.Depth{ .direct, .none }) |depth| for ([_]u32{ 0, 6 }) |selected| {
+        var list: Self = .{ .rows = .{ .userdata = undefined, .count = 7, .rowFn = Source.row, .countFromFn = Source.count }, .selected = selected, .aboveFn = Source.above, .belowFn = Source.below, .caps = .{ .depth = depth } };
         const surface = try list.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 30, .height = 7 }, .cell_size = .{} });
-        const indicator = surface.children[surface.children.len - 1];
-        try std.testing.expectEqual(@as(i17, 6), indicator.origin.row);
+        const indicator = surface.children[if (selected == 0) surface.children.len - 1 else 1];
+        try std.testing.expectEqual(@as(i17, if (selected == 0) 6 else 0), indicator.origin.row);
         var text: std.ArrayList(u8) = .empty;
         for (0..30) |x| try text.appendSlice(arena.allocator(), indicator.surface.readCell(@intCast(x), 0).char.grapheme);
-        try std.testing.expectEqualStrings("           ↓ 4 more           ", text.items);
+        try std.testing.expectEqualStrings(if (selected == 0) "           ↓ 4 more           " else "           ↑ 3 more           ", text.items);
         try std.testing.expectEqual(widget_style.of(list.caps, .{ .colour = .quiet }).fg, indicator.surface.readCell(11, 0).style.fg);
-    }
+    };
 }

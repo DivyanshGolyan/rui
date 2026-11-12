@@ -942,6 +942,10 @@ const SessionRows = struct {
         return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
     }
 
+    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
+        return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
+    }
+
     fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
         const segments = try arena.alloc(vaxis.Segment, 1);
         segments[0] = .{ .text = try std.fmt.allocPrint(arena, "↓ {d} more", .{count_}) };
@@ -1074,6 +1078,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
                 self.app_sessions.selected = self.selectedListLine();
                 self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
+                self.app_sessions.aboveFn = SessionRows.above;
                 self.app_sessions.belowFn = SessionRows.below;
                 break :sessions &self.app_sessions;
             },
