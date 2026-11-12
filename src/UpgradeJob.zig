@@ -25,6 +25,7 @@ operation: Operation = .check,
 checked: ?upgrade.Check = null,
 result: ?upgrade.Result = null,
 cleanup: upgrade.CleanupReceipts = .{},
+download: upgrade.DownloadDiagnostic = .{},
 failure: ?anyerror = null,
 outcome: Outcome = .unchanged,
 /// A stop was asked for: an Esc that `gate` let through, or leaving the
@@ -53,8 +54,8 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8) !void {
 fn work(raw: *anyopaque, task: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     switch (self.operation) {
-        .check => self.checked = try upgrade.check(self.init, self.allocator, self.store, &task.cancellation),
-        .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }, &self.cleanup),
+        .check => self.checked = try upgrade.check(self.init, self.allocator, self.store, &task.cancellation, &self.download),
+        .install => self.result = try upgrade.install(self.init, self.allocator, &self.checked.?, &task.cancellation, .{ .context = self, .report = progress }, &self.cleanup, &self.download),
     }
 }
 
@@ -143,6 +144,7 @@ pub fn deinit(self: *Self) void {
     self.settle();
     if (self.result) |*result| result.deinit(self.allocator);
     if (self.checked) |*checked| checked.deinit(self.allocator);
+    self.download.deinit(self.allocator);
     self.* = .{};
 }
 
@@ -178,7 +180,12 @@ fn version(of: @FieldType(@FieldType(upgrade.Check, "candidate"), "version")) up
 }
 
 fn ending(self: *const Self) upgrade_status.Ended {
-    const checked = &(self.checked orelse return if (self.cancelling) .cancelled else .failed);
+    const failed: upgrade_status.Ended = .{ .failed = if (self.failure) |err| switch (caller_error.of(err)) {
+        .upgrade_download_failed => .download,
+        .upgrade_release_invalid, .upgrade_preparation_failed => .release,
+        else => .other,
+    } else .other };
+    const checked = &(self.checked orelse return if (self.cancelling) .cancelled else failed);
     const release = version(checked.candidate.version);
     if (self.result) |*result| {
         if (!upgrade.compatible(result)) return .{ .incompatible = release };
@@ -188,7 +195,7 @@ fn ending(self: *const Self) upgrade_status.Ended {
         return .{ .upgraded = .{ .version = release, .restarted = restarted } };
     }
     if (self.cancelling) return .cancelled;
-    if (self.failure != null) return .failed;
+    if (self.failure != null) return failed;
     return .{
         .refused = switch (checked.selected) {
             .absent => .first_install,
@@ -222,6 +229,7 @@ pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
     }
     if (self.failure) |err| {
         try writer.print("\nUpgrade {s} failed: {s}\n", .{ if (self.operation == .check) "check" else "installation", failureWords(err) });
+        try self.download.write(writer);
         if (self.operation == .install and self.result == null) try writer.writeAll("No completed installation receipt; inspect the selected command and Host before retrying.\n");
     } else if (self.cancelling and self.result == null) {
         try writer.writeAll("\nUpgrade cancelled before installation.\n");
@@ -235,7 +243,7 @@ pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
 /// file fault, only that it did not finish.
 fn failureWords(err: anyerror) []const u8 {
     return switch (caller_error.of(err)) {
-        .upgrade_release_invalid, .upgrade_preparation_failed, .upgrade_ineligible => |code| caller_error.facts(code).says,
+        .upgrade_download_failed, .upgrade_release_invalid, .upgrade_preparation_failed, .upgrade_ineligible => |code| caller_error.facts(code).says,
         else => "Rui could not finish it. Check network access and disk space, then select Version in app settings again.",
     };
 }
@@ -333,7 +341,8 @@ test "joined installation cancellation retains the actual publication receipt" {
 
 test "a failed run says why in plain words, not an error name" {
     const cases = [_]struct { Operation, anyerror, []const u8 }{
-        .{ .check, error.InvalidReleaseVersion, "Upgrade check failed: Published stable release metadata or platform assets could not be validated." },
+        .{ .check, error.ReleaseDownloadFailed, "Upgrade check failed: Rui could not download release information or the archive from GitHub." },
+        .{ .check, error.InvalidReleaseVersion, "Upgrade check failed: Published stable release tag or platform checksums could not be validated." },
         .{ .install, error.ReleaseChecksumMismatch, "Upgrade installation failed: Release preparation or validation failed." },
         .{ .check, error.ConnectionRefused, "Upgrade check failed: Rui could not finish it." },
     };
@@ -345,6 +354,18 @@ test "a failed run says why in plain words, not an error name" {
         try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), case[2]) != null);
         try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), @errorName(case[1])) == null);
     }
+}
+
+test "a failed download report retains curl's last stderr line" {
+    const allocator = std.testing.allocator;
+    var job: Self = .{ .allocator = allocator, .started = true, .finished = true, .failure = error.ReleaseDownloadFailed };
+    defer job.deinit();
+    job.download.stderr = try allocator.dupe(u8, "earlier diagnostic\ncurl: (22) The requested URL returned error: 403\n");
+    var buffer: [1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try job.writeReport(&writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "curl: (22) The requested URL returned error: 403\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "earlier diagnostic") == null);
 }
 
 test "cleanup report retains copied paths and the worker error" {
@@ -607,8 +628,10 @@ test "how a run ends, as the status bar names it" {
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .replacement_observed, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         // No receipt: a cancel says so before a failure does.
         .{ .job = .{ .operation = .install, .cancelling = true, .failure = error.Cancelled }, .ended = .cancelled, .outcome = .unchanged },
-        .{ .job = .{ .operation = .install, .failure = error.ReleaseChecksumMismatch }, .ended = .failed, .outcome = .unchanged },
-        .{ .job = .{ .failure = error.ConnectionRefused }, .ended = .failed, .outcome = .unchanged },
+        .{ .job = .{ .operation = .install, .failure = error.ReleaseChecksumMismatch }, .ended = .{ .failed = .release }, .outcome = .unchanged },
+        .{ .job = .{ .failure = error.ReleaseDownloadFailed }, .ended = .{ .failed = .download }, .outcome = .unchanged },
+        .{ .job = .{ .failure = error.InvalidReleaseEndpoint }, .ended = .{ .failed = .release }, .outcome = .unchanged },
+        .{ .job = .{ .failure = error.ConnectionRefused }, .ended = .{ .failed = .other }, .outcome = .unchanged },
         .{ .job = .{ .cancelling = true }, .ended = .cancelled, .outcome = .unchanged },
     }) |case| {
         var job = case.job;
@@ -618,6 +641,9 @@ test "how a run ends, as the status bar names it" {
         try std.testing.expectEqualDeep(upgrade_status.Run{ .ended = .{ .how = case.ended, .outcome = case.outcome } }, job.status(0));
         job.result = null;
         job.checked = null;
+        // Discovery can fail before any Check exists; the same owner still
+        // decides why, without collapsing it into a generic failed ending.
+        if (job.failure != null) try std.testing.expectEqualDeep(case.ended, job.ending());
     }
 }
 

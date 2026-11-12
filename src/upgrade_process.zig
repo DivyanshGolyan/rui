@@ -56,6 +56,78 @@ pub fn output(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8
     return result.stdout;
 }
 
+/// At most the existing 4096-byte child stderr capture, owned by one run.
+/// Only a failed download transfers it; successful probes retain nothing.
+pub const DownloadDiagnostic = struct {
+    stderr: ?[]u8 = null,
+
+    pub fn deinit(self: *DownloadDiagnostic, allocator: std.mem.Allocator) void {
+        if (self.stderr) |bytes| allocator.free(bytes);
+        self.* = .{};
+    }
+
+    pub fn write(self: *const DownloadDiagnostic, writer: *std.Io.Writer) !void {
+        const bytes = self.stderr orelse return;
+        const trimmed = std.mem.trimEnd(u8, bytes, "\r\n");
+        const start = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |at| at + 1 else 0;
+        if (trimmed.len == start) return;
+        var text: @import("TerminalText.zig") = .{ .mode = .line };
+        try text.feed(writer, trimmed[start..]);
+        try text.finish(writer);
+        try writer.writeAll("\n");
+    }
+};
+
+/// Curl failures are download failures, not archive validation failures.
+/// Preserve stderr before unwinding so shell and restored TUI reports agree.
+pub fn downloadOutput(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, cancellation: ?*const client.Cancellation, limit: usize, diagnostic: ?*DownloadDiagnostic) ![]u8 {
+    const result = try run(allocator, io, argv, cancellation, limit);
+    errdefer allocator.free(result.stdout);
+    if (!result.term.success()) {
+        if (diagnostic) |receipt| {
+            receipt.deinit(allocator);
+            receipt.stderr = result.stderr;
+        } else allocator.free(result.stderr);
+        return error.ReleaseDownloadFailed;
+    }
+    allocator.free(result.stderr);
+    return result.stdout;
+}
+
+test "upgrade process download failure retains only the last diagnostic line for reports" {
+    const allocator = std.testing.allocator;
+    var diagnostic: DownloadDiagnostic = .{};
+    defer diagnostic.deinit(allocator);
+    try std.testing.expectError(error.ReleaseDownloadFailed, downloadOutput(allocator, std.testing.io, &.{ "sh", "-c", "printf 'earlier line\\nlast curl failure\\n' >&2; exit 22" }, null, 1024, &diagnostic));
+    var buffer: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try diagnostic.write(&writer);
+    try std.testing.expectEqualStrings("last curl failure\n", writer.buffered());
+    try std.testing.expectError(error.UpgradeChildFailed, output(allocator, std.testing.io, &.{ "sh", "-c", "exit 1" }, null, 1024));
+}
+
+test "upgrade process download diagnostic handles empty CRLF and hostile terminal bytes" {
+    const allocator = std.testing.allocator;
+    var diagnostic: DownloadDiagnostic = .{};
+    defer diagnostic.deinit(allocator);
+    for ([_]struct { []const u8, []const u8 }{
+        .{ "", "" },
+        .{ "\r\n", "" },
+        .{ "first\r\nlast\r\n", "last\n" },
+        .{ "curl: \x1b[31m\xff\n", "curl: \\x1b[31m\\xff\n" },
+    }) |case| {
+        diagnostic.deinit(allocator);
+        diagnostic.stderr = try allocator.dupe(u8, case[0]);
+        var buffer: [128]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try diagnostic.write(&writer);
+        try std.testing.expectEqualStrings(case[1], writer.buffered());
+    }
+    // A later failed download replaces (and frees) the previous capture.
+    try std.testing.expectError(error.ReleaseDownloadFailed, downloadOutput(allocator, std.testing.io, &.{ "sh", "-c", "printf replacement >&2; exit 1" }, null, 1024, &diagnostic));
+    try std.testing.expectEqualStrings("replacement", diagnostic.stderr.?);
+}
+
 test "upgrade process pre-cancellation starts no child" {
     var token: client.Cancellation = .{};
     token.requestStop();

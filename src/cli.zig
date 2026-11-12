@@ -611,8 +611,11 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     holdStore(store);
     const upgrade = @import("upgrade.zig");
     const allocator = std.heap.c_allocator;
-    var checked = upgrade.check(init, allocator, store, null) catch |err| {
+    var download: upgrade.DownloadDiagnostic = .{};
+    defer download.deinit(allocator);
+    var checked = upgrade.check(init, allocator, store, null, &download) catch |err| {
         stderr.diagnostic("rui: upgrade check failed; no installation or Host was changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        upgradeDownloadDiagnostic(err, &download);
         recordExit(.environment);
         return error.Reported;
     };
@@ -636,8 +639,9 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         };
         written catch |err| stderr.diagnostic("rui: could not write the retained installation cleanup receipt ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
     }
-    var result = upgrade.install(init, allocator, &checked, null, null, &cleanup) catch |err| {
+    var result = upgrade.install(init, allocator, &checked, null, null, &cleanup, &download) catch |err| {
         stderr.diagnostic("rui: upgrade failed before publication; the selected build and Host were not changed ({s}).\n", .{@tagName(caller_error.of(@as(anyerror, err)))});
+        upgradeDownloadDiagnostic(err, &download);
         recordExit(.environment);
         return error.Reported;
     };
@@ -650,6 +654,17 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
         else => {},
     }
     if (exit_status != .done) return error.Reported;
+}
+
+noinline fn upgradeDownloadDiagnostic(err: anyerror, download: *const @import("upgrade.zig").DownloadDiagnostic) void {
+    if (caller_error.of(err) != .upgrade_download_failed) return;
+    const facts = caller_error.facts(.upgrade_download_failed);
+    stderr.diagnostic("{s} {s}\n", .{ facts.says, facts.next });
+    // Terminal escaping can expand the bounded 4096-byte curl capture.
+    var buffer: [32768]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    download.write(&writer) catch return; // Optional guidance, like stderr.diagnostic.
+    stderr.diagnosticBytes(writer.buffered());
 }
 
 fn publishInstall(init: std.process.Init, args: []const []const u8) !void {

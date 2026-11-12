@@ -31,6 +31,8 @@ pub const Refusal = enum { first_install, source_build, unknown_build, package_m
 /// Where an install stands. Only `preparing` can still roll back.
 pub const Step = enum { preparing, publishing, restarting };
 
+pub const Failure = enum { download, release, other };
+
 pub const Ended = union(enum) {
     up_to_date: Version,
     /// Another install selected a build newer than the release found:
@@ -40,7 +42,7 @@ pub const Ended = union(enum) {
     /// Cancelled before publishing: nothing changed.
     cancelled,
     /// Failed before publishing: nothing changed.
-    failed,
+    failed: Failure,
     upgraded: struct { version: Version, restarted: bool },
     /// Installed, but this client cannot use the Host it left.
     incompatible: Version,
@@ -137,8 +139,8 @@ pub fn line(run: Run, buffer: *[max_line_bytes]u8, script: Script) Line {
                 writer.writeAll("Upgrade cancelled; nothing changed") catch unreachable;
                 break :said .{ .normal, .notice };
             },
-            .failed => said: {
-                writer.print("! Upgrade failed; nothing changed {s} {s}", .{ dot, shell }) catch unreachable;
+            .failed => |why| said: {
+                writer.print("! {s}; nothing changed {s} {s}", .{ failure_words.get(why), dot, shell }) catch unreachable;
                 break :said .{ .attention, .notice };
             },
             .upgraded => |done| said: {
@@ -154,6 +156,12 @@ pub fn line(run: Run, buffer: *[max_line_bytes]u8, script: Script) Line {
     };
     return .{ .text = writer.buffered(), .tone = said[0], .lasts = said[1] };
 }
+
+const failure_words = std.enums.EnumArray(Failure, []const u8).init(.{
+    .download = "Couldn't reach GitHub",
+    .release = "Upgrade failed",
+    .other = "Upgrade failed",
+});
 
 const refusals = std.enums.EnumArray(Refusal, []const u8).init(.{
     .first_install = "no managed install",
@@ -207,7 +215,9 @@ test "how a run ended: a notice, or held until another Upgrade when the client c
         .{ .{ .refused = .unknown_build }, "Can't upgrade here: an unknown build · run rui upgrade in a shell for details", .attention, .notice },
         .{ .{ .refused = .package_managed }, "Can't upgrade here: installed by another tool · run rui upgrade in a shell for details", .attention, .notice },
         .{ .cancelled, "Upgrade cancelled; nothing changed", .normal, .notice },
-        .{ .failed, "! Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
+        .{ .{ .failed = .download }, "! Couldn't reach GitHub; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
+        .{ .{ .failed = .release }, "! Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
+        .{ .{ .failed = .other }, "! Upgrade failed; nothing changed · run rui upgrade in a shell for details", .attention, .notice },
         .{ .{ .upgraded = .{ .version = v, .restarted = true } }, "Upgraded to 0.60.1 · Host restarted", .normal, .notice },
         .{ .{ .upgraded = .{ .version = v, .restarted = false } }, "Upgraded to 0.60.1", .normal, .notice },
         .{ .{ .incompatible = .{ .schema = 61, .patch = 0 } }, "Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave", .attention, .persistent },
@@ -254,7 +264,10 @@ pub fn fieldTail(run: Run, buffer: *[max_line_bytes]u8) []const u8 {
                 .package_managed => " · package managed",
             },
             .cancelled => " · cancelled",
-            .failed => " · upgrade failed",
+            .failed => |why| switch (why) {
+                .download => " · couldn't reach GitHub",
+                .release, .other => " · upgrade failed",
+            },
             .upgraded => |done| {
                 writer.print(" · upgraded to {f}", .{done.version}) catch unreachable;
                 return writer.buffered();
@@ -276,6 +289,11 @@ test "Upgrade settings field reports state without shell instructions" {
     try std.testing.expectEqualStrings(" · upgrading to 0.61.0", fieldTail(.{ .installing = .{ .found = found } }, &buffer));
     try std.testing.expectEqualStrings(" · publishing…", fieldTail(.{ .installing = .{ .found = found, .step = .publishing } }, &buffer));
     try std.testing.expectEqualStrings(" · restarting the Host…", fieldTail(.{ .installing = .{ .found = found, .step = .restarting } }, &buffer));
+    for ([_]struct { Failure, []const u8 }{
+        .{ .download, " · couldn't reach GitHub" },
+        .{ .release, " · upgrade failed" },
+        .{ .other, " · upgrade failed" },
+    }) |case| try std.testing.expectEqualStrings(case[1], fieldTail(.{ .ended = .{ .how = .{ .failed = case[0] }, .outcome = .unchanged } }, &buffer));
     const endings = [_]Ended{
         .{ .up_to_date = .{ .schema = 60, .patch = 0 } },
         .superseded,
@@ -284,7 +302,7 @@ test "Upgrade settings field reports state without shell instructions" {
         .{ .refused = .unknown_build },
         .{ .refused = .package_managed },
         .cancelled,
-        .failed,
+        .{ .failed = .other },
         .{ .upgraded = .{ .version = found.version, .restarted = true } },
         .{ .incompatible = found.version },
     };
