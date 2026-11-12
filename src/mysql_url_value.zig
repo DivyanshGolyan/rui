@@ -4,30 +4,33 @@ const Bounded = @import("bounded.zig").Bounded;
 const mysql = @import("store/wire/mysql.zig");
 
 /// Caller-owned parsed fields. Slices borrow this storage until parse or wipe.
-pub const Value = struct {
-    pub const default_port: u16 = 3306;
-    user: Bounded(mysql.max_user_bytes) = .{},
-    password: Bounded(mysql.max_password_bytes) = .{},
-    host: Bounded(253) = .{},
-    socket: Bounded(107) = .{},
-    database: Bounded(64) = .{},
-    // Same path bound as the provider launch frame and TLS loader.
-    ca_file: Bounded(@import("host_settings.zig").max_ca_file_bytes) = .{},
-    port: u16 = default_port,
+pub fn ValueWith(comptime ca_file_bytes: usize) type {
+    return struct {
+        const Value = @This();
+        pub const default_port: u16 = 3306;
+        user: Bounded(mysql.max_user_bytes) = .{},
+        password: Bounded(mysql.max_password_bytes) = .{},
+        host: Bounded(253) = .{},
+        socket: Bounded(107) = .{},
+        database: Bounded(64) = .{},
+        // Same path bound as the provider launch frame and TLS loader.
+        ca_file: Bounded(ca_file_bytes) = .{},
+        port: u16 = default_port,
 
-    /// Replace the previous value; an invalid URL leaves all fields wiped.
-    pub fn parse(self: *Value, text: []const u8) error{InvalidMysqlUrl}!void {
-        self.wipe();
-        errdefer self.wipe();
-        try parseInto(self, text);
-    }
+        /// Replace the previous value; an invalid URL leaves all fields wiped.
+        pub fn parse(self: *Value, text: []const u8) error{InvalidMysqlUrl}!void {
+            self.wipe();
+            errdefer self.wipe();
+            try parseInto(self, text);
+        }
 
-    /// Erase credentials and every other retained field, including unused bytes.
-    pub fn wipe(self: *Value) void {
-        std.crypto.secureZero(u8, std.mem.asBytes(self));
-        self.port = default_port;
-    }
-};
+        /// Erase credentials and every other retained field, including unused bytes.
+        pub fn wipe(self: *Value) void {
+            std.crypto.secureZero(u8, std.mem.asBytes(self));
+            self.port = default_port;
+        }
+    };
+}
 
 /// Parse into fresh, field-compatible storage owned by an adapter.
 pub fn parseInto(self: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
@@ -100,6 +103,7 @@ fn decode(out: anytype, text: []const u8) error{InvalidMysqlUrl}!void {
 }
 
 test "mysql URL value parses TLS and socket targets and replaces prior fields" {
+    const Value = ValueWith(@import("host_settings.zig").max_ca_file_bytes);
     var value: Value = .{};
     defer value.wipe();
     try value.parse("mysql://u%40ser:p%3Ass@[::1]:3307/db?ssl-ca=%2Fca.pem");
@@ -116,6 +120,7 @@ test "mysql URL value parses TLS and socket targets and replaces prior fields" {
 }
 
 test "mysql URL value rejects malformed values and wipes partial secrets" {
+    const Value = ValueWith(@import("host_settings.zig").max_ca_file_bytes);
     var value: Value = .{};
     for ([_][]const u8{
         "",                        "https://u:p@h/d",                 "mysql://u:p@h",                 "mysql://:p@h/d",
@@ -131,6 +136,7 @@ test "mysql URL value rejects malformed values and wipes partial secrets" {
 }
 
 test "mysql URL value enforces every decoded field bound" {
+    const Value = ValueWith(@import("host_settings.zig").max_ca_file_bytes);
     var value: Value = .{};
     defer value.wipe();
     inline for (.{ "user", "password", "host", "socket", "database", "ca_file" }) |field| {
@@ -157,6 +163,7 @@ test "mysql URL value enforces every decoded field bound" {
 }
 
 test "mysql URL value wipe erases every field buffer" {
+    const Value = ValueWith(@import("host_settings.zig").max_ca_file_bytes);
     var value: Value = .{};
     try value.parse("mysql://user:secret@host/db?ssl-ca=/ca.pem");
     value.wipe();

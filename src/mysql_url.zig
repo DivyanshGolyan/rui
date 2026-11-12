@@ -2,7 +2,7 @@
 //! be percent-encoded in the authority, or spelled as an absolute path.
 //! TCP accepts only `ssl-ca=<absolute PEM path>` to replace system trust.
 const std = @import("std");
-pub const Value = @import("mysql_url_value.zig").Value;
+pub const Value = @import("mysql_url_value.zig").ValueWith(@import("host_settings.zig").max_ca_file_bytes);
 pub const parseInto = @import("mysql_url_value.zig").parseInto;
 const wire = @import("store/wire/mysql_connection.zig");
 const Url = @This();

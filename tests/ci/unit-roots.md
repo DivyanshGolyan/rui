@@ -21,6 +21,8 @@ The Store root alone starts and verifies the live MySQL dialect check in Linux C
 The value-only `url` module owns URL parsing and host bounds. Native, logic
 and semantic-check roots import the same module instance as their HTTP/2 and
 TLS modules, so URL types are never compiled into two modules in one binary.
+The import-architecture test lists this named value module among its module
+roots; path-only traversal cannot follow its shared named import.
 
 Module ownership preserves each module's process globals. Executions are
 **serial, Store last**: the MySQL dialect fixture uses fixed schema names and

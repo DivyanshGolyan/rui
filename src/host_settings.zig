@@ -11,6 +11,7 @@ const defaults = @import("product_defaults.zig");
 const http = @import("http1/request.zig");
 const endpoint_value = @import("endpoint_value.zig");
 const mysql_value = @import("mysql_url_value.zig");
+const MysqlValue = mysql_value.ValueWith(max_ca_file_bytes);
 
 // Moved, not copied, from the retiring launch frame and its platform shell.
 pub const max_document_bytes = 1024 * 1024;
@@ -102,7 +103,7 @@ pub fn Choice(comptime E: type, comptime initial: E) type {
 /// borrow the temporary parsing arena.
 pub const MysqlBytes = struct {
     raw: []u8 = &.{},
-    parsed: ?*mysql_value.Value = null,
+    parsed: ?*MysqlValue = null,
     allocator: ?std.mem.Allocator = null,
     pub fn slice(self: *const MysqlBytes) []const u8 {
         return self.raw;
@@ -120,7 +121,7 @@ pub const MysqlBytes = struct {
     }
     pub fn set(self: *MysqlBytes, gpa: std.mem.Allocator, text: []const u8) Error!void {
         if (text.len > max_document_bytes) return error.SettingsInvalid;
-        const parsed = try gpa.create(mysql_value.Value);
+        const parsed = try gpa.create(MysqlValue);
         errdefer {
             std.crypto.secureZero(u8, std.mem.asBytes(parsed));
             gpa.destroy(parsed);
@@ -1529,7 +1530,7 @@ test "Host settings every derived bounded leaf refuses one byte or integer beyon
             try value.writer.writeAll("{\"value\":\"");
             if (std.mem.eql(u8, leaf.json_schema.format.?, "mysql-login-source")) {
                 try value.writer.writeAll("mysql://u:");
-                const capacity = comptime @as(mysql_value.Value, .{}).password.bytes.len;
+                const capacity = comptime @as(MysqlValue, .{}).password.bytes.len;
                 try value.writer.splatByteAll('a', capacity + 1);
                 try value.writer.writeAll("@localhost/db");
             } else try value.writer.splatByteAll('a', secret_value.max_key_bytes + 1);
@@ -1662,7 +1663,7 @@ test "Host settings MySQL literal exceeds API key size but never appears in outp
     var input: std.Io.Writer.Allocating = .init(gpa);
     defer input.deinit();
     try input.writer.writeAll("{\"providers\":{},\"interface\":{\"dir\":\"/tmp/host-settings\"},\"store\":{\"mysql\":{\"url\":{\"value\":\"mysql://user:");
-    try input.writer.splatByteAll('p', comptime @as(mysql_value.Value, .{}).password.bytes.len);
+    try input.writer.splatByteAll('p', comptime @as(MysqlValue, .{}).password.bytes.len);
     try input.writer.writeAll("@localhost/db\"}}}}");
     var failure: start_report.Failure = undefined;
     try apply(settings, gpa, input.written(), .pipe, checkSample, &failure);
