@@ -23,6 +23,9 @@ Enter these at the `›` prompt. Typing `/` lists names only; fixed choices appe
 | `/setup` | Changes defaults for future Sessions, not the current one. |
 | `/model` | In a conversation, shows the Session's model and sign-in; a Session keeps both. In the overview, lists the models to pick the default for new Sessions. |
 
+While the model works on a reply, the work line says `Thinking` with elapsed time.
+Rate-limited retries keep their countdown, and running tools show their descriptions.
+
 Tool outcomes start folded, showing their description and outcome, with a numeric failed exit when available.
 Click a tool heading to open or close its saved output in place.
 Ctrl-O toggles the lowest tool heading or opens the lowest collapsed Message or Session name in view, whichever is lower.

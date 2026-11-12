@@ -2192,6 +2192,7 @@ CLI failures cross one catalog boundary and render a stable code with accepted i
 Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
 The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (`host_not_serving`, exit 6); the latter prints the exact `rui host start --store PATH` command.
 An unreachable Host is absent only when the Store lock is free; a missing or refused control socket while that lock is held is `host_stopping` (exit 5), with advice to wait for shutdown before restarting and retrying.
+A Host from another Rui version that does not speak this rui's protocol is `host_incompatible` (exit 6); pause it with the Rui version that started it, then start it again with this rui.
 Other transport failures while the lock is held, or a failed lock probe, do not establish either condition and retain their original classification.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
@@ -2358,7 +2359,14 @@ Inspection creates neither directory nor file.
 On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of unarchived Sessions in the Store; each row shows its Workspace.
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
-It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice offers each provider (Codex login, an OpenAI API key, or saving a ready one as the default) or deferral, without creating a Session.
+It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with ChatGPT and API key choices on the input row, without creating a Session.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable device-login link or masked key entry, and keeps failures on that row.
+While it is open it takes every key and click, so nothing behind it opens or navigates.
+Esc leaves it, except the first-run screen, which stays until sign-in gives a default; a screen opened from Settings always returns there.
+Its choice uses the approval row's prompt and background-only selection, including with NO_COLOR; the device row always reads `auth.openai.com/codex/device · CODE`, using the answer view's terminal hyperlink boundary.
+Either locally ready provider is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
+After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
+The shared `host_launch` result retains startup output, failure context and warnings across activation. Its reporting policy supplies terminal diagnostics after screen restoration and one plain sign-in-row line; only retryable failures offer Enter. Successful activation warnings remain a single overview notice, independently of default-save failure.
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
@@ -2807,7 +2815,7 @@ This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
 Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
-Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
+Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Thinking · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
 The activity tail remains part of the feed's measured height while scrolled away; inspection and Message panels show their own documents instead.
 The `↓` chip uses a permanently reserved row. Its count names newly rendered Activity entries arriving beyond the scan's starting cursor, not invisible Activity positions or replayed provisional entries.
@@ -3023,7 +3031,7 @@ Rui cannot see whether the terminal took the bytes.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
-Before the first answer each says `No answer to copy yet.`; `/copy code` on an answer with no complete fenced block says `No code block in the last answer.` A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).
