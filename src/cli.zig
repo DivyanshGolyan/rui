@@ -472,7 +472,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.openai)) {
         .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
         .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login() ++ "`.\n",
+        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
     });
     const selectable = model_capability.capabilities(&readiness);
     const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
@@ -484,7 +484,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         break :blk null;
     };
     if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `" ++ comptime protocol.Provider.codex.login() ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login() ++ "`.\n"),
+        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `" ++ comptime protocol.Provider.codex.login().? ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login().? ++ "`.\n"),
         .selected => |selected| {
             const note: []const u8 = switch (selected.readiness) {
                 .configured => "local credential configured; remote acceptance not checked",
@@ -1152,8 +1152,18 @@ fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bo
 }
 
 fn login(init: std.process.Init, args: []const []const u8, interactive: bool, comptime exchange: anytype) !void {
-    if (args.len == 1 and std.mem.eql(u8, args[0], "openai")) return saveApiKey(init, if (interactive) .choose else .fill);
-    if (args.len != 1 or !std.mem.eql(u8, args[0], "codex")) return usage();
+    if (args.len != 1) return usage();
+    const provider = std.meta.stringToEnum(protocol.Provider, args[0]) orelse return usage();
+    if (provider.login() == null) {
+        stderr.diagnostic("rui auth login: {s} has no terminal sign-in yet; nothing was changed.\n", .{providerPresentation(provider).name});
+        return usage();
+    }
+    switch (provider) {
+        .openai => return saveApiKey(init, if (interactive) .choose else .fill),
+        .codex => {},
+        // Its login fact is false, so the check above returned.
+        .chatgpt => unreachable,
+    }
     // Guided login already owns SIGINT from the choice through publication.
     var interrupt = if (interactive) null else LoginInterrupt.init();
     defer if (interrupt) |*scope| scope.deinit();
@@ -1571,8 +1581,8 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
         const shown = providerPresentation(provider);
         if (readiness.get(provider).usable())
             try prompt.print(" [{c}] {s} (ready),", .{ shown.key, shown.name })
-        else if (shown.sign_in) |sign_in|
-            try prompt.print(" [{c}] {s},", .{ shown.key, sign_in });
+        else if (provider.login() != null)
+            try prompt.print(" [{c}] {s},", .{ shown.key, shown.sign_in });
     }
     try prompt.writeAll(" [d] defer > ");
     if (!readiness.get(.codex).usable()) try std.Io.File.stdout().writeStreamingAll(init.io, "Codex login stores Rui-owned credentials.\n");
@@ -1627,8 +1637,8 @@ fn guideProviderLogin(init: std.process.Init, readiness: *const provider_selecti
     outcome catch |err| {
         const advice: []const u8 = switch (err) {
             error.LoginInterrupted => "Rui: Login interrupted. No provider preference changed; check credentials before retrying.\n",
-            error.LoginDenied => "Rui: Login denied. No provider preference changed; use " ++ comptime protocol.Provider.codex.login() ++ " if intended.\n",
-            error.LoginExpired => "Rui: Login expired. No provider preference changed; use " ++ comptime protocol.Provider.codex.login() ++ " for a fresh code.\n",
+            error.LoginDenied => "Rui: Login denied. No provider preference changed; use " ++ comptime protocol.Provider.codex.login().? ++ " if intended.\n",
+            error.LoginExpired => "Rui: Login expired. No provider preference changed; use " ++ comptime protocol.Provider.codex.login().? ++ " for a fresh code.\n",
             else => "Rui: Login failed or credential save unconfirmed. Use rui defaults inspect before retrying; no Session binding changed.\n",
         };
         try std.Io.File.stdout().writeStreamingAll(init.io, advice);
@@ -1752,7 +1762,7 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
         const selection = try snapshot.resolve(&readiness);
         if (selection) |binding| break binding;
         if (after_choice) {
-            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui defaults inspect, " ++ comptime protocol.Provider.codex.login() ++ " or " ++ protocol.Provider.openai.login() ++ " when ready; existing work is unchanged.\n");
+            try std.Io.File.stdout().writeStreamingAll(init.io, "Rui: No new Session created. Use rui defaults inspect, " ++ comptime protocol.Provider.codex.login().? ++ " or " ++ protocol.Provider.openai.login().? ++ " when ready; existing work is unchanged.\n");
             return false;
         }
         const any_ready = for (readiness.values) |state| {
@@ -1812,7 +1822,7 @@ fn openAiBaseUrlDiagnostic(init: std.process.Init) ?Overview.HostLaunch.Warning 
 noinline fn readServedKey(init: std.process.Init, key: *api_key.Key) ![]const u8 {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (try api_key.read(try openAiKeyPath(init, &path_buffer), key) == null) {
-        stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login() ++ "`, then start the Host again.\n", .{});
+        stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
         return error.ApiKeyMissing;
     }
     return key.slice();
@@ -1857,23 +1867,23 @@ const ProviderPresentation = struct {
     /// The guided choice's key.
     key: u8,
     name: []const u8,
-    /// The guided choice when the provider is not ready; null while the
-    /// terminal has no sign-in for it, so the choice is offered only ready.
-    sign_in: ?[]const u8,
+    /// The guided choice when the provider is not ready, offered only
+    /// while it has a login (`Provider.login`).
+    sign_in: []const u8,
 };
 
 fn providerPresentation(provider: protocol.Provider) ProviderPresentation {
     return switch (provider) {
         .codex => .{ .key = 'c', .name = "Codex", .sign_in = "Codex login" },
         .openai => .{ .key = 'o', .name = "OpenAI", .sign_in = "OpenAI API key" },
-        .chatgpt => .{ .key = 'g', .name = "ChatGPT", .sign_in = null },
+        .chatgpt => .{ .key = 'g', .name = "ChatGPT", .sign_in = "ChatGPT login" },
     };
 }
 
 /// Whether the guided choice offers `provider`: ready, or with a sign-in
 /// this terminal can start.
 fn offered(provider: protocol.Provider, readiness: *const provider_selection.Readinesses) bool {
-    return readiness.get(provider).usable() or providerPresentation(provider).sign_in != null;
+    return readiness.get(provider).usable() or provider.login() != null;
 }
 
 /// "Choose c, o or d." from the provider keys.
@@ -1894,10 +1904,29 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
         first = false;
     };
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved)
-        line.print("; to add {s}, stop and restart it after `{s}`", .{ providerPresentation(provider).name, provider.login() }) catch unreachable;
+    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved) {
+        if (provider.login()) |command|
+            line.print("; to add {s}, stop and restart it after `{s}`", .{ providerPresentation(provider).name, command }) catch unreachable
+        else
+            line.print("; {s} needs a sign-in this terminal cannot make yet", .{providerPresentation(provider).name}) catch unreachable;
+    };
     line.writeAll(".\n") catch unreachable;
     return line.buffered();
+}
+
+test "the Host line names a login only for an unserved provider that has one" {
+    var buffer: [512]u8 = undefined;
+    const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
+    try std.testing.expectEqualStrings("Host: serves Codex (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; ChatGPT needs a sign-in this terminal cannot make yet.\n", hostProvidersLine(served_one, &buffer));
+    inline for (comptime std.enums.values(protocol.Provider)) |unserved| {
+        var routes = protocol.routesAll(.endpoint);
+        @field(routes, @tagName(unserved)) = .unserved;
+        const said = hostProvidersLine(routes, &buffer);
+        if (unserved.login()) |command|
+            try std.testing.expect(std.mem.indexOf(u8, said, command) != null)
+        else
+            try std.testing.expect(std.mem.indexOf(u8, said, "rui auth login") == null and std.mem.indexOf(u8, said, "cannot make yet") != null);
+    }
 }
 
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -4556,7 +4585,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
         .{ .err = error.InvalidRuiAddress, .code = .peer_context_invalid, .exit = 2, .phrase = "unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE" },
         .{ .err = error.InvalidSenderHandle, .code = .invalid_sender_handle, .exit = 2, .phrase = "Send from a live Rui Session" },
-        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: codex, openai." },
+        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: codex, openai, chatgpt." },
         .{ .err = error.UnsupportedSelectionModel, .code = .selection_model_unsupported, .exit = 6, .phrase = "rui defaults configure --clear-model" },
         .{ .err = error.SavedPreferenceStoreInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "HOME/.config/rui/preferences" },
         .{ .err = error.SavedPreferenceProviderInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },
@@ -4567,7 +4596,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.PreferencesUnavailable, .code = .preferences_unavailable, .exit = 6, .phrase = "preferences file (0600)" },
         .{ .err = error.InsecurePreferenceDirectory, .code = .preferences_unavailable, .exit = 6, .phrase = "HOME/.config/rui (0700)" },
         .{ .err = error.InvalidPreferenceStore, .code = .preference_store_invalid, .exit = 2, .phrase = "rui defaults configure --store PATH" },
-        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider codex or --provider openai" },
+        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider codex, --provider openai or --provider chatgpt." },
         .{ .err = error.InvalidPreferenceModel, .code = .preference_model_invalid, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.PreferenceProviderRequired, .code = .preference_provider_required, .exit = 2, .phrase = "Saving a default model requires a provider." },
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },

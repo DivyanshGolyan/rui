@@ -20,15 +20,21 @@ pub const Provider = enum {
         return self.facts().shown;
     }
 
-    /// What a person signed in with, as the terminal names this provider.
+    /// What a person signed in with, as the terminal names this provider:
+    /// a sign-in by its own name, so two ChatGPT sign-ins stay apart, and a
+    /// key as a key.
     pub fn signIn(self: Provider) []const u8 {
-        return self.facts().sign_in;
+        return switch (self.facts().credential) {
+            .sign_in => self.shown(),
+            .api_key => "API key",
+        };
     }
 
-    /// The shell command that signs this provider in.
-    pub fn login(self: Provider) []const u8 {
+    /// The shell command that signs this provider in, or null while Rui
+    /// has none for it; every renderer and `rui auth login` read this.
+    pub fn login(self: Provider) ?[]const u8 {
         return switch (self) {
-            inline else => |provider| "rui auth login " ++ @tagName(provider),
+            inline else => |provider| if (comptime provider.facts().login) "rui auth login " ++ @tagName(provider) else null,
         };
     }
 
@@ -42,9 +48,9 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .catalog, .runs_tools = &.{"web_search"} },
-            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .model_list = .live, .runs_tools = &.{"web_search"} },
-            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
+            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
         };
     }
 
@@ -68,8 +74,9 @@ pub const Provider = enum {
 pub const Facts = struct {
     codec: Codec,
     shown: []const u8,
-    sign_in: []const u8,
     credential: Credential,
+    /// Whether `rui auth login` signs this provider in.
+    login: bool,
     model_list: ModelList,
     /// The tools the provider runs on its side, by the names a `tools` list
     /// gives them. A Session of another provider cannot name them.
@@ -98,4 +105,16 @@ test "every OpenAI provider runs web_search, and none runs bash" {
 
 test "one provider fetches its model list live" {
     try std.testing.expectEqual(Provider.openai, comptime Provider.onlyLiveList());
+}
+
+test "every provider's sign-in reads apart from the others', and only a provider with a login names one" {
+    for (std.enums.values(Provider), 0..) |provider, at| {
+        for (std.enums.values(Provider)[at + 1 ..]) |other| try std.testing.expect(!std.mem.eql(u8, provider.signIn(), other.signIn()));
+        if (provider.login()) |command| try std.testing.expect(std.mem.endsWith(u8, command, @tagName(provider)));
+    }
+    try std.testing.expectEqualStrings("ChatGPT (device code)", Provider.codex.signIn());
+    try std.testing.expectEqualStrings("ChatGPT", Provider.chatgpt.signIn());
+    try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
+    try std.testing.expectEqualStrings("rui auth login codex", Provider.codex.login().?);
+    try std.testing.expectEqual(@as(?[]const u8, null), Provider.chatgpt.login());
 }
