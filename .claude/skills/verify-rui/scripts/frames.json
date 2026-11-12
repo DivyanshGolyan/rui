@@ -6,7 +6,7 @@
   "states": [
     {
       "name": "archive-state",
-      "note": "Archive confirmation is the durable left facts badge only, with no blank row below Footer",
+      "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, with no blank row below Footer",
       "cast": [
         {
           "label": "Archive audit",
@@ -32,7 +32,8 @@
         }
       ],
       "expect": [
-        "Archive audit",
+        "Seed history",
+        "low",
         "· Archived"
       ],
       "absent": [
