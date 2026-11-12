@@ -31,6 +31,7 @@ It restarts the selected Store's Host only if that Host is already running and c
 With an eligible installation and no running Host, Upgrade only installs.
 The Version row in the terminal's app settings starts the same run from the overview or with a conversation open, on the status row: it installs a found release at once, and Esc cancels until publishing starts.
 After installing, it redraws in the new Rui and returns to the same place with unsent drafts intact.
+Restart keeps the current Store even if saved defaults changed, and restores existing work without requiring fresh-session preferences or local sign-in.
 That also resolves the old client's protocol/restart hold; a failed or unconfirmed Host activation still needs its recovery instructions.
 If Rui must show recovery or repair instructions, follow the departure guidance instead; see the [Upgrade contract](../ARCHITECTURE.md#store-format-and-upgrades).
 

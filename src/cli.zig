@@ -1654,6 +1654,14 @@ fn requireInteractiveTerminal(init: std.process.Init, purpose: []const u8) !void
 fn newSession(init: std.process.Init, args: []const []const u8) !void {
     const options = try NewSessionOptions.parse(args) orelse return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     try requireInteractiveTerminal(init, "to open the overview");
+    if (try RelaunchStartup.read(init, options.store)) |restored| {
+        defer restored.handoff.deinit();
+        return openExistingOverview(init, restored.paths.store.slice(), if (restored.handoff.value.open) |id| id[0..protocol.session_id_bytes].* else null, .{
+            .store = restored.paths.store.slice(),
+            .provider = options.provider,
+            .model = options.model,
+        }, &restored.handoff.value);
+    }
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     if (!try prepareOverview(init, options, entry)) return;
@@ -1689,12 +1697,37 @@ fn replaceRui(init: std.process.Init, argv: []const []const u8) !void {
     return std.process.replace(init.io, .{ .argv = argv, .environ_map = init.environ_map });
 }
 
-/// The open chat travels in the handoff, not argv: entering through bare Rui
-/// admits exactly the original launch selectors (resume accepts no model pin).
-fn relaunchArguments(executable: []const u8, selectors: new_session_selection.Intent, buffer: *[7][]const u8) []const []const u8 {
+/// The CLI alone consumes startup handoffs, before fresh-Session admission.
+/// The parsed value owns its bytes through the synchronous overview run; the
+/// overview only borrows it long enough to copy editor state before startup.
+const RelaunchStartup = struct {
+    paths: platform.Paths,
+    handoff: std.json.Parsed(@import("relaunch_handoff.zig").Payload),
+
+    fn read(init: std.process.Init, explicit_store: ?[]const u8) !?RelaunchStartup {
+        const named = init.environ_map.get("RUI_RELAUNCH") orelse return null;
+        if (named.len == 0) return null;
+        const home = init.environ_map.get("HOME") orelse return null;
+        const handoff = @import("relaunch_handoff.zig");
+        // Relaunch argv always pins its actual canonical Store. An unbound
+        // handoff is still consumed once, never redirected by saved defaults.
+        const destination = explicit_store orelse {
+            if (handoff.read(init, home, "")) |value| value.deinit();
+            return null;
+        };
+        const paths = try platform.resolveClientPaths(init.io, destination);
+        return .{ .paths = paths, .handoff = handoff.read(init, home, paths.store.slice()) orelse return null };
+    }
+};
+
+/// The open chat travels in the handoff, not argv. Store is the old client's
+/// actual destination, not its former implicit default or a mutable spelling.
+fn relaunchArguments(executable: []const u8, store: []const u8, selectors: new_session_selection.Intent, buffer: *[7][]const u8) []const []const u8 {
     buffer[0] = executable;
-    var count: usize = 1;
-    inline for (.{ "store", "provider", "model" }) |name| {
+    buffer[1] = "--store";
+    buffer[2] = store;
+    var count: usize = 3;
+    inline for (.{ "provider", "model" }) |name| {
         if (@field(selectors, name)) |value| {
             buffer[count] = "--" ++ name;
             buffer[count + 1] = value;
@@ -1721,10 +1754,10 @@ fn startRelaunch(init: std.process.Init, options: Overview.Options, request: Ove
     try init.environ_map.put("RUI_RELAUNCH", path);
     defer init.environ_map.put("RUI_RELAUNCH", "") catch {};
     var argv: [7][]const u8 = undefined;
-    try hooks.replace(init, relaunchArguments(request.executable, options.selectors, &argv));
+    try hooks.replace(init, relaunchArguments(request.executable, options.store, options.selectors, &argv));
 }
 
-test "relaunch argv preserves every explicit selector subset and never searches PATH" {
+test "relaunch argv pins the actual Store with every explicit selector subset" {
     for (0..8) |mask| {
         const selectors: new_session_selection.Intent = .{
             .store = if (mask & 1 != 0) "./store as given" else null,
@@ -1732,10 +1765,12 @@ test "relaunch argv preserves every explicit selector subset and never searches 
             .model = if (mask & 4 != 0) "model pin" else null,
         };
         var buffer: [7][]const u8 = undefined;
-        const args = relaunchArguments("/published/build/bin/rui", selectors, &buffer);
+        const args = relaunchArguments("/published/build/bin/rui", "/canonical/original-store", selectors, &buffer);
         try std.testing.expectEqualStrings("/published/build/bin/rui", args[0]);
-        var at: usize = 1;
-        inline for (.{ "store", "provider", "model" }) |name| if (@field(selectors, name)) |value| {
+        try std.testing.expectEqualStrings("--store", args[1]);
+        try std.testing.expectEqualStrings("/canonical/original-store", args[2]);
+        var at: usize = 3;
+        inline for (.{ "provider", "model" }) |name| if (@field(selectors, name)) |value| {
             try std.testing.expectEqualStrings("--" ++ name, args[at]);
             try std.testing.expectEqualStrings(value, args[at + 1]);
             at += 2;
@@ -1766,7 +1801,7 @@ test "relaunch replacement failure retains departure and deletes the handoff wit
             calls += 1;
             try std.testing.expectEqualStrings("/published/build/bin/rui", argv[0]);
             try std.testing.expectEqualStrings("--store", argv[1]);
-            try std.testing.expectEqualStrings("./original store", argv[2]);
+            try std.testing.expectEqualStrings("/canonical/store", argv[2]);
             try std.testing.expectEqual(@as(usize, 3), argv.len);
             const named = invocation.environ_map.get("RUI_RELAUNCH").?;
             @memcpy(path[0..named.len], named);
@@ -2583,22 +2618,28 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     var fallback: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const paths = try platform.resolveClientPaths(init.io, try selectedStore(init, parsed.get("store"), &fallback));
     const destination = paths.store.slice();
+    return openExistingOverview(init, destination, reference[0..protocol.session_id_bytes].*, .{ .store = parsed.get("store") }, null);
+}
+
+/// Reenter saved work, whether through session resume or a valid relaunch.
+/// Reading existing work is not fresh-Session admission: local preferences and
+/// credentials may be unavailable. The Host remains the Session's authority.
+fn openExistingOverview(init: std.process.Init, destination: []const u8, open: ?overview_view.Reference, selectors: new_session_selection.Intent, restoration: ?*const @import("relaunch_handoff.zig").Payload) !void {
     try startHostForTerminal(init, destination, true, null, null);
-    const open = reference[0..protocol.session_id_bytes].*;
-    confirmSessionConfigured(init, .{ .io = init.io }, destination, reference) catch |err| {
+    if (open) |reference| confirmSessionConfigured(init, .{ .io = init.io }, destination, &reference) catch |err| {
         if (err == error.SessionNotConfigured) stderr.diagnostic("rui: configure this Session before entering it\n", .{});
-        return Overview.printFailure(err, destination, open, null);
+        return Overview.printFailure(err, destination, reference, null);
     };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
     defer cwd.close(init.io);
     const workspace_buffer = try init.gpa.create([protocol.max_workspace_bytes]u8);
     defer init.gpa.destroy(workspace_buffer);
     const workspace = workspace_buffer[0..try cwd.realPath(init.io, workspace_buffer)];
-    // Esc leads to the overview, whose composer starts Sessions with the
-    // saved defaults. The Host refuses a start that resolves no binding.
+    // Esc leads to the overview. Prospective defaults are best-effort; they
+    // never prevent returning to a draft or admit a new Session here.
     const home = init.environ_map.get("HOME");
     const binding: ?new_session_selection.Binding = blk: {
-        const snapshot: new_session_selection.Snapshot = .{ .intent = .{}, .defaults = preferences.load(home orelse break :blk null) catch break :blk null };
+        const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = if (selectors.needsPreferences()) preferences.load(home orelse break :blk null) catch break :blk null else .{} };
         break :blk snapshot.resolveUnprompted() catch null;
     };
     return openOverview(init, .{
@@ -2609,7 +2650,8 @@ fn resumeSession(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         .provider = if (binding) |*value| value.provider.slice() else null,
         .model = if (binding) |*value| value.model.slice() else null,
         .open = open,
-        .selectors = .{ .store = parsed.get("store") },
+        .selectors = selectors,
+        .restoration = restoration,
     });
 }
 

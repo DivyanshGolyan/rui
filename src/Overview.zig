@@ -86,6 +86,9 @@ pub const Options = struct {
     selectors: new_session_selection.Intent = .{},
     /// A Session to open first, as `session resume` names it.
     open: ?view.Reference = null,
+    /// CLI-authenticated one-shot handoff, borrowed through run and copied
+    /// before any terminal startup. No environment or file reads live here.
+    restoration: ?*const handoff.Payload = null,
 };
 
 /// A settled departure the CLI can replace. All slices are owned by the caller;
@@ -595,6 +598,7 @@ screen_ready: bool = false,
 pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     const self = try create(init, options, hooks, client_operations, &Signals.cancellation);
     defer self.destroy();
+    try self.restoreRelaunch();
     const screen = try init.gpa.create(SessionScreen);
     defer init.gpa.destroy(screen);
     const prepared: anyerror!void = prepare: {
@@ -605,7 +609,6 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     prepared catch |err| return self.failed(err, options.open);
     defer if (self.screen_ready) screen.deinit();
     self.session_screen = screen;
-    try self.restoreRelaunch();
     Signals.cancellation.stopped.store(false, .release);
     var app: TerminalApp = undefined;
     app.init(init.io, init.environ_map) catch |err| return self.failed(err, self.options.open);
@@ -1040,11 +1043,10 @@ fn makeRelaunch(self: *Self, left: ?Left) !Relaunch {
     return .{ .executable = executable, .handoff = bytes, .receipt = receipt, .open = if (left) |held| held.session else null };
 }
 
-/// Called only at overview start; malformed or unrelated handoffs do nothing.
+/// Apply the CLI-owned startup value once; every restored byte becomes owned.
 fn restoreRelaunch(self: *Self) !void {
-    var parsed = handoff.read(self.init, self.options.home, self.options.store) orelse return;
-    defer parsed.deinit();
-    const value = parsed.value;
+    const value = self.options.restoration orelse return;
+    self.options.restoration = null;
     // Copy every inactive draft before restoring the composer or opening a chat.
     // An allocation failure refuses startup rather than showing a partial handoff.
     for (value.drafts) |entry| try self.session_drafts.put(self.init.gpa, entry.id, entry.snapshot);
@@ -7374,10 +7376,10 @@ test "relaunch startup restores copied drafts open conversation and ending notic
         .line = line,
     });
     defer gpa.free(bytes);
-    const path = try handoff.writeEncoded(rig.init, home, bytes);
-    defer gpa.free(path);
-    try rig.environ.put("RUI_RELAUNCH", path);
+    const parsed = try handoff.decode(gpa, bytes, "/store");
+    rig.overview.options.restoration = &parsed.value;
     try rig.overview.restoreRelaunch();
+    parsed.deinit();
     try std.testing.expectEqualStrings(overview_draft.bytes, rig.overview.composerDraft().bytes);
     try std.testing.expectEqual(overview_draft.cursor, rig.overview.composer.cursor);
     try std.testing.expectEqual(overview_draft.rejected, rig.overview.composer.rejected);
@@ -7396,5 +7398,5 @@ test "relaunch startup restores copied drafts open conversation and ending notic
     }
     try rig.overview.restoreRelaunch();
     try std.testing.expect(rig.overview.session_drafts.first == null);
-    try std.testing.expectEqualStrings("", rig.environ.get("RUI_RELAUNCH").?);
+    try std.testing.expect(rig.overview.options.restoration == null);
 }

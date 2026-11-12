@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Native, offline Upgrade evidence: python3 upgrade_integration.py REAL_RUI [terminal].
+"""Native, offline Upgrade evidence: python3 upgrade_integration.py REAL_RUI [terminal|startup].
 
 Release metadata, target version and archives may be synthetic. Only the
 *selected old version* fixture is a --version-only script; every started Host
@@ -11,6 +11,7 @@ import fcntl
 import hashlib
 import http.server
 import io
+import itertools
 import json
 import os
 import pathlib
@@ -683,8 +684,8 @@ def exit_on_sigint(screen, process, description):
 
 
 def terminal_cases(root, binary, releases, artifacts):
-    """/upgrade on the overview: the status bar says each step; Esc cancels
-    while preparing; a fresh TUI's /upgrade replaces both Host and TUI,
+    """Settings > Version on the overview reports progress; Esc cancels
+    while preparing; a fresh TUI's Upgrade replaces both Host and TUI,
     retaining the overview draft. An up-to-date run does not relaunch again."""
     with case(root, binary, releases, "terminal-overview") as c:
         c.old_selection()
@@ -721,17 +722,19 @@ def terminal_cases(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.start_upgrade()
+            screen.contains(" · publishing")
+            screen.close_settings()
             screen.contains("Publishing; cancelling no longer rolls back")
             # Local editing remains available while the Host is held. Seed
-            # bytes and a non-tail caret before the old image leaves;
-            # the overview keeps the local /upgrade command until edited.
+            # bytes and a non-tail caret before the old image leaves.
+            # Esc closes Settings once publication can no longer cancel.
             screen.send("\x01\x0boverview α draft\x01\x1b[C\x1b[C\x1b[C")
             screen.draft("overview α draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
             proof_ready(c, previous, old_host)
-            assert not shown(f"‹ {session}", screen.observe()), "overview reopened as a conversation"
+            assert not shown(f"│ {session} · gpt-6-luna", screen.observe()), "overview reopened as a conversation"
             screen.draft("overview α draft", 5)
             screen.save(artifacts, "overview-installed")
             screen.send("X")
@@ -740,7 +743,9 @@ def terminal_cases(root, binary, releases, artifacts):
             # The selected build is now current: the second run installs
             # nothing. Its terminal retirement below is a completed witness
             # that no second exec/re-entry occurred, even of the same image.
-            screen.send("\x01\x0b/upgrade\r")
+            screen.start_upgrade()
+            screen.contains(" · up to date")
+            screen.close_settings()
             screen.contains(f"Rui is up to date ({releases.version})")
             assert os_semantics.process_executable(process.pid) == c.link.resolve()
             screen.send("\x01\x0bunchanged draft")
@@ -755,8 +760,8 @@ def terminal_cases(root, binary, releases, artifacts):
 
 
 def conversation_case(root, binary, releases, artifacts):
-    """/upgrade in a conversation is the overview's run on the same status
-    row: Esc cancels while preparing; a fresh TUI's /upgrade installs and
+    """Settings > Version over a conversation runs the overview's Upgrade:
+    Esc cancels while preparing; a fresh TUI's Upgrade installs and
     restarts Host and TUI, reopening that conversation with its unsent draft."""
     with case(root, binary, releases, "terminal-conversation") as c:
         c.old_selection()
@@ -792,14 +797,16 @@ def conversation_case(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
-            screen.contains(f"‹ {session}")
-            screen.send("/upgrade\r")
+            screen.contains(f"│ {session} · gpt-6-luna")
+            screen.start_upgrade()
+            screen.contains(" · publishing")
+            screen.close_settings()
             screen.contains("Publishing; cancelling no longer rolls back")
             screen.send("\x01\x0bconversation β draft\x01\x1b[C\x1b[C\x1b[C")
             screen.draft("conversation β draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
-            screen.contains(f"‹ {session}")
+            screen.contains(f"│ {session} · gpt-6-luna")
             screen.draft("conversation β draft", 5)
             screen.save(artifacts, "conversation-installed")
             proof_ready(c, previous, old_host)
@@ -831,7 +838,7 @@ def escape_after_publication(root, binary, releases, artifacts):
             screen.until(lambda: c.link.resolve() != c.original, "publication before terminal Escape")
             installed = c.link.resolve()
             screen.contains(" · publishing")
-            screen.send("\x1b")
+            screen.close_settings()
             screen.contains("Publishing; cancelling no longer rolls back")
             screen.save(artifacts, "escape-after-publication")
             assert c.link.resolve() == installed and installed.exists()
@@ -853,13 +860,15 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.start_upgrade()
             screen.until(gate.entered.is_set, "archive held before cancellation guidance")
             screen.send("\x1b")
-            screen.contains("Upgrade cancelled; nothing changed")
+            screen.contains(" · cancelled")
             gate.release.set()
             c.assert_unchanged()
-            screen.send("\x01\x0b/upgrade\r")
+            screen.start_upgrade()
+            screen.contains(f" · upgraded to {releases.version}")
+            screen.close_settings()
             screen.contains(f"Upgraded to {releases.version}")
             proof_ready(c, previous, old_host)
             assert os_semantics.process_executable(process.pid) == binary
@@ -882,7 +891,9 @@ def terminal_path_guidance(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.start_upgrade()
+            screen.contains(f" · upgraded to {releases.version}")
+            screen.close_settings()
             screen.contains(f"Upgraded to {releases.version}")
             proof_ready(c, previous, old_host)
             screen.send("\x01\x0bguidance draft")
@@ -896,6 +907,94 @@ def terminal_path_guidance(root, binary, releases, artifacts):
             assert b"hash -r" in receipt and b"rehash" in receipt, receipt.decode()
             assert screen.entries == screen.restorations == 1, "PATH guidance did not prevent relaunch"
             assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+
+
+def startup_cases(root, binary, releases, artifacts):
+    """Relaunch resumes existing work before fresh-Session admission, even
+    after local setup or the saved Store changes underneath the old TUI."""
+    for screen_kind, condition, store_kind in itertools.product(
+            ("overview", "resume"), ("readable", "unreadable", "no-credentials"),
+            ("explicit", "implicit")):
+        name = f"startup-{screen_kind}-{condition}-{store_kind}"
+        with case(root, binary, releases, name) as c:
+            c.old_selection()
+            old_host, previous = c.start_host()
+            session, credential_bytes = terminal_setup(c)
+            c.run("defaults", "configure", "--store", c.store)
+            before = c.json("session", "inspect", "--store", c.store, "--session", session)
+            preferences = c.home / ".config/rui/preferences"
+            credential = c.home / ".config/rui/codex.json"
+            preference_mode = stat.S_IMODE(preferences.stat().st_mode)
+            other_store = c.root / "other-store" if store_kind == "implicit" else None
+            if other_store is not None:
+                other_store.mkdir(mode=0o700)
+            published = c.root / "after-publication.gate"
+            published.touch()
+            c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(published)
+            destination = ["--store", str(c.store)] if store_kind == "explicit" else []
+            # The resume entry is intentionally not a conversation opened by
+            # Enter from a freshly admitted overview. Its startup tolerances
+            # must survive the new process's bare relaunch entry.
+            arguments = ([str(binary), "session", "resume", *destination, session]
+                         if screen_kind == "resume" else [str(binary), *destination])
+
+            def retire_misdirected_host():
+                if other_store is not None:
+                    status = c.json("host", "status", "--store", other_store)
+                    if status["status"] == "ready":
+                        c.run("host", "pause", "--store", other_store, "--instance", status["instance"])
+
+            try:
+                with terminal_process(arguments, env=c.env, cwd=c.root) as (process, master):
+                    screen = TerminalScreen(master, process)
+                    screen.contains(f"│ {session} · gpt-6-luna" if screen_kind == "resume" else session)
+                    screen.start_upgrade()
+                    screen.contains(" · publishing")
+                    screen.close_settings()
+                    screen.contains("Publishing; cancelling no longer rolls back")
+                    screen.send("\x01\x0bstartup α draft\x01\x1b[C\x1b[C\x1b[C")
+                    screen.draft("startup α draft", 5)
+                    assert c.link.resolve() != c.original and published.exists()
+                    assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
+                    # Mutate only after the old TUI has entered successfully.
+                    # These are startup preconditions, not upgrade failures.
+                    if other_store is not None:
+                        c.run("defaults", "configure", "--store", other_store)
+                    expected_preferences = preferences.read_bytes()
+                    if condition == "unreadable":
+                        preferences.chmod(0o000)
+                    elif condition == "no-credentials":
+                        credential.unlink()
+                    published.unlink()
+                    proof_relaunched(c, screen, process)
+                    proof_ready(c, previous, old_host)
+                    screen.contains(f"│ {session} · gpt-6-luna" if screen_kind == "resume" else session)
+                    if screen_kind == "overview":
+                        assert not shown(f"│ {session} · gpt-6-luna", screen.observe()), "overview opened a conversation"
+                    screen.draft("startup α draft", 5)
+                    screen.send("X")
+                    screen.draft("staXrtup α draft", 6)
+                    screen.save(artifacts, name)
+                    assert "No locally ready provider for a new Session" not in screen.capture.plain
+                    assert "private setup defaults unreadable" not in screen.capture.plain
+                    if condition == "unreadable":
+                        assert stat.S_IMODE(preferences.stat().st_mode) == 0
+                    if condition == "no-credentials":
+                        assert not credential.exists(), "relaunch recreated provider credentials"
+                    else:
+                        assert credential.read_bytes() == credential_bytes
+                    if other_store is not None:
+                        assert c.json("host", "status", "--store", other_store)["status"] == "unavailable"
+                        assert not list(other_store.iterdir()), "relaunch opened the newly saved default Store"
+                    exit_on_sigint(screen, process, f"{name} terminal exit")
+                    assert screen.entries == screen.restorations == 2, "startup replaced the TUI more than once"
+                after = c.json("session", "inspect", "--store", c.store, "--session", session)
+                assert after["session"] == before["session"], "relaunch submitted a draft or changed the Session"
+                preferences.chmod(preference_mode)
+                assert preferences.read_bytes() == expected_preferences, "relaunch rewrote saved defaults"
+            finally:
+                dispose_all(lambda: preferences.chmod(preference_mode), retire_misdirected_host)
+        print(f"upgrade native: {name} passed", flush=True)
 
 
 def signal_during_check(root, binary, releases, artifacts):
@@ -1067,9 +1166,9 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "terminal"):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [terminal]")
-    terminal_only = len(sys.argv) == 3
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("terminal", "startup")):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [terminal|startup]")
+    selection = sys.argv[2] if len(sys.argv) == 3 else "all"
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
     version_home = root / "version-home"
@@ -1087,15 +1186,18 @@ def main():
     releases = Releases(binary, version)
     complete = False
     try:
-        if not terminal_only:
+        if selection == "all":
             for suite in (discovery_cases, install_cases, lifecycle_cases):
                 suite(root, binary, releases)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)
-        for suite in (terminal_cases, conversation_case, escape_after_publication,
-                      terminal_cancellation_guidance, terminal_path_guidance):
-            suite(root, binary, releases, artifacts)
-            print(f"upgrade native: {suite.__name__} passed", flush=True)
-        if not terminal_only:
+        if selection in ("all", "terminal"):
+            for suite in (terminal_cases, conversation_case, escape_after_publication,
+                          terminal_cancellation_guidance, terminal_path_guidance):
+                suite(root, binary, releases, artifacts)
+                print(f"upgrade native: {suite.__name__} passed", flush=True)
+        if selection in ("all", "startup"):
+            startup_cases(root, binary, releases, artifacts)
+        if selection == "all":
             for suite in (cancel_selected_version_check, terminal_cleanup_dual_failure,
                           signal_after_publication, signal_during_check):
                 suite(root, binary, releases, artifacts)
