@@ -55,8 +55,8 @@ def main():
         caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
-        for initial, target, provider in (("ChatGPT", "API key", "openai"),
-                                          ("API key", "ChatGPT", "codex")):
+        for initial, target, provider in (("ChatGPT (device code)", "API key", "openai"),
+                                          ("API key", "ChatGPT (device code)", "codex")):
             def row_has(screen, sign_in):
                 return any("gpt-6-luna" in row and "‹" in row and f"[{sign_in}]" in row
                            for row in screen.splitlines())
