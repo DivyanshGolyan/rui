@@ -26,6 +26,7 @@ pub fn Reply(comptime Capture: type) type {
             const work: protocol.SessionWork = .fromCore(values.work);
             const peers: protocol.PeerFacts = .{ .from_person_at = values.peers.from_person_at };
             const fields: protocol.SessionRow.Fields = .{
+                .read_version = values.read_version,
                 .archive_state = values.archive_state,
                 .reference = values.reference,
                 .parent = values.parent,
