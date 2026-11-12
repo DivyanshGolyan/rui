@@ -110,40 +110,35 @@ pub const every: Keymap(Key) = blk: {
     break :blk map;
 };
 
-/// The app's one reference list, in pairs across the panel. Aliases share a
-/// row, not a second description. Empty `keys` are draft operations rather
-/// than screen actions (Enter, a line break and opening the skill list).
+/// The app's one reference list, in pairs across a fitting panel. Each
+/// screen key is represented directly or explicitly grouped under a listed
+/// key as an alias. Empty `keys` name draft operations, not screen actions.
 pub const Reference = struct {
     key: []const u8,
     meaning: []const u8,
     keys: []const Key = &.{},
+    aliases: []const Key = &.{},
 };
 
 pub const list = [_]Reference{
     .{ .key = "enter", .meaning = "send" },
-    .{ .key = "esc/ctrl+g", .meaning = "back", .keys = &.{ .escape, .ctrl_g } },
+    .{ .key = "esc", .meaning = "back", .keys = &.{.escape}, .aliases = &.{.ctrl_g} },
     .{ .key = "⇧enter", .meaning = "new line" },
     .{ .key = "ctrl+x", .meaning = "stop", .keys = &.{.ctrl_x} },
-    .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down } },
+    .{ .key = "↑↓", .meaning = "scroll", .keys = &.{ .up, .down }, .aliases = &.{ .shift_up, .shift_down, .page_up, .page_down, .home, .end, .ctrl_end } },
     .{ .key = "ctrl+o", .meaning = "tool output", .keys = &.{.ctrl_o} },
-    .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p} },
+    .{ .key = "ctrl+p", .meaning = "earlier message", .keys = &.{.ctrl_p}, .aliases = &.{.ctrl_n} },
     .{ .key = "ctrl+r", .meaning = "retry", .keys = &.{.ctrl_r} },
     .{ .key = "/", .meaning = "skills" },
     .{ .key = "alt+a", .meaning = "archive", .keys = &.{.alt_a} },
-    .{ .key = "ctrl+n", .meaning = "later message", .keys = &.{.ctrl_n} },
-    .{ .key = "ctrl+c/d", .meaning = "leave", .keys = &.{ .ctrl_c, .ctrl_d } },
-    .{ .key = "⇧↑↓", .meaning = "scroll / select", .keys = &.{ .shift_up, .shift_down } },
-    .{ .key = "pgup/pgdn", .meaning = "page scroll", .keys = &.{ .page_up, .page_down } },
-    .{ .key = "home", .meaning = "first session", .keys = &.{.home} },
-    .{ .key = "end", .meaning = "latest / last", .keys = &.{.end} },
-    .{ .key = "ctrl+end", .meaning = "latest", .keys = &.{.ctrl_end} },
+    .{ .key = "ctrl+c", .meaning = "leave", .keys = &.{.ctrl_c}, .aliases = &.{.ctrl_d} },
 };
 
 pub const ListError = enum { missing_bound_key, unbound_row, duplicate_key };
 
-/// Check the union: a key used on either screen appears exactly once; a row
-/// cannot invent an action neither screen binds. The caller supplies the
-/// actual screen maps, keeping this value-only owner independent of screens.
+/// Check the union: every bound key is listed or explicitly aliased exactly
+/// once; neither a row nor an alias can name a key neither screen binds. The
+/// caller supplies actual maps, keeping this value-only owner independent.
 pub fn listError(maps: anytype) ?ListError {
     return referenceError(&list, maps);
 }
@@ -156,7 +151,7 @@ fn referenceError(rows: []const Reference, maps: anytype) ?ListError {
         };
     }
     var shown: std.enums.EnumSet(Key) = .empty;
-    for (rows) |row| for (row.keys) |key| {
+    for (rows) |row| for ([_][]const Key{ row.keys, row.aliases }) |keys| for (keys) |key| {
         if (shown.contains(key)) return .duplicate_key;
         if (!bound.contains(key)) return .unbound_row;
         shown.insert(key);
@@ -173,4 +168,38 @@ test "keys reference rejects unbound rows and covers every screen key" {
     try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(list[0 .. list.len - 1], .{every}));
     const duplicate = list ++ .{list[3]};
     try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
+}
+
+test "keys reference aliases are explicit under their listed rows" {
+    try std.testing.expectEqual(@as(usize, 11), list.len);
+    for ([_]struct { key: Key, row: []const u8 }{
+        .{ .key = .ctrl_g, .row = "esc" },
+        .{ .key = .ctrl_d, .row = "ctrl+c" },
+        .{ .key = .ctrl_n, .row = "ctrl+p" },
+        .{ .key = .shift_up, .row = "↑↓" },
+        .{ .key = .shift_down, .row = "↑↓" },
+        .{ .key = .page_up, .row = "↑↓" },
+        .{ .key = .page_down, .row = "↑↓" },
+        .{ .key = .home, .row = "↑↓" },
+        .{ .key = .end, .row = "↑↓" },
+        .{ .key = .ctrl_end, .row = "↑↓" },
+    }) |expected| {
+        var found = false;
+        for (list) |row| for (row.aliases) |key| if (key == expected.key) {
+            try std.testing.expectEqualStrings(expected.row, row.key);
+            found = true;
+        };
+        try std.testing.expect(found);
+    }
+    var missing_alias = list;
+    missing_alias[1].aliases = &.{};
+    try std.testing.expectEqual(@as(?ListError, .missing_bound_key), referenceError(&missing_alias, .{every}));
+    var duplicate = list;
+    duplicate[1].aliases = &.{ .ctrl_g, .escape };
+    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
+    duplicate[1].aliases = &.{ .ctrl_g, .ctrl_g };
+    try std.testing.expectEqual(@as(?ListError, .duplicate_key), referenceError(&duplicate, .{every}));
+    var unbound = every;
+    unbound.meanings.set(.ctrl_g, null);
+    try std.testing.expectEqual(@as(?ListError, .unbound_row), referenceError(&list, .{unbound}));
 }

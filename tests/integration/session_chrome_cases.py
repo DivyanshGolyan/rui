@@ -476,9 +476,13 @@ def keys_case():
                 gesture = b"\x1b[F\r"
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
-            for expected in ("enter  send", "esc/ctrl+g back", "ctrl+x", "stop", "ctrl+o", "tool output", "retry", "scroll / select", "pgup/pgdn page scroll", "first session", "latest / last"):
+            for index, expected in enumerate(('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave')):
                 assert expected in keys, (width, expected, keys)
-            for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings"):
+                if width == 46:
+                    assert rows(keys)[index].rstrip() == " " + expected, (index, keys)
+            if width == 140:
+                assert " enter    send              esc      back" in rows(keys)[0], keys
+            for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
             # Enter and typing do not edit a setting or the hidden draft.
             settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
@@ -488,7 +492,7 @@ def keys_case():
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys at 140 and 46 columns has only paired keys and meanings; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys has eleven aligned entries, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
 
 
 def notice_case():

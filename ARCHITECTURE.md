@@ -2962,9 +2962,9 @@ The overview lists its own commands, `/archive`, `/configure`, `/model`, `/renam
 Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
 There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
 The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
-Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in row-major pairs: no title, footer or instructions.
+Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in aligned row-major pairs when they fit, or one column otherwise: no title, footer or instructions.
 One `ctrl+x` stops work; it does not require two presses.
-`keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key appears once and no row names an unbound key.
+`keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key is listed or explicitly marked as an alias of one listed row, and neither rows nor aliases name unbound keys.
 `keys_panel` derives fields from those rows; `Panel.KeyList` reuses the Panel's cell clipping, without selection or an event handler.
 `AppSettings` owns whether the reference is open; Esc or Ctrl-G closes it back to Settings before any choice, Upgrade cancellation or settings-page close, never leaving a conversation through that first press.
 The overview's `/rename NAME` names the selected Session and `/setup [OPTIONS]` saves defaults with no Session, each through the same CLI owner a conversation's runs, on the overview's worker with stdout and stderr in an unlinked scratch file; without a selected Session `/rename` says `! Select a Session first.`, as Ctrl-X does.

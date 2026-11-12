@@ -247,8 +247,9 @@ class FramesTest(unittest.TestCase):
         self.assertIn("    … 14 more lines", states["tool-open-long"]["expect"])
         self.assertIn({"gone": "/details"}, states["slash"]["steps"])
         self.assertNotIn("help", states)
-        self.assertIn("ctrl+o", states["keys"]["expect"])
-        self.assertIn("tool output", states["keys"]["expect"])
+        self.assertIn("ctrl+o   tool output", states["keys"]["expect"])
+        self.assertIn("ctrl+c   leave", states["keys"]["expect"])
+        self.assertEqual(len(states["keys"]["expect"]), 11)
         self.assertIn("/help", states["keys"]["absent"])
         self.assertIn("× Fail with exit 127 · exit 127", states["chat"]["expect"])
 

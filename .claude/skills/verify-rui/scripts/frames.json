@@ -836,7 +836,7 @@
     },
     {
       "name": "keys",
-      "note": "20-keys: Settings > Keys, paired key names and meanings only",
+      "note": "20-keys: eleven entries, aligned pairs at 140 and one column at 46",
       "open": "overview",
       "steps": [
         {
@@ -864,34 +864,17 @@
         }
       ],
       "expect": [
-        "enter  send",
-        "esc/ctrl+g back",
-        "⇧enter",
-        "new line",
-        "ctrl+x",
-        "stop",
-        "↑↓",
-        "scroll",
-        "ctrl+o",
-        "tool output",
-        "ctrl+p",
-        "earlier message",
-        "ctrl+r",
-        "retry",
-        "/      skills",
-        "alt+a",
-        "archive",
-        "ctrl+n",
-        "later message",
-        "ctrl+c/d leave",
-        "⇧↑↓",
-        "scroll / select",
-        "pgup/pgdn page scroll",
-        "home",
-        "first session",
-        "end",
-        "latest / last",
-        "ctrl+end latest"
+        "enter    send",
+        "esc      back",
+        "⇧enter   new line",
+        "ctrl+x   stop",
+        "↑↓       scroll",
+        "ctrl+o   tool output",
+        "ctrl+p   earlier message",
+        "ctrl+r   retry",
+        "/        skills",
+        "alt+a    archive",
+        "ctrl+c   leave"
       ],
       "absent": [
         "/help",
@@ -903,7 +886,16 @@
         "Browsing",
         "Keys",
         "↑↓ · enter change · esc close",
-        "‹ Rui · settings"
+        "‹ Rui · settings",
+        "ctrl+g",
+        "ctrl+d",
+        "ctrl+n",
+        "ctrl+end",
+        "ctrl+c/d",
+        "pgup/pgdn",
+        "first session",
+        "latest / last",
+        "scroll / select"
       ]
     },
     {
