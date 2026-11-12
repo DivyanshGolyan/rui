@@ -31,6 +31,7 @@ const store_module = @import("store.zig");
 const session_list_reply = @import("session_list_reply.zig");
 const session_report_reply = @import("session_report_reply.zig");
 const launch_frame = @import("launch_frame.zig");
+const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
 const tools = @import("tools.zig");
 const mcp_offered = @import("mcp/offered.zig");
@@ -888,7 +889,7 @@ pub const Launch = struct {
 /// Lists each MCP server and saves the Host tool set: the built-ins and
 /// the servers' tools, with an unreachable server's last saved tools kept
 /// (D147). A name two sources share refuses the start (D142).
-noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t) !void {
+noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.Allocator, storage: *store_module.Store, servers: []const launch_frame.Frame.McpServer, stop: ?std.posix.fd_t, failure: *?start_report.Failure) !void {
     var saved = try storage.readHostToolSet(arena);
     const kept: ?tools.HostToolSet = if (saved) |*found| found.toolSet() else null;
     var collision: mcp_offered.Collision = .{};
@@ -896,14 +897,13 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
         // The launcher closed stdin: stop as a closed stdin does later.
         error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
-            var message: [256]u8 = undefined;
-            return launch_frame.writeRefusal(io, .{
-                .code = .tool_name_collision,
-                .message = std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ collision.name, collision.first, collision.second }) catch "a tool name is offered twice",
-            });
+            var message: [start_report.max_refusal_message_bytes]u8 = undefined;
+            failure.* = .init(.tool_name_collision, std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ collision.name, collision.first, collision.second }) catch "a tool name is offered twice");
+            return err;
         },
         error.TooManyTools => {
-            return launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "the MCP servers list more tools than a Host offers" });
+            failure.* = .init(.launch_frame_invalid, "the MCP servers list more tools than a Host offers");
+            return err;
         },
         else => |other| return other,
     };
@@ -924,7 +924,9 @@ pub fn serve(
     bash_timeout_ms: u64,
     home: ?[]const u8,
     launch: ?Launch,
+    failure: *?start_report.Failure,
 ) !void {
+    failure.* = null;
     const mcp_servers: []const launch_frame.Frame.McpServer = if (launch) |value| value.mcp_servers else &.{};
     // The Host owns child waits. Automatic reaping or an inherited handler
     // would release process identities before their signal owners retire.
@@ -1022,7 +1024,7 @@ pub fn serve(
         return err;
     };
     defer storage.close() catch |err| stderr.print("rui: Store close failed: {s}\n", .{@errorName(err)});
-    return finishServing(io, &storage, launch != null, serveOpened(
+    return finishServing(&storage, launch != null, failure, serveOpened(
         io,
         allocator,
         &storage,
@@ -1044,6 +1046,7 @@ pub fn serve(
         &diagnostics,
         diagnostic_open_error,
         &readiness_owned,
+        failure,
     ));
 }
 
@@ -1070,8 +1073,9 @@ fn serveOpened(
     diagnostics: *?HostDiagnostics,
     diagnostic_open_error: ?anyerror,
     readiness_owned: *bool,
+    failure: *?start_report.Failure,
 ) !void {
-    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null);
+    if (mcp_servers.len != 0) try offerMcpTools(io, tool_set_memory.allocator(), allocator, storage, mcp_servers, if (launch) |value| value.stdin else null, failure);
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
@@ -1198,11 +1202,12 @@ fn serveOpened(
     return intake.run(&listener, &listener_open, &socket_owned);
 }
 
-fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool, result: anyerror!void) !void {
-    // This is the sole decision and publication site, after intake, workers
+fn finishServing(storage: *const store_module.Store, launched: bool, failure: *?start_report.Failure, result: anyerror!void) !void {
+    // This is the sole fence decision site, after intake, workers
     // and execution have drained. A fence wins over every serving outcome.
     if (launched and storage.kind() == .mysql and storage.isFenced()) {
-        return launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
+        failure.* = .init(.store_fenced, "the MySQL Store lost ownership or its connection; restart the Host");
+        return error.StoreFenced;
     }
     return result;
 }
@@ -3856,13 +3861,17 @@ test "launch frame fenced MySQL shutdown is decided once at the return boundary 
         var open = true;
         var owned = true;
         defer if (open) listener.deinit(io);
-        const outcome = finishServing(io, &storage, case.launched, intake.run(&listener, &open, &owned));
+        var failure: ?start_report.Failure = null;
+        const outcome = finishServing(&storage, case.launched, &failure, intake.run(&listener, &open, &owned));
         const fenced = case.mysql and case.launched and (case.early or case.late);
-        try std.testing.expectError(if (fenced) error.Reported else error.EffectAwareShutdown, outcome);
+        try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
+        try std.testing.expectEqual(@as(usize, 0), Probe.used); // The Host never publishes stdout.
+        var line_buffer: [start_report.max_line_bytes]u8 = undefined;
+        try std.testing.expectEqual(fenced, failure != null);
         try std.testing.expectEqualStrings(if (fenced)
             "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n"
         else
-            "", Probe.output[0..Probe.used]);
+            "", if (failure) |*value| start_report.line(value, &line_buffer) else "");
         try std.testing.expectEqual(@as(usize, 0), intake.exchanges.items.len);
     }
 }
@@ -4781,6 +4790,50 @@ test "inline skills suggestions answer heap exhaustion as busy, not a catalog re
     try std.testing.expect(fail_index > 0);
 }
 
+test "Host startup reports MCP tool collision and excess tools as owned failures" {
+    const Script = @import("mcp/test_server.zig");
+    for ([_]bool{ false, true }) |too_many| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: store_module.Store = undefined;
+        try store_module.testing.testingStoreToolSet(&storage, &tmp, std.testing.io, null);
+        defer storage.close() catch unreachable;
+        var json: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer json.deinit();
+        try json.writer.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[");
+        if (too_many) {
+            for (0..tools.max_host_tool_records) |i| {
+                if (i != 0) try json.writer.writeByte(',');
+                try json.writer.print("{{\"name\":\"tool_{d}\",\"inputSchema\":{{\"type\":\"object\"}}}}", .{i});
+            }
+        } else try json.writer.writeAll("{\"name\":\"bash\",\"inputSchema\":{\"type\":\"object\"}}");
+        try json.writer.writeAll("]}}");
+        const reply = try std.fmt.allocPrint(std.testing.allocator, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ json.written().len, json.written() });
+        defer std.testing.allocator.free(reply);
+        var script: Script = .{ .reply = reply };
+        try script.start();
+        defer script.stop();
+        var server: launch_frame.Frame.McpServer = .{};
+        try server.name.set("docs");
+        @memcpy(server.bearer_token.bytes[0..6], "secret");
+        server.bearer_token.len = 6;
+        var url: [128]u8 = undefined;
+        try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
+        var failure: ?start_report.Failure = null;
+        {
+            var memory: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer memory.deinit();
+            try std.testing.expectError(if (too_many) error.TooManyTools else error.ToolNameCollision, offerMcpTools(std.testing.io, memory.allocator(), std.testing.allocator, &storage, &.{server}, null, &failure));
+        } // Failure's formatted bytes must survive the listing arena.
+        try std.testing.expect(failure != null);
+        var buffer: [start_report.max_line_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(if (too_many)
+            "{\"rui_start_error\":{\"code\":\"launch_frame_invalid\",\"message\":\"the MCP servers list more tools than a Host offers\"}}\n"
+        else
+            "{\"rui_start_error\":{\"code\":\"tool_name_collision\",\"message\":\"tool name bash is offered by Rui and by docs\"}}\n", start_report.line(&failure.?, &buffer));
+    }
+}
+
 test "Host startup projects MCP offers after a changed listing and restart" {
     const Script = @import("mcp/test_server.zig");
     const testing = store_module.testing;
@@ -4806,7 +4859,9 @@ test "Host startup projects MCP offers after a changed listing and restart" {
         server.bearer_token.len = 6;
         var url: [128]u8 = undefined;
         try server.url.set(try std.fmt.bufPrint(&url, "http://127.0.0.1:{d}/mcp", .{script.port}));
-        try offerMcpTools(std.testing.io, tool_memory.allocator(), std.testing.allocator, &storage, &.{server}, null);
+        var failure: ?start_report.Failure = null;
+        try offerMcpTools(std.testing.io, tool_memory.allocator(), std.testing.allocator, &storage, &.{server}, null, &failure);
+        try std.testing.expect(failure == null);
         if (round == 0) {
             var cwd: [protocol.max_workspace_bytes]u8 = undefined;
             var configure = try testing.completeConfiguration("restart-mcp-config", "", try testing.canonicalCwd(std.testing.io, &cwd), "model-a");
