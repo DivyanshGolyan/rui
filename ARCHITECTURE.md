@@ -1596,8 +1596,12 @@ An already-installed target can still need activation of an older running Host.
 Source and release installers invoke the newly published command's `rui host restart --all` after publication; failure prints its receipt and a note without failing or undoing installation.
 `--all` is required (`option_required` without it); per-Store restart selection is not exposed yet.
 `platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store.
-Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline, but a refused, missing-after-enumeration or unreadable socket remains unconfirmed and counts as a failure without a verified Store and lock-free observation.
-Startup's `platform.reclaimStaleSocket` is safe only under its Store/runtime lease; discovery has no such authority and neither reclaims sockets nor treats failed transport as absence.
+Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline; failed transport alone never establishes absence.
+Under the Store lease, `platform.StoreLease.listen` atomically publishes the canonical Store path beside a standard SQLite socket as `<hash>.store` (0600) before binding.
+Clean socket retirement removes its hint only after unlink succeeds; a crash leaves the hint for read-only discovery. MySQL and launch-frame sockets publish no hint.
+For an unreachable socket, `platform` validates the private same-owner regular hint, bounded canonical Store and exact socket hash, then observes that Store's lease: only a free lease proves absence, which discovery skips silently without deleting anything.
+A held or inaccessible lease, missing or untrusted hint (including older Hosts), or connected unreadable peer remains unconfirmed and counts as a failure with its socket path and recovery advice.
+The hint is only routing information, never a liveness flag, Host registry or activation authority. Startup's `platform.reclaimStaleSocket` still requires the held Store/runtime lease; discovery never reclaims sockets.
 The client authenticates a socket peer, takes its launch Store as a hint, validates the canonical socket through `platform`, then confirms Store, PID and instance with the current or released-9 read-only observation profiles.
 Unreadable identities are reported rather than guessed; relative or unavailable Store hints cannot grant activation authority.
 `host_restart_all` observes and activates one Host at a time through `HostLifecycle`, requiring the same discovered instance before activation; it keeps no Host registry or mirrored launch policy.

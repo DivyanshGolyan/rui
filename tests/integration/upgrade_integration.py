@@ -621,6 +621,17 @@ class TerminalScreen:
 def restart_all_cases(root, binary, releases):
     # This suite runs under an isolated non-root fixture user: --all intentionally
     # discovers every Host of that uid, not just the defaults-selected Store.
+    # Earlier lifecycle cases intentionally crash Hosts. Leave one explicitly
+    # here too: discovery must prove its lease free without deleting its socket.
+    with case(root, binary, releases, "restart-all-crashed") as c:
+        from model_fixture import crash_host
+        process, _ = c.start_host("restart-all-crashed")
+        socket_path = pathlib.Path(c.ready["socket"])
+        crash_host(process, c.root, "restart-all-crashed")
+        assert socket_path.exists(), socket_path
+        assert c.run("host", "restart", "--all").strip() == "No running Hosts."
+        assert socket_path.exists(), "Discovery must not reclaim sockets"
+
     with case(root, binary, releases, "restart-all-empty") as c:
         assert c.run("host", "restart", "--all").strip() == "No running Hosts."
         c.assert_no_host()

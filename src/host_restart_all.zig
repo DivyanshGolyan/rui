@@ -83,7 +83,7 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
             totals.add(.failed);
             try output.flush();
             continue;
-        };
+        } orelse continue; // Only a trusted Store hint and free lease prove absence.
         const store = discovered.facts.store.slice();
         const home = init.environ_map.get("HOME") orelse {
             try writeFailure(writer, store, "selection", "HOME is unavailable; restore it and retry.");

@@ -610,26 +610,34 @@ pub fn observeHostForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128
 /// Discover a Store through an authenticated socket peer, then confirm the hint
 /// with the existing read-only profiles. Older SQLite Hosts require the Store in
 /// host-info, so an empty-Store discovery request cannot find them.
-pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !HostControlObservation {
+pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, socket_path: []const u8, deadline: ?i128) !?HostControlObservation {
     const until = hostObservationDeadline(io, deadline);
     const address = try std.Io.net.UnixAddress.init(socket_path);
     // A refused connect may be a live Host's full backlog. Give it a short
     // retry window inside the shared observation budget, never absence authority.
     const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 200 * std.time.ns_per_ms);
-    const fd = while (true) {
-        const connected = connectRequest(.{ .io = io }, address, connect_until) catch |err| {
-            if (err != error.ConnectionRefused) return err;
-            const remaining = connect_until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-            if (remaining <= 0) return err;
-            try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 25 * std.time.ns_per_ms))), .awake);
-            if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds >= connect_until) return err;
-            continue;
-        };
-        break connected;
+    const fd = connection: {
+        while (true) {
+            const connected = connectRequest(.{ .io = io }, address, connect_until) catch |err| {
+                if (err == error.ConnectionRefused) {
+                    const remaining = connect_until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+                    if (remaining > 0) {
+                        try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 25 * std.time.ns_per_ms))), .awake);
+                        if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < connect_until) continue;
+                    }
+                }
+                switch (err) {
+                    error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
+                        if (platform.socketStoreIsUnowned(io, socket_path)) return null;
+                    },
+                    else => {},
+                }
+                return err;
+            };
+            break :connection connected;
+        }
     };
-    // platform reclaims sockets only under an already-held Store/runtime lease.
-    // With no verified Store yet, neither refusal nor a missing path can prove
-    // its lock is free. All discovery errors remain unconfirmed for the caller.
+    // Once connected, unreadable peers remain failures regardless of hints.
     defer closeSocket(io, fd);
     const identity = @import("host_identity.zig");
     const pid = try identity.peer(fd);
@@ -5193,4 +5201,37 @@ test "socket upgrade discovery never infers absence from missing stale backlog o
     try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - before >= 25 * std.time.ns_per_ms);
     // The retry window must never replace the caller's shorter deadline.
     try std.testing.expectError(error.TransferInactive, observeHostForUpgradeAtSocket(allocator, io, address.path, before - 1));
+}
+
+test "socket upgrade discovery distinguishes stale free Store from refused held Store" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const parent = buffer[0..try tmp.dir.realPath(io, &buffer)];
+    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&store_buffer, "{s}/store", .{parent});
+    var lease = try platform.StoreLease.acquire(io, root);
+    var held = true;
+    defer if (held) lease.release();
+    try lease.prepareForServing(false);
+    const socket = lease.paths.socket;
+    defer {
+        if (!held) {
+            lease = platform.StoreLease.acquire(io, root) catch unreachable;
+            held = true;
+        }
+        lease.retireSocket() catch {};
+    }
+    var listener = try lease.listen(.{});
+    // A connected unreadable peer cannot be made absent by any routing hint.
+    try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    listener.deinit(io);
+    try std.testing.expectError(error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    lease.release();
+    held = false;
+    try std.testing.expectEqual(@as(?HostControlObservation, null), try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    // Discovery is read-only: a later lease holder, not discovery, reclaims it.
+    _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
 }

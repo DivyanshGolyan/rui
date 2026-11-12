@@ -45,7 +45,9 @@ rui host restart --all
 It discovers this user's running Hosts through their private runtime sockets and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work.
 Each line names the Store and reports restarted, already current, left running with a reason, or failure with recovery instructions; a total follows.
 Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
-A refused, missing-after-enumeration or unreadable socket is reported as unconfirmed and counted as failed: without its verified Store, discovery cannot establish that the Store lock is free.
+A standard SQLite Host publishes a private same-owner `<hash>.store` routing hint beside its socket under the Store lease, atomically before binding; clean retirement removes it after the socket, while a crash leaves it.
+For an unreachable socket, discovery skips silently only when `platform` validates the hint and exact socket mapping and observes the Store lease free. It deletes nothing.
+A held or inaccessible lease, absent/untrusted hint (including an older Host), or connected unreadable peer is reported as unconfirmed and counted as failed, with the socket path and recovery advice. The hint is not liveness state or activation authority.
 It does not reclaim sockets or infer absence from failed transport.
 No running Hosts prints `No running Hosts.` and starts nothing.
 A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.

@@ -657,7 +657,7 @@ const Intake = struct {
             if (self.host.stopping() and listener_open.*) {
                 listener.deinit(self.host.io);
                 listener_open.* = false;
-                std.Io.Dir.deleteFileAbsolute(self.host.io, self.host.lease.paths.socket.slice()) catch |err|
+                self.host.lease.retireSocket() catch |err|
                     stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
                 socket_owned.* = false;
             }
@@ -1077,13 +1077,12 @@ fn serveOpened(
     try storage.validateRetryWaits(limits.retry_waits_ms);
     try lease.prepareForServing(hooks.fails(.startup_cleanup));
 
-    const address = try std.Io.net.UnixAddress.init(lease.paths.socket.slice());
-    var listener = try address.listen(io, .{ .kernel_backlog = 128 });
+    var listener = try lease.listen(.{ .kernel_backlog = 128 });
     var listener_open = true;
     var socket_owned = true;
     errdefer {
         if (listener_open) listener.deinit(io);
-        if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+        if (socket_owned) lease.retireSocket() catch |err| {
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
         };
     }
@@ -1177,7 +1176,7 @@ fn serveOpened(
         // execution or request custody. Store and lease outlive both drains.
         if (listener_open) listener.deinit(io);
         listener_open = false;
-        if (socket_owned) std.Io.Dir.deleteFileAbsolute(io, lease.paths.socket.slice()) catch |err| {
+        if (socket_owned) lease.retireSocket() catch |err| {
             // The lock still protects this failed cleanup. A later startup
             // removes the owned socket or refuses to serve if it cannot.
             stderr.print("rui: retained stale socket after cleanup failure: {s}\n", .{@errorName(err)});
