@@ -25,7 +25,7 @@ test {
     _ = @import("StatusRow.zig");
     _ = @import("FactsRow.zig");
     _ = @import("ActivityBlock.zig");
-    _ = @import("Shortcuts.zig");
+    _ = @import("keys_panel.zig");
     _ = @import("SessionChrome.zig");
     _ = @import("TerminalApp.zig");
     _ = @import("Installation.zig");

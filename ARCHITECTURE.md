@@ -118,7 +118,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Interactive submission lifetime | `src/SessionSubmission.zig`: original Message or Decision, capture facts, same-original retries, joined Admission and release. `SessionInput` owns editing storage and loan tickets; `SessionFrontend` owns consent, presentation, reads and coordinated shutdown on a terminal its caller lends. `src/session_departure.zig` selects inspection supersession and exit policy from completed cleanup facts and freshly observed interruption. |
 | Host lifetime and effect handoffs | `src/server.zig`: Host, execution slots and native orchestration. `src/execution_turn.zig` owns the shared service-turn policy. |
 | Attempt bindings, launch permits and cleanup custody | `src/attempt.zig` and `src/execution.zig`: one-shot permits and generation-checked `CustodyPool` records. |
-| Model request preparation, transport and interpretation | `src/model_adapter.zig` prepares requests, walking a request's neutral items and writing the pieces the Session's codec answers each with; `src/provider.zig` owns the HTTP/2 Client and response capture lifetimes and `src/transport_policy.zig` classifies finished transfers and parses `Retry-After`; `src/output_decode.zig` classifies an HTTP error body by giving it, mapped read-only, to the pinned codec's classifier, and decides the error response and report from what the classifier names, and interprets a sealed response stream by giving each event, mapped read-only, to the pinned codec's interpreter, keeping the Host's rules across items and writing the output metadata the Store imports. `src/codec_abi.zig` is the provider codec contract and `src/codecs.zig` lists the codecs this Host serves by the codec name a Session pins, dispatches at comptime to a codec's request encoder, request headers, error classifier and response interpreter, plain functions over values their caller stores; a codec's manifest names the response headers the transport observes for it (`src/codecs/responses.zig` for `openai-responses/1` and `/2`, which encodes its request body, its history-memo carry and its tool envelope, names its request headers, reads its error envelope and interprets its response events; `src/codecs/json.zig` is the RFC 8259 JSON reader a codec runs over a whole input, and its string decoder also serves the shell). The contract, the JSON reader and each codec are functional cores, listed in `test-logic`, so a codec imports only `std`, the contract and the reader. `src/tools.zig` defines each tool's name, description and parameter schema once. |
+| Model request preparation, transport and interpretation | `src/model_adapter.zig` prepares requests, walking a request's neutral items and writing the pieces the Session's codec answers each with; `src/provider.zig` owns the HTTP/2 Client and response capture lifetimes and `src/transport_policy.zig` classifies finished transfers and parses `Retry-After`; `src/output_decode.zig` classifies an HTTP error body by giving it, mapped read-only, to the pinned codec's classifier, and decides the error response and report from what the classifier names, and interprets a sealed response stream by giving each event, mapped read-only, to the pinned codec's interpreter, keeping the Host's rules across items and writing the output metadata the Store imports. `src/codec_abi.zig` is the provider codec contract and `src/codecs.zig` lists the codecs this Host serves by the codec name a Session pins, dispatches at comptime to a codec's request encoder, request headers, error classifier and response interpreter, plain functions over values their caller stores; a codec's manifest names the response headers the transport observes for it (`src/codecs/responses.zig` for `openai-responses/1`, `/2` and `/3`, which encodes its request body, its history-memo carry and its tool envelope, names its request headers, reads its error envelope and interprets its response events; `src/codecs/json.zig` is the RFC 8259 JSON reader a codec runs over a whole input, and its string decoder also serves the shell). The contract, the JSON reader and each codec are functional cores, listed in `test-logic`, so a codec imports only `std`, the contract and the reader. `src/tools.zig` defines each tool's name, description and parameter schema once. |
 | Codex authentication and credential storage | `src/codex_auth.zig` sequences Host credential acquisition and local status and owns the device-login and refresh transport; `src/codex_credentials.zig` owns private records and cross-process credential leases. `src/codex_credential_policy.zig` owns the value decisions those owners follow: record format, selection, refresh claim and replacement admission. `src/codex_token_wire.zig` builds and interprets device-login and token-exchange messages and the records they produce. `src/providers.zig` holds the sign-in sources the Host serves (none, a ChatGPT sign-in, an API key) behind one closed `Credential`: the Host asks it whether a request waits for a lease, which endpoints it may reach, which fields it writes, what a model 401 means and who owns a Turn's routing value, and never which kind it is. |
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
@@ -608,7 +608,7 @@ An **Operation** is one model request or Action, owning its exact descriptor, ca
 Its optional **Resolution** is its immutable final result; the Operation ID also identifies that result.
 A retry is another [Attempt](#admitting-an-attempt) of the same Operation; a model request admitted against new context or settings is a new Operation.
 
-Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, reasoning/output limits and output contract.
+Each model Operation owns one immutable **Model Request Manifest** binding its protocol operation, provider and exact requested model through its frozen Session settings revision, historical input view, reasoning/output limits, effective context window and output contract.
 References/digests identify canonical content; runtime facts retain their original rendering references.
 Session facts and Operation admission share one committed per-Session order on their owning records, without a duplicate payload log.
 The Operation's admission position fixes its historical boundary.
@@ -766,6 +766,10 @@ It is null without a trigger and when the next call's purpose does not depend on
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
 `/status` shows it beside the trigger, and the conversation's Session line shows the share of the trigger it leaves.
 Resolve policy once before purpose selection and freeze the effective values on the admitted Operation.
+The Operation INSERT also freezes its model's effective context window from the selected saved-or-shipped catalog, in the same statement and Store hold, with no additional Store round.
+Only absence of a catalog source selects shipped facts; an authoritative saved generation with a missing model or null window uses the 128,000-token unlisted estimate, and a non-null window, including zero, is preserved.
+An overflowing compaction's settlement and successor admission both derive escalation from that failed Operation's frozen window and reservation, never the current catalog or the successor's window.
+A new Operation freezes the then-selected window; retries and replacement Attempts preserve the original.
 Later settings or capability changes cannot change its purpose or retry policy.
 
 The Store keeps usage in Rui's form: four counts, uncached input, cache read, cache write and output, each a whole SQLite integer, all present or all absent.
@@ -982,7 +986,7 @@ The history in a request's `input` array is one contiguous span, a pure function
 When a request seals, the execution owner copies that span's exact bytes from the sealed request into the Session's memo file and records their 64-bit Wyhash digest, appending only the bytes after a span the memo itself supplied.
 That copy is part of preparation: it yields in chunks under the preparation byte allowance, so a large history never blocks controls, Bash, provider completions or cleanup, and preparation hands the request on only after the copy ends.
 A preparation stopped or failed during the copy keeps no memo and removes its file like an eviction.
-Process memory keeps only a fixed-size index entry: Session, requested model and anchor, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force), the tool-group scan position, the span length and the digest.
+Process memory keeps only a fixed-size index entry: Session, requested model and anchor, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force, and `openai-responses/3` holds only the comma, as `/1` does), the tool-group scan position, the span length and the digest.
 When the next request of that Session selects the same model and anchor and its frozen view contains the producing admission position, preparation opens the file, requires exactly the recorded length, and reads it into the request through the request writer in bounded chunks, hashing as it goes, in place of re-reading and re-encoding the covered entries; it then closes the file and encodes only later entries.
 The copied bytes count only once the whole span matches the recorded digest.
 The copy consumes the byte allowance and scratch charge like any other emitted bytes and the request stays byte-identical to a full rebuild.
@@ -1024,6 +1028,8 @@ The seal covers the history span, not the request's settings and instructions be
 A Session pins its codec at creation, and new Sessions pin `openai-responses/2`; a Session on `openai-responses/1` keeps it and its exact bytes, since requests use the codec the Session pinned.
 Under `openai-responses/1` each request's top-level `reasoning.effort` is its Operation's frozen effort, so an effort change costs the provider cache.
 Under `openai-responses/2` the top-level effort is the effort the Session's first Operation for the requested model froze.
+`openai-responses/3` is `/2` for an endpoint that refuses the `configuration_update` input item: as under `/1`, each request's top-level effort is its Operation's frozen effort and no request writes an effort update, so an effort change costs the provider cache and no provider error is an effort-change refusal.
+No provider pins it yet.
 A rebuilt history preserves effort boundaries only from Operations requesting that model; other models' effort settings are not visible conversation and may not be supported by this model.
 Their tool declarations remain in place for the visible calls.
 The history view yields an Operation element at each earlier same-model Operation's admission position. The codec restores its effective effort only when it differs from replay carry; a boundary back to null declines. Admission captures the current request's actual emission decision against that same replay recipe (raw newest base, compatibility, effective floor and covered anchor) and frozen first-model top. The current unrefused request emits exactly that saved decision, not a new comparison against later settings. Historical boundaries and refused retries remain representation restorations, preserving pinned request bytes and memo/rebuild parity even on the first successor after compaction.
@@ -1036,7 +1042,7 @@ Every Operation is placed, whatever its outcome, because its own request carried
 
 #### Tools inside the history
 
-Under `openai-responses/2` function tools are declared inside the history too, so adding, rewording or removing one keeps the provider cache (D53-D55, D75).
+Under `openai-responses/2` and `/3` function tools are declared inside the history too, so adding, rewording or removing one keeps the provider cache (D53-D55, D75).
 After each Operation element the history view declares, with `{"type":"additional_tools","role":"developer","tools":[…]}`, the function tools that Operation's frozen set holds and the set of the last earlier Operation since the span's start lacks; a tool record is saved once, so a reworded tool is a new record and is declared again.
 The first Operation after the span's start, or after a compaction base's anchor, declares its whole set, since the base covers the earlier declarations.
 A removed tool stays declared in the history, and a call to it gets the tool result `This tool was removed.`: settlement offers the Operation's own set and withdraws every tool an earlier Operation offered or an earlier configuration revision loaded.
@@ -1237,6 +1243,10 @@ The trigger is derived from the manifest's protocol operation, never a Conversat
 The source demonstrates this path; absence of a standalone call in that client does not prove that the subscription server rejects `/responses/compact`.
 Generic API documentation does not establish subscription endpoint availability.
 V1 depends on neither that endpoint nor automatic `context_management` support.
+Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead ends with the top-level `"tool_choice":"none","context_management":[{"type":"compaction","compact_threshold":1000}]`, after the history span, so the span and its carry are unchanged.
+The provider refuses a threshold under 1000 tokens, and a compaction Operation runs only on a large context, so 1000 always compacts; `tool_choice` keeps the reply the provider writes while compacting from calling a function or searching the web.
+With `context_management` the provider's response is `compaction`, `message`, `compaction`, and the last compaction item alone carries the whole memory: replaying only it keeps the context.
+The rule above still expects exactly one compaction item, so a version-three compaction does not settle yet; no provider pins `openai-responses/3`, and accepting that shape is a separate decision.
 
 Require a completed response with exactly one nonempty supported compaction item for explicit compaction.
 Store the complete ordered output once on that Operation.
@@ -1494,6 +1504,10 @@ The step to 64 renames `host_catalog` to `host_tool_set` and `action_operation.b
 The step to 65 freezes each Operation's effective tool offer, retaining its settings revision's offer for old Operations.
 The step to 66 freezes configured effort sources and admitted effort emission/fallback, records immutable refusal provenance in `session_change`, and moves saved wire 12 metadata to 13.
 The step to 68 (D179, D219) adds nullable final-attempt `latency_ms` and `first_event_ms` to `model_operation`, without backfilling old resolutions.
+The step to 69 freezes each model Operation's effective context window as a non-null integer in 0..4294967295, with no default (D238).
+It backfills every old Operation using its frozen settings revision's exact model and a literal mapping of the pre-change shipped snapshot, using 128,000 for absent or null windows, not the mutable saved catalog.
+This pins legacy escalation policy; the old rows did not retain their admission-time saved window, and migration does not claim to recover it.
+Existing floors, levels, counts, resolutions and references are preserved.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -2560,7 +2574,6 @@ On a typed draft Ctrl-P says to empty the draft first, even while a step is read
 Ctrl-P past the oldest says `No earlier message.` While an Action's choice holds the input, Ctrl-P and Ctrl-N do nothing and presses not yet read are dropped; a step already read still lands on the draft.
 Ctrl-B and Ctrl-F move the caret a character left and right, as in readline.
 Any Ctrl, Alt, Super, Hyper or Meta chord with no binding, a typed C0 control among them, on a character, a control or a named key such as an arrow, is ignored without a notice as it arrives, leaving the draft unchanged (Divyansh’s decision): ESC followed by a key (Option as Meta, an Esc pressed just before a key, or a chord tmux re-encodes that way) and Kitty Alt chords, even with associated text, never insert the bare key, reject the draft or send it.
-If the conversation shortcuts overlay is open, the key closes it first; the unbound chord otherwise does nothing.
 ESC before a key that starts no sequence is Alt on that key as decoded alone: ESC ^H is Alt-Backspace, ESC CR (which arrives as ESC LF under ICRNL) is Alt-Enter, and ESC before a multibyte scalar drops that scalar; a combining mark or joined scalar that arrives after it is ordinary text.
 Alt-Enter adds a line like Shift-Enter and Ctrl-J in every form (ESC CR, ESC LF, Kitty `CSI 13;3u` and `CSI 27;3;13~`) and never sends: Ghostty sends Shift-Enter as ESC CR.
 A bare Esc that expires (80 ms) before Enter is Esc, then Enter, which sends.
@@ -2694,8 +2707,8 @@ These client choices do not change existing Sessions, the Host's fixed fallback 
 The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the selected catalog's OpenAI IDs because it has no public list.
 The Host refreshes the models.dev fact catalog and saves it across Host runs.
 Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
-Historical compaction escalation for an already frozen Operation deliberately uses shipped windows: settlement and later admission independently recompute the same deeper floor, and no Store field freezes a saved catalog window between those calls.
-Using a refreshed window there could make their decisions disagree and produce `CorruptStore`; changing that historical rule requires an explicit freeze/format decision.
+Each new model Operation freezes the selected catalog's effective context window on its own row (D238).
+Historical compaction escalation reads only that frozen value, so a refresh between admission, overflow settlement and successor admission cannot change the failed Operation's deeper floor or make the two decisions disagree.
 Offline CLI defaults can therefore be refused by Host admission when its saved facts differ; the CLI does not silently substitute another model, effort or threshold.
 There is no model-list command.
 Help needs no Host or credentials.
@@ -2913,7 +2926,7 @@ Standalone zero-width output clusters, clusters wider than eight cells and clust
 Unrepresentable input edits are declined explicitly; an unrepresentable marked paste rolls back to the preceding draft and caret.
 Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab displays as one space.
 
-`/status`, `/requests` and `/help` render selected inspections without changing the draft.
+`/status` and `/requests` render selected inspections without changing the draft.
 `/status` is rendered by the next settled live read from that read's own Current capture, and shows in the same step as that read's history and composer status, so the page never disagrees with them.
 While the page is on screen, each settled live read renders it again only if its contents would change, and replaces it in place: the reader's position, highlighted option, notice and consent are kept.
 A live read's failure is the same failure with or without `/status`.
@@ -2946,12 +2959,12 @@ Marked paste never grants permission.
 Their unchanged CLI owners write complete stdout and stderr to the inspection scratch file.
 Output of up to two lines becomes a notice under the input without the CLI's `Rui: ` prefix, with `rui: ` diagnostics marked `!`; longer output opens as an inspection page under the `Browsing · Esc returns` heading.
 The Session screen stays in place and no command reads terminal input.
-`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME · /help`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
+`/discard` and `/recover KEY` answer with a notice; an unknown command shows `! Unknown command /NAME`, and a known one given an argument it does not take shows its usage, as `! Usage: /copy [code|file]`.
 
 A command list appears when you type "/", built from the same table the command parser uses. /effort and /rename are short forms of /configure. (Divyansh approved this on 2026-10-31, front-end plan row 6.)
 
-`slash_commands.zig` holds one table per screen of each command's name, argument shape and plain listed flag; the parser, command runner, list and `/help` read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too. `/help` retains the command names and argument shapes, without descriptions.
-`/requests`, `/recover`, `/result` and `/discard` are for recovery: they work and `/help` names them, but the list leaves them out (Divyansh, 2026-11-02).
+`slash_commands.zig` holds one table per screen of each command's name, argument shape and plain listed flag; the parser, command runner and list read it. The `/` list shows only names as typed, with fixed choice words in quiet colour separated by ` · `; choice and option rows are names only too.
+`/requests`, `/recover`, `/result` and `/discard` are for recovery: they work, but the list leaves them out (Divyansh, 2026-11-02).
 `/requests` still writes its page of every recovery handle, and while that page shows over an empty draft the list's rows offer what can be done with them, each row the command line it runs, so a pick does what typing it does and no key is typed (Divyansh, 2026-11-02).
 The first row is `/recover KEY` for this conversation's own original only while a retry would go now and could only send a Message: a plain Message whose Admission is unconfirmed, nothing in flight and no Action waiting; never a decision or a Message that carries one.
 Then come each saved Message's `/result KEY`, newest saved first with its local `HH:MM` (23 of them, the list's rows less that one), the original included when it has no `/recover` row.
@@ -2972,11 +2985,15 @@ Enter in a shown list takes the highlighted row: a command with nothing more to 
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
 Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/help`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
-Both screens share `/help`, `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME · /help` (Divyansh, 2026-11-02: "Same commands both screens").
-The overview's `/help` replaces the Sessions' rows with a panel headed `Help`, `Esc returns` at its right: the overview's keys, then its commands as its table lists them.
-A screen too small for the whole panel says `! Screen too small for /help` instead, as `/model` does; one that shrinks under it shows the lines that fit and counts the rest.
-Esc or Ctrl-G, past a shown command list, closes the panel and keeps the draft, and the line under the input says `esc close` while it shows; a key that acts on a Session (one that selects, Ctrl-X, Enter on an empty draft) and `/rename` close it first and act where the Sessions show.
+The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
+There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
+The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
+Selecting Keys by Enter or click opens only key names in strong text and their short meanings, in aligned row-major pairs when they fit, or one column otherwise: no title, footer or instructions.
+One `ctrl+x` stops work; it does not require two presses.
+`keymap.list` owns the reference rows, checked against the union of both screens' keymaps so each bound key is listed or explicitly marked as an alias of one listed row, and neither rows nor aliases name unbound keys.
+`keys_panel` derives fields from those rows; `Panel.KeyList` reuses the Panel's cell clipping, without selection or an event handler.
+`AppSettings` owns whether the reference is open; Esc or Ctrl-G closes it back to Settings before any choice, Upgrade cancellation or settings-page close, never leaving a conversation through that first press.
 The overview's `/rename NAME` names the selected Session and `/setup [OPTIONS]` saves defaults with no Session, each through the same CLI owner a conversation's runs, on the overview's worker with stdout and stderr in an unlinked scratch file; without a selected Session `/rename` says `! Select a Session first.`, as Ctrl-X does.
 With no Session, the overview's `/setup` says `Saved defaults for future Sessions.` and its failures name no Session, where a conversation's add that the active Session is unchanged.
 One command runs at a time, and Enter on an empty draft waits for it too, since a conversation's commands write to the same stdout and stderr; either says `! Wait for /NAME to finish.`
@@ -3642,14 +3659,13 @@ Exact nonzero numbers are not another state protocol.
 
 Conversation entry is quiet, without configuration banners or routine IDs.
 Bash and `bypass`, the default, stay quiet: no notice or banner announces them. Permission mode is a setting and never appears as a chat-footer suffix.
-`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it, and `/help` describes the Session line.
+`/status` states the mode with the exact binding on its Permissions row, `bypass · Bash and MCP run without asking` or `ask · Bash and MCP ask first`, `session list` JSON shows it.
 Existing Sessions preserve their saved mode.
 User submissions are `›` blocks with their admission time and assistant prose has no role labels; concise tool outcomes stay quiet and the live line ends the conversation only while work is under way.
 Divyansh approved this on 2026-10-31 (front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 Successful conversation omits protocol receipts and follow reminders; original captured request handles remain available through `/requests`.
 If opening a Session started from the overview fails after its `session start` was confirmed, best-effort stderr guidance retains that request handle and an executable exact Store/Session resume command while preserving the original failure.
 This reports admission only, not completion, and does not promise delivery under stderr contention or failed output credit.
-`/help` describes the implemented Session commands and one-shot login route.
 These are presentation choices over existing Host facts, not new conversation or recovery authority; one-shot and JSON output remain unchanged.
 
 ### Connection capacity and control headroom

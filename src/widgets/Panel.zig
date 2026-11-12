@@ -370,3 +370,73 @@ test "Panel hover highlights fields choices and actions without changing keyboar
     _ = try panel.widget().draw(ctx);
     try std.testing.expect(!panel.hover.pointing);
 }
+
+/// A read-only reference in fitting columns, without selection or input ownership.
+/// It shares the panel's cell clipping; labels are strong, values are plain.
+pub const KeyList = struct {
+    fields: []const Field,
+    ground: vaxis.Style = .{},
+    strong: vaxis.Style = .{ .bold = true },
+
+    pub fn widget(self: *KeyList) vxfw.Widget {
+        return .{ .userdata = self, .drawFn = drawReference };
+    }
+
+    fn drawReference(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *KeyList = @ptrCast(@alignCast(raw));
+        const size = ctx.max.size();
+        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+        @memset(surface.buffer, .{ .style = self.ground });
+        var key_widths = [_]usize{ 0, 0 };
+        var value_widths = [_]usize{ 0, 0 };
+        for (self.fields, 0..) |field, index| {
+            const column = index % 2;
+            key_widths[column] = @max(key_widths[column], ctx.stringWidth(field.label));
+            value_widths[column] = @max(value_widths[column], ctx.stringWidth(field.value));
+        }
+        const margin = 1;
+        const key_gap = 3;
+        const column_gap = 2;
+        const left_width = margin + key_widths[0] + key_gap + value_widths[0];
+        const right_width = margin + key_widths[1] + key_gap + value_widths[1];
+        const columns: usize = if (self.fields.len > 1 and left_width + column_gap + right_width <= size.width) 2 else 1;
+        if (columns == 1) key_widths[0] = @max(key_widths[0], key_widths[1]);
+        for (self.fields, 0..) |field, index| {
+            const row = index / columns;
+            if (row >= size.height) break;
+            const column = index % columns;
+            const start = if (column == 0) 0 else left_width + column_gap;
+            const column_width = if (column == 0) left_width else right_width;
+            const limit: u16 = if (columns == 1) size.width else @intCast(start + column_width);
+            const label: u16 = @intCast(@min(start + margin, limit));
+            const value: u16 = @intCast(@min(start + margin + key_widths[column] + key_gap, limit));
+            _ = paintTo(ctx, surface, field.label, label, @intCast(row), self.strong, limit);
+            _ = paintTo(ctx, surface, field.value, value, @intCast(row), self.ground, limit);
+        }
+        return surface;
+    }
+};
+
+test "Panel KeyList fits measured columns and aligns values after the widest key in cells" {
+    var reference: KeyList = .{ .fields = &.{
+        .{ .label = "界界界", .value = "one" },
+        .{ .label = "x", .value = "two" },
+        .{ .label = "long", .value = "three" },
+        .{ .label = "xy", .value = "four" },
+    } };
+    for ([_]u16{ 26, 27 }) |width| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const surface = try reference.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 4 }, .cell_size = .{} });
+        // The left key is six terminal cells, the right key two. The
+        // measured widths are 15 + 2 + 10, unrelated to the app's table.
+        const columns: usize = if (width == 27) 2 else 1;
+        for ([_][]const u8{ "one", "two", "three", "four" }, 0..) |value, index| {
+            const start: usize = if (columns == 2 and index % 2 == 1) 23 else 10;
+            for (value, 0..) |byte, col| {
+                const cell = surface.readCell(@intCast(start + col), @intCast(index / columns));
+                try std.testing.expectEqualStrings(&.{byte}, cell.char.grapheme);
+            }
+        }
+    }
+}
