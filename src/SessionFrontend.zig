@@ -562,6 +562,7 @@ fn showSubmissionFailure(self: *Self) !void {
     self.dropMessageRequest();
     const file = self.files.details;
     try file.setLength(self.init.io, 0);
+    try self.init.io.vtable.fileSeekTo(self.init.io.userdata, file, 0);
     var buffer: [4096]u8 = undefined;
     var output = file.writerStreaming(self.init.io, &buffer);
     try reads.writeSubmission(self.submission.view(), if (self.heldFailure()) |failure| failure.page else null, &output.interface);
@@ -8575,6 +8576,67 @@ test "chat info typed configure supersedes every cancellable read without making
         try std.testing.expectEqual(.failed, self.info_effect);
         try std.testing.expect(self.leaving == null and held.left == null);
         try std.testing.expect(self.submission.intent == null);
+    }
+}
+
+test "repair details rewrite from byte zero on first repeated and changed held failures" {
+    const Entry = enum { owner, alt_d, details_control };
+    const long_page = comptime page: {
+        const line = "Changed environment guidance. Shorten these variables before recovery.\n";
+        var bytes: [line.len * 80]u8 = undefined;
+        for (0..80) |i| @memcpy(bytes[i * line.len ..][0..line.len], line);
+        break :page bytes;
+    };
+    const cases = [_]struct { key: u8, state: Submission.State, page: ?[]const u8, body: []const u8, last_error: ?anyerror = null, error_line: []const u8 = "", replace_failure: bool = true }{
+        .{ .key = 'K', .state = .not_started, .page = null, .body = "Publication/admission may be incomplete; Ctrl-R retries this exact original." },
+        .{ .key = 'K', .state = .not_started, .page = &long_page, .body = &long_page },
+        // Old advice belongs to the exact original and failure state only.
+        .{ .key = 'K', .state = .rejected, .page = null, .body = "Submission rejected; /discard releases only this original, retaining the next draft.", .replace_failure = false },
+        .{ .key = 'L', .state = .not_started, .page = null, .body = "Publication/admission may be incomplete; Ctrl-R retries this exact original.", .replace_failure = false },
+        .{ .key = 'L', .state = .rejected, .page = "Changed refusal: inspect this original before discarding.", .body = "Changed refusal: inspect this original before discarding.", .last_error = error.RequestBindingMismatch, .error_line = "Last submission error: RequestBindingMismatch\n" },
+        .{ .key = 'L', .state = .rejected, .page = null, .body = "Submission rejected; /discard releases only this original, retaining the next draft." },
+    };
+    for (std.enums.values(Entry)) |entry| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.files.details = try held.tmp.dir.createFile(std.testing.io, "repair-details", .{ .read = true });
+        defer self.files.details.close(std.testing.io);
+        const original = self.input.submitText("original message");
+        self.submission.intent = .{ .message = original };
+        try held.keys("kept draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        for (cases) |case| {
+            self.submission.key = @splat(case.key);
+            self.submission.state = case.state;
+            self.submission.last_error = case.last_error;
+            if (case.replace_failure) self.holdFailure(.{ .line = "! Original needs repair", .key = .status }, case.page);
+            const expected = try std.fmt.allocPrint(std.testing.allocator, "Original reserved request: {s}\n{s}\n{s}", .{ self.submission.key, case.body, case.error_line });
+            defer std.testing.allocator.free(expected);
+            const bytes = try std.testing.allocator.alloc(u8, expected.len);
+            defer std.testing.allocator.free(bytes);
+            for (0..3) |opening| {
+                errdefer std.debug.print("repair entry={s}, key={c}, page_bytes={d}, opening={d}\n", .{ @tagName(entry), case.key, case.body.len, opening });
+                switch (entry) {
+                    .owner => try self.showSubmissionFailure(),
+                    .alt_d => try held.keys("\x1bd"),
+                    .details_control => {
+                        var ctx = held.context();
+                        try chromeClick(.details)(self, &ctx);
+                    },
+                }
+                try std.testing.expectEqual(@as(u64, expected.len), (try self.files.details.stat(std.testing.io)).size);
+                try std.testing.expectEqual(expected.len, try self.files.details.readPositionalAll(std.testing.io, bytes, 0));
+                try std.testing.expectEqualStrings(expected, bytes);
+                try std.testing.expectEqualStrings(expected, self.screen.browsing.text());
+                try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0) == null);
+                try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+                try std.testing.expect(self.screen.preview_complete);
+                try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+                try std.testing.expectEqual(cursor, self.input.composition().cursor);
+                try std.testing.expectEqualStrings("original message", try self.input.message(original));
+            }
+        }
     }
 }
 
