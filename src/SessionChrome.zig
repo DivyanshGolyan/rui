@@ -241,7 +241,7 @@ test "the Session chrome fills the slots for the latest view and for browsing, a
     var transcript: @import("DocumentView.zig") = .{ .document = document };
     var facade: AppScreen.Content = .{ .shown = transcript.widget() };
     var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
-    self.activity.work = .{ .mark = "⠹", .tone = .normal, .words = "Waiting", .clock = .{ .elapsed = 12 } };
+    self.activity.work = .{ .mark = "⠹", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 12 } };
     self.activity.live.count = 0;
     self.activity.live.total = 5;
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

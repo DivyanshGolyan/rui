@@ -38,7 +38,7 @@ def untimed(row):
 
 
 # What work under way says: the running call's row, "⠹ Run tests · 42s", or
-# the conversation's last line, "⠹ Waiting · 12s",
+# the conversation's last line, "⠹ Thinking · 12s",
 # "⠹ Rate limited · retry 2 in 18s", "Stopping…".
 LIVE_LINE = re.compile(r"^(?:[⠹◌?] .+ · (?:\d|retry )|Stopping…)", re.M)
 # What the line under a draft beside an Action says once Enter there denies
@@ -820,8 +820,8 @@ def persistent_copy_case():
                 env={**os.environ, "HOME": str(home)}, cwd=here) as (caller, master):
             read_terminal(master, "› ")
             capture = terminal_capture(master)
-            terminal_step(master, "/copy", "No answer to copy yet.", composer=True)
-            terminal_step(master, "/copy code", "No answer to copy yet.", composer=True)
+            terminal_step(master, "/copy", "No answer to copy", composer=True)
+            terminal_step(master, "/copy code", "No answer to copy", composer=True)
             assert capture.clipboard == [] and not any(here.iterdir()), capture.clipboard
             terminal_step(master, "Copy request", "Done.", composer=True)
             # A left drag over the answer's last word copies exactly the text
