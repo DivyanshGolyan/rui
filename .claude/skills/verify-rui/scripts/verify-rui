@@ -2037,10 +2037,13 @@ def frame_expectations(state):
     return value
 
 
-def frame_absences(state):
+def frame_absences(state, sessions=None):
     value = state.get("absent", [])
     if not isinstance(value, list) or not all(isinstance(text, str) and text and "\0" not in text for text in value):
         raise ValueError(f"{state['name']}: absent must be a list of nonempty text markers")
+    if sessions is not None:
+        return [sessions[match.group(1)] if (match := re.fullmatch(r"\{session:(.+)\}", text)) else text
+                for text in value]
     return value
 
 
@@ -2137,6 +2140,10 @@ def validate_scenario(data, sizes=None):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
+        for text in frame_absences(state):
+            match = re.fullmatch(r"\{session:(.+)\}", text)
+            require(match is None or match.group(1) in labels,
+                    f"{name}: unknown cast label in absent: {text}")
         normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state),
                                   "absent": frame_absences(state)})
     return {**data, "sizes": override or default_sizes, "states": normalized_states}
@@ -2462,12 +2469,12 @@ def frame_row_failure(state, plain):
     return None
 
 
-def frame_ready(terminal, state, allow_exit=False):
+def frame_ready(terminal, state, allow_exit=False, sessions=None):
     # Transitions are asserted at the frame their last wait observed, not
     # polled until a later frame happens to satisfy the regression oracle.
     if state.get("first_frame", False):
         return
-    expected, absent = frame_expectations(state), frame_absences(state)
+    expected, absent = frame_expectations(state), frame_absences(state, sessions)
     terminal.wait(lambda c: all(text in c.completed for text in expected)
                   and all(text not in c.completed for text in absent)
                   and frame_row_failure(state, c.completed) is None,
@@ -2485,7 +2492,7 @@ def frame_capture(run, target, out, state, size, reason):
     missing = next((text for text in frame_expectations(state) if text not in plain), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
-    unexpected = next((text for text in frame_absences(state) if text in plain), None)
+    unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if text in plain), None)
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
     if reason is None:
@@ -2587,7 +2594,7 @@ def cmd_frames(args):
                 first_wait = state["steps"][0].get("wait") if state["steps"] else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
                 exiting = frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
-                frame_ready(target, state, allow_exit=exiting)
+                frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
             except (Exception, SystemExit) as error:
                 reason = str(error)
                 if state["name"] in selected:
@@ -2612,7 +2619,7 @@ def cmd_frames(args):
                                 if target is None:
                                     raise FrameFailure("terminal did not launch")
                                 target.resize(size)
-                                frame_ready(target, state, allow_exit=exiting)
+                                frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
                             # The first viewport is already sized. Capture directly
                             # after its steps/wait, while a transient is still visible.
                             record = frame_capture(run, target, out, state, size, reason)

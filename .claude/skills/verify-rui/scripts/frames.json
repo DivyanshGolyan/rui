@@ -5,6 +5,125 @@
   ],
   "states": [
     {
+      "name": "archive-state",
+      "note": "Archive confirmation is one durable left fact; editable model/effort precede the optional name, with no blank row below Footer",
+      "cast": [
+        {
+          "label": "Archive audit",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Seed history"
+          ]
+        }
+      ],
+      "open": "Archive audit",
+      "steps": [
+        {
+          "text": "/archive"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "· Archived"
+        }
+      ],
+      "expect": [
+        "Seed history",
+        "low",
+        "· Archived"
+      ],
+      "absent": [
+        "[Archived]",
+        "/unarchive",
+        "{session:Archive audit}",
+        "Archived Archive audit"
+      ]
+    },
+    {
+      "name": "archived-list",
+      "note": "Archived rows show their name without a redundant archive tag or raw id",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/sessions archived"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Archive audit"
+        }
+      ],
+      "expect": [
+        "✓ Archive audit"
+      ],
+      "absent": [
+        "[Archived]",
+        "/unarchive",
+        "{session:Archive audit}",
+        "· archived"
+      ]
+    },
+    {
+      "name": "transient-chat",
+      "note": "A chat copy reply appears once on Footer, alongside durable archive state",
+      "open": "Archive audit",
+      "steps": [
+        {
+          "text": "/copy"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Sent to clipboard"
+        }
+      ],
+      "expect": [
+        "Sent to clipboard",
+        "· Archived"
+      ],
+      "absent": [
+        "Archived Archive audit",
+        "/unarchive",
+        "{session:Archive audit}"
+      ]
+    },
+    {
+      "name": "transient-overview",
+      "note": "An overview command error occupies Footer once, without a separate reply row",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/nope"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Unknown command /nope"
+        }
+      ],
+      "expect": [
+        "Unknown command /nope"
+      ],
+      "absent": [
+        "Archived Archive audit",
+        "/unarchive",
+        "{session:Archive audit}"
+      ]
+    },
+    {
       "name": "first-run",
       "note": "No credentials: sign-in choice occupies the input row",
       "open": "overview",
@@ -146,6 +265,34 @@
       "absent": [
         "› /effort",
         "enter pick"
+      ]
+    },
+    {
+      "name": "all-sessions",
+      "note": "Mixed archive states retain a quiet archived suffix; the archived-only list does not",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/sessions all"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Archive audit · archived"
+        }
+      ],
+      "expect": [
+        "Archive audit · archived",
+        "Draft lifecycle"
+      ],
+      "absent": [
+        "[Archived]",
+        "Draft lifecycle · archived",
+        "{session:Archive audit}",
+        "{session:Draft lifecycle}"
       ]
     },
     {
