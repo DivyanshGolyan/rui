@@ -19,7 +19,7 @@ pub fn main(init: std.process.Init) !void {
         defer runtime.deinit();
         var probe: ConsentProbe = .{ .replace_request = std.mem.eql(u8, args[1], "consent-replaced") };
         var root: @import("Root.zig") = .{ .overview = probe.widget(), .list = probe.widget(), .compose = probe.widget() };
-        probe.pasting = &root.input.pasting;
+        root.overview_keys = .{ .context = &probe, .take = ConsentProbe.key };
         try runtime.run(root.widget());
         if (probe.decision) |decision|
             std.debug.print("decision={d}:{s}\n", .{ decision.action, @tagName(decision.choice) })
@@ -89,7 +89,6 @@ const ConsentProbe = struct {
     const vxfw = @import("vaxis").vxfw;
     consent: @import("ActionConsent.zig") = .{},
     card: @import("PermissionCard.zig") = undefined,
-    pasting: *const bool = undefined,
     replace_request: bool,
     decision: ?@import("session_consent.zig").Decision = null,
     text: vxfw.Text = .{ .text = "$ true" },
@@ -103,16 +102,25 @@ const ConsentProbe = struct {
         switch (input) {
             .init => {
                 self.consent.adopt(17);
-                self.card = .{ .consent = &self.consent, .pasting = self.pasting, .description = "Run the probe", .body = self.text.widget(), .userdata = self, .on_decision = decided };
-            },
-            .key_press, .invalid_key => {
-                if (self.replace_request) self.consent.adopt(29);
-                try self.card.widget().handleEvent(ctx, input);
-                ctx.quit = true;
+                self.card = .{ .consent = &self.consent, .description = "Run the probe", .body = self.text.widget(), .userdata = self, .on_decision = decided };
             },
             .tick => try self.card.widget().handleEvent(ctx, input),
             else => {},
         }
+    }
+
+    /// Root hands the probe its keys, as it does the Session's core: the
+    /// first key goes to the card, which takes only an exact Enter.
+    fn key(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
+        const self: *ConsentProbe = @ptrCast(@alignCast(raw));
+        const choice: @import("ActionConsent.zig").Input = switch (input) {
+            .key_press => |pressed| if (@import("TerminalEditor.zig").isEnter(pressed)) .enter else .other,
+            .invalid_key => .invalid,
+            else => return,
+        };
+        if (self.replace_request) self.consent.adopt(29);
+        try self.card.take(ctx, choice, delivery.pasted);
+        ctx.quit = true;
     }
 
     fn decided(raw: *anyopaque, _: *vxfw.EventContext, decision: @import("session_consent.zig").Decision) !void {

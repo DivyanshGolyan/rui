@@ -639,22 +639,25 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const address = try std.Io.net.UnixAddress.init(socket_path);
     // A refused connect may be a live Host's full backlog. Give it a short
     // retry window inside the shared observation budget, never absence authority.
-    const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 200 * std.time.ns_per_ms);
+    const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + refused_connect_retry_ns);
     const fd = connection: {
         while (true) {
             const connected = connectRequest(.{ .io = io }, address, connect_until) catch |err| {
+                switch (err) {
+                    // A free Store lease proves a crashed Host's leftover
+                    // socket absent now; only a Store still owned earns the
+                    // retry, so leftovers never cost the window.
+                    error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
+                        if (platform.socketStoreIsUnowned(io, socket_path)) return null;
+                    },
+                    else => {},
+                }
                 if (err == error.ConnectionRefused) {
                     const remaining = connect_until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
                     if (remaining > 0) {
                         try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 25 * std.time.ns_per_ms))), .awake);
                         if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < connect_until) continue;
                     }
-                }
-                switch (err) {
-                    error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
-                        if (platform.socketStoreIsUnowned(io, socket_path)) return null;
-                    },
-                    else => {},
                 }
                 return err;
             };
@@ -682,6 +685,10 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (observed.pid != pid) return error.InvalidHostInfo;
     return observed;
 }
+
+/// How long socket discovery retries a refused connect to a Store whose lease
+/// is still held: a live Host's full backlog refuses until it accepts.
+const refused_connect_retry_ns = 200 * std.time.ns_per_ms;
 
 fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
@@ -796,11 +803,14 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
     const Mode = enum {
         current,
         historical,
+        historical_14,
         historical_13,
         historical_13_chatgpt,
         strict,
+        strict_14,
         strict_13,
         exact,
+        exact_14,
         exact_13,
         body_mismatch,
         malformed_header,
@@ -846,8 +856,9 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
             const io = std.testing.io;
             const until = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 2 * std.time.ns_per_s;
             const count: usize = switch (self.mode) {
-                .historical, .body_mismatch, .unknown => 3,
-                .historical_13, .historical_13_chatgpt, .budget => 2,
+                .historical, .body_mismatch, .unknown => 4,
+                .historical_13, .historical_13_chatgpt => 3,
+                .historical_14, .budget => 2,
                 else => 1,
             };
             for (0..count) |index| {
@@ -855,9 +866,10 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 const connection = try self.listener.accept(io);
                 defer connection.close(io);
                 const fd = connection.socket.handle;
-                const order = [_][]const u8{ protocol.wire_version, protocol_reply.HostInfoProfile.released_13.wire(), protocol_reply.HostInfoProfile.released_9.wire() };
+                const order = [_][]const u8{ protocol.wire_version, protocol_reply.HostInfoProfile.released_14.wire(), protocol_reply.HostInfoProfile.released_13.wire(), protocol_reply.HostInfoProfile.released_9.wire() };
                 const expected_wire = switch (self.mode) {
                     .exact => protocol_reply.HostInfoProfile.released_9.wire(),
+                    .exact_14 => protocol_reply.HostInfoProfile.released_14.wire(),
                     .exact_13 => protocol_reply.HostInfoProfile.released_13.wire(),
                     else => order[index],
                 };
@@ -905,12 +917,13 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 const response_wire = switch (self.mode) {
                     .current, .unavailable, .activation_current => protocol.wire_version,
                     .unknown => "8",
+                    .historical_14, .strict_14, .exact_14 => protocol_reply.HostInfoProfile.released_14.wire(),
                     .historical_13, .historical_13_chatgpt, .strict_13, .exact_13 => protocol_reply.HostInfoProfile.released_13.wire(),
                     else => protocol_reply.HostInfoProfile.released_9.wire(),
                 };
                 const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
                 var body_buffer: [1024]u8 = undefined;
-                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version) or self.mode == .historical_13_chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
+                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version) or std.mem.eql(u8, response_wire, protocol_reply.HostInfoProfile.released_14.wire()) or self.mode == .historical_13_chatgpt) ",\"chatgpt\":\"unserved\"" else "" });
                 var error_buffer: [256]u8 = undefined;
                 const body: []const u8 = switch (self.mode) {
                     .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
@@ -953,8 +966,9 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 else => {},
             }
             const observed = switch (mode) {
-                .strict, .strict_13, .strict_503 => if (observeHostProcess(io, root, null)) |_| return error.TestUnexpectedResult else |err| return err,
+                .strict, .strict_14, .strict_13, .strict_503 => if (observeHostProcess(io, root, null)) |_| return error.TestUnexpectedResult else |err| return err,
                 .exact => try observeHostForUpgradeProfile(io, root, .released_9, null),
+                .exact_14 => try observeHostForUpgradeProfile(io, root, .released_14, null),
                 .exact_13 => try observeHostForUpgradeProfile(io, root, .released_13, null),
                 else => try observeHostForUpgrade(io, root, null),
             };
@@ -1011,7 +1025,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     }
                 }
                 switch (mode) {
-                    .strict, .strict_13, .strict_503, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
+                    .strict, .strict_14, .strict_13, .strict_503, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
                     .budget => try std.testing.expectError(error.ResponseInactive, result),
                     .body_mismatch,
                     .unavailable,
@@ -1030,12 +1044,13 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                         try std.testing.expect(reading == .incompatible);
                         try std.testing.expectEqual(std.c.getpid(), reading.incompatible);
                     },
-                    .current, .historical, .historical_13, .historical_13_chatgpt, .exact, .exact_13, .activation_current => {
+                    .current, .historical, .historical_14, .historical_13, .historical_13_chatgpt, .exact, .exact_14, .exact_13, .activation_current => {
                         const reading = try result;
                         try std.testing.expect(reading == .compatible);
                         const observed = reading.compatible;
                         const expected_profile: protocol_reply.HostInfoProfile = switch (mode) {
                             .current, .activation_current => .current,
+                            .historical_14, .exact_14 => .released_14,
                             .historical_13, .historical_13_chatgpt, .exact_13 => .released_13,
                             else => .released_9,
                         };
@@ -1052,8 +1067,9 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 }
                 try std.testing.expectEqual(@as(?anyerror, null), peer.failure);
                 try std.testing.expectEqual(@as(usize, switch (mode) {
-                    .historical, .body_mismatch, .unknown => 3,
-                    .historical_13, .historical_13_chatgpt, .budget => 2,
+                    .historical, .body_mismatch, .unknown => 4,
+                    .historical_13, .historical_13_chatgpt => 3,
+                    .historical_14, .budget => 2,
                     else => 1,
                 }), peer.seen);
             }
@@ -3118,7 +3134,7 @@ test "client activity peer boundary rejects noncanonical IDs and owns canonical 
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"key\\u0000雪\",\"target\":{\"session\":");
         try body.appendJsonString(session);
-        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("},\"code\":\"invalid_sender_handle\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (index < 2) {
             const page = try protocol_reply.ActivityPage.parse(body.slice(), .{});
             @memset(body.bytes[0..body.len], 'x');
@@ -3144,7 +3160,7 @@ test "client failed-send target is required and nullable without relaxing peers"
         var body: protocol.RequestBuffer = .{};
         try body.append("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"activity_page\",\"delta\":\"full\",\"since\":null,\"end\":\"1\",\"direction\":\"forward\",\"items\":[{\"position\":\"1\",\"ordinal\":\"0\",\"at\":\"1\",\"value\":{\"send_failed\":{\"key\":\"refused\",");
         try body.append(case.field);
-        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
+        try body.append("\"code\":\"unsupported_reasoning_effort\"}}}],\"more\":false,\"call_activity\":{\"total\":\"0\",\"entries\":[]},\"queued\":{\"count\":\"0\",\"oldest_position\":\"0\",\"newest_admission\":\"0\",\"newest_position\":\"0\"},\"work\":{\"read_version\":\"00000000000000000000000000000000.0\",\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null,\"revision\":\"1\",\"workspace\":\"/w\"}}");
         if (case.failure) |failure| {
             try std.testing.expectError(failure, protocol_reply.ActivityPage.parse(body.slice(), .{}));
             continue;
@@ -5450,10 +5466,18 @@ test "socket upgrade discovery distinguishes stale free Store from refused held 
     // A connected unreadable peer cannot be made absent by any routing hint.
     try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
     listener.deinit(io);
+    // Held lease, nothing listening: a live Host's refusal keeps the whole
+    // retry window.
+    const refused_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     try std.testing.expectError(error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - refused_at >= refused_connect_retry_ns);
     lease.release();
     held = false;
+    // A crashed Host's leftover: the free lease answers at the first refusal,
+    // before the window, so many leftovers cannot add up to a stalled upgrade.
+    const stale_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     try std.testing.expectEqual(@as(?HostControlObservation, null), try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - stale_at < refused_connect_retry_ns);
     // Discovery is read-only: a later lease holder, not discovery, reclaims it.
     _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
 }

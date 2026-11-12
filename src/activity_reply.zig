@@ -19,6 +19,10 @@ const Item = activity_facts.Item;
 const Page = activity_facts.Page;
 const Search = activity_facts.Search;
 
+fn optionalText(value: anytype) ?[]const u8 {
+    return if (value.*) |*text| text.slice() else null;
+}
+
 pub const max_page_bytes = page_reply.max_bytes;
 pub const max_search_bytes = search_reply.max_bytes;
 
@@ -34,6 +38,7 @@ pub const ItemJson = struct {
     }
     pub const tail = .{"}}"};
     /// Each value kind's JSON, named by its tag.
+    const call_details = .{ ",\"description\":", H{ .optional_string = @import("tool_presentation.zig").max_description_bytes }, ",\"tool\":", H{ .optional_string = @import("tool_name.zig").max_bytes }, ",\"server\":", H{ .optional_string = @import("tool_record.zig").max_server_bytes } };
     pub const value_shapes = struct {
         /// Holes: admission, key, turn, state, admitted at, sender, content.
         const message = .{ "{\"admission\":\"", H.decimal, "\",\"key\":", H{ .string = protocol.max_key_bytes }, ",\"turn\":", H.optional_id, ",\"state\":\"", H{ .tag = @FieldType(Item.Message, "state") }, "\",\"admitted_at\":\"", H.decimal, "\",\"sender\":", H{ .optional_json = NamedPeerJson }, ",\"content\":", H{ .json = ContentJson }, "}" };
@@ -43,7 +48,7 @@ pub const ItemJson = struct {
         /// Holes: content, final.
         pub const assistant = .{ "{\"content\":", H{ .json = ContentJson }, ",\"final\":", H.boolean, "}" };
         /// Holes: operation, turn, call ordinal, Action, rejection, the three field contents.
-        pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, "]}" };
+        pub const call = .{ "{\"operation\":\"", H.decimal, "\",\"turn\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\",\"action\":", H.optional_id, ",\"rejection\":", H{ .optional_tag = protocol.ProposalRejection }, ",\"fields\":[", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, ",", H{ .json = ContentJson }, "]" } ++ call_details ++ .{"}"};
         /// Holes: content, presentation.
         pub const tool_result = .{ "{\"content\":", H{ .json = ContentJson }, ",\"presentation\":", H{ .json = ToolPresentationJson }, "}" };
         /// A call the provider ran, shown by its line alone. Hole: presentation.
@@ -57,7 +62,7 @@ pub const ItemJson = struct {
         /// Holes: key, target, code.
         pub const send_failed = .{ "{\"key\":", H{ .string = protocol.max_key_bytes }, ",\"target\":", H{ .optional_json = NamedPeerJson }, ",\"code\":", H{ .string = protocol.max_code_bytes }, "}" };
         /// Holes: action, operation, call ordinal.
-        pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"}" };
+        pub const approval_requested = .{ "{\"session\":", H{ .string = protocol.session_id_bytes }, ",\"action\":\"", H.decimal, "\",\"operation\":\"", H.decimal, "\",\"call_ordinal\":\"", H.decimal, "\"" } ++ call_details ++ .{"}"};
         /// Holes: revision, field, provider text.
         pub const session_changed = .{ "{\"revision\":\"", H.decimal, "\",\"field\":\"", H{ .tag = protocol.SessionField }, "\",\"provider_text\":", H{ .optional_string = protocol.max_report_bytes }, "}" };
         /// Holes: operation, dropped.
@@ -91,7 +96,7 @@ pub const ItemJson = struct {
             },
             .sent => |sent| try writeShape(out, value_shapes.sent, .{ sent.admission, sent.admitted_at, NamedPeerJson{ .value = sent.target }, ContentJson{ .value = sent.content } }),
             .send_failed => |failed| try writeShape(out, value_shapes.send_failed, .{ failed.key.slice(), NamedPeerJson.optional(failed.target), failed.code.slice() }),
-            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal }),
+            .approval_requested => |request| try writeShape(out, value_shapes.approval_requested, .{ request.session.slice(), request.action, request.operation, request.call_ordinal, optionalText(&request.description), optionalText(&request.tool), optionalText(&request.server) }),
             .session_changed => |change| try writeShape(out, value_shapes.session_changed, .{ change.revision, change.field, if (change.provider_text) |text| text.slice() else null }),
             .compacted => |compacted| try writeShape(out, value_shapes.compacted, .{ compacted.operation, compacted.dropped }),
             .model_call => |call| try writeShape(out, value_shapes.model_call, .{ call.model.slice(), if (call.served_model) |model| model.slice() else null, call.input_tokens, call.output_tokens, call.cached_tokens, call.latency_ms, call.first_event_ms, call.status.slice(), call.attempts }),
@@ -102,7 +107,7 @@ pub const ItemJson = struct {
                 comptime std.debug.assert(call.fields.len == 3);
                 var fields: [3]ContentJson = undefined;
                 for (call.fields, &fields) |field, *content| content.* = .{ .value = .{ .length = field.length, .digest = field.digest } };
-                try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2] });
+                try writeShape(out, value_shapes.call, .{ call.operation, call.turn, call.call_ordinal, call.action, call.rejection, fields[0], fields[1], fields[2], optionalText(&call.description), optionalText(&call.tool), optionalText(&call.server) });
             },
             .turn_ended => |ended| try writeShape(out, value_shapes.turn_ended, .{ ended.session.slice(), ended.turn, ended.operation, ended.ending, ended.code.slice(), ContentJson.optional(ended.content) }),
             .stop => |stop| try writeShape(out, value_shapes.stop, .{ stop.key.slice(), stop.turn, stop.cutoff, stop.completion }),
@@ -151,13 +156,14 @@ pub const PageWorkJson = struct {
     value: *const activity_facts.PageWork,
 
     pub const openapi_name = "PageWork";
-    /// Holes: the work's fields, revision, Workspace.
-    pub const json_shape = .{"{"} ++ protocol.SessionWork.fields ++ .{ ",\"revision\":\"", H.decimal, "\",\"workspace\":", H{ .string = protocol.max_workspace_bytes }, "}" };
+    /// Holes: the work's fields, last line, revision, Workspace.
+    pub const json_shape = .{ "{\"read_version\":\"", H{ .text = change_ring.Token.max_bytes }, "\"," } ++ protocol.SessionWork.fields ++ .{ ",\"last_line\":", H{ .optional_json = protocol.LastLine.Fields }, ",\"revision\":\"", H.decimal, "\",\"workspace\":", H{ .string = protocol.max_workspace_bytes }, "}" };
     pub const max_json_bytes = shapeBytes(json_shape);
 
     pub fn writeJson(self: *const PageWorkJson, out: *std.Io.Writer) !void {
+        var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
         const work: protocol.SessionWork = .fromCore(self.value.work);
-        try writeShape(out, json_shape, work.args() ++ .{ self.value.revision, self.value.workspace.slice() });
+        try writeShape(out, json_shape, .{self.value.read_version.format(&token_buffer)} ++ work.args() ++ .{ if (self.value.last_line) |*line| protocol.LastLine.Fields{ .position = line.position, .text = if (line.text) |*text| text.slice() else null } else null, self.value.revision, self.value.workspace.slice() });
     }
 };
 

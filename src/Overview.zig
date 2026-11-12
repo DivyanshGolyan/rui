@@ -10,6 +10,7 @@
 //! asked for. An opened Session borrows the terminal through
 //! `SessionFrontend`, with ticks paused, and gives it back on Esc.
 const std = @import("std");
+const session_list = @import("session_list.zig");
 const model_catalog = @import("model_catalog.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -470,6 +471,7 @@ app_input: InputArea = undefined,
 /// What can fill the list's place, each its own widget: the screen shows
 /// the one the core names. Only the Sessions hear a press.
 app_sessions: GroupedList = .{},
+app_new_session: OverviewLines.NewSession = undefined,
 session_drafts: @import("session_drafts.zig").Drafts = .{},
 app_panel: GroupedList = .{},
 app_settings_line: OverviewLines.Settings = undefined,
@@ -565,7 +567,12 @@ pub fn run(init: std.process.Init, options: Options, hooks: Hooks) !?Relaunch {
     app.init(init.io, init.environ_map) catch |err| return self.failed(err, self.options.open);
     self.app = &app;
     self.attention = &app.attention;
-    const ended = app.run(self.root.widget());
+    // Establish the read epoch before a direct resume can start its reader.
+    // No worker exists yet; every later handshake uses the single worker.
+    const ended = startup: {
+        _ = self.takeHostRead(self.ops.host(self)) catch |err| break :startup @as(anyerror!void, err);
+        break :startup app.run(self.root.widget());
+    };
     self.stopApp();
     app.deinit();
     return self.finishApp(ended);
@@ -686,79 +693,64 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             _ = try self.event(.{ .footer_input = .{ .click = null } });
             ctx.redraw = true;
         },
-        .key_press, .paste_start, .paste_end, .invalid_key => {
-            if (self.root.input.layer.settingsOpen()) {
-                // Under the settings page only the keys that are the whole
-                // app's stay live: leaving, and Esc for an Upgrade it can
-                // still cancel. Nothing edits the hidden draft or the list.
-                const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
-                const live = selected == .action and (selected.action == .exit or (selected.action == .clear and self.state.upgrade.takesEscape()));
-                if (!live) {
-                    ctx.consumeEvent();
-                    return;
-                }
-            }
-            if (!self.root.input.layer.settingsOpen()) {
-                if (self.root.settings_page.standaloneField() != null and input == .key_press and !self.root.input.pasting) {
-                    const named = TerminalEditor.named(input.key_press);
-                    if (named == .escape or named == .ctrl_g) {
-                        try self.closeStandaloneChoice(ctx);
-                        ctx.consumeAndRedraw();
-                        return;
-                    }
-                }
-                if (self.root.settings_page.standaloneOpen()) {
-                    const page = &self.root.settings_page;
-                    const choice_input = if (self.root.input.pasting or input != .key_press) page.takesPaste() else page.takesKey(input.key_press);
-                    if (choice_input) {
-                        try page.standaloneWidget().handleEvent(ctx, input);
-                        ctx.consumeAndRedraw();
-                        return;
-                    }
-                    // As on the regular Settings page, unbound text and a
-                    // paste into a row choice never edit the hidden draft.
-                    const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
-                    if (selected != .action or selected.action != .exit) {
-                        ctx.consumeEvent();
-                        return;
-                    }
-                } else {
-                    var footer_input: view.FooterInput = .other;
-                    if (input == .paste_start) {
-                        footer_input = .text;
-                    } else if (input == .key_press and !self.root.input.pasting) {
-                        const key = input.key_press;
-                        if (key.matchExact(vaxis.Key.tab, .{})) footer_input = .{ .tab = false } else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) footer_input = .{ .tab = true } else if (key.matchExact(vaxis.Key.enter, .{})) footer_input = .enter else if (TerminalEditor.named(key) == .escape or TerminalEditor.named(key) == .ctrl_g) footer_input = .escape else if (TerminalEditor.selectEvent(view.keys, input, false) == .text) footer_input = .text;
-                    }
-                    const routed = try self.eventResult(.{ .footer_input = footer_input });
-                    try self.appNext(ctx, routed.next);
-                    if (!routed.forward_input) {
-                        ctx.consumeAndRedraw();
-                        return;
-                    }
-                }
-            }
-            if (input == .key_press and !self.root.input.pasting and self.composer.length == 0 and SessionFrontend.hostStartKey(input.key_press) and try requestHostStart(self, ctx)) {
-                ctx.consumeEvent();
-                return;
-            }
-            const selected = TerminalEditor.selectEvent(view.keys, input, self.root.input.pasting);
-            const composed: view.Input = switch (self.state.route(selected)) {
-                .edit => .{ .composer = self.composer.appEvent(view.keys, input, self.root.input.pasting) },
-                .frozen => .{ .composer = if (selected == .action) .{ .action = selected.action } else .none },
-            };
-            try self.appNext(ctx, try self.event(.{ .composed = .{ .input = composed, .draft = self.composerDraft() } }));
-            ctx.consumeEvent();
-            ctx.redraw = true;
-        },
         else => {},
     }
+}
+
+/// Root hands the overview each key, paste mark and malformed key it
+/// routes here, with what it arrived under and whether it is pasted. The
+/// core decides what it means; this applies that and reads only the facts
+/// other owners hold: the draft, the footer choice's answer and whether the
+/// Host can start.
+fn appKey(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event, delivery: @import("app_input.zig").Effects.Delivery) anyerror!void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const page = &self.root.settings_page;
+    const result = try self.eventResult(.{ .key = .{
+        .key = overviewKey(input),
+        .pasted = delivery.pasted,
+        .under = delivery.under,
+        .draft = self.composerDraft(),
+        .choice = if (page.standaloneField() != null) .{
+            .shown = page.standaloneOpen(),
+            .takes = if (delivery.pasted or input != .key_press) page.takesPaste() else page.takesKey(input.key_press),
+        } else null,
+        .host_startable = self.hostNext() != null,
+    } });
+    try self.appNext(ctx, result.next);
+    switch (result.take) {
+        .drop => {},
+        .taken => ctx.redraw = true,
+        .choice => {
+            try page.standaloneWidget().handleEvent(ctx, input);
+            ctx.redraw = true;
+        },
+        .close_choice => try self.closeStandaloneChoice(ctx),
+        .start_host => try self.requestedHostStart(ctx),
+        .edit => {
+            const composed = self.composer.appEvent(view.keys, input, delivery.pasted);
+            try self.appNext(ctx, try self.event(.{ .composed = .{ .input = .{ .composer = composed }, .draft = self.composerDraft() } }));
+            ctx.redraw = true;
+        },
+    }
+}
+
+/// The overview core's name for one terminal input. Bindings match exact
+/// modifiers, as the line editor's do.
+fn overviewKey(input: vxfw.Event) view.Key {
+    return switch (input) {
+        .paste_start => .paste_start,
+        .paste_end => .paste_end,
+        .invalid_key => .invalid,
+        .key_press => |key| if (TerminalEditor.named(key)) |name| .{ .named = name } else if (TerminalEditor.isEnter(key)) .enter else if (key.matchExact(vaxis.Key.tab, .{})) .tab else if (key.matchExact(vaxis.Key.tab, .{ .shift = true })) .shift_tab else if (SessionFrontend.hostStartKey(key)) .host_start else if (TerminalEditor.selectKey(view.keys, key) == .text) .text else .other,
+        // Root routes only these to the overview.
+        else => unreachable,
+    };
 }
 
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.input.pasting } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft() } }));
     if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
 }
@@ -823,13 +815,13 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .start = requestHostStart, .notice = hostNotice } }, self.caps);
+    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
-    self.state.conversing = reference;
-    try self.root.openSession(ctx, child);
+    _ = try self.event(.{ .conversation = reference });
+    try self.root.openSession(ctx, child, frontend.keyOwner());
 }
 
 fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFrontend.Outcome) !void {
@@ -848,7 +840,7 @@ fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFron
             }
             try self.retired.append(self.init.gpa, .{ .left = left.*, .frame = self.root.frames });
             self.app_session = null;
-            self.state.conversing = null;
+            _ = try self.event(.{ .conversation = null });
             try self.root.closeSession(ctx);
             // App's last frame can still point at the old widgets. Dispose
             // only after the next frame replaces that focus/hit-test tree.
@@ -1083,7 +1075,11 @@ const SessionRows = struct {
 
     fn count(raw: *const anyopaque, first: u32) u32 {
         const self: *const SessionRows = @ptrCast(@alignCast(raw));
-        return @intCast(self.state.order.items.len -| (first -| view.first_row_line));
+        return @intCast(self.state.order.items.len -| (first -| view.firstRowLine(self.state)));
+    }
+
+    fn above(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
+        return try arena.dupe(vaxis.Segment, &.{.{ .text = try std.fmt.allocPrint(arena, "↑ {d} more", .{count_}) }});
     }
 
     fn below(count_: u32, arena: std.mem.Allocator) std.mem.Allocator.Error!@import("widgets/List.zig").Line {
@@ -1202,6 +1198,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
                 rows.* = .{ .state = &self.state, .width = size.width, .caps = self.caps, .frame = frame };
                 self.app_sessions.selected = self.selectedListLine();
                 self.app_sessions.rows = .{ .userdata = rows, .count = @intCast(view.listLength(&self.state)), .rowFn = SessionRows.row, .countFromFn = SessionRows.count };
+                self.app_sessions.aboveFn = SessionRows.above;
                 self.app_sessions.belowFn = SessionRows.below;
                 break :sessions &self.app_sessions;
             },
@@ -1213,7 +1210,15 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_screen.content = prepared;
         list = prepared;
         self.app_header.caps = self.caps;
-        self.app_screen.header = self.app_header.widget();
+        if (view.showsNewSession(&self.state)) {
+            self.app_new_session.caps = self.caps;
+            const header = try ctx.arena.create(@import("widgets/Stack.zig"));
+            header.* = .{ .priority = .top, .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
+                .{ .widget = self.app_new_session.widget() },
+                .{ .widget = self.app_header.widget() },
+            }) };
+            self.app_screen.header = header.widget();
+        } else self.app_screen.header = self.app_header.widget();
     }
     if (part != .list) {
         self.app_input.composer.style = normal;
@@ -1269,7 +1274,7 @@ fn appEffortClick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 /// Both Escape and its drawn action close only this presentation.
 fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (self.root.settings_page.standaloneField() == null or self.root.input.pasting) return;
+    if (self.root.settings_page.standaloneField() == null) return;
     self.root.settings_page.closeStandaloneChoice();
     _ = try self.event(.{ .footer_input = .escape });
     try ctx.requestFocus(self.app_input.composer.widget());
@@ -1283,7 +1288,7 @@ fn appChoiceClose(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
 
 fn appChoicePick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (!self.root.settings_page.standaloneOpen() or self.root.input.pasting) return;
+    if (!self.root.settings_page.standaloneOpen()) return;
     try self.root.settings_page.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
 }
 
@@ -1402,7 +1407,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
         .interrupted = interrupted,
     };
     self.composer = self.emptyComposer(0);
-    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
+    self.root = .{ .main_presentation = .{ .context = self, .close = closeMainPresentation }, .overview = self.widget(), .overview_keys = .{ .context = self, .take = appKey }, .list = self.listWidget(), .compose = self.composeWidget(), .settings_page = .{ .backend = self.settingsBackend(), .version = @import("transport_options").version }, .input = .{ .layer = if (options.sign_in) .{ .sign_in = .{ .over = .main } } else .main } };
     self.sign_in = .{ .init = init, .selectors = options.selectors, .activate = hooks.activate, .ready = hooks.ready, .userdata = self, .on_done = signedIn, .on_close = closeSignIn, .list_visible = listVisible };
     self.root.sign_in = self.sign_in.widget();
     self.paintDivider();
@@ -1410,6 +1415,7 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_input = .{ .composer = .{ .editor = &self.composer, .placeholder = "Type a task" }, .facts_at = .bottom };
     self.app_screen = .{ .content = &self.app_sessions, .input = &self.app_input, .userdata = self, .on_event = appEvent };
     self.app_header = .{ .state = &self.state };
+    self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_model = .{ .label = "", .userdata = self, .on_click = appModelClick };
     self.app_effort = .{ .label = "", .userdata = self, .on_click = appEffortClick };
     self.app_choice_pick = .{ .label = "", .userdata = self, .on_click = appChoicePick };
@@ -1560,7 +1566,7 @@ fn event(self: *Self, value: view.Event) !?Next {
     return (try self.eventResult(value)).next;
 }
 
-const EventResult = struct { next: ?Next = null, archive_admission: view.ArchiveAdmission = .refused, forward_input: bool = false };
+const EventResult = struct { next: ?Next = null, archive_admission: view.ArchiveAdmission = .refused, take: view.Take = .drop };
 
 /// Keep the core's synchronous admission with the jobs this exact step queued.
 fn eventResult(self: *Self, value: view.Event) !EventResult {
@@ -1573,12 +1579,10 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
         self.queueHost();
     }
     var next: ?Next = null;
-    var forward_input = false;
     var refused: ?keymap.Refusal = null;
     for (effects.slice()) |effect| switch (effect) {
         .open_settings => next = .open_settings,
         .open_choice => |field| next = .{ .open_choice = field },
-        .forward_input => forward_input = true,
         .list => |since| {
             self.traversal = .init(since);
             self.traversal_archive = self.state.listing_archive.?;
@@ -1600,15 +1604,15 @@ fn eventResult(self: *Self, value: view.Event) !EventResult {
             .refused => |why| refused = why,
             else => {},
         },
-        .exit => return .{ .next = .leave, .archive_admission = effects.archive_admission },
+        .exit => return .{ .next = .leave, .archive_admission = effects.archive_admission, .take = effects.take },
     };
     if (refused) |why| if (next == null) {
         const settled = try self.eventResult(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
-        return .{ .next = settled.next, .archive_admission = effects.archive_admission };
+        return .{ .next = settled.next, .archive_admission = effects.archive_admission, .take = effects.take };
     };
     self.askSkills();
     self.sendStatuses();
-    return .{ .next = next, .archive_admission = effects.archive_admission, .forward_input = forward_input };
+    return .{ .next = next, .archive_admission = effects.archive_admission, .take = effects.take };
 }
 
 /// Brings the terminal's program status records to what the core wants:
@@ -2043,10 +2047,10 @@ fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !v
 
 /// A read the opened Session's conversation applied: the outcome it opened
 /// on is one the person has seen.
-fn observed(raw: *anyopaque, read: protocol.session_work.Work, opening: bool) !void {
+fn observed(raw: *anyopaque, read: session_list.Snapshot, opening: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .observed = .{ .reference = self.opened, .work = read, .opening = opening } });
+    const next = try self.event(.{ .observed = .{ .reference = self.opened, .read_version = read.read_version, .work = read.work, .last_line = read.last_line, .opening = opening } });
     std.debug.assert(next == null);
 }
 
@@ -2279,13 +2283,24 @@ fn queueHostStart(self: *Self) void {
     self.queue(.start_host);
 }
 
+/// The Host is stopped and a start can mend it now.
+fn hostStartable(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.hostNext() != null;
+}
+
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.hostNext() == null) return false;
+    try self.requestedHostStart(ctx);
+    return true;
+}
+
+/// Starts the stopped Host that `hostNext` says a start can mend.
+fn requestedHostStart(self: *Self, ctx: *vxfw.EventContext) !void {
     self.queueHostStart();
     try self.dispatch(if (self.root.session == null) .all else .lent);
     ctx.redraw = true;
-    return true;
 }
 
 fn hostNotice(raw: *anyopaque) ?vxfw.Widget {
@@ -2355,7 +2370,7 @@ fn startHost(self: *Self) HostLaunch {
 fn hostFacts(self: *Self) HostRead {
     const observation: HostObservation = switch (client.hostStatus(self.init.io, self.options.store)) {
         .ready => |host| .{ .ready = .{
-            .facts = .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied },
+            .facts = .{ .instance = host.instance, .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied },
             .paused = host.paused,
         } },
         .unavailable => .{ .stopped = platform.StoreLease.lastStop(self.init.io, self.options.store) },
@@ -2562,7 +2577,7 @@ const fake_operations: Operations = .{
     .host = struct {
         fn host(_: *Self) HostRead {
             Seen.now.hosts += 1;
-            return .{ .observation = .{ .ready = .{ .facts = .{ .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } } } };
+            return .{ .observation = .{ .ready = .{ .facts = .{ .instance = @splat(1), .started_at = test_now_s - 60, .slots = 4, .slots_in_use = 1 } } } };
         }
     }.host,
     .list = struct {
@@ -2570,10 +2585,10 @@ const fake_operations: Operations = .{
             Seen.now.lists += 1;
             Seen.now.archive_filter = self.traversal_archive;
             Seen.now.since = cursor.since;
-            page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = 1 }, .next = null };
+            page.* = .{ .count = Seen.now.listed, .delta = .full, .since = .{ .instance = @splat(1), .generation = Seen.now.lists }, .next = null };
             for (page.rows[0..Seen.now.listed], listed_references[0..Seen.now.listed], 0..) |*row, reference, at| {
                 const since = test_now_s - 10 - at;
-                row.* = .{ .work = .{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 } };
+                row.* = .{ .read_version = page.since, .work = .{ .state = if (at < Seen.now.working) .{ .working = .{ .since = since } } else .{ .idle = .{ .since = since } }, .turn = 1, .operation = 1 } };
                 row.reference.set(reference) catch unreachable;
                 row.workspace.set("/work") catch unreachable;
                 row.model.set("gpt-5.5") catch unreachable;
@@ -2731,6 +2746,8 @@ const Rig = struct {
         rig.out = .init(std.testing.allocator);
         rig.attention = .{ .vx = &rig.screen.vx, .out = &rig.out.writer };
         rig.overview.attention = &rig.attention;
+        // The production run establishes its launch epoch before App starts.
+        rig.overview.state.read_instance = @splat(1);
         // As App's first frame does, at the size a PTY opens with.
         _ = try view.step(&rig.overview.state, .{ .resized = .{ .width = 80, .height = 24 } });
         return rig;
@@ -3672,7 +3689,7 @@ test "a terminal that answers the program status probe gets each Session's recor
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
     // The conversation reading it first writes nothing.
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     // Opening the Session shows the person its outcome.
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
@@ -3846,7 +3863,7 @@ test "a later Turn's finish the conversation read first is still a record when t
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
     // Turn 2 finishes and its conversation reads that before any listing.
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     Listing.finished_turn = 2;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
@@ -3884,7 +3901,7 @@ test "a finish the conversation opened on is no done record when a listing reads
     Listing.finished_turn = 1;
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, true);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, true);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.startsWith(u8, rig.signalled(), "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
@@ -3919,7 +3936,7 @@ test "records go out though the terminal never answered the probe, and nothing e
     try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\") != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, written, 0x07) == null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, false);
+    try observed(overview, .{ .read_version = .{ .instance = @splat(1), .generation = Seen.now.lists + 1 }, .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
 }
 
@@ -4013,7 +4030,7 @@ const HostRecovery = struct {
     }
     fn host(_: *Self) HostRead {
         return .{ .observation = switch (availability) {
-            .ready, .paused => .{ .ready = .{ .facts = .{ .started_at = test_now_s, .slots = 4, .slots_in_use = 0 }, .paused = availability == .paused } },
+            .ready, .paused => .{ .ready = .{ .facts = .{ .instance = @splat(1), .started_at = test_now_s, .slots = 4, .slots_in_use = 0 }, .paused = availability == .paused } },
             .stopped => .{ .stopped = last_stop },
             .stopping => .unavailable,
             .incompatible => .incompatible,
@@ -5395,7 +5412,7 @@ test "a command output panel stays above the pinned Settings row, with or withou
             const row = &state.rows.items[state.order.items[0]];
             row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
             try row.state.failed.code.set("provider_http_401");
-            try std.testing.expect(view.band(state.rows.items, state.now_ms, state.login_at) != null);
+            try std.testing.expect(view.band(state) != null);
         }
         var clipped = false;
         var whole = false;
@@ -5947,10 +5964,11 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         " › /",
     });
     try std.testing.expect(std.mem.endsWith(u8, try all.line(23), "enter pick / esc close"));
-    // Nine rows leave four commands and a count of the rest.
-    var short = try rig.shown(80, 9);
+    // The pinned control leaves four commands and a count of the rest.
+    var short = try rig.shown(80, 10);
     defer short.deinit();
     try short.expectLines(0, &.{
+        "  + New Session",
         "/archive",
         "/configure",
         "/rename",
@@ -6136,7 +6154,7 @@ test "App overview schedules spinning rows only while Root shows the list" {
             // Closing at phone width makes the same list eligible again.
             .{ .width = 46, .open = false, .visible = true },
         }) |layout| {
-            if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget());
+            if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget(), null);
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
             _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
             try std.testing.expectEqual(spinning, overview.listSpins());
@@ -6231,7 +6249,7 @@ test "App overview list stays live beside a focused child and wheels stay in the
     try std.testing.expect(try rig.settle() == null);
     var peer: Peer = .{};
     overview.root.session = peer.widget();
-    overview.state.conversing = "k7m2qx".*;
+    _ = try overview.event(.{ .conversation = "k7m2qx".* });
     overview.state.selected = .{ .session = "b4n8wd".* };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -6303,7 +6321,7 @@ test "App overview list press follows only after the open child settles and open
             try std.testing.expectEqualStrings("b4n8wd", &overview.opened);
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, overview.app_sessions.widget());
+            try overview.root.openSession(ctx, overview.app_sessions.widget(), null);
         }
     };
     var tmp = std.testing.tmpDir(.{});
@@ -6371,7 +6389,7 @@ test "App shell divider follows overview locale across layouts and screen select
         for (0..2) |paint| {
             if (paint != 0) try overview.paintCursor();
             for ([_]bool{ false, true }) |open| {
-                if (open) try overview.root.openSession(&events, session.widget()) else try overview.root.closeSession(&events);
+                if (open) try overview.root.openSession(&events, session.widget(), null) else try overview.root.closeSession(&events);
                 for ([_]u16{ 46, 99, 100, 140 }) |width| {
                     const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
                     const layout = surface.children[0].surface;
@@ -6419,7 +6437,7 @@ test "App list clicks validate present and removed targets with open and closed 
             try std.testing.expect(overview.root.session == null);
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, overview.app_sessions.widget());
+            try overview.root.openSession(ctx, overview.app_sessions.widget(), null);
         }
     };
     var tmp = std.testing.tmpDir(.{});
@@ -6501,7 +6519,7 @@ test "App root navigation shows and focuses the main pane before every Session s
             try std.testing.expect((try focus(ctx)).eql(overview.widget()));
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, @This().widget(overview));
+            try overview.root.openSession(ctx, @This().widget(overview), null);
         }
         fn widget(overview: *Self) vxfw.Widget {
             return .{ .userdata = overview, .eventHandler = @This().event, .drawFn = @This().draw };
@@ -6714,10 +6732,16 @@ test "App settings Enter reaches Root at both widths with and without a retained
             _ = try overview.root.widget().draw(draw_context);
             // Real parser/overview handlers select the last list row;
             // do not synthesize a core click or set selected directly.
-            try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
-            try std.testing.expect(overview.state.selected == .settings);
-            try std.testing.expect(!overview.root.input.layer.settingsOpen());
-            try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
+            // While a Session is the main pane Root gives it the keys, so
+            // there the Settings row's own press opens the page.
+            if (retained) {
+                try appClick(overview, &ctx, .settings);
+            } else {
+                try app_events.send(&ctx, "\x1b[F", overview.root.widget(), overview.widget());
+                try std.testing.expect(overview.state.selected == .settings);
+                try std.testing.expect(!overview.root.input.layer.settingsOpen());
+                try app_events.send(&ctx, "\r", overview.root.widget(), overview.widget());
+            }
             try std.testing.expect(overview.root.input.layer.settingsOpen());
             try std.testing.expect(overview.state.selected == .settings);
             try std.testing.expect(!ctx.quit);
@@ -6920,6 +6944,161 @@ test "App settings typed queued saves settle on departure and retain failures" {
             try std.testing.expect(overview.defaults_save == .saved);
         }
         try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+    }
+}
+
+test "pinned New Session remains above the end marker and responds to clicks and Enter" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        // End selects Settings; Up selects the last Session, without changing
+        // the pinned control's position or stealing the selection's space.
+        _ = try rig.press("\x1b[F\x1b[A");
+        const selected = rig.overview.state.selected.session;
+        for (0..2) |_| {
+            var shown = try rig.shown(width, 11);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(1), "↑") != null);
+            const span = for (rig.overview.app_sessions.shown_at) |span| {
+                if (span.target) |target| if (target == .open and std.mem.eql(u8, &target.open, &selected)) break span;
+            } else return error.SelectedSessionMissing;
+            try std.testing.expectEqual(@as(u16, 2), span.height);
+        }
+        try std.testing.expect(try rig.click(3, 0, width, 11) == null);
+        try std.testing.expectEqual(view.Selection.new_session, rig.overview.state.selected);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expectEqual(@as(usize, 0), Seen.now.conversations);
+        try std.testing.expect(try rig.press("a new pinned task\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings("a new pinned task", Seen.now.start.text.slice());
+        try std.testing.expectEqualStrings("n3w5es", &Seen.now.conversed);
+    }
+}
+
+test "chat omits New Session at every width and overview restores its pinned control" {
+    const Chat = struct {
+        const child: vxfw.Text = .{ .text = "Chat transcript" };
+        fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
+            overview.state.conversing = overview.opened;
+            try overview.root.openSession(ctx, child.widget(), null);
+        }
+    };
+    const rig = try openListed();
+    defer rig.close();
+    rig.overview.ops.open = Chat.open;
+    // Exercise the same list instance before opening, beside the chat, and on
+    // return, including a prefix change while the list had scrolled.
+    _ = try rig.press("\x1b[F\x1b[A");
+    var before = try rig.shown(140, 11);
+    defer before.deinit();
+    try std.testing.expect(std.mem.indexOf(u8, try before.text(), "+ New Session") != null);
+    const selected = rig.overview.state.selected.session;
+    _ = try rig.press("\r");
+    for ([_]u16{ 140, 46, 140, 46 }) |width| {
+        var shown = try rig.shown(width, 20);
+        defer shown.deinit();
+        const text = try shown.text();
+        try std.testing.expect(std.mem.indexOf(u8, text, "Chat transcript") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") == null);
+        if (width == 140) {
+            const line = rig.overview.app_sessions.selected.?;
+            const target = view.clickOf(&rig.overview.state, view.listItem(&rig.overview.state, line).?).?;
+            try std.testing.expectEqualStrings(&selected, &target.open);
+        }
+    }
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    rig.overview.state.conversing = null;
+    try rig.overview.root.closeSession(&ctx);
+    for ([_]u16{ 46, 140 }) |width| {
+        var shown = try rig.shown(width, 20);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+    }
+}
+
+test "chat omission preserves late-listed Sessions and the physical last-row footer" {
+    const Chat = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Chat.dir = tmp.dir;
+    Chat.files = 0;
+    const rig = try openComposer();
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = Chat.scratch;
+    overview.ops.open = openSession;
+    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    defer {
+        if (overview.app_session) |left| {
+            if (left.frontend) |frontend| frontend.stop();
+            overview.disposeSession(left);
+            overview.app_session = null;
+        }
+        overview.retired.deinit(std.testing.allocator);
+    }
+    // The transcript may finish opening before the independent sidebar list.
+    overview.app_session.?.frontend.?.reading.opening = false;
+    for ([_]bool{ false, true }) |listed| {
+        if (listed) {
+            Seen.now.listed = listed_references.len;
+            try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+            try std.testing.expect(try rig.settle() == null);
+        }
+        for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 30 } }) |size| {
+            var shown = try rig.shown(size.width, size.height);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") != null);
+            if (size.width == 140) {
+                try std.testing.expectEqual(if (listed) listed_references.len else 0, overview.app_sessions.shown_at.len);
+                if (listed) {
+                    // No omitted control or spacer may consume the first row.
+                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Fix the flaky test") != null);
+                    for (overview.app_sessions.shown_at, 0..) |span, index| {
+                        try std.testing.expectEqual(@as(i17, @intCast(index * 2)), span.row);
+                        try std.testing.expectEqual(@as(u16, 2), span.height);
+                    }
+                }
+            }
+        }
+    }
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    _ = try overview.event(.{ .conversation = null });
+    try overview.root.closeSession(&ctx);
+    for ([_]u16{ 140, 46 }) |width| {
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        const gap = try shown.line(1);
+        try std.testing.expect(std.mem.trim(u8, gap, " │").len == 0);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+    }
+}
+
+test "pinned New Session wins the last header row over a provider band" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        const state = &rig.overview.state;
+        const row = &state.rows.items[state.order.items[0]];
+        row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
+        try row.state.failed.code.set("provider_http_401");
+        try std.testing.expect(view.band(state) != null);
+        // Narrow screens reserve four input rows; the wide list has no input.
+        var shown = try rig.shown(width, if (width == 46) 5 else 1);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
     }
 }
 
@@ -7614,6 +7793,43 @@ test "Overview mouse Host line without a start or retry has no hover or click ac
     }
 }
 
+test "Overview pinned New Session hover survives unchanged frames without selecting or focusing" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        _ = try rig.press("\x1b[B");
+        const selected = rig.overview.state.selected;
+        try std.testing.expect(selected == .session);
+        var plain = try rig.shown(width, 30);
+        defer plain.deinit();
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        const pinned = rig.overview.app_new_session.widget();
+        const motion: vxfw.Event = .{ .mouse = .{ .col = 4, .row = 0, .button = .none, .type = .motion, .mods = .{} } };
+        try pinned.handleEvent(&ctx, .mouse_enter);
+        try pinned.handleEvent(&ctx, motion);
+        for (0..2) |_| {
+            var hovered = try rig.shown(width, 30);
+            defer hovered.deinit();
+            const style = @import("widget_style.zig").of(rig.overview.caps, .{ .background = .hover });
+            try std.testing.expectEqual(style.bg, hovered.screen.readCell(4, 0).?.style.bg);
+            try std.testing.expectEqual(style.reverse, hovered.screen.readCell(4, 0).?.style.reverse);
+            try std.testing.expect(rig.overview.app_new_session.row.inner.hover.pointing);
+            try std.testing.expectEqual(selected, rig.overview.state.selected);
+            for (ctx.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+            ctx.cmds.clearRetainingCapacity();
+            ctx.redraw = false;
+            try pinned.handleEvent(&ctx, motion);
+            try std.testing.expect(!ctx.redraw);
+            try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+        }
+        try pinned.handleEvent(&ctx, .mouse_leave);
+        var left = try rig.shown(width, 30);
+        defer left.deinit();
+        try std.testing.expectEqual(plain.screen.readCell(4, 0).?.style, left.screen.readCell(4, 0).?.style);
+        try std.testing.expect(!rig.overview.app_new_session.row.inner.hover.pointing);
+    }
+}
 test "App settings Sign-in Enter and click use the Overview owner and return to settings" {
     for ([_]u16{ 46, 140 }) |width| for ([_]bool{ false, true }) |click| for ([_]bool{ false, true }) |busy| {
         errdefer std.debug.print("settings sign-in width={d} click={} busy={}\n", .{ width, click, busy });
@@ -8342,8 +8558,13 @@ test "Overview standalone footer close clicks match Escape preserve paste and pr
             } else return error.TestExpectedCloseTarget;
             try std.testing.expectEqual(@as(u16, 9), close.surface.size.width);
             try std.testing.expect(close.origin.col + close.surface.size.width <= width);
+            // Inside a paste Root takes the click before the footer sees it.
             self.root.input.pasting = true;
-            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                ctx.consume_event = false;
+                try self.root.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind } });
+                try std.testing.expect(ctx.consume_event);
+            }
             try std.testing.expect(page.standaloneOpen());
             self.root.input.pasting = false;
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
@@ -8423,7 +8644,7 @@ test "Overview standalone lifetime shared domain closes every phase through real
             .close_click => for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind }),
             .navigate => {
                 const session: vxfw.Text = .{ .text = "Session" };
-                try self.root.openSession(&ctx, session.widget());
+                try self.root.openSession(&ctx, session.widget(), null);
                 try std.testing.expect(!page.standaloneOpen() and page.standaloneField() == null);
                 try self.root.closeSession(&ctx);
             },
