@@ -261,14 +261,16 @@ def overview_title(frame):
     return "  + New Session" in frame and "  Settings" in frame and "Type a task" not in frame
 
 
-def overview_frame(master, accept, keys=b"", timeout=15):
+def overview_frame(master, accept, keys=b"", timeout=15, *, ready=True):
     """The first committed list frame after `keys` that `accept`s.
 
     Overview has no editor or cursor-readiness condition; its pinned rows
-    and bottom action footer identify the screen instead.
+    and bottom action footer identify the screen instead. A known retained
+    reply can replace the action: opt out of readiness and accept that reply.
     """
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
-                       and "enter open" in screen, timeout)
+                       and (not ready or "enter open" in screen)
+                       and not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", screen), timeout)
 
 
 def open_new_chat(master, timeout=15):

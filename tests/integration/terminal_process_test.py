@@ -152,6 +152,27 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
         self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
 
+    def test_overview_retained_notice_requires_explicit_relaxation_and_complete_list(self):
+        from human_cli_fixture import overview_frame
+
+        for notice in ("Sign-in saved; couldn't save default", "Not created: NotDir"):
+            with self.subTest(notice=notice):
+                accept = lambda screen: notice in screen
+                with patch("human_cli_fixture.keyed_frame") as keyed:
+                    overview_frame(17, accept)
+                strict = keyed.call_args.args[2]
+                with patch("human_cli_fixture.keyed_frame") as keyed:
+                    overview_frame(17, accept, ready=False)
+                relaxed = keyed.call_args.args[2]
+                frame = "  + New Session\n  Settings\n" + notice
+                self.assertFalse(strict(frame, 0, 0))
+                self.assertTrue(relaxed(frame, 0, 0))
+                self.assertTrue(strict(frame + "\nenter open", 0, 0))
+                for marker in ("+ New Session", "Settings", notice):
+                    self.assertFalse(relaxed(frame.replace(marker, "missing"), 0, 0))
+                for editor in ("Type a task", " › draft", " > draft", "sidebar │ › draft"):
+                    self.assertFalse(relaxed(frame + "\n" + editor, 3, 3))
+
     def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):
         replies = []
         default = ScreenCapture(8, 2, reply=replies.append)

@@ -2337,7 +2337,8 @@ def main(selected="all"):
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
             codex_fixture.credentials(explicit_config / "codex.json")
-            welcome = overview_frame(master, overview_title, keys=b"\r", timeout=10)
+            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame,
+                                     keys=b"\r", timeout=10, ready=False)
             assert all(noise not in welcome for noise in ("Session:", "Provider:", "Model:", "request:")), welcome
             assert not (explicit_config / "requests").exists(), "the overview captured a request"
             assert malformed.read_text() == "version=9\n"
@@ -2365,7 +2366,8 @@ def main(selected="all"):
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
             credential_file.write_text(credential_file.read_text().replace("expires_at=4102444800", "expires_at=0").replace("refreshed_at=1750000000", f"refreshed_at={renewed_at}"))
             assert defaults(preferences_home, environment={"RUI_CODEX_CREDENTIAL_FILE": str(credential_file)})["local_credentials"]["codex"] == "renewal_due"
-            welcome = overview_frame(master, overview_title, keys=b"\r")
+            welcome = overview_frame(master, lambda frame: "Sign-in saved; couldn't save default" in frame,
+                                     keys=b"\r", ready=False)
             assert "Session:" not in welcome and "Permission:" not in welcome, welcome
             leave_overview(master)
             assert expiring.wait(timeout=5) == 0
@@ -2477,7 +2479,8 @@ def main(selected="all"):
             # New Session's Configure capture fails before any send; no
             # editor, Session or Message is created.
             overview_frame(master, overview_title)
-            refused = overview_frame(master, lambda frame: "Not created: NotDir" in frame, keys=b"\x1b[H\r")
+            refused = overview_frame(master, lambda frame: "Not created: NotDir" in frame,
+                                     keys=b"\x1b[H\r", ready=False)
             assert "Type a task" not in refused, refused
             os.write(master, b"\x03")
             # Keep the slave alive until all output is collected: Darwin can
