@@ -199,8 +199,8 @@ test "App screens compose content input facts status and an overlay without owni
         const drawn = try screen.draw(ctx);
         try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
         const column = drawn.children[0].surface;
-        try std.testing.expectEqual(@as(i17, 19), column.children[1].origin.row);
-        try std.testing.expectEqual(@as(i17, 18), drawn.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 20), column.children[1].origin.row);
+        try std.testing.expectEqual(@as(i17, 19), drawn.children[1].origin.row);
         try std.testing.expect(column.children[1].surface.widget.eql(input.widget()));
         for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
             const tiny = try screen.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
@@ -222,22 +222,22 @@ test "App screens compose content input facts status and an overlay without owni
     const column = active.children[0].surface;
     const upper = column.children[0].surface;
     const lower = upper.children[1];
-    try std.testing.expectEqual(@as(i17, 17), lower.origin.row + lower.surface.children[2].origin.row);
+    try std.testing.expectEqual(@as(i17, 18), lower.origin.row + lower.surface.children[2].origin.row);
     // The marker owns a whole row above the tail; the content ends above it.
     const marker_row = lower.surface.children[1];
-    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 16, .col = 0 }, vxfw.RelativePoint{ .row = lower.origin.row + marker_row.origin.row, .col = marker_row.origin.col });
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 17, .col = 0 }, vxfw.RelativePoint{ .row = lower.origin.row + marker_row.origin.row, .col = marker_row.origin.col });
     try std.testing.expectEqual(@as(u16, 80), marker_row.surface.size.width);
     try std.testing.expectEqual(@as(i17, 78), marker_row.surface.children[0].origin.col);
     try std.testing.expectEqual(@as(u8, 1), marker_row.surface.children[0].z_index);
-    try std.testing.expectEqual(@as(u16, 15), lower.surface.children[0].surface.size.height);
-    try std.testing.expectEqual(@as(i17, 19), column.children[1].origin.row);
+    try std.testing.expectEqual(@as(u16, 16), lower.surface.children[0].surface.size.height);
+    try std.testing.expectEqual(@as(i17, 20), column.children[1].origin.row);
     try std.testing.expectEqual(@as(u8, 2), active.children[1].z_index);
     session.tail = null;
     const browsing = try session.widget().draw(ctx);
     const browsing_lower = browsing.children[0].surface.children[0].surface.children[1];
     const browsing_marker = browsing_lower.surface.children[1];
-    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 18, .col = 0 }, vxfw.RelativePoint{ .row = browsing_lower.origin.row + browsing_marker.origin.row, .col = browsing_marker.origin.col });
-    try std.testing.expectEqual(@as(u16, 17), browsing_lower.surface.children[0].surface.size.height);
+    try std.testing.expectEqual(vxfw.RelativePoint{ .row = 19, .col = 0 }, vxfw.RelativePoint{ .row = browsing_lower.origin.row + browsing_marker.origin.row, .col = browsing_marker.origin.col });
+    try std.testing.expectEqual(@as(u16, 18), browsing_lower.surface.children[0].surface.size.height);
     for ([_]vxfw.Size{ .{ .width = 1, .height = 1 }, .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 0 } }) |size| {
         const tiny = try session.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height }));
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);
@@ -303,9 +303,9 @@ test "App screens render the original composition with painted marker rows" {
             std.hash.autoHash(&hash, cell.style);
         }
     };
-    // Based on c347313's composition, with marker rows filled to the ground,
+    // c347313's composition with grounded marker rows and no empty status slot,
     // across all optional rows and tiny, narrow and wide terminals.
-    try std.testing.expectEqual(@as(u64, 15741834227597727779), hash.final());
+    try std.testing.expectEqual(@as(u64, 9710008619075226950), hash.final());
 }
 
 test "App screens update layout state through exhausted resizes for every optional row combination" {
