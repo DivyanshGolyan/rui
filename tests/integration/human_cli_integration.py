@@ -888,7 +888,7 @@ def persistent_copy_case():
 
 def provider_prompt(master):
     # First run is now a committed app frame, not a canonical line prompt.
-    return await_screen(master, "[ChatGPT]")
+    return await_screen(master, "› ChatGPT    API key")
 
 
 def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
@@ -1805,13 +1805,13 @@ def provider_line_cases():
             cwd=state, env={**os.environ, "HOME": str(no_tty)}, input="script task",
             capture_output=True, text=True, timeout=5)
         assert scripted.returncode == 6 and "[store_unavailable]" in scripted.stderr, scripted
-        assert "[ChatGPT]" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
+        assert "› ChatGPT    API key" not in scripted.stdout and "Provider: [c]" not in scripted.stdout
         assert not (no_tty / ".config").exists() and not (no_tty / "store").exists()
-        for choice in ("codex", "key", "device", "escape"):
+        for choice in ("codex", "ready-key", "key", "device", "escape"):
             home = state / choice
             config = home / ".config/rui"
             config.mkdir(parents=True, mode=0o700)
-            if choice == "codex":
+            if choice in ("codex", "ready-key"):
                 codex_fixture.credentials(config / "codex.json")
                 (config / "openai.key").write_text("fixture-provider-choice-key\n")
                 (config / "openai.key").chmod(0o600)
@@ -1826,11 +1826,15 @@ def provider_line_cases():
                 caller = spawn([str(fixture.RUI), "--store", str(selected_store)], cwd=state,
                     env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE,
                     default_signals=(signal.SIGINT,))
-                if choice == "codex":
+                if choice in ("codex", "ready-key"):
                     provider_prompt(master)
-                    os.write(master, b"\r")
+                    key_file = config / "openai.key"
+                    key_before = key_file.read_bytes(), key_file.stat().st_mtime_ns
+                    os.write(master, b"\x1b[C\r" if choice == "ready-key" else b"\r")
                     overview_frame(master, overview_title)
-                    assert "provider=codex\n" in (config / "preferences").read_text()
+                    provider = "openai" if choice == "ready-key" else "codex"
+                    assert f"provider={provider}\n" in (config / "preferences").read_text()
+                    assert (key_file.read_bytes(), key_file.stat().st_mtime_ns) == key_before
                 else:
                     offered = provider_prompt(master)
                     assert "API key" in offered and "Provider: [c]" not in offered, offered
@@ -1850,10 +1854,10 @@ def provider_line_cases():
                     elif choice == "device":
                         os.write(master, b"\r")
                         waiting = read_terminal(master, "BDL9-KI88H")
-                        assert "auth.openai.com/codex/device" in waiting, waiting
+                        assert "auth.openai.com/codex/device · BDL9-KI88H" in waiting, waiting
                         assert "Waiting for ChatGPT" in waiting, waiting
                         os.write(master, b"\x1b")
-                        read_terminal(master, "[ChatGPT]", fresh=True)
+                        read_terminal(master, "› ChatGPT    API key", fresh=True)
                     else:
                         # Choice typing does nothing. Escape from key entry
                         # returns to a visibly different choice frame before
@@ -2254,7 +2258,7 @@ def main(selected="all"):
             raise
         try:
             offered = provider_prompt(master)
-            assert "[ChatGPT]" in offered and "API key" in offered, offered
+            assert "› ChatGPT    API key" in offered and "API key" in offered, offered
             os.write(master, b"\x03")
             terminal_exit(deferred, master)
             assert deferred.wait(timeout=5) == 0
@@ -2278,7 +2282,7 @@ def main(selected="all"):
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "[ChatGPT]" in provider_prompt(master)
+            assert "› ChatGPT    API key" in provider_prompt(master)
             # Another client installs a fixture credential while this caller
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
@@ -2305,7 +2309,7 @@ def main(selected="all"):
             dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
         try:
-            assert "[ChatGPT]" in provider_prompt(master)
+            assert "› ChatGPT    API key" in provider_prompt(master)
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
@@ -2336,7 +2340,7 @@ def main(selected="all"):
                     dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
                     raise
                 try:
-                    assert "[ChatGPT]" in provider_prompt(master)
+                    assert "› ChatGPT    API key" in provider_prompt(master)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
                     welcome = overview_frame(master, overview_title, keys=b"\r")

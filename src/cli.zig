@@ -1584,8 +1584,8 @@ fn activateOverview(init: std.process.Init, intent: new_session_selection.Intent
     return .{ .binding = entry.binding orelse return error.HostModelUnavailable, .store = entry.store };
 }
 
-fn overviewProviderReady(init: std.process.Init, provider: protocol.Provider) bool {
-    return localReadiness(init).get(provider).usable();
+fn overviewProviderReady(init: std.process.Init) provider_selection.Readinesses {
+    return localReadiness(init);
 }
 
 fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses) !void {

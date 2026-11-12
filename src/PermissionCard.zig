@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Consent = @import("ActionConsent.zig");
 const Policy = @import("session_consent.zig");
+const input_choice = @import("choice_row.zig");
 const Self = @This();
 
 consent: *Consent,
@@ -124,17 +125,9 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
             surface.writeCell(@intCast(col), body_height, cell);
             surface.writeCell(@intCast(col), size.height - 1, cell);
         };
-        var allow = self.style;
-        var deny = self.style;
-        allow.reverse = self.consent.highlight == .allow_once;
-        deny.reverse = self.consent.highlight == .deny;
         self.choice_row = size.height - 1 - rule;
-        if (self.choice_column != 0) _ = window.child(.{ .width = 2, .y_off = self.choice_row.?, .height = 1 }).printSegment(.{ .text = " ›", .style = self.style }, .{ .wrap = .none });
-        _ = window.child(.{ .x_off = self.choice_column, .width = self.choice_width, .y_off = self.choice_row.?, .height = 1 }).print(&.{
-            .{ .text = " Allow once ", .style = allow },
-            .{ .text = "  ", .style = self.style },
-            .{ .text = " Deny ", .style = deny },
-        }, .{ .wrap = .none });
+        const choices = input_choice.segments(.{ "Allow once", "Deny" }, @intFromBool(self.consent.highlight == .deny), self.style, self.choice_column != 0);
+        _ = window.child(.{ .width = size.width - self.choice_column, .y_off = self.choice_row.?, .height = 1 }).print(&choices, .{ .wrap = .none });
         if (self.consent.draw()) self.ready_pending = true;
     }
     surface.children = children;

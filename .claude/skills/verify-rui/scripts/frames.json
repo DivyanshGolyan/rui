@@ -11,18 +11,20 @@
       "first_run": true,
       "steps": [
         {
-          "wait": "[ChatGPT]"
+          "wait": "› ChatGPT    API key"
         }
       ],
       "expect": [
-        "[ChatGPT]",
+        "› ChatGPT    API key",
         "API key",
         "Sign in"
       ],
       "absent": [
         "Provider: [c]",
         "Host stopped",
-        "Type a task"
+        "Type a task",
+        "[ChatGPT]",
+        "[API key]"
       ]
     },
     {
@@ -35,7 +37,7 @@
       },
       "steps": [
         {
-          "wait": "[ChatGPT]"
+          "wait": "› ChatGPT    API key"
         },
         {
           "keys": [
@@ -47,12 +49,15 @@
         }
       ],
       "expect": [
-        "auth.openai.com/codex/device",
-        "BDL9-KI88H",
+        "auth.openai.com/codex/device · BDL9-KI88H",
         "Waiting for ChatGPT"
       ],
       "absent": [
-        "Provider: [c]"
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]",
+        "Open auth.openai.com",
+        "and enter"
       ]
     },
     {
@@ -62,7 +67,7 @@
       "first_run": true,
       "steps": [
         {
-          "wait": "[ChatGPT]"
+          "wait": "› ChatGPT    API key"
         },
         {
           "keys": [
@@ -86,7 +91,9 @@
       ],
       "absent": [
         "sk-secret",
-        "Provider: [c]"
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]"
       ]
     },
     {

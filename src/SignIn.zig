@@ -11,6 +11,8 @@ const provider_login = @import("provider_login.zig");
 const preferences = @import("preferences.zig");
 const selection = @import("new_session_selection.zig");
 const Footer = @import("widgets/Footer.zig");
+const choice_row = @import("choice_row.zig");
+const ConversationViewport = @import("ConversationViewport.zig");
 const Self = @This();
 
 pub const Activation = struct {
@@ -19,7 +21,10 @@ pub const Activation = struct {
     default_failed: bool = false,
 };
 pub const Activate = *const fn (std.process.Init, selection.Intent) anyerror!Activation;
-pub const Ready = *const fn (std.process.Init, @import("protocol.zig").Provider) bool;
+pub const Ready = *const fn (std.process.Init) core.Readinesses;
+const Published = struct { defaults: anyerror!void, activation: anyerror!Activation };
+const Outcome = union(enum) { cancelled, failed: anyerror, published: Published };
+const Presentation = union(enum) { screen: *vxfw.EventContext, departure: *std.Io.Writer };
 state: core.State = .{},
 init: ?std.process.Init = null,
 selectors: selection.Intent = .{},
@@ -39,8 +44,8 @@ task: ClientTask = .{},
 /// publication wins, Escape cannot claim that the saved sign-in was undone.
 gate: std.atomic.Value(enum(u8) { cancellable, cancelled, publishing }) = .init(.cancellable),
 code: @import("protocol.zig").Bounded(64) = .{},
-answer: ?Activation = null,
-worker_failure: core.Failure = .login,
+attempt: core.Attempt = .existing,
+outcome: ?Outcome = null,
 threadlocal var current: *Self = undefined;
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -61,13 +66,19 @@ pub fn cancel(self: *Self) void {
 
 /// Every accepted attempt is joined before its input storage is released.
 pub fn stop(self: *Self) !void {
+    var bytes: [256]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    const ended = self.stopTo(&writer);
+    // The terminal is restored before the app calls stop. If stderr takes
+    // nothing there is no second output destination; the error still escapes.
+    if (writer.buffered().len != 0) _ = @import("stderr.zig").writeReceipt(writer.buffered());
+    try ended;
+}
+
+fn stopTo(self: *Self, writer: *std.Io.Writer) !void {
     self.cancel();
     defer self.key.wipe();
-    self.task.join() catch |err| {
-        // Cancellation before publication has no effect to report. Every
-        // failure after publication is retained at the departure boundary.
-        if (err != error.LoginInterrupted or self.gate.load(.acquire) != .cancelled) return err;
-    };
+    try self.settle(.{ .departure = writer });
 }
 
 fn cancelled() bool {
@@ -89,34 +100,39 @@ fn display(code: []const u8) !void {
 fn work(raw: *anyopaque, _: *ClientTask) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     current = self;
-    const init = self.init.?;
-    const provider = self.state.selected;
-    if (provider == .codex and !(if (self.ready) |ready| ready(init, provider) else false)) {
-        // Explicit fixture only: no credential, token or network operation.
-        if (std.mem.eql(u8, init.environ_map.get("RUI_TEST_LOGIN") orelse "", "waiting")) {
-            try display("BDL9-KI88H");
-            while (!cancelled()) try init.io.sleep(.fromMilliseconds(20), .awake);
-            return error.LoginInterrupted;
-        }
-        try provider_login.codex(init, codex_auth.login, display, cancelled, publish);
-    } else {
-        if (!publish()) return error.LoginInterrupted;
-        if (provider == .openai) try provider_login.key(init, self.key.slice());
-    }
-    self.worker_failure = .defaults;
-    const default_failed = if (preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", provider, false)) |_| false else |_| true;
-    // Publication and defaults are independent. Explicit launch selectors can
-    // still activate when the future default could not be saved.
-    if (!default_failed) self.worker_failure = .host;
-    self.answer = try self.activate.?(init, self.selectors);
-    self.answer.?.default_failed = default_failed;
+    self.outcome = if (self.runAttempt()) |published|
+        .{ .published = published }
+    else |err| if (err == error.LoginInterrupted and cancelled()) .cancelled else .{ .failed = err };
 }
 
-fn begin(self: *Self, ctx: *vxfw.EventContext) void {
-    self.key.len = if (self.state.selected == .openai) self.key.len else 0;
+fn runAttempt(self: *Self) !Published {
+    const init = self.init.?;
+    switch (self.attempt) {
+        .codex => {
+            // Explicit fixture only: no credential, token or network operation.
+            if (std.mem.eql(u8, init.environ_map.get("RUI_TEST_LOGIN") orelse "", "waiting")) {
+                try display("BDL9-KI88H");
+                while (!cancelled()) try init.io.sleep(.fromMilliseconds(20), .awake);
+                return error.LoginInterrupted;
+            }
+            try provider_login.codex(init, codex_auth.login, display, cancelled, publish);
+        },
+        .key, .existing => {
+            if (!publish()) return error.LoginInterrupted;
+            if (self.attempt == .key) try provider_login.key(init, self.key.slice());
+        },
+    }
+    // These effects have independent outcomes. Retain both even when the UI
+    // leaves after publication and never consumes an activation on a tick.
+    const defaults: anyerror!void = if (preferences.saveProviderAfterLogin(init.environ_map.get("HOME") orelse "", self.state.selected, false)) |_| {} else |err| err;
+    return .{ .defaults = defaults, .activation = self.activate.?(init, self.selectors) };
+}
+
+fn begin(self: *Self, ctx: *vxfw.EventContext, attempt: core.Attempt) void {
+    if (attempt != .key) self.key.wipe();
+    self.attempt = attempt;
     self.code.len = 0;
-    self.answer = null;
-    self.worker_failure = .login;
+    self.outcome = null;
     self.gate.store(.cancellable, .release);
     const init = self.init orelse return; // UI-only rendering has no effects.
     self.task.start(init.io, self, work) catch {
@@ -129,25 +145,56 @@ fn begin(self: *Self, ctx: *vxfw.EventContext) void {
 
 fn advance(self: *Self, ctx: *vxfw.EventContext) !void {
     if (self.task.thread == null or !self.task.completed()) return;
-    const outcome = self.task.join();
+    try self.settle(.{ .screen = ctx });
+}
+
+/// One joined outcome, consumed once by the same reporting owner on a tick
+/// or on departure. In particular, a successful activation cannot erase a
+/// failed default save, and a failed activation cannot hide it either.
+fn settle(self: *Self, presentation: Presentation) !void {
+    if (self.task.thread == null) return;
+    try self.task.join();
     self.key.wipe();
     self.key_rejected = false;
-    outcome catch |err| {
-        if (err == error.LoginInterrupted and self.gate.load(.acquire) == .cancelled) return;
-        const failure: core.Failure = switch (err) {
+    const outcome = self.outcome.?;
+    self.outcome = null;
+    switch (outcome) {
+        .cancelled => {},
+        .failed => |err| try self.reportFailure(presentation, switch (err) {
             error.LoginExpired => .expired,
             error.LoginDenied => .denied,
-            else => self.worker_failure,
-        };
-        _ = self.state.step(.{ .failed = failure });
-        ctx.redraw = true;
-        return;
-    };
-    _ = self.state.step(.done);
-    if (self.on_done) |done| done(self.userdata.?, ctx, self.answer.?) catch {
-        _ = self.state.step(.{ .failed = .defaults });
-    };
-    ctx.redraw = true;
+            else => .login,
+        }, err),
+        .published => |published| {
+            const default_error: ?anyerror = if (published.defaults) |_| null else |err| err;
+            var activation = published.activation catch |err| {
+                try self.reportFailure(presentation, if (default_error != null) .defaults_and_host else .host, default_error orelse err);
+                return;
+            };
+            if (presentation == .departure) {
+                if (default_error) |err| try self.reportFailure(presentation, .defaults, err);
+                return;
+            }
+            const ctx = presentation.screen;
+            activation.default_failed = default_error != null; // Borrowed report, not another stored outcome.
+            _ = self.state.step(.done);
+            if (self.on_done) |done| try done(self.userdata.?, ctx, activation);
+            ctx.redraw = true;
+        },
+    }
+}
+
+fn reportFailure(self: *Self, presentation: Presentation, failure: core.Failure, err: anyerror) !void {
+    switch (presentation) {
+        .screen => |ctx| {
+            _ = self.state.step(.{ .failed = failure });
+            ctx.redraw = true;
+        },
+        .departure => |writer| {
+            try writer.print("{s}\n", .{failureText(failure)});
+            return err;
+        },
+    }
 }
 
 fn appendKey(self: *Self, text: []const u8) void {
@@ -214,7 +261,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         effect = if (self.state.stage == .key_entry or self.state.stage == .key_invalid)
             self.state.step(.{ .key = !self.key_rejected and api_key.valid(self.key.slice()) })
         else
-            self.state.step(.enter);
+            self.state.step(.{ .enter = if (self.init != null and self.ready != null) self.ready.?(self.init.?) else .initFill(.missing) });
     } else if (key.matches(vaxis.Key.left, .{})) {
         effect = self.state.step(.left);
     } else if (key.matches(vaxis.Key.right, .{})) {
@@ -230,7 +277,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         } else if (key.text) |text| self.appendKey(text);
     }
     switch (effect) {
-        .codex, .key => self.begin(ctx),
+        .codex => self.begin(ctx, .codex),
+        .key => self.begin(ctx, .key),
+        .existing => self.begin(ctx, .existing),
         .close => if (self.on_close) |close| try close(self.userdata.?, ctx),
         .cancel, .none => {},
     }
@@ -239,11 +288,12 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 
 fn failureText(failure: core.Failure) []const u8 {
     return switch (failure) {
-        .expired => "ChatGPT sign-in expired · enter tries again",
-        .denied => "ChatGPT sign-in denied · enter tries again",
-        .login => "Sign-in failed · enter tries again",
-        .defaults => "Sign-in saved; couldn't save default · enter tries again",
-        .host => "Sign-in saved; Host didn't start · enter tries again",
+        .expired => "ChatGPT sign-in expired",
+        .denied => "ChatGPT sign-in denied",
+        .login => "Sign-in failed",
+        .defaults => "Sign-in saved; couldn't save default",
+        .host => "Sign-in saved; Host didn't start",
+        .defaults_and_host => "Sign-in saved; default not saved; Host didn't start",
     };
 }
 
@@ -272,13 +322,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         self.task.mutex.unlock(self.init.?.io);
     } else code = self.code;
     const line: []const vaxis.Cell.Segment = switch (self.state.stage) {
-        .choice => if (self.state.selected == .codex) &.{.{ .text = "  [ChatGPT]   API key", .style = self.style }} else &.{.{ .text = "  ChatGPT   [API key]", .style = self.style }},
+        .choice => try ctx.arena.dupe(vaxis.Cell.Segment, &choice_row.segments(.{ "ChatGPT", "API key" }, @intFromBool(self.state.selected == .openai), self.style, true)),
         .codex_waiting => if (code.len == 0) &.{.{ .text = "  Connecting to ChatGPT", .style = self.style }} else line: {
             const segments = try ctx.arena.alloc(vaxis.Cell.Segment, 3);
-            // At phone width the label contracts, never the code or link.
-            segments[0] = .{ .text = if (size.width < 65) " " else "  Open ", .style = self.style };
-            segments[1] = .{ .text = "auth.openai.com/codex/device", .style = self.style, .link = .{ .uri = "https://auth.openai.com/codex/device" } };
-            segments[2] = .{ .text = try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ if (size.width < 65) " " else " and enter ", code.slice() }), .style = self.style };
+            segments[0] = .{ .text = "  ", .style = self.style };
+            segments[1] = ConversationViewport.linkedSegment("auth.openai.com/codex/device", self.style, "https://auth.openai.com/codex/device");
+            segments[2] = .{ .text = try std.fmt.allocPrint(ctx.arena, " · {s}", .{code.slice()}), .style = self.style };
             break :line segments;
         },
         .key_entry => line: {
@@ -289,7 +338,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .key_invalid => &.{.{ .text = "  Invalid API key · edit and enter", .style = self.style }},
         .saving => &.{.{ .text = "  Saving sign-in", .style = self.style }},
         .done => &.{.{ .text = "", .style = self.style }},
-        .failed => try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = failureText(self.state.failure), .style = self.style }}),
+        .failed => try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = try std.fmt.allocPrint(ctx.arena, "{s} · enter tries again", .{failureText(self.state.failure)}), .style = self.style }}),
     };
     const rich = try ctx.arena.create(vxfw.RichText);
     rich.* = .{ .text = line, .softwrap = false, .width_basis = .parent };
@@ -384,7 +433,7 @@ test "Sign-in worker reports installation default activation and cancellation ou
             return page.code.len != 0;
         }
     };
-    const Case = enum { success, key_failure, default_failure, host_failure, cancel };
+    const Case = enum { success, key_failure, default_failure, host_failure, both_failure, cancel };
     for (std.enums.values(Case)) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -395,9 +444,9 @@ test "Sign-in worker reports installation default activation and cancellation ou
         try env.put("HOME", home);
         var missing_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
         if (case == .key_failure) try env.put(api_key.path_variable, try std.fmt.bufPrint(&missing_bytes, "{s}/absent/key", .{home}));
-        if (case == .host_failure) try env.put("FAIL_HOST", "1");
+        if (case == .host_failure or case == .both_failure) try env.put("FAIL_HOST", "1");
         if (case == .cancel) try env.put("RUI_TEST_LOGIN", "waiting");
-        if (case == .default_failure) {
+        if (case == .default_failure or case == .both_failure) {
             var config = try tmp.dir.createDirPathOpen(std.testing.io, ".config/rui", .{ .permissions = .fromMode(0o700) });
             defer config.close(std.testing.io);
             var file = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
@@ -417,7 +466,7 @@ test "Sign-in worker reports installation default activation and cancellation ou
         @memcpy(page.key.bytes[0..secret.len], secret);
         page.key.len = secret.len;
         var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
-        page.begin(&ctx);
+        page.begin(&ctx, if (case == .cancel) .codex else .key);
         if (case == .cancel) {
             try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.codeReady);
             try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.escape } });
@@ -432,10 +481,10 @@ test "Sign-in worker reports installation default activation and cancellation ou
                 try std.testing.expectEqual(case == .default_failure, fixture.default_failed);
                 try std.testing.expectEqual(core.Stage.done, page.state.stage);
             },
-            .key_failure, .host_failure => {
+            .key_failure, .host_failure, .both_failure => {
                 try std.testing.expect(!fixture.done);
                 try std.testing.expectEqual(core.Stage.failed, page.state.stage);
-                try std.testing.expectEqual(if (case == .host_failure) core.Failure.host else core.Failure.login, page.state.failure);
+                try std.testing.expectEqual(if (case == .both_failure) core.Failure.defaults_and_host else if (case == .host_failure) core.Failure.host else core.Failure.login, page.state.failure);
             },
             .cancel => {
                 try std.testing.expect(!fixture.done);
@@ -448,6 +497,119 @@ test "Sign-in worker reports installation default activation and cancellation ou
             defer key.wipe();
             try std.testing.expect(try api_key.read(try api_key.path(&env, &path_buffer), &key) != null);
             try std.testing.expectEqualStrings(secret, key.slice());
+        }
+    }
+}
+
+test "Sign-in choices use approval background selection with and without colour" {
+    for ([_]bool{ false, true }) |colour| {
+        for ([_]core.Provider{ .codex, .openai }) |provider| {
+            var page: Self = .{};
+            page.state.selected = provider;
+            if (colour) page.style = .{ .fg = .{ .rgb = .{ 200, 210, 220 } }, .bg = .{ .rgb = .{ 20, 30, 40 } } };
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const surface = try page.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} });
+            var text = std.Io.Writer.Allocating.init(arena.allocator());
+            for (surface.children[1].surface.buffer, 0..) |cell, column| {
+                try text.writer.writeAll(cell.char.grapheme);
+                const selected = if (column >= 2 and column <= 10) provider == .codex else if (column >= 13 and column <= 21) provider == .openai else false;
+                try std.testing.expectEqual(selected, cell.style.reverse);
+            }
+            try std.testing.expectEqualStrings(" › ChatGPT    API key", std.mem.trimEnd(u8, text.written(), " "));
+        }
+    }
+}
+
+test "Sign-in departure settles cancellation and every published default and activation outcome once" {
+    const poll = @import("test_poll");
+    const Fixture = struct {
+        fn activate(init: std.process.Init, _: selection.Intent) !Activation {
+            if (init.environ_map.get("FAIL_HOST") != null) return error.HostReadinessUnconfirmed;
+            var answer: Activation = .{ .binding = .{}, .store = .{} };
+            try answer.binding.provider.set("openai");
+            try answer.binding.model.set(@import("product_defaults.zig").recommended_model);
+            try answer.store.set(init.environ_map.get("HOME").?);
+            return answer;
+        }
+        fn completed(page: *Self) bool {
+            return page.task.completed();
+        }
+        fn codeReady(page: *Self) bool {
+            page.task.mutex.lockUncancelable(page.init.?.io);
+            defer page.task.mutex.unlock(page.init.?.io);
+            return page.code.len != 0;
+        }
+    };
+    for ([_]bool{ false, true }) |cancel_before_publication| {
+        for ([_]bool{ false, true }) |default_failed| {
+            for ([_]bool{ false, true }) |host_failed| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var home_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const home = home_bytes[0..try tmp.dir.realPath(std.testing.io, &home_bytes)];
+                var env: std.process.Environ.Map = .init(std.testing.allocator);
+                defer env.deinit();
+                try env.put("HOME", home);
+                if (cancel_before_publication) try env.put("RUI_TEST_LOGIN", "waiting");
+                if (host_failed) try env.put("FAIL_HOST", "1");
+                if (default_failed) {
+                    var config = try tmp.dir.createDirPathOpen(std.testing.io, ".config/rui", .{ .permissions = .fromMode(0o700) });
+                    defer config.close(std.testing.io);
+                    var file = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
+                    defer file.close(std.testing.io);
+                    try file.writeStreamingAll(std.testing.io, "version=9\n");
+                }
+                var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer arena.deinit();
+                const argv = [_][*:0]const u8{"rui"};
+                const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &env, .preopens = .empty };
+                var page: Self = .{ .init = init, .activate = Fixture.activate };
+                defer page.stop() catch @panic("sign-in escaped departure test");
+                page.state.selected = if (cancel_before_publication) .codex else .openai;
+                page.state.stage = if (cancel_before_publication) .codex_waiting else .saving;
+                const key = "sk-departure-secret";
+                @memcpy(page.key.bytes[0..key.len], key);
+                page.key.len = key.len;
+                var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+                page.begin(&ctx, if (cancel_before_publication) .codex else .key);
+                if (cancel_before_publication) {
+                    try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.codeReady);
+                } else {
+                    try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.completed);
+                    try std.testing.expectEqual(core.Stage.saving, page.state.stage);
+                    try std.testing.expect(page.outcome != null); // No advance consumed it.
+                }
+                var report: std.Io.Writer.Allocating = .init(arena.allocator());
+                const ended = page.stopTo(&report.writer);
+                if (cancel_before_publication) {
+                    try ended;
+                    try std.testing.expectEqualStrings("", report.written());
+                    try std.testing.expectEqual(.cancelled, page.gate.load(.acquire));
+                    if (default_failed) {
+                        try std.testing.expectError(error.UnsupportedPreferencesVersion, preferences.load(home));
+                    } else {
+                        try std.testing.expectError(error.FileNotFound, tmp.dir.access(init.io, ".config/rui/preferences", .{}));
+                    }
+                } else {
+                    try std.testing.expectEqual(.publishing, page.gate.load(.acquire));
+                    if (default_failed) try std.testing.expectError(error.UnsupportedPreferencesVersion, ended) else if (host_failed) try std.testing.expectError(error.HostReadinessUnconfirmed, ended) else try ended;
+                    try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, report.written(), if (host_failed) "default not saved" else "couldn't save default") != null);
+                    try std.testing.expectEqual(host_failed, std.mem.indexOf(u8, report.written(), "Host didn't start") != null);
+                    if (!default_failed) try std.testing.expectEqualStrings("openai", (try preferences.load(home)).provider.slice());
+                }
+                var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                var saved: api_key.Key = .{};
+                defer saved.wipe();
+                const installed = try api_key.read(try api_key.path(&env, &path_buffer), &saved);
+                try std.testing.expectEqual(!cancel_before_publication, installed != null);
+                if (installed != null) try std.testing.expectEqualStrings(key, saved.slice());
+                try std.testing.expect(page.task.thread == null and page.outcome == null);
+                try std.testing.expectEqual(@as(usize, 0), page.key.len);
+                const reported = report.written().len;
+                try page.stopTo(&report.writer);
+                try std.testing.expectEqual(reported, report.written().len);
+            }
         }
     }
 }

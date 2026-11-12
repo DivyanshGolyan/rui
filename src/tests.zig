@@ -2,6 +2,7 @@ test {
     _ = @import("widgets/Panel.zig");
     _ = @import("app_settings.zig");
     _ = @import("SignIn.zig");
+    _ = @import("choice_row.zig");
     _ = @import("sign_in.zig");
     _ = @import("widgets/Split.zig");
     _ = @import("widgets/Stack.zig");

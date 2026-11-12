@@ -632,6 +632,7 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
                     try line.writer.writeAll(cell.char.grapheme);
                     if (cell.link.uri.len != 0) {
                         try std.testing.expectEqualStrings("https://auth.openai.com/codex/device", cell.link.uri);
+                        try std.testing.expect(std.mem.indexOf(u8, "auth.openai.com/codex/device", cell.char.grapheme) != null);
                         linked += 1;
                     }
                 }
@@ -641,9 +642,9 @@ test "Sign-in frames keep the list at 140 columns and the code link and masked k
             const text = dump.written();
             try std.testing.expect(std.mem.indexOf(u8, text, secret) == null);
             switch (stage) {
-                .choice => try std.testing.expect(std.mem.indexOf(u8, text, "[ChatGPT]   API key") != null),
+                .choice => try std.testing.expect(std.mem.indexOf(u8, text, "› ChatGPT    API key") != null),
                 .codex_waiting => {
-                    try std.testing.expect(std.mem.indexOf(u8, text, "BDL9-KI88H") != null);
+                    try std.testing.expect(std.mem.indexOf(u8, text, "auth.openai.com/codex/device · BDL9-KI88H") != null);
                     try std.testing.expectEqual(@as(usize, "auth.openai.com/codex/device".len), linked);
                 },
                 .key_entry => try std.testing.expect(std.mem.indexOf(u8, text, "•••••••••") != null),

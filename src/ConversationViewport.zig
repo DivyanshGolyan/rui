@@ -35,6 +35,13 @@ pub const Layout = struct {
 
 pub const representable = display_text.representable;
 
+/// Shared answer/UI link boundary. Text and URI remain borrowed through the
+/// draw; Vaxis carries the URI on the cells and emits the terminal's OSC 8.
+/// Address validation and text styling stay with the caller.
+pub fn linkedSegment(text: []const u8, style: vaxis.Style, uri: []const u8) vaxis.Cell.Segment {
+    return .{ .text = text, .style = style, .link = .{ .uri = uri } };
+}
+
 /// Rows used by a print that ended at `result`. A row is used once text
 /// reaches it; an exact fill leaves the next row unused. Overflow means
 /// that at least one more row remains, even when the last visible row filled.
@@ -631,7 +638,7 @@ pub fn Sized(comptime limit: usize, comptime styled: bool) type {
                 }
                 const shown = !styled or (isSidenote(self.styles[start]) == notes and foregroundIndex(self.styles[start]) != address_index);
                 if (shown) {
-                    segments[count] = .{ .text = self.bytes[start..stop], .style = self.segmentStyle(start, colour, plain, colours), .link = .{ .uri = self.terminalLink(start) } };
+                    segments[count] = linkedSegment(self.bytes[start..stop], self.segmentStyle(start, colour, plain, colours), self.terminalLink(start));
                     count += 1;
                 }
                 start = stop;
