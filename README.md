@@ -53,15 +53,16 @@ curl -fsSL https://github.com/DivyanshGolyan/rui/releases/latest/download/instal
 ```
 
 The installer checks SHA-256 and installs in `~/.local/bin`.
-Follow its `PATH` instructions if your shell cannot find `rui`.
+If `~/.local/bin` is not on your `PATH`, it adds it to your shell profile; open a new terminal afterwards.
+Set `RUI_NO_MODIFY_PATH=1` to leave your profile alone and follow its `PATH` instructions instead.
 See [upgrade and activation](docs/host.md#upgrade-and-activation) before updating saved work.
 
 <a id="start-a-conversation"></a>
 
-Enable Codex device code authorization in ChatGPT security settings, or ask your workspace admin to allow it.
-Then run `rui auth login codex`, follow the printed link, and keep the code private.
 Run `rui` in your project directory.
-For API-key setup instead, see the [Host guide](docs/host.md#run-in-the-foreground).
+The first run signs you in with your ChatGPT account or an OpenAI API key.
+For ChatGPT, enable Codex device code authorization in ChatGPT security settings first, or ask your workspace admin to allow it, and keep the printed code private.
+`rui auth login codex` and the [Host guide](docs/host.md#run-in-the-foreground) cover signing in from scripts.
 
 Bash runs with your full privileges, without a sandbox, and defaults to running without approval (`bypass`).
 [Approval settings](docs/using-rui.md#approve-bash-commands) apply per Session and do not automatically propagate to agents it starts.

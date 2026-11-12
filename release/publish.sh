@@ -23,11 +23,52 @@ rui_publish() {
         if [ -n "$_rui_after" ]; then
             _rui_observe "$1" "${_rui_after%/bin/rui}" "$3"
             _rui_render "$1"
-            "$2/bin/rui" --installation-path </dev/null || :
+            _rui_path "$1" "$2" "${4:-intentional-source}"
         else
             printf 'Publication completed, but the selected command could not be inspected. Check %s.\n' "$_rui_link" >&2
         fi
     ) || :
+}
+
+# _rui_path PREFIX BUILD MODE -> BUILD's PATH advice. When a released install's
+# ~/.local/bin is missing from PATH, add it to the login shell's profile
+# instead, so a new terminal finds rui; RUI_NO_MODIFY_PATH=1 keeps the advice.
+_rui_path() {
+    _rui_advice=$("$2/bin/rui" --installation-path </dev/null) || _rui_advice=
+    case $_rui_advice in
+        *' is not on your PATH'*)
+            if [ "$3" = released-install ] && [ "$1" = "$HOME/.local" ] && [ -z "${RUI_NO_MODIFY_PATH:-}" ] \
+                && _rui_rc=$(_rui_profile) && _rui_add_path "$_rui_rc"; then
+                printf 'Added ~/.local/bin to your PATH in %s. Open a new terminal to use it.\n' "$(_rui_show "$_rui_rc")"
+                return 0
+            fi ;;
+    esac
+    if [ -n "$_rui_advice" ]; then printf '%s\n' "$_rui_advice"; fi
+}
+
+# _rui_profile -> the file the login shell reads at startup, or failure for a
+# shell whose syntax differs (fish): the advice covers those.
+_rui_profile() {
+    case ${SHELL##*/} in
+        zsh) printf '%s/.zshrc' "${ZDOTDIR:-$HOME}" ;;
+        bash)
+            if [ "$(uname -s)" = Darwin ]; then printf '%s/.bash_profile' "$HOME"; else printf '%s/.bashrc' "$HOME"; fi ;;
+        fish) return 1 ;;
+        *) printf '%s/.profile' "$HOME" ;;
+    esac
+}
+
+# _rui_add_path FILE -> FILE ends with the PATH line, appended once.
+_rui_add_path() {
+    _rui_line='export PATH="$HOME/.local/bin:$PATH"'
+    if [ -f "$1" ] && grep -qxF "$_rui_line" "$1"; then return 0; fi
+    {
+        if [ -s "$1" ]; then
+            if [ -n "$(tail -c 1 "$1")" ]; then printf '\n'; fi
+            printf '\n'
+        fi
+        printf '# Added by the Rui installer\n%s\n' "$_rui_line"
+    } >>"$1" 2>/dev/null
 }
 
 # _rui_target LINK -> LINK's target when LINK is a symlink to an executable
@@ -223,6 +264,6 @@ _rui_render() {
             printf 'Could not inspect the Host for the defaults-selected Store. Its identity and status are unknown; installation did not restart it. The installation succeeded.\n' >&2 ;;
     esac
     if [ "$_rui_kind" = first ]; then
-        printf 'Next: %s auth login codex (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)\n' "$_rui_cmd"
+        printf 'Next: run rui in your project directory. It signs you in first (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation).\n'
     fi
 }

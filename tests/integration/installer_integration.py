@@ -28,7 +28,9 @@ PLATFORM = os_semantics.native_release_target()
 
 KEPT = "Saved work and sign-in were kept."
 HOST = "Rui's background Host (the process that runs your Sessions)"
-NEXT = "Next: ~/.local/bin/rui auth login codex (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)"
+NEXT = "Next: run rui in your project directory. It signs you in first (setup steps: https://github.com/DivyanshGolyan/rui#start-a-conversation)."
+ADDED = "Added ~/.local/bin to your PATH in ~/.zshrc. Open a new terminal to use it."
+PATH_LINE = 'export PATH="$HOME/.local/bin:$PATH"'
 
 
 UNKNOWN_COMPATIBILITY = ("Could not establish compatibility for the defaults-selected Store. Host startup performs the authoritative check; "
@@ -125,7 +127,7 @@ done
 cp "{self.served}/${{url##*/download/}}" "$output"
 ''')
         (self.tools / "curl").chmod(0o755)
-        self.environment = {**os.environ, "HOME": str(self.home),
+        self.environment = {**os.environ, "HOME": str(self.home), "SHELL": "/bin/zsh", "ZDOTDIR": "",
                             "PATH": f"{self.tools}:{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin",
                             "RUI_TEST_PUBLISH_HELPER": str(self.publisher)}
 
@@ -184,13 +186,9 @@ cp "{self.served}/${{url##*/download/}}" "$output"
     def test_first_install_path_states(self):
         installed = "Installed Rui 0.40.0 at ~/.local/bin/rui."
         later = self.root / "later"
-        missing = f"{self.bin} is not on your PATH. Add the installation directory to your shell profile, then open a new terminal:"
-        exported = f"  export PATH=$'{self.bin}':\"$PATH\""
         cases = {
-            "missing": (f"{self.tools}:/usr/bin:/bin", None, [installed, NEXT, missing, exported]),
-            "missing, another rui": (f"{self.tools}:/usr/bin:/bin", self.tools, [
-                installed, NEXT, f"{self.bin} is not on your PATH, which finds another rui at {self.tools}/rui. "
-                "Add the installation directory to your shell profile, then open a new terminal:", exported]),
+            "missing": (f"{self.tools}:/usr/bin:/bin", None, [installed, NEXT, ADDED]),
+            "missing, another rui": (f"{self.tools}:/usr/bin:/bin", self.tools, [installed, NEXT, ADDED]),
             "shadowed": (None, self.tools, [
                 installed, NEXT, f"Your PATH finds another rui first, at {self.tools}/rui. Put {self.bin} before it "
                 "in your PATH, then run hash -r (Bash) or rehash (Zsh)."]),
@@ -205,6 +203,42 @@ cp "{self.served}/${{url##*/download/}}" "$output"
                     self.other_rui(other)
                 result = self.install("0.40.0", PATH=path or self.environment["PATH"])
                 self.assertEqual(self.report(result), expected)
+                profile = self.home / ".zshrc"
+                if ADDED in expected:
+                    self.assertEqual(profile.read_text(), f"# Added by the Rui installer\n{PATH_LINE}\n")
+                else:
+                    self.assertFalse(profile.exists())
+
+    def test_missing_path_profile_cases(self):
+        installed = "Installed Rui 0.40.0 at ~/.local/bin/rui."
+        missing = f"{self.bin} is not on your PATH. Add the installation directory to your shell profile, then open a new terminal:"
+        advice = [installed, NEXT, missing, f"  export PATH=$'{self.bin}':\"$PATH\""]
+        path = f"{self.tools}:/usr/bin:/bin"
+        cases = {
+            # name: (environment, profile before, report, profile after)
+            "opted out": ({"RUI_NO_MODIFY_PATH": "1"}, None, advice, None),
+            "fish keeps the advice": ({"SHELL": "/usr/bin/fish"}, None, advice, None),
+            "line already present": ({}, f"alias ll=ls\n{PATH_LINE}\n", [installed, NEXT, ADDED],
+                                     f"alias ll=ls\n{PATH_LINE}\n"),
+            "no trailing newline": ({}, "alias ll=ls", [installed, NEXT, ADDED],
+                                    f"alias ll=ls\n\n# Added by the Rui installer\n{PATH_LINE}\n"),
+            "ZDOTDIR": ({"ZDOTDIR": str(self.home / "zdot")}, None,
+                        [installed, NEXT, "Added ~/.local/bin to your PATH in ~/zdot/.zshrc. Open a new terminal to use it."], None),
+            "unknown shell uses .profile": ({"SHELL": "/bin/ksh"}, None,
+                                            [installed, NEXT, "Added ~/.local/bin to your PATH in ~/.profile. Open a new terminal to use it."], None),
+        }
+        for case, (environment, before, expected, after) in cases.items():
+            with self.subTest(case=case):
+                self.start_over()
+                (self.home / "zdot").mkdir()
+                profile = self.home / ".zshrc"
+                if before is not None:
+                    profile.write_text(before)
+                self.assertEqual(self.report(self.install("0.40.0", PATH=path, **environment)), expected)
+                if after is not None or before is not None:
+                    self.assertEqual(profile.read_text(), after)
+                elif ADDED not in expected:
+                    self.assertFalse(profile.exists())
 
     def test_update_preserves_data_and_reports_versions(self):
         sentinels = [self.home / ".zshrc", self.home / ".config/rui/codex.json",
