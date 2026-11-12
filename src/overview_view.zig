@@ -388,7 +388,7 @@ pub const Event = union(enum) {
     /// The command `step` asked the shell to run ended.
     ran: Ran,
     /// A pointer press on something a click acts on.
-    clicked: struct { target: Click, draft: Draft = .{}, pasting: bool = false },
+    clicked: struct { target: Click, draft: Draft = .{} },
     /// Esc left a conversation whose original is unconfirmed. The shell
     /// sends it only while `canHoldSend` says the ledger has room.
     unconfirmed: Unconfirmed,
@@ -1675,19 +1675,16 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         // A click is input as a key is: the screen that takes no key takes
         // no click, wherever it lands.
         .clicked => |input| if (state.inputMode() != .frozen) switch (input.target) {
-            .footer => |field| if (!input.pasting) {
-                _ = footerInput(state, .{ .click = field }, &effects);
-            },
+            .footer => |field| _ = footerInput(state, .{ .click = field }, &effects),
             .open => |reference| try clickOpen(state, reference, &effects),
             // The row the frame drew, only in the list it drew: then
             // Enter takes it, as arrowing to it and pressing Enter would.
-            .command => |pressed| if (!input.pasting) {
-                if (slash_commands.Shown.pickedNow(&state.commands, nextCommands(state, input.draft), pressed) != null)
-                    try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
+            .command => |pressed| if (slash_commands.Shown.pickedNow(&state.commands, nextCommands(state, input.draft), pressed) != null) {
+                try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
             },
             .new_session => {
                 state.selected = .new_session;
-                if (!input.pasting) try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
+                try compose(state, .{ .input = .{ .composer = .submit }, .draft = input.draft }, &effects);
             },
             .settings => {
                 state.selected = .settings;
@@ -7210,14 +7207,14 @@ test "archive admission reports only a new ledger request across every surface c
     try std.testing.expectEqual(@as(usize, 0), empty.request_count);
 }
 
-test "overview mouse New Session owns Enter policy for every draft frozen and paste state" {
+test "overview mouse New Session owns Enter policy for every draft and frozen state" {
     const Case = struct { text: []const u8, tags: []const std.meta.Tag(Effect) };
     for ([_]Case{
         .{ .text = "", .tags = &.{} },
         .{ .text = " \n", .tags = &.{.clear_draft} },
         .{ .text = "a mouse task", .tags = &.{.start} },
         .{ .text = "/configure --reasoning-effort high", .tags = &.{.clear_draft} },
-    }) |case| for ([_]bool{ false, true }) |frozen| for ([_]bool{ false, true }) |pasting| {
+    }) |case| for ([_]bool{ false, true }) |frozen| {
         var state = try opened(&mixed);
         defer state.deinit();
         _ = try step(&state, .{ .resized = .{ .width = 100, .height = 60 } });
@@ -7225,12 +7222,12 @@ test "overview mouse New Session owns Enter policy for every draft frozen and pa
         if (frozen) _ = try submit(&state, .{ .bytes = "already starting" });
         state.selected = .{ .session = "b2c3d4".* };
         const before = state.selected;
-        const effects = try step(&state, .{ .clicked = .{ .target = .new_session, .draft = draft, .pasting = pasting } });
+        const effects = try step(&state, .{ .clicked = .{ .target = .new_session, .draft = draft } });
         try std.testing.expectEqual(if (frozen) before else Selection.new_session, state.selected);
-        const tags = if (frozen or pasting) &.{} else case.tags;
+        const tags = if (frozen) &.{} else case.tags;
         try std.testing.expectEqual(tags.len, effects.len);
         for (tags, effects.slice()) |tag, effect| try std.testing.expectEqual(tag, std.meta.activeTag(effect));
-        if (!frozen and !pasting) {
+        if (!frozen) {
             if (std.mem.eql(u8, case.text, "a mouse task")) try std.testing.expectEqualStrings(case.text, effects.items[0].start.text);
         }
     };
@@ -7254,7 +7251,7 @@ fn drawnCommandList(state: *State, skills: ?[]const []const u8) !Draft {
 
 test "overview command list click takes the drawn row only from the list the frame drew, as arrows and Enter do" {
     const Case = enum { unchanged, unchanged_skill, choice, run, edited, replaced, closed, closed_skill };
-    const Mode = enum { editable, frozen, pasting };
+    const Mode = enum { editable, frozen };
     const first_page = [_][]const u8{ "refactor", "review" };
     var setup_line = "/setup".*;
     for (std.enums.values(Case)) |case| for (std.enums.values(Mode)) |mode| {
@@ -7324,7 +7321,7 @@ test "overview command list click takes the drawn row only from the list the fra
         }
         const before = clicked.commands;
         const selected = clicked.selected;
-        const effects = try step(&clicked, .{ .clicked = .{ .target = .{ .command = pressed }, .draft = drafts[0], .pasting = mode == .pasting } });
+        const effects = try step(&clicked, .{ .clicked = .{ .target = .{ .command = pressed }, .draft = drafts[0] } });
         if ((case == .unchanged or case == .unchanged_skill or case == .choice or case == .run) and mode == .editable) {
             // Independent expectation: the arrows to that row, then Enter.
             for (0..index) |_| _ = try press(&keyed, drafts[1], .next);
@@ -7416,11 +7413,6 @@ test "new chat footer focus domain uses the same drawn fields as chat" {
         for (std.enums.values(FooterField)) |field| {
             const effects = try step(&state, .{ .clicked = .{ .target = .{ .footer = field } } });
             try std.testing.expectEqual(field, effects.slice()[0].open_choice);
-        }
-        for (std.enums.values(FooterField)) |field| {
-            state.footer.focus = .model;
-            try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .target = .{ .footer = field }, .pasting = true } }));
-            try std.testing.expectEqual(FooterFocus.model, state.footer.focus);
         }
         state.footer.focus = .input;
         const sequence = if (has_effort) &[_]FooterFocus{ .model, .effort, .input } else &[_]FooterFocus{ .model, .input };

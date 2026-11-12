@@ -743,7 +743,7 @@ fn overviewKey(input: vxfw.Event) view.Key {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.input.pasting } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft() } }));
     if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
 }
@@ -1263,13 +1263,12 @@ fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn appChoiceClose(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.root.input.pasting) return;
     try self.closeStandaloneChoice(ctx);
 }
 
 fn appChoicePick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (!self.root.settings_page.standaloneOpen() or self.root.input.pasting) return;
+    if (!self.root.settings_page.standaloneOpen()) return;
     try self.root.settings_page.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
 }
 
@@ -8343,8 +8342,13 @@ test "Overview standalone footer close clicks match Escape preserve paste and pr
             } else return error.TestExpectedCloseTarget;
             try std.testing.expectEqual(@as(u16, 9), close.surface.size.width);
             try std.testing.expect(close.origin.col + close.surface.size.width <= width);
+            // Inside a paste Root takes the click before the footer sees it.
             self.root.input.pasting = true;
-            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                ctx.consume_event = false;
+                try self.root.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind } });
+                try std.testing.expect(ctx.consume_event);
+            }
             try std.testing.expect(page.standaloneOpen());
             self.root.input.pasting = false;
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
