@@ -3667,6 +3667,13 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
   attached Session keys and eligible queue size, followed by live ancestor edges.
   A stopped, excluded admission is not live work. The existing TypeScript follow
   loop keeps busy-polling for `working`, including after the root's own Turn ended.
+- **Attached-tree redesign pending Store format allocation:** a Session owes its
+  parent until its active Turn, eligible queued Message past its stop cutoff,
+  unpositioned forwarded rows, undelivered ending Message and recursively owed
+  descendants have all transferred into the parent's feed or eligible input.
+  The proposed single owner is a transactional Store live-obligation frontier,
+  shared by work reads and forwarding, indexed independently of finished children
+  and excluded admissions. This is not implemented by the current read-time seed.
 - **Latest** and **before** follow the Session's order, never the clock, which can step back.
   A tool group's changes follow its proposal, and its resolutions follow one another by acceptance position; a queued admission and an outcome compare by position.
   An `allow_once` decision and a Bash launch claim no position: a decision is ordered against a resolution by time, and `bash` dates from the earliest launch time among running Actions.
