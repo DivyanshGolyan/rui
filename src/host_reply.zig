@@ -509,7 +509,11 @@ test "every reply renders its exact worst-case bound from the shape it writes" {
         }
     }
     try std.testing.expectEqual(protocol.WorkStateJson.max_json_bytes, longest_state_bytes);
-    facts.work = .{ .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max }, .revision = max };
+    facts.work = .{
+        .work = .{ .state = longest_state, .turn = max, .operation = max, .first_action = max },
+        .last_line = .{ .position = max, .text = .{ .bytes = @splat(1), .len = @import("session_list.zig").max_last_line_bytes } },
+        .revision = max,
+    };
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.len = protocol.max_workspace_bytes;
     var page_buffer: [activity_reply.max_page_bytes]u8 = undefined;
