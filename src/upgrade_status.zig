@@ -163,6 +163,16 @@ const failure_words = std.enums.EnumArray(Failure, []const u8).init(.{
     .other = "Upgrade failed",
 });
 
+/// The installed client is about to run, so old-client incompatibility no
+/// longer asks the person to restart it. Other endings retain their exact line.
+pub fn relaunchLine(run: Run, buffer: *[max_line_bytes]u8, script: Script) []const u8 {
+    const ending = if (run == .ended and run.ended.how == .incompatible)
+        Run{ .ended = .{ .how = .{ .upgraded = .{ .version = run.ended.how.incompatible, .restarted = false } }, .outcome = run.ended.outcome } }
+    else
+        run;
+    return line(ending, buffer, script).text;
+}
+
 const refusals = std.enums.EnumArray(Refusal, []const u8).init(.{
     .first_install = "no managed install",
     .source_build = "a source build",
@@ -312,4 +322,24 @@ test "Upgrade settings field reports state without shell instructions" {
         try std.testing.expect(std.mem.indexOf(u8, text, "shell") == null);
         try std.testing.expect(std.mem.indexOf(u8, text, "esc") == null);
     }
+}
+
+test "relaunch ending removes old-client restart instructions only in the new client" {
+    var buffer: [max_line_bytes]u8 = undefined;
+    const incompatible: Run = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 60, .patch = 0 } }, .outcome = .incompatible } };
+    try std.testing.expectEqualStrings("Upgraded to 0.60.0", relaunchLine(incompatible, &buffer, .unicode));
+    try std.testing.expect(std.mem.indexOf(u8, line(incompatible, &buffer, .unicode).text, "restart rui") != null);
+    const compatible: Run = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = true } }, .outcome = .compatible } };
+    try std.testing.expectEqualStrings("Upgraded to 0.60.0 · Host restarted", relaunchLine(compatible, &buffer, .unicode));
+}
+
+test "relaunch ending preserves every failure reason without a success line" {
+    var buffer: [max_line_bytes]u8 = undefined;
+    inline for (std.enums.values(Failure)) |failure| {
+        const run: Run = .{ .ended = .{ .how = .{ .failed = failure }, .outcome = .unchanged } };
+        var ordinary_buffer: [max_line_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(line(run, &ordinary_buffer, .unicode).text, relaunchLine(run, &buffer, .unicode));
+    }
+    const download: Run = .{ .ended = .{ .how = .{ .failed = .download }, .outcome = .unchanged } };
+    try std.testing.expectEqualStrings("! Couldn't reach GitHub; nothing changed · run rui upgrade in a shell for details", relaunchLine(download, &buffer, .unicode));
 }
