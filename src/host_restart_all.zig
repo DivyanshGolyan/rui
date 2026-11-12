@@ -74,18 +74,15 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     defer if (target) |value| value.deinit(allocator);
     // One observation and activation at a time: no concurrent Store interruption.
     for (sockets) |socket| {
-        const discovered = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch |err| switch (err) {
-            // Only absence/refusal establishes that this is a stale socket, not
-            // a live Host whose identity or protocol we failed to understand.
-            error.HostNotServing => continue,
-            else => {
-                try writer.writeAll("Store unknown (socket ");
-                try field(writer, socket);
-                try writer.writeAll("): failed at discovery: Host facts unreadable; inspect with its owning client, then retry.\n");
-                totals.add(.failed);
-                try output.flush();
-                continue;
-            },
+        const discovered = client.observeHostForUpgradeAtSocket(allocator, init.io, socket, null) catch {
+            // No verified Store means no lock-backed proof of absence. Even a
+            // refused or removed socket must be reported, not silently skipped.
+            try writer.writeAll("Store unknown (socket ");
+            try field(writer, socket);
+            try writer.writeAll("): failed at discovery: Host state is unconfirmed; inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n");
+            totals.add(.failed);
+            try output.flush();
+            continue;
         };
         const store = discovered.facts.store.slice();
         const home = init.environ_map.get("HOME") orelse {

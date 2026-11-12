@@ -44,7 +44,9 @@ rui host restart --all
 `--all` is required; this command does not accept `--store` yet.
 It discovers this user's running Hosts through their private runtime sockets and restarts eligible Hosts one at a time on the selected installed build, preserving capacity and saved work.
 Each line names the Store and reports restarted, already current, left running with a reason, or failure with recovery instructions; a total follows.
-Stale sockets are ignored. An unreadable Host is reported, never guessed at.
+Socket discovery retries transient connection refusal for up to 200 ms inside its observation deadline.
+A refused, missing-after-enumeration or unreadable socket is reported as unconfirmed and counted as failed: without its verified Store, discovery cannot establish that the Store lock is free.
+It does not reclaim sockets or infer absence from failed transport.
 No running Hosts prints `No running Hosts.` and starts nothing.
 A newer Host is not downgraded; unsupported, application-owned and unconfirmed-ownership launches are left running with a reason.
 A failed or unconfirmed restart returns an operational caller error; installer activation failures print a note without failing the completed install.

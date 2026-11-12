@@ -655,7 +655,8 @@ def restart_all_cases(root, binary, releases):
 
         # Derive the runtime location from native readiness, not a second owner
         # of the uid/hash naming rule. A live non-Host socket must be reported;
-        # after its listener closes, the stale socket must be silently ignored.
+        # after its listener closes, even this stale socket stays unconfirmed:
+        # discovery cannot prove the Store lease is free from a refused connect.
         unreadable = pathlib.Path(first.ready["socket"]).parent / "restart-unreadable.sock"
         try:
             with os_semantics.unix_stream() as listener:
@@ -665,11 +666,15 @@ def restart_all_cases(root, binary, releases):
                 assert "Store unknown (socket " in output and "failed at discovery:" in output, output
                 assert "[host_restart_failed]" in output, output
                 assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
-            output = first.run("host", "restart", "--all")
-            assert "2 Hosts: 0 restarted, 2 already current" in output, output
-            assert str(unreadable) not in output, output
+            output = first.run("host", "restart", "--all", expect=6)
+            assert str(unreadable) in output and "Host state is unconfirmed" in output, output
+            assert "3 Hosts: 0 restarted, 2 already current, 0 left unchanged, 1 failed." in output, output
+            assert "[host_restart_failed]" in output, output
         finally:
             unreadable.unlink(missing_ok=True)
+        output = first.run("host", "restart", "--all")
+        assert "2 Hosts: 0 restarted, 2 already current" in output, output
+        assert str(unreadable) not in output, output
 
     with case(root, binary, releases, "restart-all-managed-source") as c:
         old_host, previous = c.start_host("retained-older-source", source=True)
