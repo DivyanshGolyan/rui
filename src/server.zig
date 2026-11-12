@@ -983,11 +983,14 @@ pub noinline fn serve(
     defer if (mysql_url) |url| url.destroy();
     var socket_buffer: [host_settings.max_launch_socket_path_bytes]u8 = undefined;
     const socket_path = if (!settings.interface.dir.anchored) try std.fmt.bufPrint(&socket_buffer, "{s}/" ++ host_settings.socket_name, .{settings.interface.dir.slice()}) else "";
-    var lease: platform.StoreLease = undefined;
+    // One Host-owned lease in final storage, through Store close and cleanup.
+    // Keep its bounded path buffers off the resident Host main-thread frame.
+    const lease = try allocator.create(platform.StoreLease);
+    defer allocator.destroy(lease);
     if (mysql_url != null)
         try lease.acquireMysql(io, settings.interface.dir.slice(), socket_path)
     else
-        lease = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
+        lease.* = try platform.StoreLease.acquire(io, settings.store.sqlite.dir.slice());
     defer lease.release();
     if (mysql_url == null and !settings.interface.dir.anchored) try lease.useRuntimeDirectory(settings.interface.dir.slice(), socket_path);
     // fd1 may alias fd2. Exclude flag borrowing before any continuing
@@ -1010,7 +1013,7 @@ pub noinline fn serve(
     var tool_set_memory = std.heap.ArenaAllocator.init(allocator);
     defer tool_set_memory.deinit();
     var storage: store_module.Store = undefined;
-    openStoreForHost(io, &storage, &lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
+    openStoreForHost(io, &storage, lease, served, &limits, mcp_servers.len != 0, mysql_url, if (diagnostics) |*writer| writer else null) catch |err| {
         if (err == error.StoreIdentityMismatch) startup_failure = "store_identity_mismatch";
         return err;
     };
@@ -1019,7 +1022,7 @@ pub noinline fn serve(
         io,
         allocator,
         &storage,
-        &lease,
+        lease,
         active_capacity,
         limits,
         tuning.hooks,
