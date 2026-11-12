@@ -1671,6 +1671,107 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     try std.testing.expectEqualStrings("\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }
 
+// Rows render alone; feed_window draws the gap between them from `tight`.
+test "session_reads rendered row kinds keep their own text and feed_window draws the gap from adjacency in every order" {
+    const vaxis = @import("vaxis");
+    const Window = feed_window.Window;
+    const Entry = feed_window.Entry;
+    const Text = feed_window.Text;
+    const testing = std.testing;
+    const Sink = struct {
+        document: *Viewport.Sized(512, true),
+        pub fn feed(self: *@This(), bytes: []const u8) !void {
+            try self.document.append(bytes);
+        }
+        pub fn excluding(_: *@This(), _: u64) void {}
+    };
+    var peer: protocol.NamedPeer = .{ .session = .{} };
+    try peer.session.set("9f8e7d");
+    var search: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try search.set("Search");
+    var find: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try find.set("Find");
+    const content: protocol.ActivityItem.Content = .{ .length = 3, .digest = @splat(0xab) };
+    // Each kind with its line and whether it packed with a packing
+    // neighbour before rows left the blank line to the feed: a tool row or
+    // peer Message after another drew no blank line; anything else did.
+    const Kind = struct { value: protocol.ActivityItem.Value, line: []const u8, packed_: bool };
+    const kinds = [_]Kind{
+        .{ .value = .{ .sent = .{ .admission = 4, .target = peer, .content = content, .admitted_at = std.math.maxInt(u64) } }, .line = "→ Messaged 9f8e7d", .packed_ = true },
+        .{ .value = .{ .received = .{ .admission = 5, .key = .{}, .turn = 3, .state = .applied, .content = content, .admitted_at = std.math.maxInt(u64), .sender = peer } }, .line = "← Received message from 9f8e7d", .packed_ = true },
+        .{ .value = .{ .hosted_call = .{ .description = search, .code = .succeeded, .publication_position = null } }, .line = "✓ Search", .packed_ = true },
+        .{ .value = .{ .hosted_call = .{ .description = find, .code = .failed, .publication_position = null } }, .line = "× Find", .packed_ = false },
+        .{ .value = .{ .send_failed = .{ .key = .{}, .target = null, .code = .{} } }, .line = "× Message not delivered", .packed_ = false },
+        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } }, .line = "■ Stopped", .packed_ = false },
+    };
+    var documents: [kinds.len]Viewport.Sized(512, true) = undefined;
+    var texts: [kinds.len]Text = undefined;
+    for (kinds, &documents, &texts, 0..) |kind, *document, *text_, index| {
+        document.* = .{};
+        var sink: Sink = .{ .document = document };
+        const item: protocol.ActivityItem = .{ .position = index + 1, .at = 1, .value = kind.value };
+        try testing.expect(!try View.render(undefined, "unused", "k7m2qx", item, .{}, false, &sink, false, "", .{ .viewport = .wcwidth }, .none));
+        try document.prepare();
+        text_.* = Text.fromDocument(document);
+        // Row text is the row's line alone: no blank line on either side.
+        try testing.expect(text_.bytes[0] != '\n' and std.mem.count(u8, text_.bytes, "\n") == 1);
+        try testing.expectEqual(kind.packed_, View.tight(kind.value));
+    }
+    var cells: [40 * 8]vaxis.Cell = undefined;
+    var screen: vaxis.Screen = .{ .width = 40, .height = 8, .width_method = .unicode, .buf = &cells };
+    const pane: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 40, .height = 8, .screen = &screen };
+    var buffer: [64]u8 = undefined;
+    const Rows = struct {
+        fn at(drawn: *const vaxis.Screen, index: u16, storage: []u8) []const u8 {
+            var used: usize = 0;
+            var column: u16 = 0;
+            while (column < drawn.width) {
+                const cell = drawn.readCell(column, index).?;
+                @memcpy(storage[used..][0..cell.char.grapheme.len], cell.char.grapheme);
+                used += cell.char.grapheme.len;
+                column += @max(1, cell.char.width);
+            }
+            return std.mem.trimEnd(u8, storage[0..used], " ");
+        }
+    };
+    for (0..kinds.len) |a| for (0..kinds.len) |b| for (0..kinds.len) |c| {
+        const order = [_]usize{ a, b, c };
+        // Append all, prepend one or two over a seam, or append one at a time.
+        for (0..3) |shape| {
+            var window: Window = .{};
+            var entries: [3]Entry = undefined;
+            for (order, &entries, 0..) |kind, *entry, at| entry.* = .{ .key = .{ .position = at + 1 }, .text = texts[kind], .tight = View.tight(kinds[kind].value) };
+            switch (shape) {
+                0 => try window.append(&entries),
+                1 => {
+                    try window.append(entries[1..]);
+                    try window.prepend(entries[0..1]);
+                },
+                else => {
+                    try window.append(entries[2..]);
+                    try window.prepend(entries[1..2]);
+                    try window.prepend(entries[0..1]);
+                },
+            }
+            // Neighbours never change a row's own bytes.
+            for (entries) |entry| try testing.expectEqualStrings(entry.text.bytes, window.text(entry.key).bytes);
+            _ = window.heights(.{ .width = 40, .method = .unicode });
+            @memset(&cells, .{});
+            window.draw(.{ .first = 0 }, pane, true, .{}, .{});
+            var row: u16 = 0;
+            for (order, 0..) |kind, at| {
+                if (at != 0 and !(kinds[order[at - 1]].packed_ and kinds[kind].packed_)) {
+                    try testing.expectEqualStrings("", Rows.at(&screen, row, &buffer));
+                    row += 1;
+                }
+                try testing.expectEqualStrings(kinds[kind].line, Rows.at(&screen, row, &buffer));
+                row += 1;
+            }
+            try testing.expectEqualStrings("", Rows.at(&screen, row, &buffer));
+        }
+    };
+}
+
 test "session_reads policy cursor is inclusive only for a fresh provisional replay" {
     const job: Job = .{ .cursor = .{ .end = 90, .position = 40, .ordinal = 2 } };
     for ([_]u64{ 0, 1, 7 }) |ordinal| {
