@@ -44,6 +44,20 @@ When the user drops a requirement, list every planned or merged piece that only 
 Keep independent concerns independent; familiarity and line/module counts do not establish simplicity.
 Obtain independent opinions on material design questions.
 
+### Shape before code
+
+Before writing code for a change to `src/`, write a `## Shape` section in the PR description answering:
+
+- **[Values in](#ownership-and-transitions).** The value each user action or worker result arrives as.
+  An input carries what the user saw (the drawn row, list or frame), never state re-read later.
+- **[Who decides](#ownership-and-transitions).** The core `step` or transition function that makes each decision; shell code only applies the effects it returns.
+- **[Owner reused](#review).** For each behavior that already exists (joining a reader, reporting a failure, editor recovery, a choice), the function the change calls.
+  A second path doing an existing job is a finding.
+- **[Facts derived](#ownership-and-transitions).** For each new flag, marker or counter, the committed fact it is derived from instead.
+- **[Outcomes whole](#review).** Each result type crossing a boundary and the one function that settles it on completion, cancel and departure; no field is dropped on the way.
+
+When a review finding falls under one of these, the fix names it and corrects every site in the change before the next push.
+
 ### Ownership and transitions
 
 Keep state, validation and transitions with their owner.
@@ -128,7 +142,7 @@ On Host threads:
 
 ## Review
 
-Codex on the draft PR is the code review: comment `@codex review for duplicated authority and braided concerns; group symptoms by owner` after every draft push, because it reviews drafts only on request.
+Codex on the draft PR is the code review: comment `@codex review for duplicated authority and braided concerns, and against the PR's Shape section; group symptoms by owner` after every draft push, because it reviews drafts only on request.
 Mark ready once Codex is clean; [Landing](docs/agents/landing.md#publish-and-merge) owns the test-only exception for fixes after readiness.
 The [Code Review Rules](AGENTS.md#code-review-rules) own how it groups and orders its findings; the rules it applies stay here.
 The author's own reviews are design reviews of the approved design, and a redesign when fixes keep producing new findings.

@@ -57,6 +57,9 @@ on_press: ?Press = null,
 base_style: vaxis.Style = .{},
 /// Only background and reverse override the row's styles; foregrounds stay intact.
 selection_style: vaxis.Style = .{ .reverse = true },
+/// The pointer's row, quieter than the selection; only background, reverse and underline apply.
+/// A row that is both selected and hovered keeps the selection.
+hover_style: vaxis.Style = .{ .ul_style = .single },
 /// Optional presentation for the below line; row styles are unaffected.
 below_style: ?vaxis.Style = null,
 below_align: @FieldType(vxfw.RichText, "text_align") = .left,
@@ -104,7 +107,8 @@ const Lazy = struct {
     row: ?Row = null,
     base_style: vaxis.Style = .{},
     hovered: bool = false,
-    hover_style: vaxis.Style = .{},
+    /// Snapshot of the owner's hover look; null while this row is selected, since selection wins.
+    hover_style: ?vaxis.Style = null,
 
     fn widget(self: *Lazy) vxfw.Widget {
         return .{ .userdata = self, .drawFn = drawRow };
@@ -116,7 +120,7 @@ const Lazy = struct {
             const row = try self.owner.rows.rowFn(self.owner.rows.userdata, self.index, ctx.arena);
             std.debug.assert(row.lines.len > 0 and row.lines.len <= std.math.maxInt(u16));
             const selected = self.owner.selected == self.index;
-            self.hover_style = self.owner.selection_style;
+            self.hover_style = if (selected) null else self.owner.hover_style;
             self.base_style = self.owner.base_style;
             if (selected) self.base_style = selection(self.base_style, self.owner.selection_style);
             const lines = try ctx.arena.alloc(Line, row.lines.len);
@@ -139,8 +143,8 @@ const Lazy = struct {
             // RichText's widget is stack-local; only its cells escape.
             if (drawn.size.height != 0) @memcpy(surface.buffer[y * surface.size.width ..][0..surface.size.width], drawn.buffer[0..surface.size.width]);
         }
-        if (self.hovered) for (surface.buffer) |*cell| {
-            cell.style = selection(cell.style, self.hover_style);
+        if (self.hovered) if (self.hover_style) |hover| for (surface.buffer) |*cell| {
+            cell.style = hovering(cell.style, hover);
         };
         return surface;
     }
@@ -150,6 +154,12 @@ fn selection(style: vaxis.Style, selected: vaxis.Style) vaxis.Style {
     var result = style;
     result.bg = selected.bg;
     result.reverse = selected.reverse;
+    return result;
+}
+
+fn hovering(style: vaxis.Style, hover: vaxis.Style) vaxis.Style {
+    var result = selection(style, hover);
+    result.ul_style = hover.ul_style;
     return result;
 }
 
@@ -564,7 +574,7 @@ test "List updates its row count through exhausted resizes without building rows
 test "List hover paints only clickable clipped rows without moving selection and clears on leave" {
     const rows: []const Row = &Testing.mixed;
     var pressed: Testing.Pressed = .{};
-    var list: Self = .{ .rows = .of(&rows), .selected = 4, .selection_style = .{ .bg = .{ .index = 2 } }, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
+    var list: Self = .{ .rows = .of(&rows), .selected = 4, .selection_style = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .on_press = .{ .userdata = &pressed, .pressed = Testing.Pressed.pressed } };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx = Testing.context(arena.allocator(), 9);
@@ -575,12 +585,17 @@ test "List hover paints only clickable clipped rows without moving selection and
         for ([_]i16{ 0, 19 }) |x| {
             try list.widget().handleEvent(&events, .{ .mouse = .{ .col = x, .row = y, .button = .none, .type = .motion, .mods = .{} } });
             const hovered = try list.widget().draw(ctx);
-            for (hovered.children[1].surface.buffer) |cell| try std.testing.expectEqual(list.selection_style.bg, cell.style.bg);
+            for (hovered.children[1].surface.buffer) |cell| try std.testing.expectEqual(list.hover_style.bg, cell.style.bg);
+            for (hovered.children[4].surface.buffer) |cell| try std.testing.expectEqual(list.selection_style.bg, cell.style.bg);
             try std.testing.expectEqual(@as(?u32, 4), list.selected);
             try std.testing.expectEqual(@as(?u32, null), pressed.target);
             try std.testing.expect(list.hover.pointing);
         }
     }
+    // The selected row keeps the selection under the pointer.
+    try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 0, .row = 6, .button = .none, .type = .motion, .mods = .{} } });
+    const both = try list.widget().draw(ctx);
+    for (both.children[4].surface.buffer) |cell| try std.testing.expectEqual(list.selection_style.bg, cell.style.bg);
     try list.widget().handleEvent(&events, .mouse_leave);
     const plain = try list.widget().draw(ctx);
     try std.testing.expectEqual(list.base_style.bg, plain.children[1].surface.readCell(0, 0).style.bg);
@@ -603,7 +618,7 @@ test "List hover paints only clickable clipped rows without moving selection and
     _ = try list.widget().draw(clipped_ctx);
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
     const clipped = try list.widget().draw(clipped_ctx);
-    try std.testing.expectEqual(list.selection_style.bg, clipped.children[1].surface.readCell(0, 0).style.bg);
+    try std.testing.expectEqual(list.hover_style.bg, clipped.children[1].surface.readCell(0, 0).style.bg);
     try std.testing.expectEqual(@as(u16, 1), list.shown_at[1].height);
     try list.widget().handleEvent(&events, .{ .mouse = .{ .col = 1, .row = 2, .button = .none, .type = .motion, .mods = .{} } });
     try std.testing.expect(!list.hover.pointing);
@@ -636,7 +651,9 @@ test "List column actions override row targets and region-only rows clip hover a
     var mouse: vaxis.Mouse = .{ .row = 1, .col = 5, .button = .none, .mods = .{}, .type = .motion };
     try list.widget().handleEvent(&ctx, .{ .mouse = mouse });
     const hovered = try list.widget().draw(Testing.context(arena.allocator(), 3));
-    try std.testing.expect(hovered.children[1].surface.readCell(0, 0).style.reverse);
+    // Without colour the pointer's row underlines; reverse stays the selection's mark.
+    try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.children[1].surface.readCell(0, 0).style.ul_style);
+    try std.testing.expect(!hovered.children[1].surface.readCell(0, 0).style.reverse);
     try std.testing.expect(list.selected == null and pressed.target == null);
     try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
     const Case = struct { row: i16, col: i16, expected: ?u32 };
@@ -651,7 +668,7 @@ test "List column actions override row targets and region-only rows clip hover a
     }
     try list.widget().handleEvent(&ctx, .mouse_leave);
     const left = try list.widget().draw(Testing.context(arena.allocator(), 3));
-    try std.testing.expect(!left.children[1].surface.readCell(0, 0).style.reverse);
+    try std.testing.expectEqual(vaxis.Style.Underline.off, left.children[1].surface.readCell(0, 0).style.ul_style);
     mouse.row = 1;
     mouse.col = 3;
     mouse.type = .motion;
