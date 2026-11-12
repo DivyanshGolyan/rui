@@ -225,12 +225,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const limit = ctx.max.size();
     if (!self.validate()) return vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = limit.width, .height = 0 });
     var indices: std.array_list.Managed(usize) = .init(ctx.arena);
-    var widest: usize = 0;
     var selected_row: usize = 0;
     for (self.menu.entries, 0..) |entry, at| if (self.row(entry) != null) {
         if (self.selected == at) selected_row = indices.items.len;
         try indices.append(at);
-        widest = @max(widest, entry.id.len);
     };
     const size: vxfw.Size = .{ .width = limit.width, .height = @intCast(@min(limit.height, indices.items.len)) };
     var surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
@@ -249,6 +247,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         end = indices.items.len;
     }
     const shown = indices.items[self.scroll..end];
+    // Context follows the longest name in this viewport, not hidden matches
+    // above/below it and never the terminal's right edge.
+    var widest: usize = 0;
+    for (shown) |at| widest = @max(widest, self.menu.entries[at].id.len);
     self.hits = shown;
     for (shown, 0..) |at, y| {
         const entry = self.menu.entries[at];
@@ -570,5 +572,36 @@ test "Model choice input scrolls by grapheme and reserves refusal without a labe
         try std.testing.expect(std.unicode.utf8ValidateSlice(text.written()));
         try std.testing.expect(std.mem.indexOf(u8, text.written(), "Filter:") == null);
         if (width >= 27 and failure != null) try std.testing.expect(std.mem.indexOf(u8, text.written(), "text couldn't be entered") != null);
+    };
+}
+
+test "Model choice size column follows only the longest shown name across widths and filters" {
+    const entries = [_]picker.Entry{
+        .{ .id = "a-very-long-hidden-chat-model-before", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+        .{ .id = "gpt-6.1-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) },
+        .{ .id = "gpt-6.1-terra", .known = true, .catalogued = true, .providers = .initOne(.codex) },
+        .{ .id = "gpt-6-sol", .known = true, .catalogued = true, .providers = .initOne(.codex) },
+        .{ .id = "another-even-longer-hidden-chat-model-after", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    for (30..141) |width| for ([_]u16{ 1, 2, 3 }) |height| for ([_]bool{ false, true }) |filtered| {
+        errdefer std.debug.print("size column width={d} height={d} filtered={any}\n", .{ width, height, filtered });
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var choice: Self = .{};
+        choice.open(&menu, .codex, "gpt-6.1-terra");
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        if (filtered) try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 's', .text = "sol" } });
+        const drawn = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = height }, .cell_size = .{} });
+        // The hidden long names above/below never set this column. With sol,
+        // the two visible names are shorter again, at every terminal width.
+        const column: u16 = if (filtered) 18 else 20; // name starts at 5, then 11/13 cells and a two-cell gap.
+        try std.testing.expectEqual(@as(usize, if (height == 1 or (!filtered and height == 2)) 1 else 2), choice.hits.len);
+        for (choice.hits, 0..) |index, y| {
+            try std.testing.expect(entries[index].known);
+            for (5 + entries[index].id.len..column) |x| try std.testing.expectEqualStrings(" ", drawn.readCell(@intCast(x), @intCast(y)).char.grapheme);
+            try std.testing.expectEqualStrings("1", drawn.readCell(column, @intCast(y)).char.grapheme);
+            try std.testing.expectEqualStrings("M", drawn.readCell(column + 1, @intCast(y)).char.grapheme);
+        }
     };
 }
