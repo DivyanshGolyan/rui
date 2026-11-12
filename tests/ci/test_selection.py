@@ -79,10 +79,10 @@ class AssertedTextSelectionTest(unittest.TestCase):
                                        "sample-integration": python | {"A shell double-quoted literal",
                                                                         "A shell single-quoted literal"}})
 
-    def test_session_chrome_text_selects_human_cli_integration(self):
-        path = "src/session_chrome.zig"
+    def test_keys_panel_text_selects_human_cli_integration(self):
+        path = "src/keys_panel.zig"
         text = (Path(__file__).resolve().parents[2] / path).read_text()
-        self.assertIn("shift+enter or ctrl+j new line", text)
+        self.assertIn("ctrl+p   earlier message", text)
         result = select([path], "review", AVAILABLE, contents={path: (text, text)})
         self.assertIn("human-cli-integration", result["targets"])
         self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])

@@ -872,31 +872,67 @@
       ]
     },
     {
-      "name": "help",
-      "note": "20-help: Ctrl-O opens a row; no separate tool-details command",
-      "open": "Fix retry deadline",
+      "name": "keys",
+      "note": "20-keys: eleven entries, aligned pairs at 140 and one column at 46",
+      "open": "overview",
       "steps": [
         {
-          "text": "/help"
-        },
-        {
           "keys": [
+            "End",
             "Enter"
           ]
         },
         {
-          "wait": "Marks"
+          "wait": "Notifications"
         },
         {
-          "gone": "/details"
+          "keys": [
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Down",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "earlier message"
         }
       ],
       "expect": [
-        "Marks",
-        "Keys",
-        "ctrl+o                 open",
+        "enter    send",
+        "esc      back",
+        "⇧enter   new line",
+        "ctrl+x   stop",
+        "↑↓       scroll",
+        "ctrl+o   tool output",
+        "ctrl+p   earlier message",
+        "ctrl+r   retry",
+        "/        skills",
+        "alt+a    archive",
+        "ctrl+c   leave"
+      ],
+      "absent": [
+        "/help",
+        "Ctrl-X twice",
+        "shift+enter or ctrl+j",
         "Commands",
-        "/copy [code|file]"
+        "Marks",
+        "Esc returns",
+        "Browsing",
+        "Keys",
+        "↑↓ · enter change · esc close",
+        "‹ Rui · settings",
+        "ctrl+g",
+        "ctrl+d",
+        "ctrl+n",
+        "ctrl+end",
+        "ctrl+c/d",
+        "pgup/pgdn",
+        "first session",
+        "latest / last",
+        "scroll / select"
       ]
     },
     {
@@ -908,7 +944,7 @@
           "text": "/"
         },
         {
-          "wait": "/help"
+          "wait": "/copy"
         },
         {
           "gone": "/details"
@@ -920,7 +956,9 @@
       "expect": [
         "/copy",
         "code · file",
-        "/effort",
+        "/effort"
+      ],
+      "absent": [
         "/help"
       ]
     },
@@ -944,6 +982,9 @@
         "/sessions",
         "unarchived · archived · all",
         "/unarchive"
+      ],
+      "absent": [
+        "/help"
       ]
     },
     {

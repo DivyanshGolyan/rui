@@ -238,10 +238,29 @@ pub fn stageEndingMessageUpgrade(storage: *Store, keep_pending_forward: bool) !v
     };
     // K10 is the 66 -> 67 transition, even after later formats append steps.
     const from: u32 = 66;
-    // Remove format 68's additions too, so both engines replay the complete
-    // pending chain from the genuine old shape rather than double-adding them.
-    try Native.exec(storage, "ALTER TABLE model_operation DROP COLUMN first_event_ms");
-    try Native.exec(storage, "ALTER TABLE model_operation DROP COLUMN latency_ms");
+    // Reconstruct the historical row width from its owning CREATE, not a
+    // hand-maintained list of every column later formats append. Both engines
+    // must replay the pending chain from format 66's actual Operation shape.
+    const old_model = comptime blk: {
+        for (schema.migrations[(from - 1) - schema.migration_baseline].sqlite) |sql| {
+            if (std.mem.startsWith(u8, sql, "CREATE TABLE model_operation(")) break :blk sql;
+        }
+        @compileError("the ending upgrade fixture requires format 66's Operation CREATE");
+    };
+    const columns = comptime blk: {
+        for (schema.tables) |table| {
+            if (std.mem.eql(u8, table.name, "model_operation")) break :blk table.columns;
+        }
+        unreachable;
+    };
+    inline for (0..columns.len) |index| {
+        const column = columns[columns.len - 1 - index];
+        const added = comptime blk: {
+            @setEvalBranchQuota(100 * old_model.len);
+            break :blk std.mem.indexOf(u8, old_model, "\n " ++ column.name ++ " ") == null;
+        };
+        if (added) try Native.exec(storage, "ALTER TABLE model_operation DROP COLUMN " ++ column.name);
+    }
     const old = schema.migrations[53 - schema.migration_baseline];
     const suppress = schema.migrations[56 - schema.migration_baseline];
     // Use the historical definitions, not a second handwritten old format.

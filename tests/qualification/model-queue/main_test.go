@@ -266,7 +266,8 @@ func TestProvenanceFailuresExitNonzeroAfterPublication(t *testing.T) {
 
 // Query-level evidence for the synthetic history writer: set identities come
 // from the initialized Session, including an explicit loaded subset, not a
-// fixed ID or a nullable fallback for the new frozen-offer column.
+// fixed ID or a nullable fallback for the new frozen-offer column. The failed
+// history also freezes the writer's explicit zero context capacity.
 func TestPopulateFreezesSessionOffer(t *testing.T) {
 	sqliteBinary := pinnedSQLite(t)
 	for _, test := range []struct{ name, loaded, want string }{
@@ -287,7 +288,7 @@ CREATE TABLE core_command(command_key TEXT PRIMARY KEY,kind INTEGER,target TEXT,
 INSERT INTO core_command VALUES('template-configure',1,'k7m2qx',zeroblob(32),NULL,NULL,1,'',1,1,1);
 CREATE TABLE message_admission(admission_id INTEGER PRIMARY KEY,session_ref TEXT,command_key TEXT,content_id INTEGER,admission_position INTEGER,turn_id INTEGER,admitted_at INTEGER);
 CREATE TABLE turn(turn_id INTEGER PRIMARY KEY,session_ref TEXT,first_admission_id INTEGER,input_cutoff INTEGER,operation_id INTEGER,outcome_code TEXT,outcome_content_id INTEGER,outcome_position INTEGER,outcome_at INTEGER);
-CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,settings_revision INTEGER,input_cutoff INTEGER,admission_position INTEGER,attempt_ordinal INTEGER,retry_due_at_ms INTEGER,resolution_code TEXT,output_reservation INTEGER,resolved_at INTEGER,tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id));
+CREATE TABLE model_operation(operation_id INTEGER PRIMARY KEY,turn_id INTEGER,session_ref TEXT,settings_revision INTEGER,input_cutoff INTEGER,admission_position INTEGER,attempt_ordinal INTEGER,retry_due_at_ms INTEGER,resolution_code TEXT,output_reservation INTEGER,resolved_at INTEGER,tool_set_id INTEGER NOT NULL REFERENCES tool_set(tool_set_id),context_window INTEGER NOT NULL CHECK(context_window BETWEEN 0 AND 4294967295));
 CREATE TABLE conversation_entry(session_ref TEXT,entry_ordinal INTEGER,session_position INTEGER,entry_kind INTEGER,turn_id INTEGER,source_admission_id INTEGER,source_revision INTEGER,source_operation_id INTEGER,content_id INTEGER,recorded_at INTEGER);
 CREATE TABLE session_stop(command_key TEXT,session_ref TEXT,selected_turn_id INTEGER,admission_cutoff INTEGER,position INTEGER,stopped_at INTEGER);
 `, test.loaded))
@@ -297,12 +298,12 @@ CREATE TABLE session_stop(command_key TEXT,session_ref TEXT,selected_turn_id INT
 			if err := populate(deadline, sqliteBinary, store, population{History: 2}); err != nil {
 				t.Fatal(err)
 			}
-			rows, err := sql(deadline, sqliteBinary, store, "SELECT tool_set_id FROM model_operation ORDER BY operation_id;")
+			rows, err := sql(deadline, sqliteBinary, store, "SELECT tool_set_id,context_window FROM model_operation ORDER BY operation_id;")
 			if err != nil {
 				t.Fatal(err)
 			}
-			if want := test.want + "\n" + test.want; rows != want {
-				t.Fatalf("offers = %q, want %q", rows, want)
+			if want := test.want + "|0\n" + test.want + "|0"; rows != want {
+				t.Fatalf("offers and context windows = %q, want %q", rows, want)
 			}
 		})
 	}
