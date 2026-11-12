@@ -46,7 +46,12 @@ Fix each dependent PR on its branch, with its owner's lane told, or wait until i
 PRs run independently only when they touch different files.
 Work sharing a file with an open PR stacks on that PR, including across lanes.
 Land a stack in order.
-Only its front PR takes `origin/main`; each later PR takes main once, after its parent lands.
+Only its front PR takes `origin/main`.
+When a PR lands, GitHub deletes its branch and retargets the next PR in the stack to `main`.
+That next PR then merges as it is, with no push, when its head contains its parent's final head (`git merge-base --is-ancestor PARENT_HEAD CHILD_HEAD`) and GitHub reports no conflict; its earlier green `admission` and clean Codex review still apply to that unchanged head.
+Otherwise it first merges its parent's final head, or `origin/main` on a conflict, and waits for the new head's CI.
+The ancestry check matters because squash merging gives the parent new commits on `main`: a stacked PR missing the parent's last fix merges without a conflict yet brings back what that fix removed.
+Arm auto-merge only on a PR whose base is `main`; on a stacked PR it would merge into the parent's branch.
 
 ## CI failures
 
