@@ -497,10 +497,9 @@ def lifecycle_cases(root, binary, releases):
     with case(root, binary, releases, "retained-tagged-source-host") as c:
         c.old_selection()
         host, previous = c.start_host(source=True)
-        output = c.finish_upgrade(c.spawn_upgrade(), success=False)
-        assert "Installed Rui" in output and "existing Host was left running" in output, output
-        assert host.poll() is None and c.status()["instance"] == previous["instance"]
-        assert os_semantics.process_executable(host.pid) != c.link.resolve()
+        output = c.finish_upgrade(c.spawn_upgrade())
+        assert "Installed Rui" in output and "Activation: ready;" in output, output
+        proof_ready(c, previous, host)
 
     with case(root, binary, releases, "application-owned-host") as c:
         c.old_selection()
@@ -672,6 +671,31 @@ def restart_all_cases(root, binary, releases):
         finally:
             unreadable.unlink(missing_ok=True)
 
+    with case(root, binary, releases, "restart-all-managed-source") as c:
+        old_host, previous = c.start_host("retained-older-source", source=True)
+        target = c.build("selected-newer-source")
+        # As with the retained release builds above, these are different real
+        # build identities at the same numeric version. Source revisions can
+        # advance without a version bump; both builds have source markers.
+        (target / "revision").write_text("synthetic-newer-source-revision\n")
+        c.run("--publish-install", c.home, target, "intentional-source")
+        assert c.link.resolve() == target / "bin/rui"
+        c.binary = c.link
+        output = c.run("host", "restart", "--all", timeout=60)
+        assert f"{previous['store']}: restarted on {releases.version}" in output, output
+        current = proof_ready(c, previous, old_host)
+        output = c.run("host", "restart", "--all")
+        assert f"{previous['store']}: already on {releases.version}" in output, output
+        assert c.status()["instance"] == current["instance"]
+        # Observation of a source Host grants no right to replace a selected
+        # source installation through Upgrade: that still requires .released.
+        start = len(releases.requests)
+        output = c.upgrade(expect=6)
+        assert "intentional source build" in output, output
+        assert c.link.resolve() == target / "bin/rui"
+        assert c.status()["instance"] == current["instance"]
+        assert releases.archive_path not in releases.requests[start:]
+
     with case(root, binary, releases, "restart-all-application-owned") as c:
         process, previous = c.start_host("application-owned", managed=False)
         # There is no selected installation: unsupported ownership is a skip,
@@ -679,6 +703,14 @@ def restart_all_cases(root, binary, releases):
         output = c.run("host", "restart", "--all")
         assert f"{previous['store']}: left running: application-owned Host" in output, output
         assert "1 Hosts: 0 restarted, 0 already current, 1 left unchanged, 0 failed." in output, output
+        assert process.poll() is None and c.status()["instance"] == previous["instance"]
+
+    with case(root, binary, releases, "restart-all-unknown-managed") as c:
+        process, previous = c.start_host("unknown-managed")
+        executable = os_semantics.process_executable(process.pid)
+        (executable.parent.parent / "THIRD_PARTY_NOTICES.md").unlink()
+        output = c.run("host", "restart", "--all")
+        assert f"{previous['store']}: left running: application-owned Host" in output, output
         assert process.poll() is None and c.status()["instance"] == previous["instance"]
 
 
@@ -999,8 +1031,8 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "restart-all"):
-        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all]")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("restart-all", "lifecycle")):
+        sys.exit("usage: python3 tests/integration/upgrade_integration.py PATH_TO_REAL_RUI [restart-all|lifecycle]")
     binary = pathlib.Path(sys.argv[1]).resolve(strict=True)
     root = canonical_fixture_root(tempfile.mkdtemp(prefix="rui-upgrade-"))
     version_home = root / "version-home"
@@ -1019,8 +1051,9 @@ def main():
     complete = False
     try:
         if len(sys.argv) == 3:
-            restart_all_cases(root, binary, releases)
-            print("upgrade native: restart_all_cases passed", flush=True)
+            suite = {"restart-all": restart_all_cases, "lifecycle": lifecycle_cases}[sys.argv[2]]
+            suite(root, binary, releases)
+            print(f"upgrade native: {suite.__name__} passed", flush=True)
             complete = True
             return
         for suite in (discovery_cases, install_cases, lifecycle_cases, restart_all_cases):

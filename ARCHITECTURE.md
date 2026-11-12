@@ -1601,6 +1601,9 @@ Unreadable identities are reported rather than guessed; relative or unavailable 
 `host_restart_all` observes and activates one Host at a time through `HostLifecycle`, requiring the same discovered instance before activation; it keeps no Host registry or mirrored launch policy.
 Its pure report function consumes every `ActivationOutcome` and `Limitation`, keeping each Store-first line and success/failure category together; failures and unconfirmed restarts yield an operational caller error.
 Already-target and newer Hosts remain untouched, and unsupported launches are left running with their reason.
+Managed released and source Host builds are eligible; source Host versions come from their retained executable's bounded `--version` output through the same numeric version parser as restart-all's target.
+Unknown managed, ineligible and foreign builds remain application-owned; a managed source build without a verified numeric version grants no activation plan.
+Upgrade installation eligibility still requires a selected managed release, independently of the running Host's build kind; a source-started Host newer than that release is superseded without interruption, otherwise normal activation can restart it.
 The target is the pinned installed selection, with a verified numeric version; an unversioned source target is reported without stopping Hosts.
 No running Hosts prints `No running Hosts.` and starts nothing.
 This install-wide operation is separate from `rui upgrade`, whose selected-Store behavior is unchanged.

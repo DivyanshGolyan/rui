@@ -54,8 +54,10 @@ The Upgrade restart affects all Sessions in the selected Store and may interrupt
 A running Host keeps its configured capacity through the restart.
 Installation and activation are reported separately.
 An unsupported or application-owned Host launch may remain running after a release is installed, with activation reported as incomplete.
-Automatic activation supports released managed `host serve` launches whose public settings can be preserved.
-Source, application-owned `--launch-frame`, hidden-option, and relative configuration-path launches are not paused.
+Automatic activation supports released and source managed `host serve` launches whose public settings can be preserved and whose executable reports a verified numeric version.
+Unknown managed builds, foreign executables, application-owned `--launch-frame`, hidden-option, and relative configuration-path launches are not paused.
+This does not make a selected source installation eligible for `rui upgrade`; Upgrade still requires a selected managed release.
+When that selection is released but its running Host came from a managed source build, the usual version comparison applies: a newer Host stays running without a downgrade; an equal or older Host can restart on the pinned release.
 Private launch environment is observed only in memory and wiped after the operation.
 Upgrade waits for the observed Host's lease to retire and checks the pinned target's readiness before reporting activation.
 

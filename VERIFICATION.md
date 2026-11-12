@@ -855,7 +855,9 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 `upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
 Its `restart_all_cases` suite also runs alone with `python3 tests/integration/upgrade_integration.py REAL_RUI restart-all` as an isolated non-root user.
 Two real retained managed builds serve separate Stores; `host restart --all` must replace both instances with the selected pinned executable and retire both old PIDs, preserve capacity/environment, then leave both current instances unchanged on retry.
-The suite checks no-Host/no-start behavior, mandatory `--all`, refusal of per-Store selection, a live unreadable socket as an operational failure, a stale refused socket as a silent skip, and an application-owned Host as an explained successful skip even without an installed target.
+The suite checks no-Host/no-start behavior, mandatory `--all`, refusal of per-Store selection, a live unreadable socket as an operational failure, a stale refused socket as a silent skip, and application-owned and unknown-managed Hosts as explained successful skips even without an installed target.
+It also restarts a retained managed source Host onto a newly selected managed source build, verifies exact pinned process replacement and an already-current retry, and confirms Upgrade still refuses a selected source installation without changing the Host.
+The lifecycle suite checks a released selection can activate a retained managed source Host through the same version and exact-instance rules.
 `host_restart_all` native unit tests cover every activation outcome, every limitation and every failed/unconfirmed stage; platform/client tests cover runtime filtering, missing directories and stale-versus-unreadable discovery.
 Both installer suites record the exact newly selected command's restart-all invocation, retain its output and require exit zero after a failed restart handoff.
 
