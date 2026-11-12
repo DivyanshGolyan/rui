@@ -1,5 +1,5 @@
 //! The Upgrade, as the overview and a conversation both read it: the run
-//! /upgrade started, what the last run left Host requests, and from those
+//! app settings started, what the last run left Host requests, and from those
 //! alone whether requests wait, whose Esc is, and what a conversation's
 //! loop does next. Values in, decisions out; the overview owns the one
 //! value, its worker says where the run stands, and a conversation reads it.
@@ -12,8 +12,8 @@ const upgrade_status = @import("upgrade_status.zig");
 pub const Outcome = upgrade_status.Outcome;
 
 /// What the last Upgrade left: requests open, held until the listing is
-/// read again under the selected Rui, or blocked until /upgrade or a new
-/// terminal.
+/// read again under the selected Rui, or blocked until another Upgrade or
+/// a new terminal.
 pub const After = enum { open, reobserving, blocked };
 
 /// What a conversation's loop does on this pass.
@@ -27,7 +27,7 @@ pub const Phase = enum {
     active,
 };
 
-pub const recovery = "! Host requests paused after Upgrade; draft and original retained. /upgrade or use the selected Rui in a new terminal.";
+pub const recovery = "! Host requests paused after Upgrade; draft and original retained. Select Version in app settings or use the selected Rui in a new terminal.";
 /// What a conversation's status row says while it reads itself again.
 pub const rereading = "Reading this Session again after the Upgrade…";
 
@@ -49,7 +49,7 @@ pub fn relaunch(outcome: Outcome, has_guidance: bool) bool {
 }
 
 pub const Upgrade = struct {
-    /// The run /upgrade started, as its worker last said it stands; null
+    /// The run app settings started, as its worker last said it stands; null
     /// before the first.
     run: ?upgrade_status.Run = null,
     after: After = .open,
@@ -69,7 +69,7 @@ pub const Upgrade = struct {
         return if (self.run) |run| run.takesEscape() else false;
     }
 
-    /// /upgrade checks at once. False while a run goes on, which keeps its
+    /// Starts checking at once. False while a run goes on, which keeps its
     /// progress and its Esc.
     pub fn start(self: *Upgrade) bool {
         if (self.going()) return false;
@@ -91,7 +91,7 @@ pub const Upgrade = struct {
     }
 
     /// A conversation could not settle its Client work for the run, or
-    /// read itself again after it: blocked until /upgrade.
+    /// read itself again after it: blocked until another Upgrade.
     pub fn block(self: *Upgrade) void {
         self.after = .blocked;
     }
@@ -117,12 +117,12 @@ const ended_unchanged: upgrade_status.Run = .{ .ended = .{ .how = .cancelled, .o
 const ended_compatible: upgrade_status.Run = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 61, .patch = 0 }, .restarted = true } }, .outcome = .compatible } };
 const ended_incompatible: upgrade_status.Run = .{ .ended = .{ .how = .{ .incompatible = .{ .schema = 61, .patch = 0 } }, .outcome = .incompatible } };
 
-test "an Upgrade holds Host requests from /upgrade until the listing is read under the selected Rui" {
+test "an Upgrade holds Host requests from its start until the listing is read under the selected Rui" {
     var upgrade: Upgrade = .{};
     try std.testing.expect(!upgrade.held() and !upgrade.takesEscape() and upgrade.phase(false) == .active);
     try std.testing.expect(upgrade.start());
     try std.testing.expect(upgrade.held() and upgrade.takesEscape() and upgrade.phase(false) == .quiescing);
-    // The run going on keeps its progress: another /upgrade starts nothing.
+    // The run going on keeps its progress: another start does nothing.
     upgrade.stand(.{ .installing = .{ .found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none }, .step = .publishing } });
     try std.testing.expect(!upgrade.start() and upgrade.run.? == .installing and !upgrade.takesEscape());
     upgrade.stand(ended_compatible);
@@ -141,7 +141,7 @@ test "a block lasts until another Upgrade, and a listing does not lift it" {
     try std.testing.expect(upgrade.held() and upgrade.phase(false) == .blocked and upgrade.phase(true) == .blocked);
     upgrade.reobserved();
     try std.testing.expectEqual(After.blocked, upgrade.after);
-    // /upgrade again quiesces first, and an unchanged run keeps the block.
+    // Starting again quiesces first, and an unchanged run keeps the block.
     try std.testing.expect(upgrade.start());
     try std.testing.expectEqual(Phase.quiescing, upgrade.phase(false));
     upgrade.stand(ended_unchanged);

@@ -1,4 +1,4 @@
-//! Inline /upgrade's joined worker: the check, then at once the install.
+//! The app settings Version row's joined worker: check, then install.
 //! The owner keeps this value at a stable address from begin through
 //! completion, polls `advance` and tells the overview's core its `status`. The
 //! full check and receipts print on exit.
@@ -251,7 +251,7 @@ pub fn writeReport(self: *const Self, writer: *std.Io.Writer) !void {
 fn failureWords(err: anyerror) []const u8 {
     return switch (caller_error.of(err)) {
         .upgrade_release_invalid, .upgrade_preparation_failed, .upgrade_ineligible => |code| caller_error.facts(code).says,
-        else => "Rui could not finish it. Check network access and disk space, then run /upgrade again.",
+        else => "Rui could not finish it. Check network access and disk space, then select Version in app settings again.",
     };
 }
 

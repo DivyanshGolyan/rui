@@ -29,7 +29,7 @@ Run `rui --version` to see the selected build.
 `rui upgrade` updates an eligible released managed installation under `~/.local` to that release.
 It restarts the selected Store's Host only if that Host is already running and can be safely activated.
 With an eligible installation and no running Host, Upgrade only installs.
-The terminal's `/upgrade` does the same from the overview or a conversation, on the status row: it installs a found release at once, and Esc cancels until publishing starts.
+The Version row in the terminal's app settings starts the same run from the overview or with a conversation open, on the status row: it installs a found release at once, and Esc cancels until publishing starts.
 After installing, it redraws in the new Rui and returns to the same place with unsent drafts intact.
 That also resolves the old client's protocol/restart hold; a failed or unconfirmed Host activation still needs its recovery instructions.
 If Rui must show recovery or repair instructions, follow the departure guidance instead; see the [Upgrade contract](../ARCHITECTURE.md#store-format-and-upgrades).

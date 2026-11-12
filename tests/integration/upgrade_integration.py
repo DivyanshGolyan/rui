@@ -7,6 +7,7 @@ and every install target is the supplied real native executable. Retained-build 
 Host versions, exercise replacement of an already-running native Host.
 """
 import contextlib
+import fcntl
 import hashlib
 import http.server
 import io
@@ -19,6 +20,8 @@ import shutil
 import signal
 import socket
 import stat
+import struct
+import termios
 import subprocess
 import sys
 import tarfile
@@ -550,7 +553,10 @@ class TerminalScreen:
 
     def __init__(self, master, process):
         self.master, self.process = master, process
-        self.capture = ScreenCapture(COLUMNS, ROWS, reply=answers_to(master))
+        self.columns = max(COLUMNS, 140)
+        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, self.columns, 0, 0))
+        process.send_signal(signal.SIGWINCH)
+        self.capture = ScreenCapture(self.columns, ROWS, reply=answers_to(master))
         self.tail = bytearray()
         self.entries = self.restorations = 0
         self.transition_tail = b""
@@ -595,6 +601,30 @@ class TerminalScreen:
 
     def send(self, text):
         os.write(self.master, text.encode())
+
+    def start_upgrade(self):
+        # Settings stays reachable in the split list while a conversation is open.
+        frame = self.contains("Settings")
+        for row, line in enumerate(frame.splitlines()):
+            if "Settings" in line[:40]:
+                column = line.index("Settings")
+                self.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
+                break
+        else:
+            raise AssertionError(frame)
+        self.contains("Notifications")
+        frame = self.contains("Version")
+        for row, line in enumerate(frame.splitlines()):
+            if "Version" in line[40:]:
+                column = line.index("Version", 40)
+                self.send(f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m")
+                break
+        else:
+            raise AssertionError(frame)
+
+    def close_settings(self):
+        self.send("\x1b")
+        self.contains("›")
 
     def save(self, destination, name):
         if destination is not None:
@@ -670,16 +700,16 @@ def terminal_cases(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.start_upgrade()
             screen.until(gate.entered.is_set, "terminal installation archive gate")
-            screen.contains(f"Upgrading to {releases.version}")
-            screen.contains("esc cancels")
+            screen.contains(f"upgrading to {releases.version}")
+            screen.contains("Version")
             screen.save(artifacts, "overview-preparing")
             assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
             # Escape interrupts the running download; nothing waits on the
             # fixture server.
             screen.send("\x1b")
-            screen.contains("Upgrade cancelled; nothing changed")
+            screen.contains(" · cancelled")
             gate.release.set()
             c.assert_unchanged()
             assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
@@ -741,15 +771,17 @@ def conversation_case(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
-            screen.contains(f"‹ {session}")
-            screen.send("/upgrade\r")
+            # The wide shell keeps the list alongside the conversation; its
+            # footer identifies the opened Session in the right pane.
+            screen.contains(f"│ {session} · gpt-6-luna")
+            screen.start_upgrade()
             screen.until(gate.entered.is_set, "conversation installation archive gate")
-            screen.contains(f"Upgrading to {releases.version}")
-            screen.contains("esc cancels")
+            screen.contains(f"upgrading to {releases.version}")
+            screen.contains("Version")
             screen.save(artifacts, "conversation-preparing")
             assert c.link.resolve() == c.original and c.status()["instance"] == previous["instance"]
             screen.send("\x1b")
-            screen.contains("Upgrade cancelled; nothing changed")
+            screen.contains(" · cancelled")
             gate.release.set()
             c.assert_unchanged()
             assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
@@ -795,10 +827,10 @@ def escape_after_publication(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.start_upgrade()
             screen.until(lambda: c.link.resolve() != c.original, "publication before terminal Escape")
             installed = c.link.resolve()
-            screen.contains("Publishing; cancelling no longer rolls back")
+            screen.contains(" · publishing")
             screen.send("\x1b")
             screen.contains("Publishing; cancelling no longer rolls back")
             screen.save(artifacts, "escape-after-publication")
@@ -875,9 +907,9 @@ def signal_during_check(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.start_upgrade()
             screen.until(gate.entered.is_set, "metadata check held before terminal signal")
-            screen.contains("Checking for updates")
+            screen.contains("checking for updates")
             screen.save(artifacts, "signal-during-check")
             exit_on_sigint(screen, process, "terminal exit during held upgrade check")
             assert not gate.release.is_set(), "terminal required metadata peer release before exiting"
@@ -897,7 +929,7 @@ def signal_after_publication(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
-            screen.send("/upgrade\r")
+            screen.start_upgrade()
             screen.until(lambda: c.link.resolve() != c.original, "publication before SIGINT")
             installed = c.link.resolve()
             assert installed.exists() and gate.exists()
@@ -944,7 +976,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
             try:
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
-                screen.send("/upgrade\r")
+                screen.start_upgrade()
 
                 def child_started():
                     return receipt.exists() and receipt.read_text().strip().isdigit()
@@ -958,10 +990,10 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
                     return running.returncode == 0 and not running.stdout.strip().startswith("Z")
 
                 assert alive()
-                screen.contains("Checking for updates")
+                screen.contains("checking for updates")
                 assert releases.requests[start:] == [], "latest discovery ran before selected probe completed"
                 screen.send("\x1b")
-                screen.contains("Upgrade cancelled; nothing changed")
+                screen.contains(" · cancelled")
                 screen.save(artifacts, "selected-version-escape")
 
                 def reaped():
@@ -999,7 +1031,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
             with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
                 screen = TerminalScreen(master, process)
                 screen.contains("›")
-                screen.send("/upgrade\r")
+                screen.start_upgrade()
                 screen.until(gate.entered.is_set, "real archive request after stage creation")
                 stages = list(parent.glob("install.*"))
                 assert len(stages) == 1 and stages[0].is_dir(), stages
@@ -1008,6 +1040,8 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
                 # remove that directory after checksum validation rejects it.
                 parent.chmod(0o500)
                 gate.release.set()
+                screen.contains(" · upgrade failed")
+                screen.close_settings()
                 screen.contains("Upgrade failed; nothing changed")
                 screen.save(artifacts, "dual-failure-status")
                 assert retained.is_dir(), "cleanup receipt did not identify an existing retained stage"

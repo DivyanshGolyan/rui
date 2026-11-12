@@ -4,6 +4,8 @@
 //! pinned device-code flow and refresh, and builds the login and refresh
 //! records those exchanges produce. Callers own the transport, the clock and the
 //! polling loop; selection and admission live in `codex_credential_policy.zig`.
+//! The ChatGPT plan sign-in (`chatgpt_plan_wire.zig`) talks to the same
+//! issuer, so it reuses the token response, refresh and form encoding here.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
 const Text = @import("json_scalar.zig").Text;
@@ -14,7 +16,7 @@ pub const response_limit = 64 * 1024;
 pub const token_limit = policy.max_token_bytes;
 const Required = policy.Required;
 const json_content = "application/json";
-const form_content = "application/x-www-form-urlencoded";
+pub const form_content = "application/x-www-form-urlencoded";
 const token_url = issuer ++ "/oauth/token";
 
 /// One POST to the issuer. The body may borrow caller-owned secret bytes.
@@ -47,17 +49,7 @@ pub fn loginRecord(tokens: *const Tokens, refreshed_at: i64, record: *policy.Rec
     try record.id_token.set(tokens.id_token.slice());
     try record.access_token.set(tokens.access_token.slice());
     try record.refresh_token.set(tokens.refresh_token.slice());
-    try deriveClaims(record, claims);
-}
-
-/// A record's account, FedRAMP routing and expiry are those of its own
-/// tokens, read as `policy.validateSelected` reads them.
-fn deriveClaims(record: *policy.Record, claims: *policy.ClaimScratch) !void {
-    var account: policy.Account = undefined;
-    try policy.parseAccount(record.id_token.slice(), claims, &account);
-    try record.account_id.set(account.id.slice());
-    record.fedramp = account.fedramp;
-    record.expires_at = try policy.expiryOf(record, claims);
+    try policy.deriveClaims(record, claims);
 }
 
 pub const device_start: Request = .{
@@ -160,7 +152,8 @@ pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
 
 /// Builds the replacement for a claimed record from a refresh response.
 /// Omitted rotating fields are kept; routing and expiry follow the resulting
-/// tokens. The generation is assigned at admission. On error the replacement
+/// tokens, whose account is read by the record's own kind
+/// (`policy.accountOf`), so a plan record's refresh keeps its subject. The generation is assigned at admission. On error the replacement
 /// is zeroed.
 pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record, scratch: *Scratch) !void {
     replacement.* = current.*;
@@ -171,16 +164,16 @@ pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []
     if (wire.id_token) |text| {
         const id = text.slice;
         var account: policy.Account = undefined;
-        try policy.parseAccount(id, &scratch.claims, &account);
+        try policy.accountOf(current, id, &scratch.claims, &account);
         if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice())) return error.AccountChanged;
         const fedramp = account.fedramp;
-        try policy.parseAccount(current.id_token.slice(), &scratch.claims, &account);
+        try policy.accountOf(current, current.id_token.slice(), &scratch.claims, &account);
         if (account.fedramp != fedramp) return error.AccountChanged;
         try replacement.id_token.set(id);
     }
     if (wire.access_token) |access| try replacement.access_token.set(access.slice);
     if (wire.refresh_token) |refresh| try replacement.refresh_token.set(refresh.slice);
-    try deriveClaims(replacement, &scratch.claims);
+    try policy.deriveClaims(replacement, &scratch.claims);
     replacement.refreshed_at = refreshed_at;
     replacement.state = .ready;
 }
@@ -269,7 +262,9 @@ fn formEncode(buffer: []u8, code: []const u8, verifier: []const u8) ![]const u8 
     return stream.buffered();
 }
 
-fn percentEncode(writer: *std.Io.Writer, value: []const u8) !void {
+/// Writes `value` with every byte outside RFC 3986's unreserved set as `%XX`,
+/// which suits both a form body and a URL query.
+pub fn percentEncode(writer: *std.Io.Writer, value: []const u8) !void {
     const hex = "0123456789ABCDEF";
     for (value) |byte| switch (byte) {
         'A'...'Z', 'a'...'z', '0'...'9', '-', '.', '_', '~' => try writer.writeByte(byte),
@@ -533,12 +528,14 @@ test "authentication failure classes name errors their producers raise" {
     // `policy.failureCode` classifies by name; a misspelled or renamed
     // producer error would silently become a backend failure.
     inline for (@typeInfo(policy.LoginRequired).error_set.error_names.?) |name| {
-        try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));
+        const plan = @import("chatgpt_plan_wire.zig");
+        try std.testing.expect(comptime raises(parseRefreshResponse, name) or raises(plan.parseRefreshResponse, name) or raises(policy.select, name) or raises(policy.launchCheck, name));
         const failure: anyerror = @field(anyerror, name);
         const expected = switch (failure) {
             error.RefreshTokenExpired => "provider_sign_in_refresh_token_expired",
             error.RefreshTokenReused => "provider_sign_in_refresh_token_reused",
             error.RefreshTokenInvalidated => "provider_sign_in_refresh_token_invalidated",
+            error.PlanScopeMissing => "provider_sign_in_plan_scope_missing",
             else => "provider_sign_in_required",
         };
         try std.testing.expectEqualStrings(expected, policy.failureCode(failure));
