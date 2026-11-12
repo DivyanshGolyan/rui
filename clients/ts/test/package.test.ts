@@ -12,7 +12,7 @@ import { PLATFORM_PACKAGES, resolveBinary } from "../src/binary.ts";
 
 const binary = process.env.RUI_BINARY;
 const platform = PLATFORM_PACKAGES[process.platform]?.[process.arch];
-const releasePlatform = { "rui-linux-x64": "linux-x86_64", "rui-linux-arm64": "linux-arm64", "rui-darwin-arm64": "darwin-arm64" }[platform ?? ""];
+const releasePlatform = { "ruicode-linux-x64": "linux-x86_64", "ruicode-linux-arm64": "linux-arm64", "ruicode-darwin-arm64": "darwin-arm64" }[platform ?? ""];
 const skip = !binary
 	? "set RUI_BINARY to a built rui"
 	: releasePlatform === undefined
@@ -40,14 +40,14 @@ test("the packed tarballs install and start a Host from the platform package", {
 		const app = join(work, "app");
 		mkdirSync(app);
 		writeFileSync(join(app, "package.json"), '{"name":"app","private":true,"type":"module"}');
-		execFileSync("npm", ["install", "--offline", "--no-audit", "--no-fund", "--ignore-scripts", join(packs, "rui-0.0.1.tgz"), join(packs, `${platform}-0.0.1.tgz`)], { cwd: app, stdio: "inherit" });
-		const installed = JSON.parse(readFileSync(join(app, "node_modules", "rui", "package.json"), "utf8"));
-		assert.deepEqual(Object.keys(installed.optionalDependencies).sort(), ["rui-darwin-arm64", "rui-linux-arm64", "rui-linux-x64"]);
+		execFileSync("npm", ["install", "--offline", "--no-audit", "--no-fund", "--ignore-scripts", join(packs, "rui-0.0.1.tgz"), join(packs, `rui${(platform as string).slice("ruicode".length)}-0.0.1.tgz`)], { cwd: app, stdio: "inherit" });
+		const installed = JSON.parse(readFileSync(join(app, "node_modules", "ruicode", "package.json"), "utf8"));
+		assert.deepEqual(Object.keys(installed.optionalDependencies).sort(), ["ruicode-darwin-arm64", "ruicode-linux-arm64", "ruicode-linux-x64"]);
 		// Plain node, no type stripping, a PATH with no rui on it: the executable can only come from the platform package.
 		writeFileSync(
 			join(app, "run.mjs"),
 			`import { readlinkSync } from "node:fs";
-import { Rui } from "rui";
+import { Rui } from "ruicode";
 const rui = await Rui.connect({ database: ${JSON.stringify(join(work, "store"))}, provider: { baseUrl: "https://api.openai.com/v1", key: "sk-test" } });
 const executable = process.platform === "linux" ? readlinkSync(\`/proc/\${rui.pid}/exe\`) : null;
 console.log(JSON.stringify({ executable }));
