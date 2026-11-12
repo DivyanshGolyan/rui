@@ -16,6 +16,7 @@ const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
+const transition = @import("../transition.zig");
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const operation_effort = @import("operation_effort.zig");
@@ -1088,53 +1089,81 @@ const RetryChoice = struct {
     }
 };
 
-/// The read Access `candidate` pages through due retries in id order,
-/// outside any transaction, until it finds one `active` does not hold,
-/// after at most one more than it can exclude; each page is a round. The
-/// Store runs no other entry point meanwhile, so the write Access `a`
-/// starts the replacement Attempt from what the scan read, in one round.
-/// The first page's round also reads `scheduled`, when given: the Unix
-/// millisecond the earliest scheduled retry not yet due falls due.
-pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active: ActiveOperationFilter, faults: Faults, scheduled: ?*?u64) !?AttemptAdmission {
-    const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(io)) orelse return error.IntegerOutOfRange;
-    const limit = try std.math.add(u64, active.maximum_exclusions, 1);
-    var choice: RetryChoice = .{ .active = active, .now_ms = now_ms };
-    var next_scheduled: next_scheduled_retry.Result = null;
-    var first_page = true;
-    while (choice.chosen == null and choice.scanned < limit) {
-        choice.page_rows = 0;
-        candidate.readEach(due_retries, .{ .now_ms = now_ms, .after = choice.after }, limit - choice.scanned, &choice);
-        if (first_page and scheduled != null) candidate.read(next_scheduled_retry, .{ .now_ms = now_ms }, &next_scheduled);
-        try store_access.runAs(candidate, error.RetrySelectionFailed);
-        if (first_page) if (scheduled) |out| {
-            out.* = if (next_scheduled) |row| row.retry_due_at_ms else null;
-        };
-        first_page = false;
-        if (choice.corrupt) return error.CorruptStore;
-        if (choice.page_rows < retry_admission_page_rows) break;
-    }
-    const chosen = choice.chosen orelse return null;
-    const replacement = chosen.attempt_ordinal.get() + 1;
-    a.write(retry_attempt, .{
-        .operation_id = chosen.operation_id.get(),
-        .replacement = replacement,
-        .turn_id = chosen.turn_id.get(),
-        .attempt_ordinal = chosen.attempt_ordinal.get(),
-        .now_ms = now_ms,
-        .session = chosen.session,
+/// Admits the oldest due retry no slot in `active` holds. It pages
+/// through due retries in id order, outside any transaction, until it
+/// finds one `active` does not hold, after at most one more than it can
+/// exclude; each page is a round. The Store runs no other entry point
+/// meanwhile, so the commit starts the replacement Attempt from what the
+/// scan read. The first page's round also reads `scheduled`, when given:
+/// the Unix millisecond the earliest scheduled retry not yet due falls due.
+pub const AdmitRetry = struct {
+    pub const rounds = transition.rounds(.{
+        .first_page = .{ .always, error.RetrySelectionFailed },
+        .next_page = .{ .paged, error.RetrySelectionFailed },
     });
-    if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    a.commit() catch |err| {
-        if (err != error.RetryNoLongerDue) return err;
-        try a.abandon(faults);
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { io: std.Io, active: ActiveOperationFilter, scheduled: ?*?u64 };
+    pub const Result = ?AttemptAdmission;
+    pub const Ordinary = store_core.Ordinary.none;
+    /// The retry changed since the scan read it: the admission answers null.
+    pub const Declined = error{RetryNoLongerDue};
+    pub const Guards = Declined;
+
+    input: Input,
+    limit: u64 = 0,
+    choice: RetryChoice = undefined,
+    next_scheduled: next_scheduled_retry.Result = null,
+
+    pub fn step(t: *AdmitRetry, r: *transition.Round(AdmitRetry), ran: ?rounds.At) !transition.Next(AdmitRetry) {
+        const page = ran orelse {
+            const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(t.input.io)) orelse return error.IntegerOutOfRange;
+            t.limit = try std.math.add(u64, t.input.active.maximum_exclusions, 1);
+            t.choice = .{ .active = t.input.active, .now_ms = now_ms };
+            t.queuePage(r);
+            if (t.input.scheduled != null) r.read(next_scheduled_retry, .{ .now_ms = now_ms }, &t.next_scheduled);
+            return .{ .round = .first_page };
+        };
+        if (page == .first_page) if (t.input.scheduled) |out| {
+            out.* = if (t.next_scheduled) |row| row.retry_due_at_ms else null;
+        };
+        if (t.choice.corrupt) return error.CorruptStore;
+        if (t.choice.chosen == null and t.choice.scanned < t.limit and t.choice.page_rows >= retry_admission_page_rows) {
+            t.queuePage(r);
+            return .{ .round = .next_page };
+        }
+        const chosen = t.choice.chosen orelse return .{ .done = null };
+        r.write(retry_attempt, .{
+            .operation_id = chosen.operation_id.get(),
+            .replacement = chosen.attempt_ordinal.get() + 1,
+            .turn_id = chosen.turn_id.get(),
+            .attempt_ordinal = chosen.attempt_ordinal.get(),
+            .now_ms = t.choice.now_ms,
+            .session = chosen.session,
+        });
+        if (r.faults().attempt_before_commit) return error.InjectedAttemptCommitFailure;
+        return .commit;
+    }
+
+    fn queuePage(t: *AdmitRetry, r: *transition.Round(AdmitRetry)) void {
+        t.choice.page_rows = 0;
+        r.readEach(due_retries, .{ .now_ms = t.choice.now_ms, .after = t.choice.after }, t.limit - t.choice.scanned, &t.choice);
+    }
+
+    pub fn committed(t: *const AdmitRetry) Result {
+        const chosen = t.choice.chosen.?;
+        return .{ .permit = .{ .binding = .{
+            .turn_id = chosen.turn_id.get(),
+            .operation_id = chosen.operation_id.get(),
+            .attempt_ordinal = chosen.attempt_ordinal.get() + 1,
+        } } };
+    }
+
+    pub fn declined(_: *const AdmitRetry, _: Declined) Result {
         return null;
-    };
-    return .{ .permit = .{ .binding = .{
-        .turn_id = chosen.turn_id.get(),
-        .operation_id = chosen.operation_id.get(),
-        .attempt_ordinal = replacement,
-    } } };
-}
+    }
+};
 
 /// Every active Turn's current Operation that proposed tool calls, the
 /// Operations that can be blocking successor discovery: main's scope.

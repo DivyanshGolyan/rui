@@ -41,6 +41,13 @@ pub fn refusal(phase: Phase) []const u8 {
     };
 }
 
+/// Only an installation with no remaining departure guidance can replace
+/// this terminal's client. Screen and draft state affect the handoff, not
+/// whether an installed client must start.
+pub fn relaunch(outcome: Outcome, has_guidance: bool) bool {
+    return outcome != .unchanged and !has_guidance;
+}
+
 pub const Upgrade = struct {
     /// The run app settings started, as its worker last said it stands; null
     /// before the first.
@@ -157,4 +164,12 @@ test "an unchanged run reads the listing again, and a conversation's failure blo
     try std.testing.expectEqual(Phase.quiescing, upgrade.phase(true));
     upgrade.stand(ended_unchanged);
     try std.testing.expectEqual(Phase.blocked, upgrade.phase(true));
+}
+
+test "relaunch is only an installed outcome without departure guidance" {
+    for (std.enums.values(Outcome)) |outcome| {
+        for ([_]bool{ false, true }) |guidance| {
+            try std.testing.expectEqual(outcome != .unchanged and !guidance, relaunch(outcome, guidance));
+        }
+    }
 }
