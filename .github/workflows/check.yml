@@ -96,6 +96,13 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               print('Selection (not acceptance):\n```json\n' + json.dumps(result.selection, indent=2) + '\n```', file=f)
           PY
+      - name: Require PR Shape
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          BASE=$(python3 -c 'import json; print(json.load(open("selection.json"))["base"])')
+          python3 tests/ci/pr_shape.py "$BASE"
   policy:
     needs: plan
     if: ${{ !github.event.repository.private && needs.plan.outputs.change_kind == 'normal' && needs.plan.outputs.draft_run == 'false' }}

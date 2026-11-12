@@ -28,6 +28,9 @@ PROVIDER_OWNED = (
     "providers.zig",
     "provider_name.zig",
     "api_key.zig",
+    # The shared credential adapter and its input-row sign-in screen.
+    "provider_login.zig",
+    "SignIn.zig",
     "model_list.zig",
     "model_capability.zig",
     "cli.zig",

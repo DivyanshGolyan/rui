@@ -131,6 +131,41 @@ class FramesTest(unittest.TestCase):
             ], "steps": [{"text": "/help"}, {"keys": ["Enter"]}, {"wait": "Keys", "timeout": 2}]},
         ]}
 
+    def test_mouse_steps_send_first_matching_cell_and_exact_sgr_bytes(self):
+        steps = self.helper["frame_steps"]
+        for action, expected in (("move", b"\x1b[<35;7;2M"),
+                                 ("click", b"\x1b[<0;7;2M\x1b[<0;7;2m")):
+            with self.subTest(action=action):
+                calls = []
+                def tmux(*argv, **_kwargs):
+                    calls.append(argv)
+                    return types.SimpleNamespace(returncode=0, stderr="", stdout="Header\n界e\u0301   Target Target\nTarget\n")
+                run = types.SimpleNamespace(tmux=tmux)
+                with patch.dict(steps.__globals__, {"frame_dead": lambda *_: False}), patch("time.sleep"):
+                    steps(run, "pane", [{"mouse": {"at": "Target", "do": action}}])
+                self.assertEqual(calls[0], ("capture-pane", "-p", "-t", "pane"))
+                self.assertEqual(calls[1][:4], ("send-keys", "-H", "-t", "pane"))
+                self.assertEqual(bytes.fromhex("".join(calls[1][4:])), expected)
+
+    def test_mouse_absent_target_fails_without_injection(self):
+        steps = self.helper["frame_steps"]
+        tmux = unittest.mock.Mock(return_value=types.SimpleNamespace(returncode=0, stderr="", stdout="Other"))
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "mouse target absent: Missing"):
+            steps(types.SimpleNamespace(tmux=tmux), "pane", [{"mouse": {"at": "Missing", "do": "move"}}])
+        self.assertEqual(tmux.call_count, 1)
+
+    def test_mouse_validation(self):
+        for value in ({"at": "Target", "do": "move"}, {"at": "Target", "do": "click"}):
+            data = self.scenario()
+            data["states"][1].update(steps=[{"mouse": value}], expect="Target")
+            self.helper["validate_scenario"](data)
+        for value in (None, {}, {"at": "", "do": "move"}, {"at": "x", "do": "drag"},
+                      {"at": "x\ny", "do": "move"}, {"at": "x", "do": "move", "extra": 1}):
+            data = self.scenario()
+            data["states"][1].update(steps=[{"mouse": value}], expect=[])
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "invalid mouse"):
+                self.helper["validate_scenario"](data)
+
     def test_sizes(self):
         parse = self.helper["parse_sizes"]
         self.assertEqual(parse("140x40,46x30"), [(140, 40), (46, 30)])
@@ -138,6 +173,19 @@ class FramesTest(unittest.TestCase):
         for value in (None, [], "", "0x30", "46x0", "-1x3", "12X3", "12x", "2x3,", "2x3,2x3", [42], " 2x3"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 parse(value)
+
+    def test_first_run_states_are_isolated_and_validate_before_launch(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("first-run", "first-run-codex", "first-run-key"):
+            self.assertTrue(states[name]["first_run"])
+            self.assertEqual(states[name]["open"], "overview")
+        self.assertEqual(states["first-run-codex"]["env"]["RUI_TEST_LOGIN"], "waiting")
+        for invalid in ("yes", 1, None):
+            data = self.scenario()
+            data["states"][0]["first_run"] = invalid
+            with self.assertRaisesRegex(ValueError, "first_run must be a boolean"):
+                self.helper["validate_scenario"](data)
 
     def test_load_and_validate_scenario(self):
         data = self.scenario()
@@ -469,7 +517,7 @@ class FramesTest(unittest.TestCase):
             self.assertIsNone(manifest["screen_library"])
             self.assertIsNone(manifest["screen_library_sha256"])
             self.assertEqual([c for c in calls if c[:2] == ["zig", "build"]],
-                             [["zig", "build", "-Doptimize=ReleaseSafe", "--summary", "all"]])
+                             [["zig", "build", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all"]])
             self.assertTrue(Path(manifest["binary"]).exists())
 
     def test_screen_dependent_commands_refuse_before_opening_terminal(self):
@@ -583,7 +631,7 @@ class FramesTest(unittest.TestCase):
             self.assertEqual(self.helper["validate_scenario"](data)["states"][1]["expect"], expected)
 
     def test_validation_rejects_all_actions_after_last_wait_before_allocating(self):
-        actions = [{"keys": ["PgDn"]}, {"text": "new draft"},
+        actions = [{"mouse": {"at": "Target", "do": "move"}}, {"keys": ["PgDn"]}, {"text": "new draft"},
                    {"send": {"to": "Fix it", "text": "new message"}}, {"host": "pause"}]
         command = self.helper["cmd_frames"]
         for action in actions:

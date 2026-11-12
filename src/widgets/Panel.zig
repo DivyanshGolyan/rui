@@ -4,6 +4,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
+const Hover = @import("Hover.zig");
 
 pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
@@ -19,6 +20,8 @@ on_activate: ?*const fn (*anyopaque, *vxfw.EventContext, usize) anyerror!void = 
 on_pick: ?*const fn (*anyopaque, *vxfw.EventContext, usize, usize) anyerror!void = null,
 ground: vaxis.Style = .{},
 selection: vaxis.Style = .{ .reverse = true },
+/// The pointer's field, choice or action, quieter than the selection, which wins where both apply.
+hover_style: vaxis.Style = .{ .ul_style = .single },
 title_style: vaxis.Style = .{ .bold = true },
 quiet: vaxis.Style = .{},
 rule_style: vaxis.Style = .{},
@@ -26,6 +29,7 @@ scroll: usize = 0,
 /// Borrowed from the last draw arena, just like the framework's hit surface.
 /// Replaced on every draw; never read outside a mouse event for that frame.
 targets: []const Target = &.{},
+hover: Hover = .{},
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -67,6 +71,7 @@ pub fn takesKey(key: vaxis.Key) bool {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.hover.handleEvent(ctx, input);
     switch (input) {
         .key_press => |key| {
             if (!takesKey(key)) return;
@@ -118,6 +123,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
     @memset(surface.buffer, .{ .style = self.ground });
     self.targets = &.{};
+    self.hover.targets = &.{};
     if (size.width == 0 or size.height == 0) return surface;
     for (0..size.width) |col| surface.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = self.rule_style });
     if (size.height == 1) return surface;
@@ -135,7 +141,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (self.fields, 0..) |field, index| {
         if (self.visible(self.rowOf(index), size.height)) |row| {
             const selected = self.choice == null and self.selected == index;
-            const style = if (selected) self.selection else self.ground;
+            const style = self.look(selected, .{ .row = row, .width = size.width });
             fillRow(surface, row, style);
             _ = paintTo(ctx, surface, field.label, 3, row, style, @min(19, size.width));
             const end = paint(ctx, surface, field.value, 19, row, style);
@@ -143,6 +149,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 var quiet = self.quiet;
                 quiet.bg = style.bg;
                 quiet.reverse = style.reverse;
+                quiet.ul_style = style.ul_style;
                 _ = paint(ctx, surface, tail, end, row, quiet);
             }
             try targets.append(.{ .row = row, .start = 0, .end = size.width, .index = index });
@@ -150,7 +157,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (self.choice) |choice| if (choice.field == index) {
             for (choice.labels, 0..) |label, at| {
                 const row = self.visible(index + 1 + at, size.height) orelse continue;
-                const style = if (at == choice.selected) self.selection else self.ground;
+                const style = self.look(at == choice.selected, .{ .row = row, .width = size.width });
                 fillRow(surface, row, style);
                 _ = paint(ctx, surface, if (choice.current == at) "✓" else " ", 5, row, style);
                 _ = paint(ctx, surface, label, 7, row, style);
@@ -162,14 +169,26 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         var col: u16 = @min(3, size.width);
         for (self.actions, 0..) |action, at| {
             const start = col;
-            const style = if (self.choice == null and self.selected == self.fields.len + at) self.selection else self.ground;
-            col = paint(ctx, surface, action, col, row, style);
+            const selected = self.choice == null and self.selected == self.fields.len + at;
+            col = paint(ctx, surface, action, col, row, if (selected) self.selection else self.ground);
+            if (!selected and self.hover.contains(.{ .row = row, .col = start, .width = col - start })) {
+                _ = paint(ctx, surface, action, start, row, self.hover_style);
+            }
             if (col > start) try targets.append(.{ .row = row, .start = start, .end = col, .index = self.fields.len + at });
             col = @intCast(@min(@as(u32, col) + 5, size.width));
         }
     };
     self.targets = targets.items;
+    const hover_targets = try ctx.arena.alloc(Hover.Rect, targets.items.len);
+    for (targets.items, hover_targets) |target, *rect| rect.* = .{ .row = target.row, .col = target.start, .width = target.end - target.start };
+    self.hover.targets = hover_targets;
     return surface;
+}
+
+/// Selection wins over hover; hover wins over the panel ground.
+fn look(self: *const Self, selected: bool, rect: Hover.Rect) vaxis.Style {
+    if (selected) return self.selection;
+    return if (self.hover.contains(rect)) self.hover_style else self.ground;
 }
 
 fn visible(self: *const Self, logical: usize, height: u16) ?u16 {
@@ -324,6 +343,46 @@ test "Panel inline choices open pick cancel and scroll in the same field" {
     try panel.widget().handleEvent(&ctx, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = 3, .col = 7 } });
     try std.testing.expect(panel.choice == null);
     try std.testing.expectEqual(@as(?usize, 0), fixture.picked);
+}
+
+test "Panel hover highlights fields choices and actions without changing keyboard state" {
+    var fixture: Fixture = .{};
+    var panel: Self = .{ .title = "Settings", .fields = &.{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" } }, .actions = &.{ "Rename", "Archive" }, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .userdata = &fixture, .on_activate = Fixture.activateRow, .on_pick = Fixture.pickRow };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
+    _ = try panel.widget().draw(ctx);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try panel.widget().handleEvent(&events, .mouse_enter);
+    for ([_]struct { row: i16, col: i16 }{ .{ .row = 3, .col = 39 }, .{ .row = 4, .col = 14 } }) |point| {
+        try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = point.col, .row = point.row, .button = .none, .type = .motion, .mods = .{} } });
+        const surface = try panel.widget().draw(ctx);
+        try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(@intCast(point.col), @intCast(point.row)).style.bg);
+        try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 2).style.bg);
+        try std.testing.expectEqual(@as(usize, 0), panel.selected);
+        try std.testing.expectEqual(@as(?usize, null), fixture.activated);
+        try std.testing.expect(panel.hover.pointing);
+    }
+    try panel.widget().handleEvent(&events, .mouse_leave);
+    var surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.ground.bg, surface.readCell(39, 3).style.bg);
+    panel.openChoice(&.{ "First", "Second" }, 0);
+    _ = try panel.widget().draw(ctx);
+    try panel.widget().handleEvent(&events, .mouse_enter);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 3, .button = .none, .type = .motion, .mods = .{} } });
+    surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .none, .type = .motion, .mods = .{} } });
+    surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(39, 4).style.bg);
+    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
+    try std.testing.expectEqual(@as(usize, 0), panel.choice.?.selected);
+    try std.testing.expectEqual(@as(?usize, null), fixture.picked);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqual(@as(?usize, 1), fixture.picked);
+    try panel.widget().handleEvent(&events, .mouse_leave);
+    _ = try panel.widget().draw(ctx);
+    try std.testing.expect(!panel.hover.pointing);
 }
 
 /// A read-only reference in fitting columns, without selection or input ownership.

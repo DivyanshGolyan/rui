@@ -123,7 +123,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
-| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, which also names its sign-in (a key reads "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
+| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("Device code", "ChatGPT", "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
@@ -794,6 +794,8 @@ Pressure uses eligible usage from the latest accepted same-binding output plus e
 The threshold fires at equality.
 Admission reads its Session's facts with its selection, inside the Store hold and before its transaction, and does not read the appended bytes: where only their count decides the purpose it writes an assistant call whose first write is a guard that the count is under the policy's limit, and a failed guard rolls back and admits the compaction instead.
 On a network Store the admitted Attempt's request starts in the same message: its settings read follows COMMIT, whole or not at all, and a request whose settings did not ride reads them in a round of its own.
+Where the [history memo](#history-memo) remembers the Session's last request, that message also reads the request's first history round, from where the memo ends and by the keys that request's view had.
+The memory is a hint: the round is kept only when the new view's own boundary gives the same keys and preparation then reads from the same position and tool-group scan position, and otherwise preparation reads the round itself, so a stale hint costs the round it would have saved and never a wrong entry.
 The assistant successor of a compaction applies pending input even if the estimate remains above the threshold.
 Provider-reported overflow still permits recovery without a configured trigger; unchanged context after an accepted base, or overflow during compaction itself, fails with `ResourceExceeded` instead of repeating compaction.
 
@@ -986,7 +988,7 @@ The history in a request's `input` array is one contiguous span, a pure function
 When a request seals, the execution owner copies that span's exact bytes from the sealed request into the Session's memo file and records their 64-bit Wyhash digest, appending only the bytes after a span the memo itself supplied.
 That copy is part of preparation: it yields in chunks under the preparation byte allowance, so a large history never blocks controls, Bash, provider completions or cleanup, and preparation hands the request on only after the copy ends.
 A preparation stopped or failed during the copy keeps no memo and removes its file like an eviction.
-Process memory keeps only a fixed-size index entry: Session, requested model and anchor, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force, and `openai-responses/3` holds only the comma, as `/1` does), the tool-group scan position, the span length and the digest.
+Process memory keeps only a fixed-size index entry: Session, requested model and anchor, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force, and `openai-responses/3` holds only the comma, as `/1` does), the tool-group scan position, the keys the producing view read its history by (its floor, the Session's first Message, the selected base's Operation and the frozen tool set), the span length and the digest.
 When the next request of that Session selects the same model and anchor and its frozen view contains the producing admission position, preparation opens the file, requires exactly the recorded length, and reads it into the request through the request writer in bounded chunks, hashing as it goes, in place of re-reading and re-encoding the covered entries; it then closes the file and encodes only later entries.
 The copied bytes count only once the whole span matches the recorded digest.
 The copy consumes the byte allowance and scratch charge like any other emitted bytes and the request stays byte-identical to a full rebuild.
@@ -1182,7 +1184,7 @@ An auto-started Host adds `--provider openai` whenever a usable key is saved.
 `--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
 It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
-The terminal cannot sign it in yet: its provider fact has no login, so `rui auth login chatgpt` changes nothing and says so, and the guided choice, the Host line, the overview band and its notices say the terminal cannot sign in to it instead of naming a command.
+The terminal cannot sign it in yet: its provider fact has no login, so `rui auth login chatgpt` changes nothing and says so, the Host line and the overview's missing-sign-in notice say the terminal cannot sign in to it instead of naming a command, and its band reads only "ChatGPT sign-in expired." so the list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
 An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
 `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
@@ -2198,6 +2200,7 @@ CLI failures cross one catalog boundary and render a stable code with accepted i
 Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
 The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (`host_not_serving`, exit 6); the latter prints the exact `rui host start --store PATH` command.
 An unreachable Host is absent only when the Store lock is free; a missing or refused control socket while that lock is held is `host_stopping` (exit 5), with advice to wait for shutdown before restarting and retrying.
+A Host from another Rui version that does not speak this rui's protocol is `host_incompatible` (exit 6); pause it with the Rui version that started it, then start it again with this rui.
 Other transport failures while the lock is held, or a failed lock probe, do not establish either condition and retain their original classification.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
@@ -2364,7 +2367,14 @@ Inspection creates neither directory nor file.
 On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of unarchived Sessions in the Store; each row shows its Workspace.
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
-It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice offers each provider (Codex login, an OpenAI API key, or saving a ready one as the default) or deferral, without creating a Session.
+It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with the Device code and API key sign-in choices on the input row, without creating a Session.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable device-login link or masked key entry, and keeps failures on that row.
+While it is open it takes every key and click, so nothing behind it opens or navigates.
+Esc leaves it, except the first-run screen, which stays until sign-in gives a default; a screen opened from Settings always returns there.
+Its choice uses the approval row's prompt and background-only selection, including with NO_COLOR; the device row always reads `auth.openai.com/codex/device · CODE`, using the answer view's terminal hyperlink boundary.
+Either locally ready provider is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
+After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
+The shared `host_launch` result retains startup output, failure context and warnings across activation. Its reporting policy supplies terminal diagnostics after screen restoration and one plain sign-in-row line; only retryable failures offer Enter. Successful activation warnings remain a single overview notice, independently of default-save failure.
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
@@ -2457,7 +2467,7 @@ A list still loading says so and is read again with the next listing, a fallback
 A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
 On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
 When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
-The sign-ins are named "ChatGPT (device code)" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`); the typed word `chatgpt` names both ChatGPT sign-ins, and a row offering both keeps the saved one, else the product's. A row too narrow for its model ID drops its sign-in column before cutting the ID.
+The sign-ins are labelled by their provider facts: "Device code" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`), short enough that the list pane keeps the chosen one whole; a label's first word (`device`, `chatgpt`, `api`) is the word that chooses it.
 Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.
 Esc steps back from the choice to the models, then closes the picker, and typing or a paste leaves it for the draft.
 Every pick saves the person's default, the one `/setup` and `rui defaults configure --provider --model` write, through the worker, and later starts use it (Divyansh, 2026-11-02, picker plan "Answered" 2 and 3).
@@ -2466,7 +2476,7 @@ An overview left without a pick writes nothing, and a failed save is not retried
 An Other model is picked like any other and runs with default limits.
 A save that fails says why in `/setup`'s words; one whose directory sync failed still changes the default and says its durability is unconfirmed.
 A save queued or running as the overview ends finishes first: on the way out the shell runs each save the core asked for through the worker's own job path, and the departure text reports one that ended after the person left.
-The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · ChatGPT (device code)`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
+The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · Device code`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
 The departure speaks for later launches, so it names the effort saved as the overview ends, whatever this launch named; one rule, `StartEffort`, decides the effort for the start and for both lines.
 The Session rows keep their highlight while the picker is open, so Ctrl-X acts on a row the person can see.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
@@ -2909,6 +2919,13 @@ Neither the set nor any output is saved.
 An open row is marked by its heading's selection background alone; the footer names no close key, because Ctrl-O acts on the lowest openable row in view, which need not be the open one.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
+Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
+New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
+Hover never changes keyboard selection or focus.
+Under the pointer, rows and fields take the hover background, the per-channel midpoint of the selvedge and selection colours, or a monochrome underline, while preserving their foreground; reverse stays the keyboard selection's mark.
+A row that is both selected and hovered keeps the selection look; chips and peer links underline and show the pointer shape.
+Only drawn, clipped action regions take clicks, and their existing paste, consent, stale-content and availability guards still apply.
+Headings, fixed status fields and unkeyed summary aggregates remain inert.
 Rui does not enable alternate scroll mode 1007.
 libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.

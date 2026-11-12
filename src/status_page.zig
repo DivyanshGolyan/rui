@@ -191,6 +191,15 @@ pub fn line(setting: Setting) usize {
     return comptime_lines.get(setting);
 }
 
+/// The changeable setting on a rendered logical line. Headings, work and
+/// fixed settings have no action; wrapped visual rows keep their source line.
+pub fn settingAtLine(index: usize) ?Setting {
+    for (std.enums.values(Setting)) |setting| {
+        if (line(setting) == index and rows.get(setting).change != .fixed) return setting;
+    }
+    return null;
+}
+
 const comptime_lines = blk: {
     var lines: std.enums.EnumArray(Setting, usize) = undefined;
     var at: usize = 1;
@@ -331,7 +340,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
         },
         .model => {
             try writeText(out, session.model.slice());
-            try out.print(" · {s}", .{session.provider.signIn()});
+            try out.print(" · {s}", .{session.provider.shown()});
             return null;
         },
         .store => {
@@ -343,7 +352,7 @@ fn writeValue(setting: Setting, facts: Facts, out: *std.Io.Writer) !?[]const u8 
             const saved = facts.defaults.* catch |err| return unreadable(out, err);
             const provider = saved.provider catch |err| return unreadable(out, err);
             try writeText(out, if (saved.model.len != 0) saved.model.slice() else product_defaults.recommended_model);
-            try out.print(" · {s}", .{provider.signIn()});
+            try out.print(" · {s}", .{provider.shown()});
             if (saved.model.len == 0) return "Rui default";
         },
         .default_effort => {
@@ -641,7 +650,7 @@ test "each value stays on its row and says where it came from" {
         "Headroom        999 tokens  \x1b[90mSession override",
         "Model           model-a · ChatGPT",
         "Instructions    none\n",
-        "Model           gpt-x · API key\n",
+        "Model           gpt-x · OpenAI\n",
         "Effort          low\n",
         "Notifications   off\n",
         "Store           /srv/store\n",
@@ -756,4 +765,10 @@ test "status defaults compare the provider-aware client product choices" {
     try std.testing.expectEqualStrings("Session override", (try writeValue(.compact_at, held.facts(), &out)).?);
     held.session.compaction_trigger = 945000;
     try std.testing.expectEqualStrings("model default", (try writeValue(.compact_at, held.facts(), &out)).?);
+}
+
+test "status change targets include every editable line and exclude fixed rows headings and work" {
+    const expected = [_]?Setting{ null, null, .effort, .permissions, .tools, .name, .folder, .compact_at, .headroom, .model, null, null, null, .default_model, .default_effort, .notifications, .default_store, null, null, null };
+    for (expected, 0..) |setting, index| try std.testing.expectEqual(setting, settingAtLine(index));
+    try std.testing.expectEqual(null, settingAtLine(std.math.maxInt(usize)));
 }

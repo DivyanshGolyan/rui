@@ -29,7 +29,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.back.label = "‹";
     self.back.style = self.style;
     self.back.hover = self.style;
-    self.back.hover.bold = true;
+    self.back.hover.ul_style = .single;
     self.back.method = self.method;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
     // One cell of margin, as the mocks set it; the chip is the `‹` alone.
@@ -60,9 +60,16 @@ test "the facts row leads with a clickable ‹ back to the overview" {
     const press: vaxis.Mouse = .{ .col = 0, .row = 0, .button = .left, .mods = .{}, .type = .press };
     var release = press;
     release.type = .release;
+    try row.back.widget().handleEvent(&ctx, .mouse_enter);
+    const hovered = try row.back.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 1, .height = 1 }, .cell_size = .{} });
+    try std.testing.expectEqual(.single, hovered.readCell(0, 0).style.ul_style);
+    try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
     try row.back.widget().handleEvent(&ctx, .{ .mouse = press });
     try row.back.widget().handleEvent(&ctx, .{ .mouse = release });
     try std.testing.expectEqual(@as(usize, 1), back.count);
+    try row.back.widget().handleEvent(&ctx, .mouse_leave);
+    const left = try row.back.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 1, .height = 1 }, .cell_size = .{} });
+    try std.testing.expectEqual(.off, left.readCell(0, 0).style.ul_style);
     for ([_]vxfw.Size{ .{ .width = 0, .height = 1 }, .{ .width = 1, .height = 1 }, .{ .width = 3, .height = 0 } }) |size| {
         const tiny = try row.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= size.width and tiny.size.height <= size.height);

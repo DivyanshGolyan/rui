@@ -28,6 +28,7 @@ pub const Backend = struct {
     upgrade: *const fn (*anyopaque) anyerror!void,
     run: *const fn (*anyopaque) ?upgrade_status.Run,
     caps: *const fn (*anyopaque) view.Caps,
+    sign_in: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
 };
 
 /// The page's rows, in drawn order: the Panel's field index of each.
@@ -160,6 +161,7 @@ fn bind(self: *Self) void {
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
     self.panel.ground = widget_style.of(caps, .{ .background = .bar });
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
+    self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
@@ -180,8 +182,13 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, index: usize) !void {
         .version => backend.upgrade(backend.context) catch {
             self.failures.set(.version, " · couldn't start upgrade");
         },
-        // Sign-in stays selectable until its screen exists.
-        .sign_in => return,
+        .sign_in => {
+            if (backend.sign_in) |open| open(backend.context, ctx) catch |err| {
+                if (err != error.DefaultsUnavailable) return err;
+                self.failures.set(.sign_in, " · settings busy");
+            };
+            return;
+        },
         .keys => unreachable,
         .model, .effort, .permissions, .notifications => {
             try self.refresh();
@@ -526,7 +533,7 @@ test "App settings page text and ground at 99x20 and 46x20" {
         try std.testing.expect(std.mem.indexOf(u8, text, "   Effort          low") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Permissions     run without asking") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Notifications   on") != null);
-        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         ChatGPT") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "   Sign-in         Device code") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, "   Version         0.60.0 · up to date") != null);
         try std.testing.expect(std.mem.indexOf(u8, text, if (page.narrow) " ‹ Rui · settings" else " Rui · settings") != null);
         const ground = widget_style.of(.{}, .{ .background = .bar });
@@ -627,6 +634,85 @@ test "App settings Permissions choices save both modes and display the saved wor
         page.bind();
         try std.testing.expectEqualStrings(if (mode == .bypass) "run without asking" else "ask first", page.fields[@backingInt(Row.permissions)].value);
         try std.testing.expectEqual(@as(?Row, null), page.saving_row);
+    }
+}
+
+test "App settings Sign-in row opens the shared sign-in screen on Enter" {
+    const SignIn = struct {
+        opens: usize = 0,
+        busy: bool = false,
+        fn open(raw: *anyopaque, _: *vxfw.EventContext) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.busy) return error.DefaultsUnavailable;
+            self.opens += 1;
+        }
+    };
+    var owner: SignIn = .{};
+    var fixture: Fixture = .{};
+    var backend = fixture.backend();
+    var page: Self = .{ .backend = backend };
+    try page.refresh();
+    // Other backend operations are not used by this row.
+    backend.context = &owner;
+    backend.sign_in = SignIn.open;
+    page.backend = backend;
+    page.select(.sign_in);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), owner.opens);
+    try std.testing.expect(!page.hasChoice());
+    owner.busy = true;
+    try press(&page, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqual(@as(usize, 1), owner.opens);
+    try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
+}
+
+test "App settings mouse hover and click use the same field choices as Enter" {
+    for ([_]protocol.PermissionMode{ .ask, .bypass }) |initial| {
+        var fixture: Fixture = .{ .values = .{ .permission_mode = initial } };
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try page.refresh();
+        _ = try page.widget().draw(draw_ctx);
+        try page.widget().handleEvent(&events, .mouse_enter);
+        const permissions_row = 2 + @backingInt(Row.permissions);
+        var mouse: vaxis.Mouse = .{ .col = 1, .row = permissions_row, .button = .none, .type = .motion, .mods = .{} };
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        var surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, 2).style.bg);
+        try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
+        try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
+        try page.widget().handleEvent(&events, .mouse_leave);
+        surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.ground.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        mouse.button = .left;
+        mouse.type = .press;
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(@as(usize, @backingInt(Row.permissions)), page.panel.choice.?.field);
+        const selected = page.panel.choice.?.selected;
+        const next: protocol.PermissionMode = if (initial == .ask) .bypass else .ask;
+        const choice_row: u16 = permissions_row + 1 + @as(u16, if (next == .bypass) 0 else 1);
+        _ = try page.widget().draw(draw_ctx);
+        mouse.row = @intCast(choice_row);
+        mouse.button = .none;
+        mouse.type = .motion;
+        try page.widget().handleEvent(&events, .mouse_enter);
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, choice_row).style.bg);
+        try std.testing.expectEqual(selected, page.panel.choice.?.selected);
+        mouse.button = .left;
+        mouse.type = .press;
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(next, fixture.last_edit.?.permission_mode.set);
+        try std.testing.expect(!page.hasChoice());
+        try page.widget().handleEvent(&events, .mouse_leave);
     }
 }
 

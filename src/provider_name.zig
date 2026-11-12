@@ -15,19 +15,17 @@ pub const Provider = enum {
         return self.facts().codec;
     }
 
-    /// The provider as the person knows it, in screen text.
+    /// The provider as the person knows it, where prose names it: a band,
+    /// the Host line, /status, a refusal.
     pub fn shown(self: Provider) []const u8 {
         return self.facts().shown;
     }
 
-    /// What a person signed in with, as the terminal names this provider:
-    /// a sign-in by its own name, so two ChatGPT sign-ins stay apart, and a
-    /// key as a key.
+    /// The short label of what a person signed in with, where a sign-in is
+    /// chosen or read beside a model: the picker's control, the Session line
+    /// and the first-run choice. Short, so a narrow pane keeps it whole.
     pub fn signIn(self: Provider) []const u8 {
-        return switch (self.facts().credential) {
-            .sign_in => self.shown(),
-            .api_key => "API key",
-        };
+        return self.facts().sign_in;
     }
 
     /// The shell command that signs this provider in, or null while Rui
@@ -48,9 +46,9 @@ pub const Provider = enum {
     /// The table: the one switch on which provider it is.
     pub fn facts(self: Provider) Facts {
         return switch (self) {
-            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
-            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
-            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .codex => .{ .codec = .@"openai-responses/2", .shown = "ChatGPT (device code)", .sign_in = "Device code", .credential = .sign_in, .login = true, .model_list = .catalog, .runs_tools = &.{"web_search"} },
+            .openai => .{ .codec = .@"openai-responses/2", .shown = "OpenAI", .sign_in = "API key", .credential = .api_key, .login = true, .model_list = .live, .runs_tools = &.{"web_search"} },
+            .chatgpt => .{ .codec = .@"openai-responses/3", .shown = "ChatGPT", .sign_in = "ChatGPT", .credential = .sign_in, .login = false, .model_list = .catalog, .runs_tools = &.{"web_search"} },
         };
     }
 
@@ -74,6 +72,7 @@ pub const Provider = enum {
 pub const Facts = struct {
     codec: Codec,
     shown: []const u8,
+    sign_in: []const u8,
     credential: Credential,
     /// Whether `rui auth login` signs this provider in.
     login: bool,
@@ -107,14 +106,24 @@ test "one provider fetches its model list live" {
     try std.testing.expectEqual(Provider.openai, comptime Provider.onlyLiveList());
 }
 
-test "every provider's sign-in reads apart from the others', and only a provider with a login names one" {
+test "every provider's name and sign-in read apart from the others', and only a provider with a login names one" {
     for (std.enums.values(Provider), 0..) |provider, at| {
-        for (std.enums.values(Provider)[at + 1 ..]) |other| try std.testing.expect(!std.mem.eql(u8, provider.signIn(), other.signIn()));
+        for (std.enums.values(Provider)[at + 1 ..]) |other| {
+            try std.testing.expect(!std.mem.eql(u8, provider.signIn(), other.signIn()));
+            try std.testing.expect(!std.mem.eql(u8, provider.shown(), other.shown()));
+            // The typed /model word is a sign-in's first word.
+            try std.testing.expect(!std.ascii.eqlIgnoreCase(firstWord(provider.signIn()), firstWord(other.signIn())));
+        }
         if (provider.login()) |command| try std.testing.expect(std.mem.endsWith(u8, command, @tagName(provider)));
     }
-    try std.testing.expectEqualStrings("ChatGPT (device code)", Provider.codex.signIn());
+    try std.testing.expectEqualStrings("Device code", Provider.codex.signIn());
+    try std.testing.expectEqualStrings("ChatGPT (device code)", Provider.codex.shown());
     try std.testing.expectEqualStrings("ChatGPT", Provider.chatgpt.signIn());
     try std.testing.expectEqualStrings("API key", Provider.openai.signIn());
     try std.testing.expectEqualStrings("rui auth login codex", Provider.codex.login().?);
     try std.testing.expectEqual(@as(?[]const u8, null), Provider.chatgpt.login());
+}
+
+fn firstWord(text: []const u8) []const u8 {
+    return text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
 }

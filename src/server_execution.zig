@@ -430,7 +430,9 @@ pub fn executionMain(host: *Host) void {
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
     const auth_worker: ?*AuthWorker = if (host.providers.anySignIn()) worker: {
-        workspace.auth_worker = AuthWorker{ .io = host.io };
+        // Built in place: a typed literal would be a stack temporary the size of
+        // the worker's credential work.
+        workspace.auth_worker = .{ .io = host.io };
         break :worker &workspace.auth_worker;
     } else null;
     const auth_thread: ?std.Thread = if (auth_worker) |worker|
@@ -861,7 +863,9 @@ const NativeTurn = struct {
         observeUnprocessedCompletions(self.host, self.reactor.?);
     }
 
-    pub fn serviceOneCompletion(self: *NativeTurn) bool {
+    // Its frame holds a finished transfer's work; kept out of line so the
+    // admission chain beside it never carries it (stack_frames.json).
+    pub noinline fn serviceOneCompletion(self: *NativeTurn) bool {
         if (callServiceOneCompletion(self.host, self.reactor, self.slots, self.workspace)) return true;
         // nextCompletion marks discovery streams finished without casting
         // them to model Transfers. Publish one answer per service turn.
@@ -1847,7 +1851,7 @@ fn admitNewAttempt(
     const token = host.custody.reserve() orelse return .no_work;
     // The slot's preparation is free (`modelPreparationOpen`), so the
     // admission starts the request in it: the settings ride its commit.
-    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings }) catch |err| {
+    var admission = host.store.admitModelAttemptInto(kind, host.hooks.storeFaults(.attempt_admission), .{ .view = &preparation.view, .settings = &preparation.settings, .remembered = model_adapter.remembered(&host.history_memos) }) catch |err| {
         host.custody.releaseUnused(token) catch unreachable;
         fenceDispatch(host, "Attempt admission", err);
         return .retry_later;
