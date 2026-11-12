@@ -851,6 +851,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
     const attention = style.of(self.app_caps, .{ .colour = .attention });
     const failure = style.of(self.app_caps, .{ .colour = .failure });
+    const hover = style.of(self.app_caps, .{ .background = .hover });
     const colours: viewport.Colours = .{
         .quiet = quiet.fg,
         .user = style.of(self.app_caps, .{ .colour = .ink }).fg,
@@ -867,17 +868,20 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
+    self.app_card.hover_style = hover;
     self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
+    self.app_preview.hover_style = hover;
     self.app_preview.method = self.app_caps.width;
     self.app_content.style = normal;
-    self.app_content.hover_style = style.of(self.app_caps, .{ .background = .selection });
+    self.app_content.hover_style = hover;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
     self.app_document.style = normal;
     self.app_document.colours = colours;
+    self.app_document.hover_style = hover;
     self.app_document.method = self.app_caps.width;
     self.app_document.document = if (screen.view == .message) &screen.staging else &screen.browsing;
     self.app_body.shown = if (screen.view == .feed) self.app_content.widget() else self.app_document.widget();
@@ -888,6 +892,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         self.app_palette.method = self.app_caps.width;
         self.app_palette.style = normal;
         self.app_palette.quiet = quiet;
+        self.app_palette.hover_style = hover;
         self.app_palette.userdata = self;
         self.app_palette.on_select = appSelectCommand;
         palette = self.app_palette.widget();
@@ -3462,6 +3467,25 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                     var ctx = held.context();
                     const preview = &held.self.app_preview;
                     const row: i16 = @intCast(preview.drawn.height);
+                    // The continuation row hovers in the hover role at every depth.
+                    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+                        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+                        held.self.app_caps = .{ .depth = depth };
+                        _ = try held.draw();
+                        try preview.widget().handleEvent(&ctx, .mouse_enter);
+                        try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
+                        const role = style.of(held.self.app_caps, .{ .background = .hover });
+                        for (0..hovered.size.width) |col| {
+                            const cell = hovered.readCell(@intCast(col), @intCast(row)).style;
+                            try std.testing.expectEqual(role.bg, cell.bg);
+                            try std.testing.expectEqual(role.ul_style, cell.ul_style);
+                            try std.testing.expectEqual(role.reverse, cell.reverse);
+                        }
+                        try preview.widget().handleEvent(&ctx, .mouse_leave);
+                    }
+                    held.self.app_caps = .{ .depth = .none };
+                    _ = try held.draw();
                     for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
                         try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .mods = .{}, .type = kind } });
                     }
@@ -3481,6 +3505,31 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "row 000") != null);
             }
         }
+    }
+}
+
+test "App Session binds the hover role to every widget it owns with a hover style at every depth" {
+    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.self.app_caps = .{ .depth = depth };
+        // A shown palette binds too; it draws only without a request.
+        try held.keys("/c");
+        _ = try held.draw();
+        try std.testing.expect(held.screen.commands != null);
+        const role = style.of(held.self.app_caps, .{ .background = .hover });
+        var bound: usize = 0;
+        const info = @typeInfo(Self).@"struct";
+        inline for (info.field_names, info.field_types) |name, Field| {
+            if (@typeInfo(Field) == .@"struct" and @hasField(Field, "hover_style")) {
+                errdefer std.debug.print("field={s}\n", .{name});
+                try std.testing.expectEqualDeep(role, @field(held.self, name).hover_style);
+                bound += 1;
+            }
+        }
+        // app_card, app_preview, app_content, app_document and app_palette.
+        try std.testing.expectEqual(5, bound);
     }
 }
 
@@ -8159,7 +8208,13 @@ test "App Session palette clicks follow Enter for command words options and valu
         _ = try held.draw();
         try std.testing.expect(held.self.app_palette.hover.pointing);
         const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
-        try std.testing.expect(palette.readCell(2, @intCast(row)).style.reverse);
+        const cell = palette.readCell(2, @intCast(row));
+        if (selected == index) try std.testing.expect(cell.style.reverse) else {
+            try std.testing.expect(!cell.style.reverse);
+            try std.testing.expectEqual(held.self.app_palette.hover_style.bg, cell.style.bg);
+            try std.testing.expectEqual(held.self.app_palette.hover_style.ul_style, cell.style.ul_style);
+            try std.testing.expect(palette.readCell(2, @intCast(selected - held.self.app_palette.first)).style.reverse);
+        }
         try std.testing.expectEqual(selected, held.screen.commands.?.highlight);
         try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
         for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
@@ -8335,8 +8390,9 @@ test "App Session status mouse targets every editable field including wrapped ro
             const hovered = try panel.widget().draw(ctx);
             try std.testing.expectEqual(case.draft != null, panel.hover.pointing);
             if (case.draft != null) {
-                try std.testing.expectEqual(panel.colours.selection, hovered.readCell(col, row).style.bg);
-                try std.testing.expectEqual(panel.colours.selection == .default, hovered.readCell(col, row).style.reverse);
+                try std.testing.expectEqual(panel.hover_style.bg, hovered.readCell(col, row).style.bg);
+                try std.testing.expectEqual(panel.hover_style.ul_style, hovered.readCell(col, row).style.ul_style);
+                try std.testing.expect(!hovered.readCell(col, row).style.reverse);
                 try std.testing.expectEqual(plain.readCell(col, row).style.fg, hovered.readCell(col, row).style.fg);
             }
             try std.testing.expectEqual(before, held.self.inspection.selected);

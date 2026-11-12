@@ -142,6 +142,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.inner.on_press = if (self.on_press != null) .{ .userdata = frame, .pressed = reportPress } else null;
     self.inner.base_style = widget_style.of(self.caps, .{});
     self.inner.selection_style = widget_style.of(self.caps, .{ .background = .selection });
+    self.inner.hover_style = widget_style.of(self.caps, .{ .background = .hover });
     const size = ctx.max.size();
     const tail_rows = if (self.tail) |tail| @min(tail.rows, size.height) else 0;
     const room = size.height - tail_rows;
