@@ -287,7 +287,6 @@ pub const Job = struct {
         live: View.Live = .{},
         latest_ending: ?LatestEnding = null,
         cursor: protocol_reply.ActivityCursor = .{},
-        compact_tools: bool = false,
         // Output custody began; a later failure is not a silent preparation one.
         rendering: bool = false,
         // Only confirmed stderr restoration permits exit to replay this page.
@@ -542,7 +541,6 @@ pub fn permission(raw: *anyopaque, task: *Task) !void {
         // A target resolved between reads is the same as a scan with no
         // pending Action: leave result.action empty and refresh, without consent.
         job.result.summary = (try View.permission(task.requests(), job.store, job.session, action, job.files.scratch, &output, job.colour)) orelse return;
-        job.result.compact_tools = false;
         job.result.action = action;
     }
 }
@@ -634,9 +632,8 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
             .assistant => |answer| .{ .source = .activity, .position = item.position, .ordinal = item.ordinal, .row = false, .content = answer.content },
             else => null,
         } };
-        var compact = false;
-        row.provisional = try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, &compact, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
-        row.tight = compact;
+        row.provisional = try View.render(requests, job.store, job.session, item, page.facts.queued, page.facts.work.work.state.holdsQueue(), &capture, job.colour, job.home, .{ .viewport = job.width_method }, if (open) .{ .open = output.? } else .closed) or pending;
+        row.tight = View.tight(item.value);
         try capture.finish();
         row.length = capture.length;
         if (row.length == 0 and !row.provisional) continue;
@@ -734,7 +731,6 @@ const RowCapture = struct {
     row: *RenderedRow,
     start: u64,
     length: u64 = 0,
-    first: bool = true,
     cut: bool = false,
     cap_target: ?View.Collapsed = null,
     omitted_summaries: u64 = 0,
@@ -745,8 +741,7 @@ const RowCapture = struct {
     pub fn feed(self: *@This(), raw: []const u8) !void {
         if (self.task.cancellation.stopped.load(.acquire)) return error.Cancelled;
         if (raw.len == 0 or self.cut) return;
-        const bytes = if (self.first and raw[0] == '\n') raw[1..] else raw;
-        self.first = false;
+        const bytes = raw;
         const fit = bytes[0..@intCast(@min(bytes.len, feed_window.row_capacity - notice_capacity - self.length))];
         if (fit.len != 0) try self.file.writePositionalAll(self.task.io, fit, self.start + self.length);
         for (fit, 0..) |byte, index| {
@@ -795,7 +790,6 @@ const RowCapture = struct {
         try self.file.writePositionalAll(self.task.io, bytes, self.start + self.length);
         self.length += bytes.len;
         self.boundary = self.length;
-        self.first = false;
         self.row.collapsed_targets[self.row.collapsed_count] = value;
         self.row.collapsed_count += 1;
         return true;
@@ -1445,10 +1439,10 @@ const FakeHost = struct {
 // Row-local placement is independent of the feed reader and traversal order.
 test "session_view Message placement is identical in either direction at every page split" {
     const Domain = struct {
-        const user = "\n› " ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
+        const user = "› " ++ View.Mark.body ++ "please wait\n  for the build" ++ View.Mark.reset ++ "\n";
         const link = TerminalText.link_open ++ TerminalText.session_link ++ "9f8e7d" ++ TerminalText.link_end ++ "\x1b[4mPeer" ++ TerminalText.link_close ++ View.Mark.reset ++ View.Mark.summary;
-        const received = "\n" ++ View.Mark.summary ++ "← Received message from " ++ link ++ View.Mark.reset ++ "\n";
-        const sent = "\n" ++ View.Mark.summary ++ "→ Messaged " ++ link ++ View.Mark.reset ++ "\n";
+        const received = View.Mark.summary ++ "← Received message from " ++ link ++ View.Mark.reset ++ "\n";
+        const sent = View.Mark.summary ++ "→ Messaged " ++ link ++ View.Mark.reset ++ "\n";
         const Sink = struct {
             out: *std.Io.Writer,
             lowest: ?u64 = null,
@@ -1478,8 +1472,7 @@ test "session_view Message placement is identical in either direction at every p
                             var buffer: [8192]u8 = undefined;
                             var out = std.Io.Writer.fixed(&buffer);
                             var sink: Sink = .{ .out = &out };
-                            var compact = false;
-                            const provisional = try View.render(requests, root, "k7m2qx", rows[index], queued, held, &sink, false, &compact, "", .{ .viewport = .wcwidth }, .none);
+                            const provisional = try View.render(requests, root, "k7m2qx", rows[index], queued, held, &sink, false, "", .{ .viewport = .wcwidth }, .none);
                             try std.testing.expectEqualStrings(expected[index].text, out.buffered());
                             try std.testing.expectEqual(expected[index].provisional, provisional);
                             try std.testing.expectEqual(expected[index].lowest, sink.lowest);
@@ -1540,7 +1533,7 @@ test "session_view Message placement is identical in either direction at every p
             var clock_buffer: [5]u8 = undefined;
             const time = View.clock(1, &clock_buffer).?;
             var prefix_buffer: [64]u8 = undefined;
-            const prefix = try std.fmt.bufPrint(&prefix_buffer, "\n› " ++ View.Mark.sidenote ++ "{s}" ++ View.Mark.reset ++ View.Mark.body, .{time});
+            const prefix = try std.fmt.bufPrint(&prefix_buffer, "› " ++ View.Mark.sidenote ++ "{s}" ++ View.Mark.reset ++ View.Mark.body, .{time});
             for ([_]usize{ 0, 1, protocol.ActivityPage.items * 2 + 1 }) |excluded| {
                 for ([_]bool{ false, true }) |applied_boundary| {
                     const stop_at = excluded + 5;
@@ -1566,11 +1559,11 @@ test "session_view Message placement is identical in either direction at every p
                     host.end = stop_at;
                     host.content_texts = texts[0..stop_at];
                     for (0..stop_at) |index| rows[index] = host.item(.{ .position = index + 1 }, stop_at);
-                    expected[1] = .{ .text = try std.fmt.bufPrint(&shown[1], "\n◌ not sent{s}{s}" ++ View.Mark.reset ++ "\n\n■ Stopped\n", .{ prefix, texts[0] }), .lowest = 1 };
+                    expected[1] = .{ .text = try std.fmt.bufPrint(&shown[1], "◌ not sent\n{s}{s}" ++ View.Mark.reset ++ "\n\n■ Stopped\n", .{ prefix, texts[0] }), .lowest = 1 };
                     var stop_buffer: [8192]u8 = undefined;
                     var stop_out = std.Io.Writer.fixed(&stop_buffer);
-                    for (3..excluded + 3) |index| try stop_out.print("\n◌ not sent{s}{s}" ++ View.Mark.reset ++ "\n", .{ prefix, texts[index] });
-                    try stop_out.writeAll("\n■ Stopped\n");
+                    for (3..excluded + 3) |index| try stop_out.print("{s}◌ not sent\n{s}{s}" ++ View.Mark.reset ++ "\n", .{ if (index == 3) "" else "\n", prefix, texts[index] });
+                    try stop_out.writeAll(if (excluded == 0) "■ Stopped\n" else "\n■ Stopped\n");
                     expected[stop_at - 1] = .{ .text = stop_out.buffered(), .lowest = if (excluded == 0) null else 4 };
                     try check(root, rows[0..stop_at], expected[0..stop_at], .{}, false);
                 }
@@ -1648,24 +1641,22 @@ test "activity golden stop with interrupted ending draws one line across pages" 
                 var buffer: [256]u8 = undefined;
                 var out = std.Io.Writer.fixed(&buffer);
                 var sink: Sink = .{ .out = &out };
-                var compact = true;
                 page.* = .{ .facts = .{ .end = 2, .count = if (split) 1 else 2, .direction = if (historical) .backward else .forward } };
                 page.facts.items[0] = if (historical and !split) ended else stop;
                 if (!split) page.facts.items[1] = if (historical) stop else ended;
                 for (0..page.facts.count) |index| {
                     const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                    _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth }, .none);
+                    _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                 }
                 if (split) {
                     try std.testing.expectEqualStrings("", out.buffered());
                     page.facts.items[0] = ended;
                     for (0..page.facts.count) |index| {
                         const item = page.facts.items[if (historical) page.facts.count - index - 1 else index];
-                        _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, &compact, "", .{ .viewport = .wcwidth }, .none);
+                        _ = try View.render(undefined, "unused", session.slice(), item, .{}, false, &sink, colour, "", .{ .viewport = .wcwidth }, .none);
                     }
                 }
-                try std.testing.expectEqualStrings(if (colour) "\n\x1b[39m■\x1b[39m Stopped\n" else "\n■ Stopped\n", out.buffered());
-                try std.testing.expect(!compact);
+                try std.testing.expectEqualStrings(if (colour) "\x1b[39m■\x1b[39m Stopped\n" else "■ Stopped\n", out.buffered());
             }
         }
     }
@@ -1676,9 +1667,8 @@ test "activity golden stop with interrupted ending draws one line across pages" 
     var buffer: [256]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
     var sink: Sink = .{ .out = &out };
-    var compact = false;
-    _ = try View.render(undefined, "unused", session.slice(), page.facts.items[0], .{}, false, &sink, true, &compact, "", .{ .viewport = .wcwidth }, .none);
-    try std.testing.expectEqualStrings("\n\x1b[39m■\x1b[39m Stopped\n", out.buffered());
+    _ = try View.render(undefined, "unused", session.slice(), page.facts.items[0], .{}, false, &sink, true, "", .{ .viewport = .wcwidth }, .none);
+    try std.testing.expectEqualStrings("\x1b[39m■\x1b[39m Stopped\n", out.buffered());
 }
 
 test "session_reads policy cursor is inclusive only for a fresh provisional replay" {
@@ -1865,7 +1855,7 @@ test "session_reads row heads are bounded with ordered exact collapsed targets" 
     var task: Task = .{ .io = io };
     var row: RenderedRow = .{ .key = .{ .position = 1 }, .offset = 0, .length = 0, .tight = false, .provisional = false };
     var capture: RowCapture = .{ .task = &task, .file = file, .start = 0, .row = &row };
-    try capture.feed("\nhead\n");
+    try capture.feed("head\n");
     for (0..20) |index| try capture.collapsedSummary(.{ .source = .activity, .position = index + 1, .ordinal = 0, .row = false, .content = FakeHost.content() }, View.Mark.summary ++ "┄ prior" ++ View.Mark.reset ++ "\n");
     try std.testing.expectEqual(@as(usize, 16), row.collapsed_count);
     for (row.collapsed_targets[0..row.collapsed_count], 1..) |target, position| try std.testing.expectEqual(@as(u64, position), target.position);
