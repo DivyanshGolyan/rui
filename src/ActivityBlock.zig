@@ -1,6 +1,6 @@
 //! Work under way, at the transcript's tail: the running calls, each
 //! running Bash call with its own clock; `+N more running · /status` when
-//! more run than fit; the work line (`⠹ Waiting · 12s`, `⠹ Rate limited ·
+//! more run than fit; the work line (`⠹ Thinking · 12s`, `⠹ Rate limited ·
 //! retry 2 in 18s`, `Stopping…`) when no shown call carries it; and the
 //! newest Message waiting its turn, `◌ also update docs …`. One row each, in
 //! that order, so a retry or the next call replaces a row in place rather
@@ -286,11 +286,11 @@ test "the activity tail puts the clock on the running call's own row, and the wo
 
     // The model works with no call shown: one dim work row, never stacked.
     block.live = .{};
-    block.work = .{ .mark = "⠹", .tone = .normal, .words = "Waiting", .clock = .{ .elapsed = 12 } };
+    block.work = .{ .mark = "⠹", .tone = .normal, .words = "Thinking", .clock = .{ .elapsed = 12 } };
     block.queued = .{ .line = "also update docs/using-rui.md", .count = 1 };
     const waiting = try block.widget().draw(ctx);
     try std.testing.expectEqual(@as(u16, 2), waiting.size.height);
-    try std.testing.expectEqualStrings("⠹ Waiting · 12s", try rowText(waiting, 0));
+    try std.testing.expectEqualStrings("⠹ Thinking · 12s", try rowText(waiting, 0));
     try std.testing.expectEqualStrings("◌ also update docs/using-rui.md", try rowText(waiting, 1));
     try std.testing.expectEqual(@as(usize, 0), waiting.children.len);
 
