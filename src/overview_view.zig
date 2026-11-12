@@ -507,8 +507,8 @@ pub const ListArea = enum { sessions, panel };
 
 pub const StatusLine = struct { text: []const u8, colour: Colour };
 
-/// The overview's status: what `statusSaid` says, a notice with all its
-/// lines; else the newest unconfirmed send; null when all is quiet. It
+/// Persistent status: an Upgrade, else the newest unconfirmed send;
+/// null when all is quiet. Transient notices belong to the Footer. It
 /// shows on rows of its own above the Footer, as `noticeRows` lays it out.
 /// Borrows `state` and `buffer`.
 pub fn statusLine(state: *const State, caps: Caps, buffer: *StatusBuffer) ?StatusLine {
@@ -941,26 +941,24 @@ pub const OwnedStart = struct {
     }
 };
 
-/// The overview's notice for the exact conversation, and whether Ctrl-X
-/// stops it.
+/// Persistent state, a transient reply, and whether Ctrl-X stops the chat.
 pub const Said = struct {
-    /// Null when the overview says nothing; the conversation's own notice
-    /// then shows.
+    /// Persistent state below the Footer; null while quiet.
     text: ?[]const u8,
+    notice: ?[]const u8 = null,
     stoppable: bool,
 };
 
 pub fn conversation(state: *const State, ref: Reference, work: Kind, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) Said {
-    return .{ .text = if (statusSaid(state, caps, buffer)) |line| line.text else null, .stoppable = stoppable(state, ref, work) };
+    const line = statusSaid(state, caps, buffer);
+    return .{ .text = if (line) |value| value.text else null, .notice = footerNotice(state), .stoppable = stoppable(state, ref, work) };
 }
 
-/// What both screens' status rows say first: an Upgrade while it runs,
-/// since its line is where Esc is offered; else the newest notice; else
-/// an Upgrade that holds. Borrows `state` and `buffer`.
+/// Persistent Upgrade state, independent of the Footer's transient reply.
+/// Borrows `state` and `buffer`.
 fn statusSaid(state: *const State, caps: Caps, buffer: *[upgrade_status.max_line_bytes]u8) ?StatusLine {
     const upgrade: ?upgrade_status.Line = if (state.upgrade.run) |run| upgrade_status.line(run, buffer, if (caps.unicode) .unicode else .ascii) else null;
     if (upgrade) |line| if (line.lasts == .until_done) return .{ .text = line.text, .colour = .normal };
-    if (state.notice) |*notice| return .{ .text = notice.text(), .colour = notice.colour };
     if (upgrade) |line| if (line.lasts == .persistent)
         return .{ .text = line.text, .colour = if (line.tone == .attention) .attention else .normal };
     return null;
@@ -1052,9 +1050,6 @@ pub const State = struct {
     /// The in-flight traversal's filter, or null once a view change
     /// invalidates it. Returning to that filter cannot revive its pages.
     listing_archive: ?ArchiveFilter = .active,
-    /// The Session last archived here, so its notice says when the Host
-    /// finishes archiving it.
-    last_archived: ?Reference = null,
     rows: Vec(Row) = .{},
     /// Row indices by reference.
     by_reference: Vec(Keyed) = .{},
@@ -1725,12 +1720,10 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
             const at = state.pendingAt(kind, result.request.reference).?;
             const ref = result.request.reference;
             switch (result.outcome) {
-                .requested => |completion| {
+                .requested => {
                     state.answer(at, .done, "");
-                    if (result.request.archived) {
-                        state.last_archived = ref;
-                        if (completion == .pending) state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref}) else state.say(.quiet, "Archived {s}.", .{&ref});
-                    } else state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
+                    // Archive confirmation is the server's facts badge, not a reply.
+                    if (!result.request.archived) state.say(.quiet, "Restored {s}; work was not restarted.", .{&ref});
                 },
                 .failed => |code| {
                     state.answer(at, .failed, code);
@@ -2094,13 +2087,6 @@ fn labelOf(text: []const u8) Bounded(max_label_bytes) {
 fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     const selected_at = if (state.selected == .session) position(state, state.selected.session) else null;
     const opening = state.token == null;
-    var completed_archive: ?Reference = null;
-    if (state.last_archived) |ref| for (state.pending.items) |incoming| {
-        if (!std.mem.eql(u8, &incoming.reference, &ref) or incoming.archive_state != .archived) continue;
-        if (state.find(ref)) |old| if (old.archive_state != .archived) {
-            completed_archive = ref;
-        };
-    };
     switch (answer.delta) {
         .not_modified => {},
         .changed => {
@@ -2146,7 +2132,6 @@ fn commit(state: *State, answer: Answer) error{OutOfMemory}!void {
     state.listed_at_ms = state.now_ms;
     state.list_stale = false;
     try arrange(state);
-    if (completed_archive) |ref| state.say(.quiet, "Archived {s}.", .{&ref});
     if (state.selected == .session and state.selectedRow() == null) {
         state.selected = if (selected_at) |at| if (at < state.order.items.len) .{ .session = state.rows.items[state.order.items[at]].reference } else .new_session else .new_session;
     } else if (opening and state.selected == .new_session and state.order.items.len != 0) {
@@ -2674,14 +2659,7 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
 /// and `/unarchive` restores it, so nothing is asked.
 fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, effects: *Effects) ArchiveAdmission {
     _ = work;
-    if (archive == .archiving) {
-        state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref});
-        return .refused;
-    }
-    if (archive == .archived) {
-        state.say(.quiet, "{s} is already archived. /unarchive restores it.", .{&ref});
-        return .refused;
-    }
+    if (archive != .active) return .refused; // Its durable badge already says so.
     return archiveSession(state, .{ .reference = ref }, effects);
 }
 
@@ -2696,7 +2674,7 @@ fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) Arc
     }
     if (state.request(if (request.archived) .archive else .unarchive, request.reference)) {
         effects.add(.{ .archive = request });
-        state.say(.quiet, "{s} request pending for {s}; waiting for the Host.", .{ if (request.archived) "Archive" else "Restore", &request.reference });
+        if (!request.archived) state.say(.quiet, "Restore request pending for {s}; waiting for the Host.", .{&request.reference});
         return .admitted;
     }
     return .refused;
@@ -3574,9 +3552,8 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     _ = try built.put(1, glyph, 1, .{ .colour = colour });
     const named = title(state, row);
     const name = switch (row.archive_state) {
-        .active => named.text,
+        .active, .archived => named.text,
         .archiving => try std.fmt.allocPrint(arena, "[Archiving] {s}", .{named.text}),
-        .archived => try std.fmt.allocPrint(arena, "[Archived] {s}", .{named.text}),
     };
     var buffer: [8]u8 = undefined;
     const age = if (orderClass(state, row) == .queued) "" else ageText(&buffer, (state.now_ms / 1000) -| row.state.since());
@@ -3584,7 +3561,14 @@ pub fn rowSegments(arena: Allocator, state: *const State, at: usize, width: u16,
     const age_cells = @min(built.measure(age), end -| 3);
     const name_end = end -| age_cells -| @intFromBool(age_cells != 0);
     const selected = if (state.conversing) |reference| std.mem.eql(u8, &reference, &row.reference) else state.selected == .session and std.mem.eql(u8, &state.selected.session, &row.reference);
-    _ = try built.put(3, name, name_end -| 3, .{ .colour = if (selected) .strong else .normal, .bold = selected });
+    // The archived-only list already supplies this fact; mixed lists do not.
+    const archived = if (row.archive_state == .archived and state.archive != .archived)
+        if (caps.unicode) " · archived" else " . archived"
+    else
+        "";
+    const name_room: usize = name_end -| 3;
+    const name_cells = try built.put(3, name, name_room -| built.measure(archived), .{ .colour = if (selected) .strong else .normal, .bold = selected });
+    _ = try built.put(3 + name_cells, archived, name_room -| name_cells, .{ .colour = .quiet });
     _ = try built.put(end -| age_cells, age, age_cells, .{ .colour = .quiet });
     return segmentsOf(arena, try built.finish(), width, .{});
 }
@@ -3663,9 +3647,12 @@ pub fn footerRight(state: *const State, draft: Draft) []const u8 {
     return enterWords(action);
 }
 
-/// The Footer's facts, always: a notice takes rows of its own above it
-/// (`noticeSegments`). Sanitized and fitted before the generic Footer
-/// consumes these bytes.
+/// The transient reply belongs to the Footer's right side, not status rows.
+pub fn footerNotice(state: *const State) ?[]const u8 {
+    return if (state.notice) |*notice| notice.text() else null;
+}
+
+/// The Footer's facts, sanitized and fitted before generic cell clipping.
 pub fn footerLeft(arena: Allocator, state: *const State, width: u16, caps: Caps) error{OutOfMemory}![]const u8 {
     return std.mem.trimEnd(u8, try segmentText(arena, try factsSegments(arena, state, width, caps)), " ");
 }
@@ -4004,32 +3991,12 @@ fn expectEffects(expected: []const Effect, actual: Effects) !void {
     }
 }
 
-/// A notice, which reads whole on a 40-column overview in the rows under
-/// its input, a row for each line.
+/// The core's raw notice value. Production Footer rendering is covered by
+/// Overview's widget tests, not by the logical list/status Frame below.
 fn expectNotice(state: *State, expected: ?[]const u8) !void {
-    return expectNoticeAt(state, expected, true);
-}
-
-/// A notice whose data (a Host's code, the list of start settings) may be
-/// cut at the edge of a narrow overview; its wording is not.
-fn expectNoticeWithData(state: *State, expected: []const u8) !void {
-    return expectNoticeAt(state, expected, false);
-}
-
-fn expectNoticeAt(state: *State, expected: ?[]const u8, whole_at_40: bool) !void {
     if (expected) |text| {
         const notice = state.notice orelse return error.TestExpectedNotice;
         try std.testing.expectEqualStrings(text, notice.text());
-        if (whole_at_40) {
-            const screen = try screenText(state, 40, 24, .{});
-            defer std.testing.allocator.free(screen);
-            // The Footer ends the screen; above it, a row for each of the
-            // notice's lines.
-            var lines = std.mem.splitScalar(u8, screen, '\n');
-            for (0..std.mem.count(u8, screen, "\n") - std.mem.count(u8, text, "\n") - 1) |_| _ = lines.next();
-            var said = std.mem.splitScalar(u8, text, '\n');
-            while (said.next()) |line| try std.testing.expectEqualStrings(line, std.mem.trim(u8, lines.next().?, " "));
-        }
     } else if (state.notice) |*notice| try std.testing.expectEqualStrings("", notice.text());
 }
 
@@ -4041,26 +4008,17 @@ fn screenText(state: *State, width: u16, height: u16, caps: Caps) ![]u8 {
     return frameText(state, width, height, caps, 0);
 }
 
-/// What the App overview's rows show at a size, from the segments each of
-/// its widgets draws: the provider header, two-line list or panel rows,
-/// the status's rows and one Footer under `draft`. Settings has its own widget tests. This keeps
-/// only their order, with the panel given the rows the core's layout gives
-/// it.
+/// Logical header, list/panel and persistent status segments from the core.
+/// Footer text and cells belong to Overview's production widget tests.
 const Frame = struct {
     arena: std.heap.ArenaAllocator,
     lines: []const []const Segment,
     /// The list's or panel's lines.
     list: []const []const Segment,
     caps: Caps,
-    width: u16,
-
     fn of(state: *State, width: u16, height: u16, caps: Caps, frame: u64) !Frame {
-        return drafted(state, .{}, width, height, caps, frame);
-    }
-
-    fn drafted(state: *State, draft: Draft, width: u16, height: u16, caps: Caps, frame: u64) !Frame {
         try expectEffects(&.{}, try step(state, .{ .resized = .{ .width = width, .height = height } }));
-        var self: Frame = .{ .arena = .init(std.testing.allocator), .lines = &.{}, .list = &.{}, .caps = caps, .width = width };
+        var self: Frame = .{ .arena = .init(std.testing.allocator), .lines = &.{}, .list = &.{}, .caps = caps };
         errdefer self.arena.deinit();
         const gpa = self.arena.allocator();
         const top = try headerSegments(gpa, state, width, caps);
@@ -4071,7 +4029,7 @@ const Frame = struct {
         } else {
             while (listItem(state, list_count) != null) : (list_count += 1) {}
         }
-        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows + 1);
+        const lines = try gpa.alloc([]const Segment, top.len + list_count * 2 + max_notice_rows);
         var count: usize = 0;
         var start: usize = 0;
         for (top, 0..) |segment, at| if (std.mem.eql(u8, segment.text, "\n")) {
@@ -4110,14 +4068,6 @@ const Frame = struct {
             lines[count] = notice[start_..];
             count += 1;
         }
-        var footer: Spans = .of(gpa, caps, width);
-        footer.begin();
-        const keys_ = footerRight(state, draft);
-        const key_width: u16 = @intCast(keys_.len);
-        _ = try footer.put(0, try footerLeft(gpa, state, width -| key_width, caps), width -| key_width, .{ .colour = .quiet });
-        _ = try footer.put(width -| key_width, keys_, @min(width, key_width), .{ .colour = .quiet });
-        lines[count] = try segmentsOf(gpa, try footer.finish(), width, .{});
-        count += 1;
         self.lines = lines[0..count];
         self.list = lines[first..last];
         return self;
@@ -4674,8 +4624,8 @@ test "ctrl-x stops at once a row its rule lets it stop, and asks nothing" {
 }
 
 fn expectSaid(text: ?[]const u8, stoppable_: bool, said: Said) !void {
-    try std.testing.expectEqualStrings(text orelse "", said.text orelse "");
-    try std.testing.expectEqual(text == null, said.text == null);
+    try std.testing.expectEqualStrings(text orelse "", said.notice orelse said.text orelse "");
+    try std.testing.expectEqual(text == null, (said.notice orelse said.text) == null);
     try std.testing.expectEqual(stoppable_, said.stoppable);
 }
 
@@ -4695,7 +4645,7 @@ test "ctrl-x in a conversation stops its Session as on its row, listed or not" {
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .other } }));
     try std.testing.expectEqual(@as(?[]const u8, null), conversation(&state, ref, .working, .{}, &test_said).text);
     try expectEffects(&.{}, try step(&state, .{ .stop = .{ .reference = ref, .outcome = .{ .failed = "session_not_found" } } }));
-    try expectNoticeWithData(&state, "! k7m2qx not stopped: session_not_found");
+    try expectNotice(&state, "! k7m2qx not stopped: session_not_found");
     // Ended work takes no stop.
     try std.testing.expect(conversation(&state, ref, .working, .{}, &test_said).stoppable and !conversation(&state, ref, .finished, .{}, &test_said).stoppable);
     try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .finished, .input = .stop } }));
@@ -4843,7 +4793,7 @@ test "the composer starts a Session with its text and opens it" {
     draft = try typeText(&state, "Try again");
     _ = try submit(&state, draft);
     try expectEffects(&.{}, try step(&state, .{ .start = .{ .failed = "model_capability_unavailable" } }));
-    try expectNoticeWithData(&state, "! Not started: model_capability_unavailable");
+    try expectNotice(&state, "! Not started: model_capability_unavailable");
     try std.testing.expect(!state.starting());
 }
 
@@ -4853,20 +4803,13 @@ test "the composer starts text with one slash from //, as a conversation does" {
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
     try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-    try expectNoticeWithData(&state, "! Unknown command /home/me/project");
+    try expectNotice(&state, "! Unknown command /home/me/project");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
     try expectEffects(&.{.{ .start = .{ .settings = &empty, .text = "/home/me/project needs investigating" } }}, try submit(&state, draft));
 }
 
-/// The lines of `state` with `draft` at `width` by `height`.
-fn draftLines(state: *State, draft: Draft, width: u16, height: u16) ![]u8 {
-    var shown: Frame = try .drafted(state, draft, width, height, .{}, 0);
-    defer shown.deinit();
-    return shown.text();
-}
-
-/// The status row under `draft` reads `expected`.
+/// The core chooses this Footer action for `draft`.
 fn expectLastLine(state: *State, draft: Draft, expected: []const u8) !void {
     try std.testing.expectEqualStrings(expected, footerRight(state, draft));
 }
@@ -5062,7 +5005,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
     }) |case| {
         draft = try typeText(&state, case[0]);
         try expectEffects(&.{.clear_draft}, try submit(&state, draft));
-        try if (case[1].ptr == configure_usage.ptr) expectNoticeWithData(&state, case[1]) else expectNotice(&state, case[1]);
+        try expectNotice(&state, case[1]);
         try std.testing.expect(state.settings.empty());
     }
     // Alone, /configure waits for an option: Enter on it in the list adds
@@ -5108,17 +5051,6 @@ fn expectStyle(state: *State, row: usize, column: usize, expected: Style) !void 
     var shown: Frame = try .of(state, 80, 24, .{}, 0);
     defer shown.deinit();
     try std.testing.expectEqual(expected, shown.styleAt(row, column).?);
-}
-
-/// The status row and the rows a longer notice takes above it read
-/// `expected`, as the bottom of the screen.
-/// The rows right above the Footer, which ends the screen, read `expected`.
-fn expectStatusLines(state: *State, expected: []const []const u8) !void {
-    const text = try screenText(state, 80, 24, .{});
-    defer std.testing.allocator.free(text);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    for (0..std.mem.count(u8, text, "\n") - expected.len) |_| _ = lines.next();
-    for (expected) |line| try std.testing.expectEqualStrings(line, lines.next().?);
 }
 
 fn expectScreenLine(state: *State, line: usize, expected: []const u8) !void {
@@ -5199,7 +5131,7 @@ test "an unconfirmed start clears the composer and names the request that recove
     try std.testing.expect(!state.starting());
     try std.testing.expect(state.settings.empty());
     try expectNotice(&state, "! Start unsure; details on exit");
-    try expectStatusLines(&state, &.{" ! Start unsure; details on exit"});
+    try expectNotice(&state, "! Start unsure; details on exit");
     // The next tick lists at once, so a start that did land shows.
     try expectEffects(&.{.{ .list = testToken(1) }}, try step(&state, .{ .tick = state.now_ms + 1 }));
     // A second unconfirmed start keeps the first one's handle.
@@ -5820,8 +5752,8 @@ test "the overview's rows draw an empty Store" {
     for ([_]u16{ 40, 80, 200 }) |width| {
         const text = try screenText(&state, width, 24, .{});
         defer std.testing.allocator.free(text);
-        try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session\n\n"));
-        try std.testing.expect(std.mem.endsWith(u8, text, "enter start"));
+        try std.testing.expect(std.mem.startsWith(u8, text, "  + New Session\n"));
+        try std.testing.expectEqualStrings("enter start", footerRight(&state, .{}));
         try std.testing.expect(std.mem.indexOf(u8, text, "new Session ·") == null);
     }
 }
@@ -5878,8 +5810,7 @@ fn repeated(comptime text: []const u8, comptime count: usize) []const u8 {
     }
 }
 
-test "every line fits the screen as the terminal measures it" {
-    var draft: Draft = .{};
+test "every logical row fits the screen as the terminal measures it" {
     const rockets = comptime repeated("🚀", 50);
     var state = try opened(&.{
         session("k7m2qx", .{ .working = ago(1) }, .{ .label = rockets[0..max_label_bytes] }),
@@ -5888,9 +5819,9 @@ test "every line fits the screen as the terminal measures it" {
         session("m3n8pd", .{ .failed = .{ .since = test_now_s - 120, .code = bounded(session_work.max_code_bytes, "provider_output_invalid"), .resets_at = null } }, .{ .label = comptime repeated("Cafe\u{301} ", 14) }),
     });
     defer state.deinit();
-    draft = try typeText(&state, rockets);
+    _ = try typeText(&state, rockets);
     for ([_]Caps{ .{ .width = .unicode }, .{ .width = .wcwidth }, .{ .unicode = false } }) |caps| for ([_]u16{ 80, 41, 24 }) |width| {
-        var shown: Frame = try .drafted(&state, draft, width, 24, caps, 0);
+        var shown: Frame = try .of(&state, width, 24, caps, 0);
         defer shown.deinit();
         const text = try shown.text();
         defer std.testing.allocator.free(text);
@@ -5979,16 +5910,13 @@ test "the skin follows the terminal's background, night when it gave none" {
     try std.testing.expectEqual(Skin.night, (Caps{ .background = .{ 0, 0, 255 } }).skin());
 }
 
-test "the unknown-command notice fits a 40-column screen" {
+test "an unknown command returns an attention notice" {
     var state = try opened(&mixed);
     defer state.deinit();
     const draft = try typeText(&state, "/status");
     _ = try submit(&state, draft);
-    const screen = try screenText(&state, 40, 24, .{ .unicode = true });
-    defer std.testing.allocator.free(screen);
-    try std.testing.expect(std.mem.indexOf(u8, screen, "Unknown command") != null);
-    try std.testing.expect(std.mem.endsWith(u8, screen, "enter open"));
-    try std.testing.expectEqualStrings("! Unknown command /status", state.notice.?.text());
+    try expectNotice(&state, "! Unknown command /status");
+    try std.testing.expectEqual(Colour.attention, state.notice.?.colour);
 }
 
 test "a start the Host refuses for want of its sign-in names the sign-in and its login, if it has one" {
@@ -6010,8 +5938,8 @@ test "a start the Host refuses for want of its sign-in names the sign-in and its
 }
 
 /// The rows the Sessions' list or a panel takes on an 80 by 24 screen.
-fn listRows(state: *State, draft: Draft) ![]u8 {
-    var shown: Frame = try .drafted(state, draft, 80, 24, .{}, 0);
+fn listRows(state: *State) ![]u8 {
+    var shown: Frame = try .of(state, 80, 24, .{}, 0);
     defer shown.deinit();
     const text = try Frame.textOf(shown.list);
     defer std.testing.allocator.free(text);
@@ -6094,8 +6022,6 @@ test "/rename names the selected Session through the shell, as a conversation do
         try expectNotice(&state, case[1]);
         try std.testing.expectEqual(case[2], state.notice.?.colour);
     }
-    // Both lines show under the input.
-    try expectStatusLines(&state, &.{ " Configured.", " ! label saved locally only" });
 }
 
 test "/rename under a panel brings the Sessions back, so the list shows the row it names" {
@@ -6116,7 +6042,7 @@ test "/setup needs no Session, and output of more than a line takes the Sessions
     try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
     try ranWith(&state, .{ .output = "Saved defaults for future Sessions.\nStore: /s (saved)\nNotifications: off\n" });
     try expectNotice(&state, null);
-    const shown = try listRows(&state, .{});
+    const shown = try listRows(&state);
     defer std.testing.allocator.free(shown);
     try expectLines(shown, 1, &.{ " Saved defaults for future Sessions.", " Store: /s (saved)", " Notifications: off", "" });
     try std.testing.expect(std.mem.startsWith(u8, shown, " /setup "));
@@ -6125,7 +6051,7 @@ test "/setup needs no Session, and output of more than a line takes the Sessions
     // Output past what the overview keeps says it was cut.
     _ = try submit(&state, try typeText(&state, "/setup"));
     try ranWith(&state, .{ .output = "Defaults (read only):", .cut = true });
-    const cut = try listRows(&state, .{});
+    const cut = try listRows(&state);
     defer std.testing.allocator.free(cut);
     try expectLines(cut, 1, &.{ " Defaults (read only):", " Output cut at 8 KiB." });
     // Typing "/" lists /setup's options as a conversation does.
@@ -6305,7 +6231,8 @@ test "the status bar says the Upgrade at work, else the newest notice, else an U
     // An ending that is news is a notice: it goes with the next key and
     // the unconfirmed send shows again.
     _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = false } }, .outcome = .compatible } } });
-    try expectStatus(&state, "Upgraded to 0.60.0", .normal);
+    try std.testing.expectEqualStrings("Upgraded to 0.60.0", footerNotice(&state).?);
+    try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     _ = try press(&state, .{}, .next);
     try expectStatus(&state, "! Not confirmed · rui request recover " ++ key, .attention);
     // A release this client cannot use stays until another Upgrade.
@@ -6347,7 +6274,7 @@ test "Upgrade is never refused as a Host request: the status bar shows its run a
     try std.testing.expectEqual(session_upgrade.After.blocked, state.upgrade.after);
     // A Host request is refused in words; the retry shows its own progress.
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "start this")));
-    try expectStatus(&state, upgrade_recovery, .attention);
+    try std.testing.expectEqualStrings(upgrade_recovery, footerNotice(&state).?);
     try expectEffects(&.{}, try step(&state, .start_upgrade));
     try expectStatus(&state, "Checking for updates…", .normal);
 }
@@ -6406,12 +6333,49 @@ test "archive views remove changed rows outside the server filter and select the
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     const text = try screenText(&state, 80, 24, .{});
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "Archived") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "[Archived] second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "✓ second") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "[Archived]") == null);
     b.archive_state = .active;
     _ = try refresh(&state, .changed, testToken(4), &.{b});
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
     try std.testing.expect(state.selected == .new_session);
+}
+
+test "archive row marker follows the whole filter and row-state domain" {
+    for ([_]ArchiveFilter{ .active, .archived, .all }) |filter| for ([_]ArchiveState{ .active, .archived }) |archive| for ([_]bool{ false, true }) |selected| for ([_]u16{ 40, 46, 140 }) |width| for ([_]bool{ false, true }) |unicode_marks| {
+        var state = try opened(&.{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "Archive audit" })});
+        defer state.deinit();
+        // Exercise the draw owner even for pairs that a filtered listing omits.
+        state.archive = filter;
+        state.rows.items[0].archive_state = archive;
+        state.selected = if (selected) .{ .session = "aaaaaa".* } else .new_session;
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const segments = try rowSegments(arena.allocator(), &state, 0, width, .{ .unicode = unicode_marks }, 0);
+        const text = try segmentText(arena.allocator(), segments);
+        const expected = archive == .archived and filter != .archived;
+        const marker = if (unicode_marks) " · archived" else " . archived";
+        try std.testing.expectEqual(@as(usize, @intFromBool(expected)), std.mem.count(u8, text, marker));
+        try std.testing.expect(std.mem.indexOf(u8, text, "[Archived]") == null);
+        try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, text, " "), if (unicode_marks) "✓ Archive audit" else "+ Archive audit"));
+        try std.testing.expectEqual(selected, (try styleOf(segments, "Archive audit")).bold);
+        if (expected) {
+            try std.testing.expect(std.mem.indexOf(u8, text, if (unicode_marks) "Archive audit · archived" else "Archive audit . archived") != null);
+            const style = try styleOf(segments, "archived");
+            try std.testing.expectEqual(Colour.quiet, style.colour);
+            try std.testing.expect(!style.bold);
+        }
+    };
+}
+
+test "archive row marker survives a clipped name without overlapping the age" {
+    var state = try opened(&.{session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "A long archived Session name that needs clipping" })});
+    defer state.deinit();
+    state.archive = .all;
+    state.rows.items[0].archive_state = .archived;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try expectRow(try rowSegments(arena.allocator(), &state, 0, 40, .{}, 0), 40, &.{ .{ "✓", .mark }, .{ "A long archived Sessi…", .strong }, .{ "· archived", .quiet }, .{ "1s", .quiet } });
 }
 
 test "archive filter switch clears hidden data and discards every stale traversal page" {
@@ -6457,13 +6421,13 @@ test "a busy Session archives at once, asking nothing, and never hides before se
     _ = try refresh(&state, .changed, testToken(2), &.{row});
     const settling = try screenText(&state, 100, 24, .{});
     defer std.testing.allocator.free(settling);
-    try std.testing.expect(std.mem.indexOf(u8, settling, "Stopping and archiving") != null);
+    try std.testing.expect(std.mem.indexOf(u8, settling, "[Archiving] busy") != null);
     try std.testing.expectEqual(@as(usize, 1), state.rows.items.len);
     row.archive_state = .archived;
     row.state = .{ .stopped = .{ .since = test_now_s, .cause = .stop } };
     _ = try refresh(&state, .changed, testToken(3), &.{row});
     try std.testing.expectEqual(@as(usize, 0), state.rows.items.len);
-    try std.testing.expectEqualStrings("Archived aaaaaa.", state.notice.?.text());
+    try std.testing.expect(state.notice == null);
     // /undo is gone; /unarchive restores from the archived view.
     effects = .{};
     try enter(&state, "/undo", &effects);
@@ -6565,7 +6529,7 @@ test "Alt-A conversation archive uses exact unlisted Session at once and shares 
         var state = try testState();
         defer state.deinit();
         try expectEffects(&.{}, try step(&state, .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .archive = archive } } }));
-        try std.testing.expect(state.notice != null);
+        try std.testing.expect(state.notice == null);
         try std.testing.expectEqual(@as(usize, 0), state.request_count);
     }
 }
@@ -6596,7 +6560,6 @@ test "upgrade holds admit no archive surface before draft or ledger mutation" {
                     _ = try respond(&state, .full, testToken(1), &.{row});
                     try std.testing.expectEqual(Selection{ .session = ref }, state.selected);
                     state.upgrade.after = if (blocked) .blocked else .reobserving;
-                    state.last_archived = "bbbbbb".*;
                     try showOutputPanel(&state);
                     // Preserve both an unknown handle and accepted in-flight work.
                     try std.testing.expect(state.request(.stop, "zzzzzz".*));
@@ -6612,7 +6575,6 @@ test "upgrade holds admit no archive surface before draft or ledger mutation" {
                     try std.testing.expectEqual(@as(usize, 2), state.request_count);
                     try std.testing.expectEqual(unknown, state.requests[0]);
                     try std.testing.expectEqual(pending, state.requests[1]);
-                    try std.testing.expectEqualStrings("bbbbbb", &state.last_archived.?);
                     try std.testing.expectEqualStrings(&ref, &state.selected.session);
                     try std.testing.expectEqual(archive, state.find(ref).?.archive_state);
                     try std.testing.expect(state.panel != null and state.panel.? == .output);
@@ -6698,7 +6660,6 @@ test "upgrade holds settle accepted archive restore and stop completions without
                     try std.testing.expectEqual(expected, state.requests[0].status);
                     if (outcome == .unconfirmed) try std.testing.expectEqualStrings("saved-handle", state.requests[0].text.slice());
                 }
-                if (outcome == .requested and archived) try std.testing.expectEqual(@as(?Reference, ref), state.last_archived);
             }
         }
         for ([_]StopOutcome{ .stopped, .{ .failed = "stop_failed" }, .{ .unconfirmed = "saved-handle" } }) |outcome| {
@@ -7003,9 +6964,8 @@ test "overview single footer keeps the working Enter key for every selection and
         const before = try footerLeft(arena.allocator(), &state, width, .{});
         try std.testing.expect(std.mem.indexOf(u8, before, "new Session") == null);
         state.say(.failure, "Could not start", .{});
-        // The notice takes its own row above the Footer, which keeps its
-        // facts and key.
-        try std.testing.expectEqualStrings(" Could not start", std.mem.trimEnd(u8, try segmentText(arena.allocator(), (try noticeSegments(arena.allocator(), &state, width, .{})).?), " "));
+        try std.testing.expectEqualStrings("Could not start", footerNotice(&state).?);
+        try std.testing.expectEqual(null, try noticeSegments(arena.allocator(), &state, width, .{}));
         try std.testing.expectEqualStrings(before, try footerLeft(arena.allocator(), &state, width, .{}));
         try std.testing.expectEqualStrings("enter open", footerRight(&state, .{}));
         _ = try press(&state, .{}, .first);
@@ -7233,7 +7193,7 @@ test "archive admission reports only a new ledger request across every surface c
             if (hold != .active) {
                 try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
             } else if (!case.restore and archive != .active) {
-                try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (archive == .archiving) "Stopping and archiving" else "already archived") != null);
+                try std.testing.expect(state.notice == null); // The durable archive badge is the feedback.
             } else if (held != .none) {
                 try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (held == .pending) "request pending" else "request unsure") != null);
             } else if (full) {
@@ -7393,6 +7353,29 @@ test "overview command list click takes the drawn row only from the list the fra
                 try std.testing.expectEqual(shown.seen, clicked.commands.?.seen);
             }
         }
+    };
+}
+
+test "archive confirmation comes only from durable facts, before or after the result" {
+    for ([_]bool{ false, true }) |facts_first| for ([_]@TypeOf(@as(ArchiveResult, undefined).outcome.requested){ .pending, .completed }) |completion| {
+        var row = session("aaaaaa", .{ .finished = ago(1) }, .{ .label = "Archive audit" });
+        var state = try opened(&.{row});
+        defer state.deinit();
+        var effects: Effects = .{};
+        try enter(&state, "/archive", &effects);
+        try std.testing.expect(state.notice == null);
+        const request_ = effects.slice()[1].archive;
+        row.archive_state = .archived;
+        if (facts_first) _ = try refresh(&state, .changed, testToken(2), &.{row});
+        _ = try step(&state, .{ .archive = .{ .request = request_, .outcome = .{ .requested = completion } } });
+        try std.testing.expect(state.notice == null);
+        if (!facts_first) _ = try refresh(&state, .changed, testToken(2), &.{row});
+        try std.testing.expect(state.find(row.reference) == null);
+        try std.testing.expect(state.notice == null);
+        const said = conversation(&state, row.reference, .finished, .{}, &test_said);
+        try std.testing.expect(said.notice == null);
+        try std.testing.expect(said.text == null);
+        try std.testing.expectEqual(@as(u16, 0), statusRows(&state));
     };
 }
 

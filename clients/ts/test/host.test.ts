@@ -219,11 +219,16 @@ test("a missing executable is RuiUnavailableError", async () => {
 	await assert.rejects(Rui.connect(options(newStore(), { binary: "/nonexistent/rui" })), RuiUnavailableError);
 });
 
-test("MySQL readiness discovers an opaque id without sending the URL on requests", async () => {
+function mysqlHost(refusals: (RuiStartError["code"] | null)[] = []) {
 	const directory = mkdtempSync(join(tmpdir(), "rui-ts-mysql-"));
 	const executable = join(directory, "host.cjs");
 	writeFileSync(executable, String.raw`#!/usr/bin/env node
 const net = require("node:net");
+const fs = require("node:fs");
+const counter = ${JSON.stringify(join(directory, "attempts"))};
+const attempt = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
+fs.writeFileSync(counter, String(attempt + 1));
+const refusal = ${JSON.stringify(refusals)}[attempt];
 let bytes = Buffer.alloc(0), server;
 const id = "0123456789abcdef0123456789abcdef";
 process.stdin.on("data", chunk => {
@@ -232,6 +237,11 @@ process.stdin.on("data", chunk => {
   const frame = JSON.parse(bytes.subarray(4, 4 + bytes.readUInt32BE()).toString());
   bytes.fill(0);
   if (!frame.store.startsWith("mysql://") || Object.values(process.env).includes(frame.store) || process.argv.includes(frame.store)) process.exit(2);
+  if (refusal) {
+    process.stdout.write(JSON.stringify({rui_start_error:{code:refusal,message:"could not connect to the MySQL server"}}) + "\n", () => process.exit(1));
+    return;
+  }
+  fs.rmSync(require("node:path").join(frame.runtimeDir, "rui.sock"), {force:true});
   server = net.createServer(socket => {
     let input = "";
     socket.on("data", chunk => {
@@ -242,16 +252,25 @@ process.stdin.on("data", chunk => {
       if (Buffer.byteLength(input.slice(end + 4)) < length) return;
       const request = JSON.parse(input.slice(end + 4));
       if (request.store !== "" && request.store !== id) process.exit(3);
-      const body = JSON.stringify({version:${JSON.stringify(WIRE_VERSION)},type:"host_info",store:id,instance:"a".repeat(32),active_capacity:"2",intake_capacity:"100",descriptor_limit:"1024",started_at:"1792918800",custody_occupied:"0",paused:false,innodb_doublewrite:"OFF",capabilities:{bash:true,providers:{codex:"unserved",openai:"key_file"}}});
+      const body = JSON.stringify({version:${JSON.stringify(WIRE_VERSION)},type:"host_info",store:id,instance:String(attempt).padStart(32, "0"),active_capacity:"2",intake_capacity:"100",descriptor_limit:"1024",started_at:"1792918800",custody_occupied:"0",paused:false,innodb_doublewrite:"OFF",capabilities:{bash:true,providers:{codex:"unserved",openai:"key_file"}}});
       socket.end("HTTP/1.1 200 OK\r\nContent-Length: " + Buffer.byteLength(body) + "\r\n\r\n" + body);
     });
   }).listen(require("node:path").join(frame.runtimeDir, "rui.sock"));
 });
 process.stdin.on("end", () => server ? server.close(() => process.exit(0)) : process.exit(0));
 `, { mode: 0o700 });
+	return {
+		executable,
+		attempts: () => Number(readFileSync(join(directory, "attempts"), "utf8")),
+		close: () => rmSync(directory, { recursive: true, force: true }),
+	};
+}
+
+test("MySQL readiness discovers an opaque id without sending the URL on requests", async () => {
+	const fixture = mysqlHost();
 	let rui: Rui | undefined;
 	try {
-		rui = await Rui.connect(options("mysql://user:private@localhost/db", { binary: executable }));
+		rui = await Rui.connect(options("mysql://user:private@localhost/db", { binary: fixture.executable }));
 		const id = "0123456789abcdef0123456789abcdef";
 		assert.equal(rui.hostInfo?.store, id);
 		// No property-presence/union narrowing is needed on the shared shape.
@@ -263,6 +282,55 @@ process.stdin.on("end", () => server ? server.close(() => process.exit(0)) : pro
 		});
 	} finally {
 		await rui?.close();
-		rmSync(directory, { recursive: true, force: true });
+		fixture.close();
+	}
+});
+
+test("automatic restart retries an unreachable MySQL server and recovers", { timeout: 10_000 }, async () => {
+	// An idle client unreferences its child and restart timer; keep the test alive while awaiting exit.
+	const alive = setInterval(() => {}, 100);
+	const fixture = mysqlHost([null, "mysql_unreachable", null]);
+	let rui: Rui | undefined;
+	try {
+		rui = await Rui.connect(options("mysql://user:private@localhost/db", { binary: fixture.executable }));
+		const client = rui;
+		const first = client.hostInfo!.instance;
+		const info = () => client.exchange("/v1/host-info", store => JSON.stringify({ version: WIRE_VERSION, kind: "host_info", store }));
+		const exited = once(client, "exit");
+		process.kill(client.pid!, "SIGKILL");
+		await exited;
+		const refused = once(client, "exit");
+		await assert.rejects(info(), (error: unknown) => {
+			assert.ok(error instanceof RuiUnavailableError);
+			assert.ok(error.cause instanceof RuiStartError);
+			assert.equal(error.cause.code, "mysql_unreachable");
+			return true;
+		});
+		assert.deepEqual((await refused)[0], { code: 1, signal: null, restarting: true });
+		const recovered = JSON.parse((await info()).toString("utf8"));
+		assert.notEqual(recovered.instance, first);
+		assert.equal(fixture.attempts(), 3);
+	} finally {
+		clearInterval(alive);
+		await rui?.close();
+		fixture.close();
+	}
+});
+
+test("initial connect rejects mysql_unreachable without retrying", { timeout: 10_000 }, async () => {
+	const fixture = mysqlHost(["mysql_unreachable", null]);
+	let rui: Rui | undefined;
+	try {
+		await assert.rejects(async () => {
+			rui = await Rui.connect(options("mysql://user:private@localhost/db", { binary: fixture.executable }));
+		}, (error: unknown) => {
+			assert.ok(error instanceof RuiStartError);
+			assert.equal(error.code, "mysql_unreachable");
+			return true;
+		});
+		assert.equal(fixture.attempts(), 1);
+	} finally {
+		await rui?.close();
+		fixture.close();
 	}
 });

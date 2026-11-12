@@ -231,8 +231,8 @@ fn text(w: *std.Io.Writer, value: []const u8) !void {
 }
 
 fn serverError(code: u16) anyerror {
+    if (wire.accessDenied(code)) return error.LoginRefused;
     return switch (code) {
-        1044, 1045 => error.LoginRefused,
         1146 => error.StoreSchemaMissing,
         1114, 1021 => error.CanonicalStorageFull,
         else => error.StatementFailed,
@@ -278,8 +278,15 @@ fn expectOk(conn: *wire.Connection) !void {
 }
 
 test "store.mysql open access denials keep the login refusal" {
-    try std.testing.expectEqual(error.LoginRefused, serverError(1044));
-    try std.testing.expectEqual(error.LoginRefused, serverError(1045));
+    for ([_]u16{ 1044, 1045, 1130, 1698, 1142, 1143 }) |code| {
+        try std.testing.expectEqual(error.LoginRefused, serverError(code));
+    }
+    // Authentication plugins are a handshake concern, not statement access.
+    for ([_]u16{ 1251, 1524, 1040, 1129 }) |code| {
+        try std.testing.expectEqual(error.StatementFailed, serverError(code));
+    }
+    try std.testing.expectEqual(error.CanonicalStorageFull, serverError(1114));
+    try std.testing.expectEqual(error.CanonicalStorageFull, serverError(1021));
     try std.testing.expectEqual(error.StoreSchemaMissing, serverError(1146));
     try std.testing.expectEqual(error.StatementFailed, serverError(9999));
 }
