@@ -3,8 +3,10 @@
 Every Zig test, fixture and qualification harness reads the owner, so a bump
 edits one line. A new release-gated number is spent only once per release:
 concurrent PRs share main's unreleased number instead of racing to bump it.
+Changes to the generated wire contract since that release require a newer number.
 """
 from pathlib import Path
+import json
 import re
 import subprocess
 import sys
@@ -45,6 +47,56 @@ def wire_version_at(revision):
                           capture_output=True).returncode == 0:
             return wire_version(git(ROOT, "show", f"{revision}:{path}"))
     raise AssertionError(f"{revision} has no {OWNER_FILE}")
+
+
+def normalized_contract(document):
+    """Ignore release labels and prose, retaining every wire constraint."""
+    documentation = {"description", "summary", "example", "examples"}
+
+    def normalize(value, path=()):
+        if isinstance(value, dict):
+            return {key: normalize(item, (*path, key)) for key, item in value.items()
+                    if key not in documentation and (*path, key) != ("info", "version")}
+        if isinstance(value, list):
+            return [normalize(item, (*path, index)) for index, item in enumerate(value)]
+        return value
+
+    return normalize(document)
+
+
+def first_difference(released, candidate, path="$"):
+    """The first differing JSON path, in deterministic object-key order."""
+    if type(released) is not type(candidate):
+        return path
+    if isinstance(released, dict):
+        for key in sorted(released.keys() | candidate.keys()):
+            child = f"{path}[{json.dumps(key)}]"
+            if key not in released or key not in candidate:
+                return child
+            difference = first_difference(released[key], candidate[key], child)
+            if difference is not None:
+                return difference
+    elif isinstance(released, list):
+        for index, (before, after) in enumerate(zip(released, candidate)):
+            difference = first_difference(before, after, f"{path}[{index}]")
+            if difference is not None:
+                return difference
+        if len(released) != len(candidate):
+            return f"{path}[{min(len(released), len(candidate))}]"
+    elif released != candidate:
+        return path
+    return None
+
+
+def wire_contract_error(tag, released, candidate, released_document, candidate_document):
+    """A changed released contract requires a newer owner-declared wire version."""
+    difference = first_difference(normalized_contract(released_document),
+                                  normalized_contract(candidate_document))
+    if difference is not None and candidate <= released:
+        return (f"wire contract differs from release {tag} (wire_version {released}) at {difference}, "
+                f"but wire_version is {candidate}; set src/wire_version.zig to {released + 1}, "
+                "regenerate openapi.json")
+    return None
 
 
 def literal_findings(root):
@@ -107,6 +159,48 @@ class WireVersionTest(unittest.TestCase):
         self.assertIsNone(bump_error(NAME, 4, 4, 2), "main already past the release is not the PR's bump")
         self.assertIsNotNone(bump_error(NAME, 5, 4, 2))
         self.assertIsNotNone(bump_error(NAME, 3, 4, 2), "a downgrade below main")
+
+    def test_wire_contract_comparison(self):
+        cases = (
+            ("enum added without bump", {"enum": ["old"]}, {"enum": ["old", "new"]}, 13, '$["enum"][1]'),
+            ("enum added with bump", {"enum": ["old"]}, {"enum": ["old", "new"]}, 14, None),
+            ("documentation at every depth", {"description": "before", "items": [{"summary": "old"}]},
+             {"description": "after", "items": [{"summary": "new", "example": 1, "examples": [2]}]}, 13, None),
+            ("wire bound changed", {"items": {"x-rui-max-bytes": 10}},
+             {"items": {"x-rui-max-bytes": 20}}, 13, '$["items"]["x-rui-max-bytes"]'),
+            ("release label only", {"info": {"version": "13"}}, {"info": {"version": "14"}}, 13, None),
+            ("nested version is wire", {"items": {"info": {"version": "a"}}},
+             {"items": {"info": {"version": "b"}}}, 13, '$["items"]["info"]["version"]'),
+            ("wire field removed", {"required": True}, {}, 13, '$["required"]'),
+            ("JSON type changed", {"value": 1}, {"value": True}, 13, '$["value"]'),
+            ("enum removed", {"enum": ["old", "new"]}, {"enum": ["old"]}, 13, '$["enum"][1]'),
+            ("object order only", {"a": 1, "b": 2}, {"b": 2, "a": 1}, 13, None),
+        )
+        for name, before, after, candidate, path in cases:
+            with self.subTest(name=name):
+                error = wire_contract_error("v0.69.1", 13, candidate, before, after)
+                if path is None:
+                    self.assertIsNone(error)
+                else:
+                    self.assertEqual(error, f"wire contract differs from release v0.69.1 (wire_version 13) at {path}, "
+                                     f"but wire_version is {candidate}; set src/wire_version.zig to 14, "
+                                     "regenerate openapi.json")
+
+    def test_wire_contract_changes_bump_wire_version(self):
+        tag = released_tag(ROOT)
+        if tag is None:
+            self.skipTest("no v* release tags in this checkout; the policy job checks out with fetch-depth 0")
+        if main_base(ROOT) is None:
+            self.skipTest("no origin/main in this checkout to take the merge base from")
+        if subprocess.run(["git", "-C", str(ROOT), "cat-file", "-e", f"{tag}:openapi.json"],
+                          capture_output=True).returncode:
+            self.skipTest(f"release {tag} has no openapi.json")
+        released_document = json.loads(git(ROOT, "show", f"{tag}:openapi.json"))
+        candidate_document = json.loads((ROOT / "openapi.json").read_text())
+        error = wire_contract_error(tag, wire_version_at(tag), wire_version((ROOT / OWNER_FILE).read_text()),
+                                    released_document, candidate_document)
+        if error:
+            self.fail(error)
 
     def test_wire_version_moves_once_per_release(self):
         tag = released_tag(ROOT)

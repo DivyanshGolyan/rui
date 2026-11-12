@@ -7,6 +7,7 @@ These standards own engineering methods, not runtime behavior or qualification r
 
 Each requirement has one home: [Architecture](ARCHITECTURE.md) owns accepted behavior, terminology, decisions and rationale; [Verification](VERIFICATION.md) owns required evidence and gates; GitHub issues hold unresolved decisions and research.
 Implementation slices link accepted contracts and define proof.
+The [wire-version gate](tests/ci/test_wire_version.py) requires a version greater than the newest release's when generated `openapi.json` changes beyond `info.version` and documentation-only keys, under the [wire contract rule](ARCHITECTURE.md#staged-persistent-input).
 
 Edit [Architecture](ARCHITECTURE.md) or [Verification](VERIFICATION.md) only when a change alters user-visible behavior, the Store format or a gate.
 Accepted behavior changes only by the user's decision: when an implementation departs from it, raise the conflict and change the code or ask, keeping the contract text as accepted.
