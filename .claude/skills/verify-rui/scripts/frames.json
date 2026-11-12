@@ -955,7 +955,7 @@
     },
     {
       "name": "chat-info",
-      "note": "Chat info above the retained chat input",
+      "note": "Chat info above retained input; null estimate omits Context; one substituted footer",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -973,13 +973,20 @@
         "Tools",
         "Folder",
         "Model",
+        "Copy last answer",
+        "Fix retry deadline \u00b7 info",
+        "esc close",
+        "~/code/rui"
+      ],
+      "absent": [
         "Context",
-        "Copy last answer"
+        "unknown of",
+        "alt+i info"
       ]
     },
     {
       "name": "chat-info-model",
-      "note": "Chat info Model field with the shared choice open",
+      "note": "Chat info Model choice open; null estimate omits Context; one substituted footer",
       "open": "Fix retry deadline",
       "steps": [
         {
@@ -1005,7 +1012,14 @@
       "expect": [
         "Model",
         "gpt-6.1-sol",
-        "Filter:"
+        "Filter:",
+        "Fix retry deadline \u00b7 info",
+        "esc close"
+      ],
+      "absent": [
+        "Context",
+        "unknown of",
+        "alt+i info"
       ]
     },
     {

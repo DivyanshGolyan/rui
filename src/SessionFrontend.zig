@@ -1054,10 +1054,16 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         .notice = self.shown_notice.current(now_ms),
         .overview = said.text,
         .shortcuts = self.shortcuts_open and !self.info_open,
-        .overlay = if (self.info_open) self.app_info.widget() else palette,
+        .overlay = if (self.info_open) self.app_info.bodyWidget() else palette,
         .width = ctx.max.width.?,
     });
     self.app_info.narrow = !list_visible;
+    if (self.info_open) {
+        // The panel supplies the one screen footer in the ordinary footer slot.
+        // It is not an extra row inside the Layer above the input.
+        self.app_input.facts = self.app_info.footerWidget();
+        self.app_input.status = null;
+    }
     self.app_preview.size = .{};
     self.app_content.size = .{};
     self.app_screen.host = if (self.app_hooks.host) |host| host.notice(host.context) else null;
@@ -4400,7 +4406,8 @@ test "chat info opens from the chat line above the input at 140 and 46 columns a
         try std.testing.expectEqual(base.children[1].origin.row, panel.origin.row + panel.surface.size.height);
         try std.testing.expect((try rowWith(held, "Fix retry deadline")) != null);
         try std.testing.expect((try rowWith(held, "Folder")) != null);
-        try std.testing.expect((try rowWith(held, "alt+i info")) != null);
+        try std.testing.expect((try rowWith(held, "alt+i info")) == null);
+        try std.testing.expect((try rowWith(held, "esc close")) != null);
         try held.keys("\r");
         try std.testing.expect(held.self.app_info.hasChoice());
         try held.keys("\x07");
@@ -8278,4 +8285,52 @@ test "chat info repair details never overwrite the active reader staging file" {
     const count = try self.files.inspection.readPositionalAll(std.testing.io, &bytes, 0);
     try std.testing.expectEqualStrings(Staging.bytes, bytes[0..count]);
     try std.testing.expect(self.reader.thread != null and !self.reader.completed());
+}
+
+test "chat info supplies the one bottom footer after the input and both dividers" {
+    for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 } }) |size| for ([_]bool{ false, true }) |choice| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size = .{ .width = size.width, .height = size.height };
+        held.root.size = size;
+        held.root.session = held.self.widget();
+        try captureInfo(held, "Fix retry deadline");
+        try held.keys("kept draft\x1bi");
+        _ = try held.draw();
+        if (choice) {
+            try held.keys("\x1b[B\x1b[B\x1b[B\r");
+            try std.testing.expect(held.self.app_info.model_choice.active);
+        }
+        const surface = try held.draw();
+        const base = surface.children[0].surface;
+        const input = base.children[1];
+        try std.testing.expectEqual(@as(usize, 2), input.surface.children.len);
+        const footer = input.surface.children[1];
+        try std.testing.expectEqual(@as(i17, size.height - 1), input.origin.row + footer.origin.row);
+        try std.testing.expectEqual(@as(u16, 1), footer.surface.size.height);
+        try std.testing.expectEqual(input.origin.row, surface.children[1].origin.row + surface.children[1].surface.size.height);
+        const text = try held.shown();
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "· info"));
+        try std.testing.expect(std.mem.indexOf(u8, text, "alt+i info") == null);
+        var rows = std.mem.splitScalar(u8, text, '\n');
+        var row: usize = 0;
+        var previous: []const u8 = "";
+        while (rows.next()) |line| : (row += 1) {
+            if (row == size.height - 1) {
+                try std.testing.expect(std.mem.indexOf(u8, line, "Fix retry deadline · info") != null);
+                try std.testing.expect(std.mem.indexOf(u8, line, "esc close") != null);
+            } else if (row == size.height - 2 or row == size.height - 4) {
+                try std.testing.expect(std.mem.startsWith(u8, line, "──"));
+            } else if (row == size.height - 3) {
+                try std.testing.expect(std.mem.indexOf(u8, line, "kept draft") != null);
+            }
+            if (std.mem.indexOf(u8, line, "Rename     Archive") != null) try std.testing.expectEqualStrings("", std.mem.trim(u8, previous, " "));
+            previous = line;
+        }
+        try held.keys("\x07");
+        if (choice) try held.keys("\x07");
+        try std.testing.expect(!held.self.info_open);
+        try std.testing.expect((try rowWith(held, "alt+i info")) != null);
+        try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+    };
 }

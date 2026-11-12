@@ -10,7 +10,7 @@ import codex_fixture
 import host_process
 import model_fixture as fixture
 from product_defaults import CATALOG
-from human_cli_fixture import (AppModelCatalog, app_model_open, chat_info_open, panel_frame, overview_frame,
+from human_cli_fixture import (AppModelCatalog, app_model_open, assert_chat_info_layout, chat_info_open, panel_frame, overview_frame,
                                overview_title, read_terminal, terminal_exit)
 from terminal_process import close_pty, open_pty, spawn
 
@@ -103,9 +103,11 @@ def main():
         read_terminal(master, "› ")
         session_model = chat_info_open(master)
         assert "gpt-5.5" in session_model and "Folder" in session_model, session_model
+        assert_chat_info_layout(session_model, context=False)
         choice = panel_frame(master, lambda screen: "Filter:" in screen,
                              b"\x1b[B\x1b[B\x1b[B\r")
         assert "gpt-5.5" in choice and "Known to Rui" not in choice, choice
+        assert_chat_info_layout(choice, context=False)
         panel_frame(master, lambda screen: "Filter: luna" in screen, b"luna")
         panel_frame(master, lambda screen: "Filter:" not in screen and "gpt-6-luna" in screen
                     and "saving" not in screen, b"\x1b[B\r")

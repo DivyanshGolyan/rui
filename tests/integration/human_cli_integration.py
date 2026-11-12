@@ -108,9 +108,9 @@ def home_path(home, path):
     return text
 
 
-def folder_row(home, path, columns=80):
-    """The clipped chat info Folder field at its three-cell left inset."""
-    return ("Folder          " + home_path(home, path))[:columns - 3]
+def folder_row(home, path):
+    """An unclipped, home-relative Folder row for short visible paths."""
+    return "Folder          " + home_path(home, path)
 
 
 def status_row(page, label, following):
@@ -2578,7 +2578,12 @@ def main(selected="all"):
             assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = chat_info_frame(master)
             assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"]["workspace"] == str(workspace.resolve())
-            assert shown(folder_row(preferences_home, workspace.resolve()), binding), binding
+            # A long read-only Folder keeps its basename rather than clipping
+            # the right-hand path suffix; the canonical inspection above is full.
+            folder = next(row.split("Folder", 1)[1].strip() for row in binding.split("\n")
+                          if row.strip().startswith("Folder"))
+            assert folder.endswith(workspace.resolve().name), binding
+            assert folder.startswith(("…/", "~/", "/")), binding
             assert "gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
@@ -2928,7 +2933,7 @@ def main(selected="all"):
         rejected_name = invoke(home, "session", "configure", "--store", store, "--session", invalid_name, expect=2)
         assert not rejected_name.stdout and "[invalid_session_reference]" in rejected_name.stderr, rejected_name
         # Keep hostile bytes visible after home shortening; long absolute
-        # folders are correctly clipped by the new read-only field.
+        # folders otherwise elide whole leading components.
         control_workspace = home / "name\n\x1b[2J\u202e"
         control_workspace.mkdir()
         escaped_workspace = str(control_workspace).replace("\n", "\\n").replace("\x1b", "\\x1b").replace("\u202e", "\\u202e")

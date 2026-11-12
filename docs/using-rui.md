@@ -33,8 +33,12 @@ It reports installation separately from activation, including when an applicatio
 
 Press **Alt+I** in a conversation, or click **alt+i info** on the line naming the chat, to open its info panel above the input.
 The panel has its own ground and never becomes part of the feed; your draft stays below it unchanged.
+Its one footer replaces the usual chat footer below the input’s lower divider, on the physical last row; there is no second footer inside the panel or blank notice row below it.
 Up and Down select Effort, Permissions, Tools or Model, and Enter opens the field's choices.
-Folder and Context are read-only; Rename, Archive and Copy last answer use the existing actions.
+Folder is read-only: HOME is shown as `~`, and a long path keeps its right edge with a leading ellipsis.
+It prefers whole trailing directory components; if the basename itself is too wide, it shows the longest grapheme-aligned basename suffix that fits, never an arbitrary right-side cut or an ellipsis hiding the whole name.
+Context is read-only and appears only when a context estimate is available; a missing estimate is not shown as unknown or zero, while a known zero is shown as zero.
+A blank row separates the fields from Rename, Archive and Copy last answer, including when those actions stack.
 Model changes stay within the Session's provider.
 Esc closes an open choice first, then the panel.
 The panel contains no Session IDs, Store paths or request-recovery records; use `/requests` for recovery handles.

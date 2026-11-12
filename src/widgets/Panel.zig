@@ -5,7 +5,10 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const Self = @This();
 
-pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true };
+/// Aligned field values start here; callers may fit bounded values to it.
+pub const value_column: u16 = 19;
+
+pub const Field = struct { label: []const u8, value: []const u8, tail: ?[]const u8 = null, selectable: bool = true, visible: bool = true };
 pub const Choice = struct { field: usize, labels: []const []const u8, current: ?usize, selected: usize };
 /// A field's full-width choice. The child owns its selection and scrolling.
 pub const CustomChoice = struct { field: usize, widget: vxfw.Widget, height: u16 = 8 };
@@ -41,7 +44,7 @@ pub fn widget(self: *Self) vxfw.Widget {
 }
 
 pub fn openChoice(self: *Self, labels: []const []const u8, current: ?usize) void {
-    if (self.selected >= self.fields.len or !self.fields[self.selected].selectable or labels.len == 0) return;
+    if (self.selected >= self.fields.len or (!self.fields[self.selected].selectable or !self.fields[self.selected].visible) or labels.len == 0) return;
     const checked = if (current) |at| if (at < labels.len) current else null else null;
     self.choice = .{ .field = self.selected, .labels = labels, .current = checked, .selected = checked orelse 0 };
 }
@@ -51,7 +54,7 @@ pub fn closeChoice(self: *Self) void {
 }
 
 fn selectable(self: *const Self, at: usize) bool {
-    return at < self.fields.len + self.actions.len and (at >= self.fields.len or self.fields[at].selectable);
+    return at < self.fields.len + self.actions.len and (at >= self.fields.len or (self.fields[at].selectable and self.fields[at].visible));
 }
 
 fn move(self: *Self, down: bool) void {
@@ -137,7 +140,10 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
 }
 
 fn rowOf(self: *const Self, field: usize) usize {
-    var row = if (field >= self.fields.len and !self.stacked_actions) self.fields.len else field;
+    // Hiding a fact compacts presentation, never its semantic field/action ID.
+    var row: usize = 0;
+    for (self.fields[0..@min(field, self.fields.len)]) |before| row += @intFromBool(before.visible);
+    if (field >= self.fields.len and self.stacked_actions) row += field - self.fields.len;
     if (self.choice) |choice| if (field > choice.field) {
         row += choice.labels.len;
     };
@@ -149,8 +155,8 @@ fn rowOf(self: *const Self, field: usize) usize {
 }
 
 fn activeRow(self: *const Self) usize {
-    if (self.custom_choice) |choice| return choice.field + 1;
-    if (self.choice) |choice| return choice.field + 1 + choice.selected;
+    if (self.custom_choice) |choice| return self.rowOf(choice.field) + 1;
+    if (self.choice) |choice| return self.rowOf(choice.field) + 1 + choice.selected;
     return self.rowOf(@min(self.selected, (self.fields.len + self.actions.len) -| 1));
 }
 
@@ -176,7 +182,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     if (count > 0) self.selected = @min(self.selected, count - 1);
     const body_height = size.height - 2;
     self.custom_height = if (self.custom_choice) |choice| @min(choice.height, body_height -| 1) else 0;
-    const rows = self.fields.len + self.custom_height + (if (self.actions.len > 0) (if (self.stacked_actions) self.actions.len else @as(usize, 1)) + self.action_gap else 0) + if (self.choice) |choice| choice.labels.len else @as(usize, 0);
+    var visible_fields: usize = 0;
+    for (self.fields) |field| visible_fields += @intFromBool(field.visible);
+    const rows = visible_fields + self.custom_height + (if (self.actions.len > 0) (if (self.stacked_actions) self.actions.len else @as(usize, 1)) + self.action_gap else 0) + if (self.choice) |choice| choice.labels.len else @as(usize, 0);
     const active = self.activeRow();
     if (active < self.scroll) self.scroll = active;
     const active_end = if (self.custom_choice != null) active + self.custom_height -| 1 else active;
@@ -184,16 +192,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.scroll = @min(self.scroll, rows -| body_height);
     var targets: std.array_list.Managed(Target) = .init(ctx.arena);
     for (self.fields, 0..) |field, index| {
+        if (!field.visible) continue;
         if (self.visible(self.rowOf(index), size.height)) |row| {
             const selected = self.choice == null and self.custom_choice == null and self.selected == index and field.selectable;
             const style = if (selected) self.selection else self.ground;
             fillRow(surface, row, style);
-            _ = paintTo(ctx, surface, try displayText(ctx.arena, field.label, self.unicode), 3, row, style, @min(19, size.width));
+            _ = paintTo(ctx, surface, try displayText(ctx.arena, field.label, self.unicode), 3, row, style, @min(value_column, size.width));
             // Status/failure words belong to the field, even beside a long
             // saved value. Reserve them here for every Panel consumer.
             const tail = try displayText(ctx.arena, field.tail orelse "", self.unicode);
             const limit: u16 = @intCast(size.width -| ctx.stringWidth(tail));
-            const end = paintTo(ctx, surface, try displayText(ctx.arena, field.value, self.unicode), 19, row, style, limit);
+            const end = paintTo(ctx, surface, try displayText(ctx.arena, field.value, self.unicode), value_column, row, style, limit);
             if (tail.len > 0) {
                 var quiet = self.quiet;
                 quiet.bg = style.bg;
@@ -204,7 +213,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
         if (self.choice) |choice| if (choice.field == index) {
             for (choice.labels, 0..) |label, at| {
-                const row = self.visible(index + 1 + at, size.height) orelse continue;
+                const row = self.visible(self.rowOf(index) + 1 + at, size.height) orelse continue;
                 const style = if (at == choice.selected) self.selection else self.ground;
                 fillRow(surface, row, style);
                 _ = paint(ctx, surface, if (choice.current == at) (if (self.unicode) "✓" else "+") else " ", 5, row, style);
@@ -214,7 +223,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         };
     }
     if (self.custom_choice) |choice| if (self.custom_height > 0) {
-        if (self.visible(choice.field + 1, size.height)) |row| {
+        if (self.visible(self.rowOf(choice.field) + 1, size.height)) |row| {
             self.custom_origin = row;
             self.custom_height = @min(self.custom_height, size.height - row);
             try children.append(.{ .origin = .{ .row = row, .col = 0 }, .surface = try choice.widget.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = self.custom_height })) });
@@ -529,4 +538,41 @@ test "Panel shared ASCII rendering keeps rules choices tails and canonical value
         if (width > 7) try std.testing.expectEqualStrings("+", drawn.readCell(5, 4).char.grapheme);
     }
     try std.testing.expectEqualStrings(original, panel.fields[0].value);
+}
+
+test "Panel hidden fields compact rows while preserving navigation actions and choice identities" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]bool{ false, true }) |context_visible| for ([_]bool{ false, true }) |stacked| {
+        var fixture: Fixture = .{};
+        const fields: [4]Field = .{
+            .{ .label = "Effort", .value = "high" },
+            .{ .label = "Hidden", .value = "never shown", .visible = false },
+            .{ .label = "Context", .value = "18 of 244,800", .visible = context_visible, .selectable = false },
+            .{ .label = "Model", .value = "gpt-5.5" },
+        };
+        var panel: Self = .{ .title = "Chat", .fields = &fields, .actions = &.{ "Rename", "Archive" }, .action_gap = 1, .stacked_actions = stacked, .userdata = &fixture, .on_activate = Fixture.activateRow };
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 16 }, .cell_size = .{} };
+        const drawn = try panel.widget().draw(ctx);
+        const model_row: u16 = if (context_visible) 4 else 3;
+        try std.testing.expectEqualStrings("M", drawn.readCell(3, model_row).char.grapheme);
+        const actions_row = model_row + 2;
+        for (0..46) |col| try std.testing.expectEqualStrings(" ", drawn.readCell(@intCast(col), actions_row - 1).char.grapheme);
+        try pressKey(&panel, &events, vaxis.Key.down);
+        try std.testing.expectEqual(@as(usize, 3), panel.selected);
+        try pressKey(&panel, &events, vaxis.Key.down);
+        try std.testing.expectEqual(@as(usize, 4), panel.selected);
+        try panel.widget().handleEvent(&events, .{ .mouse = .{ .button = .left, .type = .press, .mods = .{}, .row = @intCast(actions_row), .col = 3 } });
+        try std.testing.expectEqual(@as(?usize, 4), fixture.activated);
+        panel.selected = 3;
+        panel.openChoice(&.{ "first", "second" }, 0);
+        const choice = try panel.widget().draw(ctx);
+        try std.testing.expectEqualStrings("f", choice.readCell(7, model_row + 1).char.grapheme);
+        panel.closeChoice();
+        const content: vxfw.Text = .{ .text = "Model choice" };
+        panel.custom_choice = .{ .field = 3, .widget = content.widget(), .height = 3 };
+        const custom = try panel.widget().draw(ctx);
+        try std.testing.expectEqual(@as(i17, model_row + 1), custom.children[0].origin.row);
+    };
 }

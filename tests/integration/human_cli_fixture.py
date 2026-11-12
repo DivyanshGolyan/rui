@@ -256,11 +256,30 @@ def panel_frame(master, accept, keys=b"", timeout=15):
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen), timeout)
 
 
+def assert_chat_info_layout(screen, *, context=None):
+    """One substituted footer below input; facts stay separate from actions."""
+    rows = screen.split("\n")
+    contents = [row.rpartition("│")[2] if "│" in row else row for row in rows]
+    footers = [index for index, row in enumerate(contents) if " · info" in row]
+    assert footers == [len(rows) - 1], ("one info footer at the bottom", screen)
+    assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)
+    prompts = [index for index, row in enumerate(contents)
+               if row.strip() in ("›", ">") or row.lstrip().startswith(("› ", "> "))]
+    assert prompts and max(prompts) < footers[0], ("info footer follows input", screen)
+    actions = next(index for index, row in enumerate(contents) if "Rename" in row)
+    assert not contents[actions - 1].strip(), ("blank row before chat actions", screen)
+    assert not any(row.strip().startswith("Context") and "unknown" in row for row in contents), screen
+    if context is not None:
+        assert any(row.strip().startswith("Context") for row in contents) == context, screen
+
+
 def chat_info_open(master, timeout=15):
-    """Open chat info through the chat footer's Alt-I binding."""
-    return panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in
-                       ("Effort", "Permissions", "Tools", "Folder", "Model", "Context", "Rename", "Archive", "Copy last answer")),
-                       b"\x1bi", timeout)
+    """Open ready chat info through the footer; Context is optional."""
+    screen = panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in
+                         ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer")),
+                         b"\x1bi", timeout)
+    assert_chat_info_layout(screen)
+    return screen
 
 
 def chat_info_frame(master, timeout=15):

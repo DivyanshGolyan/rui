@@ -68,8 +68,19 @@ rename_bytes: [status.max_label_bytes]u8 = undefined,
 rename_editor: Editor = .{ .buffer = &.{} },
 pasting: bool = false,
 
+/// Standalone composition for callers that want a body and its footer together.
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
+}
+
+/// The panel's own ground above the chat input, with no embedded footer.
+pub fn bodyWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .eventHandler = event, .drawFn = drawBody };
+}
+
+/// The chat's facts row while this panel is open; never more than one row.
+pub fn footerWidget(self: *Self) vxfw.Widget {
+    return .{ .userdata = self, .drawFn = drawFooter };
 }
 
 pub fn hasChoice(self: *const Self) bool {
@@ -121,7 +132,7 @@ fn bind(self: *Self) void {
         .{ .label = "Tools", .value = "", .tail = self.failures[2] },
         .{ .label = "Folder", .value = if (self.ready) self.session.workspace.slice() else "unavailable", .selectable = false },
         .{ .label = "Model", .value = if (self.ready) self.session.model.slice() else "unavailable", .tail = self.failures[4] },
-        .{ .label = "Context", .value = "", .selectable = false },
+        .{ .label = "Context", .value = "", .selectable = false, .visible = self.ready and self.session.context_estimate != null },
     };
     if (self.pending) |row| if (row < self.fields.len) {
         self.fields[row].tail = " · saving";
@@ -328,19 +339,60 @@ fn safe(arena: std.mem.Allocator, text: []const u8) ![]const u8 {
 }
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    return drawContents(raw, ctx) catch |err| switch (err) {
-        // All writers here allocate from the draw arena; their only I/O
-        // failure is allocation. TerminalText's fixed escape scratch fits.
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const size = ctx.max.size();
+    if (size.width == 0 or size.height == 0) return .empty(self.widget());
+    const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
+    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.bodyWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
+    children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try self.footerWidget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
+    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+}
+
+fn drawBody(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    return drawBodyContents(raw, ctx) catch |err| switch (err) {
+        // Draw-arena writers cannot fail except allocation. TerminalText's
+        // bounded escaping scratch fits every scalar it accepts.
         error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
         error.NoSpaceLeft => unreachable,
     };
 }
 
-fn drawContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
+/// HOME shortening precedes fitting. Prefer the longest whole-component
+/// suffix; if none fits, retain a grapheme-aligned basename suffix instead.
+/// Only the left edge is elided, so the true end of the name remains visible.
+fn folderValue(self: *const Self, ctx: vxfw.DrawContext, room: u16) ![]const u8 {
+    const path = shortPath(self.home, self.session.workspace.slice());
+    const shortened = try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ path.prefix, path.rest });
+    const text = try Panel.displayText(ctx.arena, try safe(ctx.arena, shortened), self.panel.unicode);
+    if (ctx.stringWidth(text) <= room) return text;
+    const ellipsis = if (self.panel.unicode) "…" else "...";
+    const mark_width = ctx.stringWidth(ellipsis);
+    if (mark_width > room) return "";
+    for (text, 0..) |byte, at| {
+        if (byte != '/' or at + 1 == text.len) continue;
+        const tail = text[at..];
+        if (mark_width + ctx.stringWidth(tail) <= room) return std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ ellipsis, tail });
+    }
+    // No complete component fits. Keep the basename's true right edge, never
+    // cutting a grapheme (including combining marks and wide characters).
+    const basename = text[if (std.mem.lastIndexOfScalar(u8, text, '/')) |at| at + 1 else 0..];
+    var start: usize = 0;
+    var cells = ctx.stringWidth(basename);
+    var iter = ctx.graphemeIterator(basename);
+    while (cells > room - mark_width) {
+        const part = iter.next() orelse break;
+        const grapheme = part.bytes(basename);
+        start += grapheme.len;
+        cells -= ctx.stringWidth(grapheme);
+    }
+    return std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ ellipsis, basename[start..] });
+}
+
+fn drawBodyContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     self.bind();
     const size = ctx.max.size();
-    if (size.width == 0 or size.height == 0) return .empty(self.widget());
+    if (size.width == 0 or size.height == 0) return .empty(self.bodyWidget());
     const name = try safe(ctx.arena, self.title());
     self.panel.title = name;
     var tool_text: std.Io.Writer.Allocating = .init(ctx.arena);
@@ -353,15 +405,17 @@ fn drawContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     }
     self.fields[2].value = if (!self.ready) "unavailable" else if (tool_text.written().len == 0) "none" else tool_text.written();
     if (self.ready) {
-        const path = shortPath(self.home, self.session.workspace.slice());
-        self.fields[3].value = try safe(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ path.prefix, path.rest }));
+        // Fit before Panel paints so it cannot right-clip the final component.
+        self.fields[3].value = try self.folderValue(ctx, size.width -| Panel.value_column);
         self.fields[4].value = try safe(ctx.arena, self.session.model.slice());
-        var context: std.Io.Writer.Allocating = .init(ctx.arena);
-        if (self.session.context_estimate) |tokens| try status.writeGrouped(&context.writer, tokens) else try context.writer.writeAll("unknown");
-        try context.writer.writeAll(" of ");
-        try status.writeGrouped(&context.writer, self.session.compaction_trigger orelse client_defaults.compactionTrigger(self.session.provider, self.session.model.slice()));
-        self.fields[5].value = context.written();
-    } else self.fields[5].value = "unavailable";
+        if (self.session.context_estimate) |tokens| {
+            var context: std.Io.Writer.Allocating = .init(ctx.arena);
+            try status.writeGrouped(&context.writer, tokens);
+            try context.writer.writeAll(" of ");
+            try status.writeGrouped(&context.writer, self.session.compaction_trigger orelse client_defaults.compactionTrigger(self.session.provider, self.session.model.slice()));
+            self.fields[5].value = context.written();
+        }
+    }
     const actions = try ctx.arena.alloc([]const u8, 3);
     var action_width: usize = 3 + 2 * 5;
     for (self.panel.actions, 6..) |label, row| {
@@ -374,17 +428,32 @@ fn drawContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
     }
     self.panel.actions = actions;
     self.panel.stacked_actions = action_width > size.width;
-    self.panel.action_gap = if (self.panel.stacked_actions) 0 else 1;
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-    children[0] = .{ .origin = .{ .row = 0, .col = 0 }, .surface = try self.panel.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = size.height - 1 })) };
-    const footer = try ctx.arena.create(Footer);
-    footer.* = .{
-        .left = try Panel.displayText(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }), self.panel.unicode),
-        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ · enter change · esc close", self.panel.unicode),
-        .style = self.panel.quiet,
+    self.panel.action_gap = 1;
+    var surface = try self.panel.widget().draw(ctx);
+    surface.widget = self.bodyWidget();
+    return surface;
+}
+
+fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    return drawFooterContents(raw, ctx) catch |err| switch (err) {
+        error.OutOfMemory, error.WriteFailed => error.OutOfMemory,
+        error.NoSpaceLeft => unreachable,
     };
-    children[1] = .{ .origin = .{ .row = size.height - 1, .col = 0 }, .surface = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 })) };
-    return .{ .widget = self.widget(), .size = size, .buffer = &.{}, .children = children };
+}
+
+fn drawFooterContents(raw: *anyopaque, ctx: vxfw.DrawContext) !vxfw.Surface {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const caps = self.backend.caps(self.backend.context);
+    const name = try safe(ctx.arena, self.title());
+    const footer: Footer = .{
+        .left = try Panel.displayText(ctx.arena, try std.fmt.allocPrint(ctx.arena, "{s}{s} · info", .{ if (self.narrow) " ‹ " else " ", name }), caps.unicode),
+        .right = try Panel.displayText(ctx.arena, if (self.narrow) "esc close" else if (self.tool_draft != null) "↑↓ · space toggle · enter save · esc close" else "↑↓ · enter change · esc close", caps.unicode),
+        .style = widget_style.of(caps, .{ .background = .bar, .colour = .quiet }),
+    };
+    var surface = try footer.widget().draw(ctx);
+    // Footer is a stack-local rendering value; expose only the persistent owner.
+    surface.widget = self.footerWidget();
+    return surface;
 }
 
 fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -493,13 +562,22 @@ fn typeText(page: *Self, ctx: *vxfw.EventContext, text: []const u8) !void {
 }
 
 fn dump(page: *Self, arena: std.mem.Allocator, width: u16, height: u16) ![]const u8 {
-    const surface = try page.widget().draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
+    return dumpWidget(page.widget(), arena, width, height);
+}
+
+fn dumpWidget(widget_: vxfw.Widget, arena: std.mem.Allocator, width: u16, height: u16) ![]const u8 {
+    const surface = try widget_.draw(.{ .arena = arena, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{} });
     var screen = try vaxis.Screen.init(arena, .{ .cols = width, .rows = height, .x_pixel = 0, .y_pixel = 0 });
-    surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, page.widget());
+    surface.render(.{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = width, .height = height, .screen = &screen }, widget_);
     var out: std.Io.Writer.Allocating = .init(arena);
     for (0..height) |row| {
         var line: std.Io.Writer.Allocating = .init(arena);
-        for (0..width) |col| try line.writer.writeAll(screen.readCell(@intCast(col), @intCast(row)).?.char.grapheme);
+        var col: u16 = 0;
+        while (col < width) {
+            const cell = screen.readCell(col, @intCast(row)).?;
+            try line.writer.writeAll(cell.char.grapheme);
+            col += @max(1, cell.char.width);
+        }
         try out.writer.writeAll(std.mem.trimEnd(u8, line.written(), " "));
         try out.writer.writeByte('\n');
     }
@@ -874,11 +952,11 @@ test "Chat info action failures persist after navigation and fit narrow rows tog
         fixture.state_value = .failed;
         try page.widget().handleEvent(&ctx, .tick);
         for ([_]u16{ 99, 46 }) |width| {
-            const text = try dump(&page, arena.allocator(), width, 12);
+            const text = try dump(&page, arena.allocator(), width, 13);
             try std.testing.expect(std.mem.indexOf(u8, text, if (row == 7) "Archive: couldn't archive" else "Copy: couldn't copy") != null);
         }
     }
-    const text = try dump(&page, arena.allocator(), 46, 12);
+    const text = try dump(&page, arena.allocator(), 46, 13);
     try std.testing.expect(std.mem.indexOf(u8, text, "Archive: couldn't archive") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "Copy: couldn't copy") != null);
 }
@@ -945,4 +1023,207 @@ test "Chat info shared ASCII capability reaches tools model rename failures and 
             if (state >= 3) try std.testing.expect(std.mem.indexOf(u8, text, "Filter:") != null);
         }
     }
+}
+
+test "Chat info hosted body excludes its independent single-row footer" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend(), .home = "/home/d" };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ true, false }) |unicode| for ([_]u16{ 46, 99 }) |width| {
+        fixture.unicode = unicode;
+        page.narrow = width == 46;
+        const body = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 14);
+        const footer = try dumpWidget(page.footerWidget(), arena.allocator(), width, 1);
+        const complete = try dump(&page, arena.allocator(), width, 15);
+        try std.testing.expect(std.mem.indexOf(u8, body, "Context") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "Rename") != null);
+        try std.testing.expect(std.mem.indexOf(u8, body, " info") == null);
+        try std.testing.expect(std.mem.indexOf(u8, body, "esc close") == null);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "Fix retry deadline") != null);
+        try std.testing.expect(std.mem.indexOf(u8, footer, if (unicode) " · info" else " . info") != null);
+        try std.testing.expect(std.mem.indexOf(u8, footer, "esc close") != null);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, footer, "\n"));
+        try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena.allocator(), "{s}{s}", .{ body, footer }), complete);
+        if (!unicode) for (body) |byte| try std.testing.expect(byte < 0x80);
+        if (!unicode) for (footer) |byte| try std.testing.expect(byte < 0x80);
+    };
+}
+
+test "Chat info Context appears only for measured estimates regardless of work or history" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for (std.enums.values(@FieldType(status.Work, "state"))) |work| for ([_]bool{ false, true }) |history| for ([_]?u64{ null, 0, 18, 31_200 }) |estimate| {
+        fixture.session.work.state = work;
+        fixture.session.work.recent_count = @intFromBool(history);
+        fixture.session.work.recent[0] = .{ .message = .{}, .outcome = .{} };
+        fixture.session.context_estimate = estimate;
+        page.refresh();
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 14);
+        try std.testing.expectEqual(estimate != null, page.fields[5].visible);
+        try std.testing.expectEqual(estimate != null, std.mem.indexOf(u8, text, "Context") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "unknown") == null);
+        if (estimate) |tokens| {
+            try std.testing.expect(std.mem.indexOf(u8, text, switch (tokens) {
+                0 => "Context         0 of 244,800",
+                18 => "Context         18 of 244,800",
+                else => "Context         31,200 of 244,800",
+            }) != null);
+        } else try std.testing.expect(std.mem.indexOf(u8, text, "Model           gpt-6.1-sol\n\n   Rename") != null);
+        _ = arena.reset(.retain_capacity);
+    };
+    fixture.fail_read = true;
+    page.refresh();
+    const unavailable = try dumpWidget(page.bodyWidget(), arena.allocator(), 99, 14);
+    try std.testing.expect(std.mem.indexOf(u8, unavailable, "Context") == null);
+    try std.testing.expect(std.mem.indexOf(u8, unavailable, "unknown") == null);
+}
+
+test "Chat info hidden Context preserves action IDs failures and the blank action separator" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]?u64{ null, 18 }) |estimate| for ([_]u16{ 46, 99 }) |width| {
+        fixture.session.context_estimate = estimate;
+        page.refresh();
+        page.panel.selected = 4;
+        for ([_]usize{ 6, 7, 8 }) |selected| {
+            try press(&page, &ctx, vaxis.Key.down);
+            try std.testing.expectEqual(selected, page.panel.selected);
+        }
+        for ([_]usize{ 7, 6, 4 }) |selected| {
+            try press(&page, &ctx, vaxis.Key.up);
+            try std.testing.expectEqual(selected, page.panel.selected);
+        }
+        page.failures[7] = " · couldn't archive";
+        page.pending = 8;
+        fixture.state_value = .pending;
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), width, 15);
+        try std.testing.expectEqual(@as(usize, 6), page.panel.fields.len);
+        try std.testing.expectEqual(@as(?usize, 8), page.pending);
+        try std.testing.expectEqual(@as(u16, 1), page.panel.action_gap);
+        try std.testing.expect(std.mem.indexOf(u8, text, "\n\n   Rename") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Archive: couldn't archive") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Copy: saving") != null);
+        if (width == 46) {
+            try std.testing.expect(page.panel.stacked_actions);
+            try std.testing.expect(std.mem.indexOf(u8, text, "\n   Archive: couldn't archive\n   Copy: saving\n") != null);
+        }
+        // Completing action 8 stays on action 8 even if Context visibility changes.
+        fixture.session.context_estimate = if (estimate == null) 18 else null;
+        fixture.state_value = .failed;
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(@as(?usize, null), page.pending);
+        try std.testing.expectEqualStrings(" · couldn't copy", page.failures[8].?);
+        try std.testing.expectEqualStrings(" · couldn't archive", page.failures[7].?);
+        page.failures[7] = null;
+        page.failures[8] = null;
+    };
+}
+
+test "Chat info Folder prefers whole components then a grapheme-aligned basename suffix" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const cases = [_]struct { home: []const u8 = "/home/d", path: []const u8, room: u16, unicode: bool = true, expected: []const u8 }{
+        .{ .path = "/home/d", .room = 1, .expected = "~" },
+        .{ .path = "/home/d/code/rui", .room = 10, .expected = "~/code/rui" },
+        .{ .path = "/home/d/code/rui", .room = 9, .expected = "…/rui" },
+        .{ .path = "/home/d/code/rui", .room = 5, .expected = "…/rui" },
+        .{ .path = "/home/d/code/rui", .room = 4, .expected = "…rui" },
+        .{ .path = "/home/d/code/rui", .room = 1, .expected = "…" },
+        .{ .path = "/home/d/code/rui", .room = 0, .expected = "" },
+        .{ .path = "/home/dx/code/rui", .room = 17, .expected = "/home/dx/code/rui" },
+        .{ .path = "/home/dx/code/rui", .room = 10, .expected = "…/code/rui" },
+        .{ .home = "/", .path = "/code/rui", .room = 9, .expected = "/code/rui" },
+        .{ .home = "", .path = "code/rui", .room = 8, .expected = "code/rui" },
+        .{ .home = "", .path = "code/rui", .room = 7, .expected = "…/rui" },
+        .{ .path = "/home/d/code/rui", .room = 7, .unicode = false, .expected = ".../rui" },
+        .{ .path = "/home/d/code/rui", .room = 6, .unicode = false, .expected = "...rui" },
+        .{ .path = "/home/d/code/rui", .room = 2, .unicode = false, .expected = "" },
+        .{ .path = "/home/d/code/界界", .room = 6, .expected = "…/界界" },
+        .{ .path = "/home/d/code/界界", .room = 6, .unicode = false, .expected = ".../??" },
+        .{ .path = "/home/d/code/界界", .room = 4, .expected = "…界" },
+        .{ .path = "/home/d/code/界界", .room = 2, .expected = "…" },
+        .{ .path = "/home/d/code/界界", .room = 4, .unicode = false, .expected = "...?" },
+        .{ .path = "/home/d/code/abce\u{301}界", .room = 4, .expected = "…e\u{301}界" },
+        .{ .path = "/home/d/code/abce\u{301}界", .room = 3, .expected = "…界" },
+        .{ .path = "/home/d/code/abce\u{301}界", .room = 2, .expected = "…" },
+        .{ .path = "/home/d/code/abce\u{301}界", .room = 5, .unicode = false, .expected = "...??" },
+        .{ .path = "/home/d/very-long-parent/full-basename", .room = 15, .expected = "…/full-basename" },
+        .{ .path = "/home/d/full-basename", .room = 12, .expected = "…ll-basename" },
+        .{ .home = "", .path = "full-basename", .room = 13, .expected = "full-basename" },
+        .{ .home = "", .path = "full-basename", .room = 12, .expected = "…ll-basename" },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("Folder path={s} room={d} unicode={}\n", .{ case.path, case.room, case.unicode });
+        fixture.unicode = case.unicode;
+        fixture.session.workspace.set(case.path) catch unreachable;
+        page.home = case.home;
+        page.refresh();
+        page.bind();
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = case.room + 19, .height = 14 }, .cell_size = .{} };
+        const value = try page.folderValue(ctx, case.room);
+        try std.testing.expectEqualStrings(case.expected, value);
+        try std.testing.expect(ctx.stringWidth(value) <= case.room);
+        _ = try page.bodyWidget().draw(ctx);
+        try std.testing.expectEqualStrings(case.expected, page.fields[3].value);
+        const text = try dumpWidget(page.bodyWidget(), arena.allocator(), case.room + 19, 14);
+        if (case.expected.len > 0) try std.testing.expect(std.mem.indexOf(u8, text, case.expected) != null);
+        if (!case.unicode) for (text) |byte| try std.testing.expect(byte < 0x80);
+        _ = arena.reset(.retain_capacity);
+    }
+    const basename = "a-basename-too-long-for-this-view";
+    try fixture.session.workspace.set("/home/d/parent/" ++ basename);
+    page.home = "/home/d";
+    fixture.unicode = true;
+    page.refresh();
+    page.bind();
+    for (0..basename.len + 2) |room| {
+        const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(room + 19), .height = 14 }, .cell_size = .{} };
+        const expected = if (room == 0) "" else try std.fmt.allocPrint(arena.allocator(), "…{s}", .{basename[basename.len - (room - 1) ..]});
+        try std.testing.expectEqualStrings(expected, try page.folderValue(ctx, @intCast(room)));
+    }
+}
+
+fn expectSurfaceBounds(surface: vxfw.Surface) !void {
+    for (surface.children) |child| {
+        try std.testing.expect(child.origin.row + child.surface.size.height <= surface.size.height);
+        try std.testing.expect(child.origin.col + child.surface.size.width <= surface.size.width);
+        try expectSurfaceBounds(child.surface);
+    }
+}
+
+test "Chat info hosted parts and standalone wrapper respect finite zero and small bounds" {
+    var fixture: Fixture = .{};
+    fixture.init();
+    var page: Self = .{ .backend = fixture.backend() };
+    page.refresh();
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]bool{ true, false }) |unicode| for ([_]bool{ false, true }) |failed| for (0..65) |width| for (0..15) |height| {
+        fixture.unicode = unicode;
+        page.failures[1] = if (failed) " · couldn't save" else null;
+        page.failures[6] = if (failed) " · name couldn't be entered" else null;
+        page.failures[7] = if (failed) " · couldn't archive" else null;
+        page.failures[8] = if (failed) " · couldn't copy" else null;
+        for ([_]vxfw.Widget{ page.bodyWidget(), page.footerWidget(), page.widget() }, 0..) |part, index| {
+            const surface = try part.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
+            try std.testing.expect(surface.size.width <= width);
+            try std.testing.expect(surface.size.height <= height);
+            if (index == 1) try std.testing.expectEqual(@as(u16, if (height == 0) 0 else 1), surface.size.height);
+            try expectSurfaceBounds(surface);
+            _ = arena.reset(.retain_capacity);
+        }
+    };
 }

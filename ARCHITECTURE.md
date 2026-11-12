@@ -764,7 +764,7 @@ Current inspection shows effective values and whether each value is a Session ov
 Current inspection also reports `context_estimate`: the estimated tokens the next model call starts from (eligible accepted usage, uncovered bytes / 4 and output reservation), read by the same facts purpose selection reads, when that selection would compare it with the trigger.
 It is null without a trigger and when the next call's purpose does not depend on it: a Session's first call, the call after a compaction, a recovery compaction and context unchanged since the last compaction.
 So whenever it is shown, it reaches the trigger exactly when a model call admitted at that moment compacts, and the Session line's `0% left` means that.
-Chat info’s Context field shows it beside the trigger, and the conversation’s Session line shows the share of the trigger it leaves.
+When non-null, chat info’s Context field shows it beside the trigger, and the conversation’s Session line shows the share of the trigger it leaves.
 Resolve policy once before purpose selection and freeze the effective values on the admitted Operation.
 Later settings or capability changes cannot change its purpose or retry policy.
 
@@ -2904,8 +2904,14 @@ Canonical bytes and accepted composer byte offsets remain unchanged; a draft tab
 
 **Chat info.** Alt-I (`\x1bi`) or a click on `alt+i info` in the chat footer opens the chat info panel.
 The panel sits in a Layer above the chat input on its own ground, never in the feed; opening, editing and closing leave the input's draft unchanged.
-Its title is the chat's label, with Effort, Permissions, Tools, Folder, Model and Context below, then Rename, Archive and Copy last answer.
-Folder and Context are read-only; Up and Down visit selectable fields and actions, and Enter opens a choice or runs the action.
+Its title is the chat's label, with Effort, Permissions, Tools, Folder and Model below, and Context only while Current supplies a non-null estimate.
+A missing estimate omits the Context row: neither `unknown` nor an invented zero is a context measurement; an actual zero estimate is shown as zero.
+Folder and Context are read-only; Folder shortens HOME to `~` and fits long paths from the left, preserving the true right edge.
+It first keeps a suffix of whole path components with a leading ellipsis; when the basename itself is too wide, it keeps the longest grapheme-aligned basename suffix that fits after that ellipsis.
+It never arbitrarily cuts the right edge or shows an ellipsis alone instead of all the name.
+A blank row separates the fields from Rename, Archive and Copy last answer, even when the actions stack.
+Up and Down visit selectable fields and actions, and Enter opens a choice or runs the action.
+The panel contributes no internal footer: its one footer substitutes for the normal chat footer after the input’s lower divider on the physical last row, leaving the draft between panel and footer and no blank notice row below it.
 Permissions names `run without asking` and `ask first`; Tools selects from the built-in tool set.
 Model opens the shared full-width choice for this Session's provider, with type-to-filter, Up/Down and Enter to save.
 A change applies to subsequent model requests through the existing typed Session configure request; it does not send composer text or change the Session's provider.
@@ -3062,6 +3068,7 @@ The Store assigns admission IDs in Session position order, so a page that ends b
 The composer uses the same `› ` marker as submitted User messages.
 The input keeps the bottom rows of the screen in a conversation and in the overview: a rule, then the draft, which grows to ten rows or a third of the screen, whichever is fewer, and then scrolls inside itself, keeping the same text first until its caret leaves the shown lines.
 The overview keeps its own key-hint rows. The chat footer is two rows: the composer's lower rule and one `src/widgets/Footer.zig` line.
+While chat info is open, its footer replaces that Footer line on the physical last row; it adds neither a second footer between the panel and input nor a notice row below the footer.
 Its left side identifies the chat: `Name · model · effort · N% left`, plus an archive state when present; permission settings belong in chat information, not this line.
 Its right side names `alt+i info` and other active keys, including recovery, discard, unarchive and stop when applicable; keys take space before identity. The info hint is clickable and shares Alt-I’s panel-opening action.
 The chat shows `‹` only while `Root.listVisible()` is false; it has no separate width test.
@@ -3073,10 +3080,10 @@ The name is the Label, else the first line of the first Message, else the refere
 The chat footer reserves its one-space input gutter even beside the list; the hidden-list variant adds `‹ ` after that gutter.
 Identity fits whole items before its right-aligned keys, marking omitted items with ` · …`; only an oversized name is shortened at a word boundary.
 The overview keeps its own line-fitting policy.
-The footer keeps its previous placement above the bottom single-row state slot, which is blank while idle.
+The ordinary chat footer keeps its previous placement above the bottom single-row state slot, which is blank while idle; chat info suppresses that slot and puts its replacement footer on the physical last row.
 A chat notice occupies that bottom state slot and never replaces identity; it uses the failure colour when it starts with `!`. An unresolved send takes priority there, then the newest local notice, send progress and the overview's state. A transient notice goes after five seconds or the next key; an unresolved send remains. Overview notices keep their own policy.
 The rule names how many draft lines it hides above or below; a conversation drops its Session line when fewer than three rows remain under its status and the rule when fewer than four remain above the line, and an overview narrower or shorter than six cells shows no input.
-The chat state slot stays below the footer; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
+Outside chat info, the chat state slot stays below the ordinary footer; conversation text starts at the top of the screen, and its tool rows and live line follow its last line (Divyansh approved this on 2026-10-31, front-end plan PR 3, mock CFWmXwCYELhK15T7LnR6ZF).
 A draft wraps between words the same way on both screens: spaces at the edge hang past it rather than start a row, a word wider than the line (a URL or a path) breaks after its last `/`, `.`, `-` or similar mark that fits, and between clusters only when it has none; continuation rows align under the text.
 The conversation paints presentation colours from the shared Khadi theme roles: ink for User markers and work under way, quiet for settled outcomes and transient status, attention for permission decisions, and failure for failures.
 Marks come from `src/marks.zig`; CLI reads keep the matching ANSI foreground codes.
