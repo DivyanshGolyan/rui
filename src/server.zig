@@ -1157,6 +1157,10 @@ fn serveOpened(
         try provider.checkLibraries();
     }
     try std.Io.randomSecure(io, &host.instance);
+    // One served incarnation: readiness fences the same opening whose
+    // Store-read generations order listing and activity presentation.
+    // Intake and execution have not started, so no external token exists.
+    storage.instance = host.instance;
     const started_at = std.Io.Clock.real.now(io).toSeconds();
     if (started_at <= 0) return error.ClockReadFailed;
     host.started_at = @intCast(started_at);
