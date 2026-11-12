@@ -1001,9 +1001,13 @@ fn rich(ctx: vxfw.DrawContext, caps: view.Caps, segments: []const view.Segment) 
     return text.widget();
 }
 
-/// Whether a spinning mark on screen has a step to turn.
 fn wantsFrame(self: *const Self) bool {
-    return self.root.listVisible() and self.animationFrame() != self.app_frame and self.listSpins();
+    return self.wantsFrameAt(self.animationFrame());
+}
+
+/// Whether a spinning mark on screen has a step to turn at spinner `frame`.
+fn wantsFrameAt(self: *const Self, frame: u64) bool {
+    return self.root.listVisible() and frame != self.app_frame and self.listSpins();
 }
 
 /// The drawn viewport is history; which current rows spin is derived. No
@@ -3543,14 +3547,14 @@ test "the overview asks for frames only while a spinning mark is on screen" {
     try std.testing.expect(try rig.settle() == null);
     const Frames = struct {
         /// Whether, a spinner step after drawing at `height` rows, the
-        /// overview asks App for another frame. The step is taken off the
-        /// frame drawn rather than waited for.
+        /// overview asks App for another frame. The next step is passed in
+        /// rather than waited for, so the clock never decides the result.
         fn after(from: *Rig, height: u16) !bool {
             var shown = try from.shown(80, height);
             defer shown.deinit();
-            if (from.overview.wantsFrame()) return error.TestUnexpectedResult;
-            from.overview.app_frame -%= 1;
-            return from.overview.wantsFrame();
+            const drawn = from.overview.app_frame;
+            if (from.overview.wantsFrameAt(drawn)) return error.TestUnexpectedResult;
+            return from.overview.wantsFrameAt(drawn +% 1);
         }
     };
     try std.testing.expect(try Frames.after(rig, 24));
