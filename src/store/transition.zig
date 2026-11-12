@@ -10,18 +10,20 @@
 //!
 //! A transition declares:
 //! - `rounds`: `rounds(.{ .tag = .{ Kind, error.Named } })`, in the order
-//!   the rounds run. A failed statement in a round is that round's error.
+//!   the rounds run. A failed statement in a round with a named error is
+//!   that error; `.{ Kind }` names none.
 //! - `round_budget`: its `.always` rounds plus its commit, checked here.
-//! - `writes`: whether it commits. One that does not cannot ask to.
+//! - `commit`: how it commits (`Commit`). One that does not cannot ask to.
+//! - `begin`: the round its transaction opens before, or null when its
+//!   writes ride the commit round. Rounds before it read outside the
+//!   transaction; from it on, reads and writes share the transaction.
 //! - `Input`, `Result`, `Ordinary` (the errors `apply` returns without
-//!   fencing) and `Declined` (the guard errors whose commit answers
-//!   `declined(t, err)` instead of failing).
+//!   fencing), `Guards` (every guard error its writes report) and
+//!   `Declined` (those of `Guards` whose commit answers `declined(t, err)`
+//!   instead of failing).
 //! - `committed(t)`, the result once its commit stands.
 //!
-//! For now a round runs reads only and every write rides the commit round,
-//! the shape the retry admission has; the transaction opens with the first
-//! write, position or identity, as an `Access` opens it. The rounds run
-//! through `Access` until its queue core moves here.
+//! The rounds run through `Access` until its queue core moves here.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -41,8 +43,20 @@ pub const Kind = enum {
     paged,
 };
 
+/// How a transition's writes reach the Store.
+pub const Commit = enum {
+    /// It writes nothing, and cannot ask to commit.
+    none,
+    /// One transaction of any number of writes, positions and identities.
+    transaction,
+    /// Exactly one write and no positions or identities: SQLite runs it in
+    /// autocommit under the Entry lock, a batching engine in an
+    /// ownership-fenced transaction (`Access`'s `.single`).
+    single,
+};
+
 /// The rounds `spec` declares, in order: its tag enum `At`, each tag's
-/// `Kind` and the error a failed statement in that round answers.
+/// `Kind` and the error a failed statement in that round answers, if any.
 pub fn rounds(comptime spec: anytype) type {
     const names = @typeInfo(@TypeOf(spec)).@"struct".field_names;
     var values: [names.len]u8 = undefined;
@@ -52,7 +66,7 @@ pub fn rounds(comptime spec: anytype) type {
         value.* = i;
         const declared: Kind = @field(spec, name)[0];
         always_count += @intFromBool(declared == .always);
-        Named = Named || @TypeOf(@field(spec, name)[1]);
+        if (@field(spec, name).len == 2) Named = Named || @TypeOf(@field(spec, name)[1]);
     }
     const Tags = @Enum(u8, .exhaustive, names, &values);
     const always_rounds = always_count;
@@ -70,10 +84,11 @@ pub fn rounds(comptime spec: anytype) type {
             };
         }
 
-        /// The error a failed statement in `at` answers.
-        pub fn failed(at: At) Error {
+        /// The error a failed statement in `at` answers, or null when the
+        /// round names none.
+        pub fn failed(at: At) ?Error {
             return switch (at) {
-                inline else => |tag| @field(spec, @tagName(tag))[1],
+                inline else => |tag| if (@field(spec, @tagName(tag)).len == 2) @field(spec, @tagName(tag))[1] else null,
             };
         }
 
@@ -88,65 +103,111 @@ pub fn rounds(comptime spec: anytype) type {
 }
 
 /// What a step asks for: a declared round, the commit, or its result.
-/// A transition that declares no writes cannot ask to commit.
+/// A transition that commits nothing cannot ask to commit.
 pub fn Next(comptime T: type) type {
+    return NextOf(T.rounds.At, T.commit, T.Result);
+}
+
+fn NextOf(comptime At: type, comptime commit: Commit, comptime Result: type) type {
     return union(enum) {
-        round: T.rounds.At,
-        commit: if (T.writes) void else noreturn,
-        done: T.Result,
+        round: At,
+        commit: if (commit == .none) noreturn else void,
+        done: Result,
     };
 }
 
-/// What a step queues on: reads, and writes once `T.writes`. It holds the
-/// runner's Accesses behind a pointer no step can name, so a step has no
-/// way to run a round or commit.
+/// What a step queues on: reads, and writes unless it commits nothing. It
+/// holds the runner's Accesses behind a pointer no step can name, so a
+/// step has no way to run a round or commit. Two transitions that declare
+/// the same rounds, commit, guards and begin share it, so one can step
+/// through another.
 pub fn Round(comptime T: type) type {
+    return RoundOf(T.rounds, T.commit, GuardsOf(T), beginIndex(T));
+}
+
+fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8) type {
     return struct {
         const Self = @This();
         core: *anyopaque,
 
-        fn get(r: *Self) *Core(T) {
+        fn get(r: *Self) *Core(R, commit, Guards, begin) {
             return @ptrCast(@alignCast(r.core));
+        }
+
+        fn writes(comptime what: []const u8) void {
+            if (commit == .none) @compileError("a transition that commits nothing " ++ what);
+        }
+
+        fn transacts(comptime what: []const u8) void {
+            if (commit != .transaction) @compileError("only a transaction " ++ what);
         }
 
         /// `Access.read`: `destination` is defined once the round runs.
         pub fn read(r: *Self, comptime S: type, args: S.Args, destination: *S.Result) void {
-            r.get().reader.read(S, args, destination);
+            const core = r.get();
+            if (core.inside()) core.writer.read(S, args, destination) else core.reader.read(S, args, destination);
         }
 
         /// `Access.readInto`.
         pub fn readInto(r: *Self, comptime S: type, args: S.Args, row: *S.Row, found: *store_access.Found) void {
-            r.get().reader.readInto(S, args, row, found);
+            const core = r.get();
+            if (core.inside()) core.writer.readInto(S, args, row, found) else core.reader.readInto(S, args, row, found);
         }
 
         /// `Access.readEach`: `visitor` must outlive the round, so it is a
         /// field of the transition value.
         pub fn readEach(r: *Self, comptime S: type, args: S.Args, limit: u64, visitor: anytype) void {
-            r.get().reader.readEach(S, args, limit, visitor);
+            const core = r.get();
+            if (core.inside()) core.writer.readEach(S, args, limit, visitor) else core.reader.readEach(S, args, limit, visitor);
         }
 
-        /// `Access.write`: it runs in the commit round.
+        /// `Access.write`: it runs in the commit round, or, from `begin`
+        /// on, in the round it is queued for.
         pub fn write(r: *Self, comptime S: type, args: S.Args) void {
-            if (!T.writes) @compileError("a transition that declares no writes queues none: " ++ S.sql);
+            writes("queues no write: " ++ S.sql);
             r.get().writer.write(S, args);
         }
 
-        /// `Access.writeCount`: it runs in the commit round.
+        /// `Access.writeCount`, as `write`.
         pub fn writeCount(r: *Self, comptime S: type, args: S.Args, rows: u64) void {
-            if (!T.writes) @compileError("a transition that declares no writes queues none: " ++ S.sql);
+            writes("queues no write: " ++ S.sql);
             r.get().writer.writeCount(S, args, rows);
         }
 
         /// `Access.positions`: the commit advances them.
         pub fn positions(r: *Self, head: rsql.SessionHead) error{TooManyPositionClaims}!*store_access.Positions {
-            if (!T.writes) @compileError("a transition that declares no writes claims no positions");
+            transacts("claims positions");
             return r.get().writer.positions(head);
         }
 
         /// `Access.identity`: the next value of `column` in this transaction.
         pub fn identity(r: *Self, comptime column: store_core.Identity) !u64 {
-            if (!T.writes) @compileError("a transition that declares no writes takes no identities");
+            transacts("takes identities");
             return r.get().writer.identity(column);
+        }
+
+        /// `Access.writeContent`.
+        pub fn writeContent(r: *Self, content_id: u64, bytes: []const u8) void {
+            transacts("writes content");
+            r.get().writer.writeContent(content_id, bytes);
+        }
+
+        /// `Access.insertedContent`.
+        pub fn insertedContent(r: *Self, digest: *const [32]u8, length: u64, private: bool) ?u64 {
+            transacts("inserts content");
+            return r.get().writer.insertedContent(digest, length, private);
+        }
+
+        /// `Access.recordInserted`.
+        pub fn recordInserted(r: *Self, digest: *const [32]u8, length: u64, private: bool, content_id: u64) void {
+            transacts("inserts content");
+            r.get().writer.recordInserted(digest, length, private, content_id);
+        }
+
+        /// `Access.recordContentRow`.
+        pub fn recordContentRow(r: *Self, content_id: u64) void {
+            transacts("inserts content");
+            r.get().writer.recordContentRow(content_id);
         }
 
         /// The faults this run injects; a step checks its own.
@@ -156,18 +217,60 @@ pub fn Round(comptime T: type) type {
     };
 }
 
-/// The runner's state: a read Access for the rounds and, when `T.writes`,
-/// a write Access for the commit, as the retry admission held them before.
-fn Core(comptime T: type) type {
+/// The index of `T.begin`, or null.
+fn beginIndex(comptime T: type) ?u8 {
+    const at: T.rounds.At = T.begin orelse return null;
+    return @backingInt(at);
+}
+
+/// `T.Guards`, or none when it commits nothing.
+fn GuardsOf(comptime T: type) type {
+    return if (T.commit == .none) error{} else T.Guards;
+}
+
+/// `Core` for `T`.
+fn CoreFor(comptime T: type) type {
+    return Core(T.rounds, T.commit, GuardsOf(T), beginIndex(T));
+}
+
+/// The runner's state: a read Access for the rounds before `begin`, and
+/// the writer `commit` names, which runs the rounds from `begin` on. A
+/// transition whose transaction opens before its first round has no read
+/// Access; one that commits nothing has no writer.
+fn Core(comptime R: type, comptime commit: Commit, comptime Guards: type, comptime begin: ?u8) type {
+    const reads_outside = (begin orelse 1) > 0;
     return struct {
-        reader: store_access.Access(.read, error{}),
-        writer: if (T.writes) store_access.Access(.write, T.Declined) else void,
+        const Self = @This();
+        reader: if (reads_outside) store_access.Access(.read, error{}) else void,
+        writer: switch (commit) {
+            .none => void,
+            .transaction => store_access.Access(.write, Guards),
+            .single => store_access.Access(.single, Guards),
+        },
         faults: Faults,
+        /// The round the step queues for comes after this one.
+        last: ?R.At = null,
+
+        /// Whether the step queues for a round from `begin` on. Every
+        /// round before `begin` is `.always` (`check`), so the round after
+        /// `last` is the next one declared.
+        fn opened(core: *const Self) bool {
+            const first = begin orelse return false;
+            const next = if (core.last) |last| @backingInt(last) + 1 else 0;
+            return next >= first;
+        }
+
+        /// `opened`, comptime-known where only one Access exists.
+        inline fn inside(core: *const Self) bool {
+            if (commit == .none) return false;
+            if (!reads_outside) return true;
+            return core.opened();
+        }
     };
 }
 
 fn check(comptime T: type) void {
-    const commits: comptime_int = @intFromBool(T.writes);
+    const commits: comptime_int = @intFromBool(T.commit != .none);
     if (T.round_budget != T.rounds.always + commits) @compileError(std.fmt.comptimePrint(
         "{s}.round_budget is {d}, but it declares {d} .always rounds and {d} commit",
         .{ @typeName(T), T.round_budget, T.rounds.always, commits },
@@ -176,6 +279,15 @@ fn check(comptime T: type) void {
         "{s} is {d} bytes; a transition value holds at most 1 KiB",
         .{ @typeName(T), @sizeOf(T) },
     ));
+    if (beginIndex(T)) |begin| {
+        if (T.commit == .none) @compileError(@typeName(T) ++ " opens a transaction but commits nothing");
+        for (0..begin) |i| if (T.rounds.kind(@fromBackingInt(@intCast(i))) != .always)
+            @compileError(@typeName(T) ++ ": every round before begin is .always");
+    }
+    if (T.commit != .none) outer: for (@typeInfo(T.Declined).error_set.error_names.?) |name| {
+        for (@typeInfo(T.Guards).error_set.error_names.?) |guard| if (std.mem.eql(u8, name, guard)) continue :outer;
+        @compileError(@typeName(T) ++ " declines error." ++ name ++ ", which none of its Guards reports");
+    };
 }
 
 /// Runs `t` under `entry`'s lock: each round its steps ask for, then its
@@ -185,39 +297,62 @@ fn check(comptime T: type) void {
 /// in place until the pass that steps it.
 pub noinline fn run(entry: *const store_core.Entry, comptime T: type, t: *T, faults: Faults) !T.Result {
     comptime check(T);
-    var core: Core(T) = .{ .reader = .open(entry), .writer = if (T.writes) .open(entry) else {}, .faults = faults };
-    defer core.reader.deinit();
-    defer if (T.writes) core.writer.deinit();
-    if (T.writes) return core.writer.end(faults, drive(T, t, &core)) else return drive(T, t, &core);
+    const State = CoreFor(T);
+    var core: State = .{
+        .reader = if (@FieldType(State, "reader") == void) {} else .open(entry),
+        .writer = if (T.commit == .none) {} else .open(entry),
+        .faults = faults,
+    };
+    defer if (@FieldType(State, "reader") != void) core.reader.deinit();
+    defer if (T.commit != .none) core.writer.deinit();
+    if (T.commit != .none) return core.writer.end(faults, drive(T, t, &core)) else return drive(T, t, &core);
 }
 
-fn drive(comptime T: type, t: *T, core: *Core(T)) !T.Result {
+fn drive(comptime T: type, t: *T, core: *CoreFor(T)) !T.Result {
     var round: Round(T) = .{ .core = core };
-    var last: ?T.rounds.At = null;
-    while (true) switch (try T.step(t, &round, last)) {
+    while (true) switch (try T.step(t, &round, core.last)) {
         .round => |at| {
-            if (builtin.is_test and !T.rounds.follows(last, at)) std.debug.panic(
+            if (builtin.is_test and !T.rounds.follows(core.last, at)) std.debug.panic(
                 "{s} asked for round {s} after {s}: rounds run in declared order, and only a .paged one repeats",
-                .{ @typeName(T), @tagName(at), if (last) |before| @tagName(before) else "none" },
+                .{ @typeName(T), @tagName(at), if (core.last) |before| @tagName(before) else "none" },
             );
-            // Writes ride the commit round in this runner.
-            if (T.writes) std.debug.assert(core.writer.queued == 0);
-            core.reader.run() catch |err| return if (err == error.StatementFailed) T.rounds.failed(at) else err;
-            last = at;
+            const begin = comptime beginIndex(T);
+            const inside = if (begin) |first| @backingInt(at) >= first else false;
+            // Reads queued where the round runs them.
+            std.debug.assert(inside == core.opened());
+            if (@FieldType(CoreFor(T), "reader") != void and !inside) {
+                // Before `begin`, writes ride the commit round.
+                if (T.commit != .none) std.debug.assert(core.writer.queued == 0);
+                core.reader.run() catch |err| return named(T, at, err);
+            } else {
+                core.writer.run() catch |err| return named(T, at, err);
+            }
+            core.last = at;
         },
-        .commit => if (!T.writes) unreachable else {
+        .commit => if (T.commit == .none) unreachable else {
+            // Reads queued outside the transaction would never run.
+            if (@FieldType(CoreFor(T), "reader") != void) std.debug.assert(core.reader.queued == 0);
             core.writer.commit() catch |err| {
-                const declined = declinedBy(T, err) orelse return err;
-                try core.writer.abandon(core.faults);
-                return T.declined(t, declined);
+                if (comptime @typeInfo(T.Declined).error_set.error_names.?.len != 0) if (declinedBy(T, err)) |declined| {
+                    try core.writer.abandon(core.faults);
+                    return T.declined(t, declined);
+                };
+                return err;
             };
             return T.committed(t);
         },
         .done => |result| {
-            if (T.writes) try core.writer.abandon(core.faults);
+            if (T.commit != .none) try core.writer.abandon(core.faults);
             return result;
         },
     };
+}
+
+/// A round's failure: a failed statement is the round's named error, if
+/// it names one.
+fn named(comptime T: type, at: T.rounds.At, err: anytype) (@TypeOf(err) || T.rounds.Error) {
+    if (err == error.StatementFailed) if (T.rounds.failed(at)) |failed| return failed;
+    return err;
 }
 
 /// `err` as one of `T.Declined`, or null.
