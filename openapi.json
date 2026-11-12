@@ -10234,6 +10234,10 @@
       "PageWork": {
         "type": "object",
         "properties": {
+          "read_version": {
+            "type": "string",
+            "x-rui-max-bytes": 53
+          },
           "state": {
             "$ref": "#/components/schemas/WorkStateJson"
           },
@@ -10287,6 +10291,7 @@
           }
         },
         "required": [
+          "read_version",
           "state",
           "turn",
           "operation",
@@ -10886,6 +10891,10 @@
       "SessionRow": {
         "type": "object",
         "properties": {
+          "read_version": {
+            "type": "string",
+            "x-rui-max-bytes": 53
+          },
           "archive_state": {
             "type": "string",
             "enum": [
@@ -10995,6 +11004,7 @@
           }
         },
         "required": [
+          "read_version",
           "archive_state",
           "reference",
           "workspace",

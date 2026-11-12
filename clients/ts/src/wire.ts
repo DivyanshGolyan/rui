@@ -2543,6 +2543,7 @@ export interface components {
             since?: string | null;
         };
         PageWork: {
+            read_version: string;
             state: components["schemas"]["WorkStateJson"];
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
@@ -2714,6 +2715,7 @@ export interface components {
             archived?: boolean;
         };
         SessionRow: {
+            read_version: string;
             /** @enum {string} */
             archive_state: "active" | "archiving" | "archived";
             reference: string;

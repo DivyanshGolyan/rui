@@ -3060,7 +3060,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // Filtered fills never overwrite current work or move the scan cursor.
         if (read == .opening or read == .scan or phase == .permission) {
             const result = &self.job.result;
-            observed = .{ .snapshot = .{ .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
+            observed = .{ .snapshot = .{ .read_version = result.work.read_version, .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
             self.live.queued = result.queued;
             if (result.queued_line) |shown| self.live.queued_line = shown;
@@ -4823,7 +4823,7 @@ const ArchiveOverview = struct {
 
     fn observed(raw: *anyopaque, snapshot: session_list.Snapshot, opening: bool) !void {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .work = snapshot.work, .last_line = snapshot.last_line, .opening = opening } });
+        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .read_version = snapshot.read_version, .work = snapshot.work, .last_line = snapshot.last_line, .opening = opening } });
         try std.testing.expectEqual(@as(usize, 0), effects.len);
     }
 
@@ -4840,12 +4840,13 @@ test "one settled stop read updates the chat and its list row without a listing"
     var overview: ArchiveOverview = .{ .state = undefined };
     try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
     defer overview.state.deinit();
+    _ = try overview_view.step(&overview.state, .{ .host = .{ .instance = @splat(0xab), .started_at = 1, .slots = 2, .slots_in_use = 0 } });
     const ref = "k7m2qx".*;
     const stopping: protocol.WorkState = .{ .stopping = .{ .since = 1 } };
     const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .reference = ref, .workspace = "/work", .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
+        .rows = &.{.{ .read_version = .{ .instance = @splat(0xab), .generation = 1 }, .reference = ref, .workspace = "/work", .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });
@@ -4857,7 +4858,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const text = "■ Stopped\n";
     try fixture.file.writePositionalAll(std.testing.io, text, 0);
     job.result = .{
-        .work = .{ .work = stopped, .last_line = .{ .position = 2 } },
+        .work = .{ .read_version = .{ .instance = @splat(0xab), .generation = 2 }, .work = stopped, .last_line = .{ .position = 2 } },
         .row_count = 1,
         .new_rows = 1,
         .at_start = true,

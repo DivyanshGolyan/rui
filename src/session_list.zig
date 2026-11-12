@@ -45,6 +45,7 @@ pub const ListSessions = struct {
 /// One list row as the Store read it. Its slices borrow the Store's read
 /// scratch and are valid only during the visitor's `row` call.
 pub const Row = struct {
+    read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     archive_state: session_archive.State,
     reference: []const u8,
     parent: ?[]const u8,
@@ -78,6 +79,7 @@ pub const SavedLastLine = struct {
 
 /// All work-dependent facts a list row presents, from one Store read.
 pub const Snapshot = struct {
+    read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     work: session_work.Work,
     last_line: ?SavedLastLine = null,
 };

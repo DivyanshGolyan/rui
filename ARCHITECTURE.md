@@ -3510,7 +3510,7 @@ An assistant row is `final` exactly when it is its done Turn's answer: the messa
 Stop selection/cutoff and pending/completed status are likewise evaluated at end.
 The page's live work also carries `last_line`, the same bounded public last-line projection as a Session listing, read under that work's Store Access.
 Like live work, this preview may postdate a page's pinned historical end.
-An open conversation's list row takes work, last line and age from that snapshot together; listing rows remain intact for return to the list.
+A listing row and completed live-work read carry `read_version`, the actual Store opening identity and commit generation sampled under their read Access (not a traversal's frozen `since`). The overview settles both into one keyed presentation row: newer revisions replace work and last line together, equal revisions retain that value after retry-clock normalization, and older reads cannot regress its state, detail or age. Conversation departure changes focus, not the accepted row. Listing membership and listing-only terminal-status accounting remain separate. Only a Host handshake establishes the opening identity; foreign reads cannot rebase it or consume listing tokens. The served Host and its Store tokens share that incarnation. A row outside membership is retained only while its conversation owns a reader, then retired with that producer.
 This is a logical inventory prefix, not a historical transaction snapshot: immutable call classification remains attached to its item even at an interior end before the rejection-result position.
 Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.

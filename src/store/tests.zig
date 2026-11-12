@@ -890,6 +890,8 @@ pub const TestingListing = struct {
             .since = try protocol.SinceToken.parse(object.get("since").?.string),
         };
         for (object.get("sessions").?.array.items) |row| {
+            const version = try protocol.SinceToken.parse(row.object.get("read_version").?.string);
+            try std.testing.expectEqualDeep(protocol.SinceToken{ .instance = storage.instance, .generation = storage.commitGeneration() }, version);
             result.references[result.count] = row.object.get("reference").?.string[0..protocol.session_id_bytes].*;
             result.count += 1;
         }
@@ -998,6 +1000,7 @@ test "a since listing answers only the Sessions changed since its token, or ever
             try rest.expectReferences(all[8..]);
             try std.testing.expect(rest.next == null);
             try std.testing.expectEqual(first.since.generation, rest.since.generation);
+            try std.testing.expect(storage.commitGeneration() > first.next.?.changed.?.through);
             since.since = rest.since;
             try (try TestingListing.read(&storage, &tmp, since)).expectReferences(&.{all[0]});
 
@@ -1858,8 +1861,9 @@ test "Session list capture and cursor storage stay page bounded as dormant Sessi
                     const page = parsed.value.object;
                     try std.testing.expectEqual(@as(usize, protocol.session_list_page_size), page.get("sessions").?.array.items.len);
                     // The same first page and continuation remain byte bounded;
-                    // only the opaque token and ceiling may change their widths.
-                    const variable_bytes = page.get("since").?.string.len + page.get("next").?.object.get("ceiling").?.string.len;
+                    // only the opaque tokens and ceiling may change their widths.
+                    var variable_bytes = page.get("since").?.string.len + page.get("next").?.object.get("ceiling").?.string.len;
+                    for (page.get("sessions").?.array.items) |row| variable_bytes += row.object.get("read_version").?.string.len;
                     const fixed_bytes = bytes.len - variable_bytes;
                     if (i == 99) first_fixed_length = fixed_bytes else try std.testing.expectEqual(first_fixed_length, fixed_bytes);
                     try std.testing.expectEqual(@as(u64, 0), used.load(.acquire));
@@ -1936,6 +1940,7 @@ test "last line follows ended Turns and pending approvals with bounded public te
                 request.end = 1;
                 try storage.activityPage(&request, &activity);
                 try std.testing.expectEqual(@as(u64, 1), activity.end);
+                try std.testing.expectEqualDeep(protocol.SinceToken{ .instance = storage.instance, .generation = storage.commitGeneration() }, activity.work.read_version);
                 try std.testing.expectEqual(at, activity.work.last_line.?.position);
             };
         }

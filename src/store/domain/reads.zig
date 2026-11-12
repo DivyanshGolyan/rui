@@ -1116,6 +1116,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try report_domain.readWorks(a, (&work)[0..1]);
     page.work.work = try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
     try session_list_domain.readLastLine(a, session_ref, page.work.work.first_action, &page.work.last_line);
+    page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
 }
 

@@ -325,7 +325,7 @@ const ShownRow = struct { reference: *const change_ring.Id, first: u64, work: *c
 /// Reads each shown row's `list_row` in one round and visits it as it
 /// steps. The row it decodes is in report scratch (`ListRow`).
 noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64, visitor: anytype) !void {
-    var read: RowsRead(@TypeOf(visitor)) = .{ .decoded = a.store.reportScratch(ListRow), .rows = rows, .now_ms = now_ms, .visitor = visitor };
+    var read: RowsRead(@TypeOf(visitor)) = .{ .read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() }, .decoded = a.store.reportScratch(ListRow), .rows = rows, .now_ms = now_ms, .visitor = visitor };
     for (rows) |row| {
         // Creation time only dates idle work, which has no Action. Its real
         // value is read with the settings; the approval selection needs none.
@@ -348,6 +348,7 @@ noinline fn readRowSettings(a: *ReadAccess, rows: []const ShownRow, now_ms: u64,
 /// `CorruptStore`; after a failure it visits nothing more.
 fn RowsRead(comptime Visitor: type) type {
     return struct {
+        read_version: change_ring.Token,
         decoded: *ListRow,
         rows: []const ShownRow,
         now_ms: u64,
@@ -359,10 +360,11 @@ fn RowsRead(comptime Visitor: type) type {
             if (read.failure != null) return false;
             var sorted: [tool_name.max_tools][]const u8 = undefined;
             var last_text: Bounded(session_list.max_last_line_bytes) = undefined;
-            const values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
+            var values = rowValues(read.rows, read.shown, read.now_ms, row, &sorted, &last_text) catch |err| {
                 read.failure = err;
                 return false;
             };
+            values.read_version = read.read_version;
             read.visitor.row(&values) catch |err| {
                 read.failure = err;
                 return false;
