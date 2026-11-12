@@ -931,7 +931,7 @@ noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider
             break :fields &.{};
         },
     };
-    work.response = try std.heap.page_allocator.alloc(u8, switch (kind) {
+    work.response = try pages.mapZeroed(u8, switch (kind) {
         .provider => model_list.max_response_bytes,
         .catalog => max_catalog_response_bytes,
     });
@@ -965,7 +965,7 @@ noinline fn saveCatalogAnswer(store: *store_module.Store, work: *ListingWork, st
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     const entries = try models_dev.parse(arena.allocator(), body);
-    std.heap.page_allocator.free(work.response.?);
+    pages.unmapZeroed(work.response.?);
     work.response = null;
     try store.saveModelFacts(entries, if (work.fetch.etag) |*etag| etag.slice() else null);
 }
@@ -974,7 +974,7 @@ fn endListing(reactor: *provider.Reactor, kind: provider.ListingKind, work: *Lis
     reactor.endListing(kind);
     if (work.credential) |shared| reactor.credentials.release(shared);
     work.credential = null;
-    if (work.response) |response| std.heap.page_allocator.free(response);
+    if (work.response) |response| pages.unmapZeroed(response);
     work.response = null;
 }
 
@@ -4215,6 +4215,12 @@ test "a Session the register does not hold launches with the system PATH and the
     try std.testing.expectEqualStrings("PATH=/client/bin\x00HOME=/client\x00", held);
 }
 
+fn mappedResponse(bytes: []const u8) ![]u8 {
+    const response = try pages.mapZeroed(u8, bytes.len);
+    @memcpy(response, bytes);
+    return response;
+}
+
 test "catalog answer slims saves and a 304 keeps its generation and facts" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -4226,8 +4232,8 @@ test "catalog answer slims saves and a 304 keeps its generation and facts" {
     try storage.open(std.testing.io, path, root);
     defer storage.close() catch unreachable;
     const fixture = "{\"openai\":{\"models\":{\"catalog-test\":{\"limit\":{\"context\":123}}}}}";
-    var work: ListingWork = .{ .fetch = .{ .stream = .idle, .finished = true }, .credential = null, .response = try std.heap.page_allocator.dupe(u8, fixture) };
-    defer if (work.response) |bytes| std.heap.page_allocator.free(bytes);
+    var work: ListingWork = .{ .fetch = .{ .stream = .idle, .finished = true }, .credential = null, .response = try mappedResponse(fixture) };
+    defer if (work.response) |bytes| pages.unmapZeroed(bytes);
     work.fetch.etag = .{};
     try work.fetch.etag.?.set("\"saved\"");
     try saveCatalogAnswer(&storage, &work, 200, work.response.?);
@@ -4240,7 +4246,7 @@ test "catalog answer slims saves and a 304 keeps its generation and facts" {
     try std.testing.expectEqual(first.fetched_at, unchanged.fetched_at);
     try std.testing.expectEqualStrings("\"saved\"", unchanged.etag.?.slice());
     try std.testing.expectEqual(@as(?u32, 123), (try storage.modelFact("catalog-test")).?.context_window);
-    work.response = try std.heap.page_allocator.dupe(u8, "not JSON");
+    work.response = try mappedResponse("not JSON");
     try std.testing.expectError(error.InvalidCatalog, saveCatalogAnswer(&storage, &work, 200, work.response.?));
     try std.testing.expectEqual(first.generation, (try storage.readModelCatalogSource()).?.generation);
 }

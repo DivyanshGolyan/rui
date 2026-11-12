@@ -897,15 +897,13 @@ noinline fn offerMcpTools(io: std.Io, arena: std.mem.Allocator, scratch: std.mem
         error.Stopped => return error.EffectAwareShutdown,
         error.ToolNameCollision => {
             var message: [256]u8 = undefined;
-            launch_frame.writeRefusal(io, .{
+            return launch_frame.writeRefusal(io, .{
                 .code = .tool_name_collision,
                 .message = std.fmt.bufPrint(&message, "tool name {s} is offered by {s} and by {s}", .{ collision.name, collision.first, collision.second }) catch "a tool name is offered twice",
             });
-            return err;
         },
         error.TooManyTools => {
-            launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "the MCP servers list more tools than a Host offers" });
-            return err;
+            return launch_frame.writeRefusal(io, .{ .code = .launch_frame_invalid, .message = "the MCP servers list more tools than a Host offers" });
         },
         else => |other| return other,
     };
@@ -1208,8 +1206,7 @@ fn finishServing(io: std.Io, storage: *const store_module.Store, launched: bool,
     // This is the sole decision and publication site, after intake, workers
     // and execution have drained. A fence wins over every serving outcome.
     if (launched and storage.kind() == .mysql and storage.isFenced()) {
-        launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
-        return error.StoreFenced;
+        return launch_frame.writeRefusal(io, .{ .code = .store_fenced, .message = "the MySQL Store lost ownership or its connection; restart the Host" });
     }
     return result;
 }
@@ -3865,7 +3862,7 @@ test "launch frame fenced MySQL shutdown is decided once at the return boundary 
         defer if (open) listener.deinit(io);
         const outcome = finishServing(io, &storage, case.launched, intake.run(&listener, &open, &owned));
         const fenced = case.mysql and case.launched and (case.early or case.late);
-        try std.testing.expectError(if (fenced) error.StoreFenced else error.EffectAwareShutdown, outcome);
+        try std.testing.expectError(if (fenced) error.Reported else error.EffectAwareShutdown, outcome);
         try std.testing.expectEqualStrings(if (fenced)
             "{\"rui_start_error\":{\"code\":\"store_fenced\",\"message\":\"the MySQL Store lost ownership or its connection; restart the Host\"}}\n"
         else

@@ -393,6 +393,8 @@ pub const ActionExecutionInput = struct {
     runner: union(enum) {
         bash: struct { workspace: Bounded(workspace_path.max_bytes) },
         mcp: struct {
+            /// Whether this call's originating Operation offered Bash.
+            bash_offered: bool,
             parent: ?Bounded(session_id.max_reference_bytes),
             root: Bounded(session_id.max_reference_bytes),
             name: Bounded(tool_name.max_bytes),
@@ -897,10 +899,11 @@ const ReadyFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.
 // Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
 // offers never open their call ranges; candidate calls seek their Action by
 // parent and ordinal. CROSS JOIN keeps that bound before the Action lookup.
+// Only the current Operation can have executable Actions: continuation waits for every call to settle.
 const next_mcp_action = rsql.Read(.{
     .sql = "SELECT action.action_id,tool.server " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
+        "CROSS JOIN model_operation operation ON operation.operation_id=active.operation_id " ++
         "CROSS JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
         "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
@@ -1034,7 +1037,9 @@ pub const AdmitSelected = struct {
     }
 };
 const mcp_input = rsql.Read(.{
-    .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.attempt_timeout_ms AS timeout_ms FROM action_operation action " ++
+    .sql = "SELECT item.session_position AS position,action.session_ref AS session,action.sender_handle,@payload(name) AS name,tool.server,schema_content.digest,schema_content.byte_length AS length,action.attempt_timeout_ms AS timeout_ms," ++
+        "EXISTS(SELECT 1 FROM tool_set_member bash_member JOIN tool_record bash_tool ON bash_tool.tool_record_id=bash_member.tool_record_id " ++
+        "WHERE bash_member.tool_set_id=operation.tool_set_id AND bash_tool.name='bash') AS bash_offered FROM action_operation action " ++
         "JOIN model_operation operation ON operation.operation_id=action.parent_operation_id " ++
         "JOIN model_tool_call tool_call ON tool_call.operation_id=action.parent_operation_id AND tool_call.call_ordinal=action.call_ordinal " ++
         "JOIN content name ON name.content_id=tool_call.name_content_id " ++
@@ -1045,7 +1050,7 @@ const mcp_input = rsql.Read(.{
         "WHERE action.action_id=?1 AND action.parent_operation_id=?2 AND operation.turn_id=?3 AND action." ++ action_attempted_sql ++
         " AND action.resolution_code IS NULL AND " ++ mcpCallSql("action", "operation"),
     .Args = struct { action_id: u64, parent_operation_id: u64, turn_id: u64 },
-    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(tool_name.max_bytes), server: *Bounded(tool_defs.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive },
+    .Row = struct { position: ?rsql.Positive, session: *Bounded(session_id.max_reference_bytes), sender_handle: *Bounded(32), name: *Bounded(tool_name.max_bytes), server: *Bounded(tool_defs.max_server_bytes), digest: [32]u8, length: u64, timeout_ms: rsql.Positive, bash_offered: bool },
     .cardinality = .optional,
 });
 test "MCP execution input uses each engine's tool-name content layout" {
@@ -1068,14 +1073,15 @@ const session_parent = rsql.Read(.{
 });
 pub fn readMcpExecutionInput(a: anytype, binding: ActionAttemptBinding, out: *ActionExecutionInput) !void {
     out.binding = binding;
-    out.runner = .{ .mcp = .{ .parent = null, .root = .{ .len = 0 }, .name = .{ .len = 0 }, .server = .{ .len = 0 }, .input_schema = .{ .length = 0, .digest = @splat(0) } } };
+    out.runner = .{ .mcp = .{ .bash_offered = false, .parent = null, .root = .{ .len = 0 }, .name = .{ .len = 0 }, .server = .{ .len = 0 }, .input_schema = .{ .length = 0, .digest = @splat(0) } } };
     const specific = &out.runner.mcp;
-    var row: mcp_input.Row = .{ .position = null, .session = &out.session, .sender_handle = &out.sender_handle, .name = &specific.name, .server = &specific.server, .digest = undefined, .length = undefined, .timeout_ms = undefined };
+    var row: mcp_input.Row = .{ .position = null, .session = &out.session, .sender_handle = &out.sender_handle, .name = &specific.name, .server = &specific.server, .digest = undefined, .length = undefined, .timeout_ms = undefined, .bash_offered = undefined };
     var found: store_access.Found = undefined;
     a.readInto(mcp_input, .{ .action_id = binding.action_id, .parent_operation_id = binding.parent_operation_id, .turn_id = binding.turn_id }, &row, &found);
     try a.run();
     if (!found.get()) return error.StaleActionAttemptBinding;
     specific.input_schema = .{ .length = row.length, .digest = row.digest };
+    specific.bash_offered = row.bash_offered;
     out.timeout_ms = row.timeout_ms.get();
     const position = (row.position orelse return error.CorruptStore).get();
     const reference = (try reads_domain.proposal(a, out.session.slice(), position)).fields[@backingInt(tool_proposal.Field.arguments)];

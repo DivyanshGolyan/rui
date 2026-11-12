@@ -353,17 +353,19 @@ fn validServerName(name: []const u8) bool {
     return true;
 }
 
-/// The one stdout line a refused launch writes before exiting.
-pub fn writeRefusal(io: std.Io, refusal: Refusal) void {
+/// Publish the refusal and carry its already-reported status through cleanup
+/// to the CLI. A refused launch exits nonzero without a second diagnostic.
+pub fn writeRefusal(io: std.Io, refusal: Refusal) error{Reported} {
     // Every diagnostic byte may need a six-byte JSON escape.
     var buffer: [6 * max_refusal_message_bytes + 128]u8 = undefined;
     var out = std.Io.Writer.fixed(&buffer);
-    out.writeAll("{\"rui_start_error\":{\"code\":\"") catch return;
-    out.writeAll(@tagName(refusal.code)) catch return;
-    out.writeAll("\",\"message\":") catch return;
-    std.json.Stringify.encodeJsonString(refusal.message, .{}, &out) catch return;
-    out.writeAll("}}\n") catch return;
+    out.writeAll("{\"rui_start_error\":{\"code\":\"") catch return error.Reported;
+    out.writeAll(@tagName(refusal.code)) catch return error.Reported;
+    out.writeAll("\",\"message\":") catch return error.Reported;
+    std.json.Stringify.encodeJsonString(refusal.message, .{}, &out) catch return error.Reported;
+    out.writeAll("}}\n") catch return error.Reported;
     std.Io.File.stdout().writeStreamingAll(io, out.buffered()) catch {};
+    return error.Reported;
 }
 
 fn frameBytes(comptime json: []const u8) [4 + json.len]u8 {
@@ -667,6 +669,7 @@ test "a launched Host's start failure is refused with its Store's codes only" {
     try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlFlushLogUnsafe).?.message, "innodb_flush_log_at_trx_commit=1") != null);
     try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.MysqlSyncBinlogUnsafe).?.message, "sync_binlog=1") != null);
     try std.testing.expectEqualStrings("the MySQL server refused the connection before login", mysqlRefusal(error.ServerRefused).?.message);
+    try std.testing.expect(std.mem.indexOf(u8, mysqlRefusal(error.LoginRefused).?.message, "SELECT, INSERT, UPDATE") != null);
     try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.HostNotFound).?.message, mysqlRefusal(error.ConnectFailed).?.message));
     try std.testing.expect(!std.mem.eql(u8, mysqlRefusal(error.UntrustedPeer).?.message, mysqlRefusal(error.TlsFailed).?.message));
 }
@@ -700,7 +703,7 @@ fn mysqlRefusal(err: anyerror) ?Refusal {
         error.PeerFailed => .{ .code = .mysql_unreachable, .message = "could not verify the MySQL server's TLS certificate" },
         error.DeadlineExceeded => .{ .code = .mysql_unreachable, .message = "timed out connecting to the MySQL server" },
         error.ConnectionLost => .{ .code = .mysql_unreachable, .message = "the MySQL connection was lost during startup" },
-        error.LoginRefused, error.AuthMethodRefused => .{ .code = .mysql_login, .message = "the MySQL server refused the login; check credentials and database access" },
+        error.LoginRefused, error.AuthMethodRefused => .{ .code = .mysql_login, .message = "the MySQL server refused the login or the login lacks a privilege the Store needs; check credentials and SELECT, INSERT, UPDATE privileges on the database" },
         else => null,
     };
 }
