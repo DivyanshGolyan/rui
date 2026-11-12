@@ -1743,7 +1743,7 @@ def renderer_cases():
                 released[index].wait(10)
             return True
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two)
-        with terminal(session) as tty:
+        with terminal(session, columns=140) as tty:
             tty.send("status yields\r", marker)
             frames = tty.every_frame()
             holding.set()
@@ -1753,19 +1753,21 @@ def renderer_cases():
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/help\r")
-            time.sleep(0.3)
+            row, line = next((index, line) for index, line in enumerate(tty.capture.completed.split("\n")) if "Settings" in line)
+            col = line.index("Settings") + 1
+            tty.send(f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m", "Notifications")
+            keys = tty.send("\x1b[B" * 6 + "\r", "earlier message")
+            assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice")), keys
             released[1].set()
-            tty.wait("shift+↑↓               scroll", timeout=20)
             time.sleep(1.5)
-            assert "shift+↑↓               scroll" in tty.capture.completed, tty.capture.completed
+            assert "earlier message" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a later /help replaces a /status not yet shown", flush=True)
+        print("renderer: Settings > Keys covers a /status not yet shown", flush=True)
 
         # A short fresh feed clamps at its first saved row; scrolling does
         # not add a start label or duplicate the admitted Message and reply.
@@ -2601,21 +2603,31 @@ def main(selected="all"):
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
             assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
-            # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
-            help_text = terminal_step(master, "/help", "in your shell.", composer=True)
-            assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/requests", "/result KEY", "/setup", "/configure", "ctrl+r"):
-                assert command in help_text, help_text
-            assert all(command not in help_text for command in ("/history", "/upgrade", "/exit", "/inspect-action", "/wait", "/login")) and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
-            assert "without approval" not in help_text, help_text
+            # The wide layout exposes the pinned Settings row without
+            # leaving this conversation or replacing its /status page.
+            terminal_capture(master).resize(140, 50)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 140, 0, 0))
+            wide = keyed_frame(master, b"", lambda screen, x, y: "Settings" in screen and f"Status · {session}" in screen)
+            row, line = next((index, line) for index, line in enumerate(wide.split("\n")) if "Settings" in line)
+            col = line.index("Settings") + 1
+            gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
+            keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
+            for expected in ("enter  send", "esc/ctrl+g back", "ctrl+x", "stop", "tool output", "retry", "archive", "scroll / select", "first session", "latest / last"):
+                assert expected in keys, (expected, keys)
+            assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings")), keys
+            settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            assert "earlier message" not in settings, settings
+            keyed_frame(master, b"\x1b", lambda screen, x, y: f"Status · {session}" in screen and "Rui · settings" not in screen)
+            terminal_capture(master).resize(80, 50)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 80, 0, 0))
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit"):
-                notice = f"! Unknown command {command} · /help"
+            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit", "/help"):
+                notice = f"! Unknown command {command}"
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)

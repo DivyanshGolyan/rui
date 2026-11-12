@@ -325,3 +325,33 @@ test "Panel inline choices open pick cancel and scroll in the same field" {
     try std.testing.expect(panel.choice == null);
     try std.testing.expectEqual(@as(?usize, 0), fixture.picked);
 }
+
+/// A read-only two-column reference, without selection or input ownership.
+/// It shares the panel's cell clipping; labels are strong, values are plain.
+pub const KeyList = struct {
+    fields: []const Field,
+    ground: vaxis.Style = .{},
+    strong: vaxis.Style = .{ .bold = true },
+
+    pub fn widget(self: *KeyList) vxfw.Widget {
+        return .{ .userdata = self, .drawFn = drawReference };
+    }
+
+    fn drawReference(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+        const self: *KeyList = @ptrCast(@alignCast(raw));
+        const size = ctx.max.size();
+        const surface = try vxfw.Surface.init(ctx.arena, self.widget(), size);
+        @memset(surface.buffer, .{ .style = self.ground });
+        const columns: u16 = if (size.width >= 46) 2 else 1;
+        const column_width = @min(28, size.width / columns);
+        for (self.fields, 0..) |field, index| {
+            const row = index / columns;
+            if (row >= size.height) break;
+            const start: u16 = @intCast((index % columns) * column_width);
+            const limit = start + column_width;
+            const end = paintTo(ctx, surface, field.label, @min(start + 1, limit), @intCast(row), self.strong, limit);
+            _ = paintTo(ctx, surface, field.value, @min(@max(start + 8, end +| 1), limit), @intCast(row), self.ground, limit);
+        }
+        return surface;
+    }
+};
