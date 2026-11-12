@@ -31,6 +31,10 @@ function narrowed(entry: FeedEntry): void {
 		}
 		case "call": {
 			const ordinal: string = entry.callOrdinal;
+			const description: string | null = entry.description;
+			const tool: string | null = entry.tool;
+			const server: string | null = entry.server;
+			void [description, tool, server];
 			const fields: [Schemas["ActivityItemContent"], Schemas["ActivityItemContent"], Schemas["ActivityItemContent"]] = entry.fields;
 			// @ts-expect-error Only top-level camelCase keys are exposed.
 			void entry.call_ordinal;
@@ -85,6 +89,10 @@ function narrowed(entry: FeedEntry): void {
 			void entry.session;
 			const action: string = entry.action;
 			const ordinal: string = entry.callOrdinal;
+			const description: string | null = entry.description;
+			const tool: string | null = entry.tool;
+			const server: string | null = entry.server;
+			void [description, tool, server];
 			// @ts-expect-error Other kinds' fields must not be accepted.
 			void entry.final;
 			void [sessionId, action, ordinal];
@@ -496,4 +504,37 @@ test("a refused effort change retains its revision and inline provider text", as
         assert.equal(entries[0].revision, "2");
         assert.equal(entries[0].providerText, "unsupported_value: high is not supported");
     }
+});
+
+
+test("call and approval mapping preserves saved facts and readContent opens original JSON", async () => {
+    const facts = { description: "Fetch saved page", tool: "fetch_page", server: "docs" };
+    const reference = { bytes: "2", sha256: "hash" };
+    const rows: Schemas["ActivityItem"][] = [
+        { position: "1", ordinal: "0", at: "1", value: { call: { operation: "2", turn: "1", call_ordinal: "0", action: "3", rejection: null, fields: [reference, reference, reference], ...facts } } },
+        { position: "2", ordinal: "0", at: "1", value: { call: { operation: "2", turn: "1", call_ordinal: "1", action: "4", rejection: null, fields: [reference, reference, reference], description: "Print saved line", tool: "bash", server: null } } },
+        { position: "1", ordinal: "1", at: "1", value: { approval_requested: { session: "ch1ld1", operation: "2", call_ordinal: "0", action: "3", ...facts } } },
+    ];
+    const original = '{ "url": "https://example.test", "rui_call_description": "Fetch saved page" }';
+    const reads: unknown[] = [];
+    const link: Link = { exchange: async (path, build) => {
+        if (path === "/v1/activity-content") {
+            reads.push(JSON.parse(build("/store")));
+            return Buffer.from(original);
+        }
+        return Buffer.from(JSON.stringify({ delta: "full", since: null, items: rows, more: false, end: "2" }));
+    } };
+    const session = new Session(link, "r00t00");
+    const entries: FeedEntry[] = [];
+    for await (const entry of session.listActivity()) entries.push(entry);
+    assert.equal(reads.length, 0, "inline call details require no argument fetch");
+    for (const index of [0, 2]) {
+        const entry = entries[index];
+        assert.ok(entry?.kind === "call" || entry?.kind === "approval_requested");
+        assert.deepEqual({ description: entry.description, tool: entry.tool, server: entry.server }, facts);
+        assert.equal(await session.readContent(entry), original);
+    }
+    assert.equal(entries[1]?.kind, "call");
+    if (entries[1]?.kind === "call") assert.equal(entries[1].server, null);
+    assert.deepEqual(reads.map((read) => (read as { ordinal: string }).ordinal), ["0", "1"]);
 });
