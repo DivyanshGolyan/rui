@@ -222,7 +222,8 @@
       "expect": [
         "Type a task",
         "Settings",
-        "enter start"
+        "enter start",
+        "gpt-6.1-sol · low"
       ]
     },
     {
@@ -516,6 +517,108 @@
       ]
     },
     {
+      "name": "start-model",
+      "note": "New-chat model word opens the shared Model choice alone above the input",
+      "open": "overview",
+      "steps": [
+        {
+          "mouse": {
+            "at": "gpt-6.1-sol",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "✓"
+        }
+      ],
+      "expect": [
+        "Model",
+        "gpt-6.1-sol",
+        "✓",
+        "Type a task"
+      ],
+      "absent": [
+        "Notifications",
+        "Permissions",
+        "Copy last answer",
+        "click to change",
+        "▾",
+        "Filter:"
+      ]
+    },
+    {
+      "name": "start-effort",
+      "note": "Tab Tab Enter opens the shared Effort choice alone above the input",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Tab",
+            "Tab",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "xhigh"
+        }
+      ],
+      "expect": [
+        "Effort",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "✓",
+        "Type a task"
+      ],
+      "absent": [
+        "Notifications",
+        "Permissions",
+        "Copy last answer",
+        "click to change",
+        "▾",
+        "Filter:"
+      ]
+    },
+    {
+      "name": "start-picked",
+      "note": "Picking xhigh in the new-chat Effort choice saves the default and closes the choice",
+      "open": "overview",
+      "steps": [
+        {
+          "keys": [
+            "Tab",
+            "Tab",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "xhigh"
+        },
+        {
+          "mouse": {
+            "at": "xhigh",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "gpt-6.1-sol · xhigh"
+        }
+      ],
+      "expect": [
+        "gpt-6.1-sol · xhigh",
+        "Type a task",
+        "enter start"
+      ],
+      "absent": [
+        "gpt-6.1-sol · high",
+        "Effort",
+        "✓",
+        "click to change",
+        "▾"
+      ]
+    },
+    {
       "name": "mouse-settings",
       "note": "Click the pinned Settings row using terminal mouse modes",
       "open": "overview",
@@ -764,6 +867,46 @@
         "asks before Bash/MCP",
         "Type a message",
         "enter sends"
+      ]
+    },
+    {
+      "name": "chat-effort",
+      "note": "Clicking chat effort opens its shared choice; low applies only to Fix retry deadline",
+      "open": "Fix retry deadline",
+      "steps": [
+        {
+          "mouse": {
+            "at": "high",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "xhigh"
+        },
+        {
+          "mouse": {
+            "at": "low",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "gpt-6.1-sol · low · 100% left"
+        },
+        {
+          "gone": "Configured."
+        }
+      ],
+      "expect": [
+        "gpt-6.1-sol · low",
+        "The project has a README"
+      ],
+      "absent": [
+        "gpt-6.1-sol · high",
+        "Effort",
+        "Copy last answer",
+        "Configured.",
+        "click to change",
+        "▾"
       ]
     },
     {
@@ -1436,6 +1579,9 @@
         {
           "wait": "Deny"
         }
+      ],
+      "expect": [
+        " · ask"
       ],
       "absent": [
         "asks before Bash/MCP",

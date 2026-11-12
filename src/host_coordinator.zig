@@ -1,34 +1,29 @@
-//! Process custody for work which may stop the Host running its caller.
-//! A fresh image in its own session, never a forked Zig continuation.
+//! Detached custody for the shared restart-all owner. Task input contains only
+//! routing and a pinned target; private launch state never crosses this boundary.
 const std = @import("std");
 const HostLifecycle = @import("HostLifecycle.zig");
-const client = @import("client.zig");
-const identity = @import("host_identity.zig");
+const restart_all = @import("host_restart_all.zig");
 const release = @import("release_candidate.zig");
 const stderr = @import("stderr.zig");
 
-// host_identity bounds argv/environment at 2 MiB. JSON's worst-case escaping
-// needs six bytes per byte, including a second copy of argv-derived launch
-// options. The remainder covers paths, facts and JSON framing. Only one task
-// exists per coordinator, and its input storage is wiped before process exit.
-const input_limit = 32 * 1024 * 1024;
-const Activation = struct {
-    observed: client.HostControlObservation,
-    started: u64,
-    executable: []const u8,
-    argv: []const []const u8,
-    environment: []const []const u8,
-    launch: HostLifecycle.LaunchSpecification,
-    previous_version: release.Version,
-    target: []const u8,
-    version: release.Version,
+// Two filesystem paths, including worst-case JSON escaping, plus framing.
+const input_limit = 12 * std.fs.max_path_bytes + 1024;
+const event_limit = input_limit;
+const Task = struct {
+    home: []const u8,
+    target: ?restart_all.Target = null,
+    report: enum { lines, events },
 };
-const Task = union(enum) { restart_all, activate: Activation };
-const Event = union(enum) { progress: HostLifecycle.Stage, outcome: HostLifecycle.ActivationOutcome };
+const Event = union(enum) {
+    progress: HostLifecycle.Stage,
+    version: release.Version,
+    entry: restart_all.Entry,
+    // Error sets are not JSON-decodable. Preserve cancellation semantically;
+    // other global failures retain their original diagnostic in the worker.
+    failure: enum { cancelled, unconfirmed },
+    done,
+};
 
-/// Child owns the complete task after stdin closes. No cancellation or cleanup
-/// of the caller may kill it after that handoff: it may already have stopped a
-/// Host. Its process group is independent even if Bash exec'd the caller.
 fn submit(init: std.process.Init, allocator: std.mem.Allocator, task: Task, stdout: std.process.SpawnOptions.StdIo) !std.process.Child {
     const executable = try std.process.executablePathAlloc(init.io, allocator);
     defer allocator.free(executable);
@@ -50,67 +45,81 @@ fn submit(init: std.process.Init, allocator: std.mem.Allocator, task: Task, stdo
 }
 
 pub fn restartAll(init: std.process.Init, allocator: std.mem.Allocator) !void {
-    var child = try submit(init, allocator, .restart_all, .inherit);
+    var child = try submit(init, allocator, .{ .home = init.environ_map.get("HOME") orelse return error.HomeNotFound, .report = .lines }, .inherit);
     const term = try child.wait(init.io);
     if (!term.success()) return error.HostRestartFailed;
 }
 
-// Bounded values contain unwritten capacity. Transfer their values, never
-// uninitialized/private tail bytes through generic JSON array serialization.
-fn wireObservation(value: client.HostControlObservation) client.HostControlObservation {
-    var result = value;
-    @memset(result.facts.store.bytes[result.facts.store.len..], 0);
-    if (result.facts.innodb_doublewrite) |*text| @memset(text.bytes[text.len..], 0);
-    return result;
-}
-
-pub fn activate(init: std.process.Init, allocator: std.mem.Allocator, observation: *const HostLifecycle.Observation, target: []const u8, version: release.Version, cancellation: ?*const client.Cancellation, progress: ?HostLifecycle.Progress) !HostLifecycle.ActivationOutcome {
-    const plan = switch (observation.*) {
-        .absent => return .not_needed,
-        .unsupported => |reason| return .{ .unsupported = reason },
-        .managed => |*value| value,
+/// Cancellation owns preparation up to EOF. After handoff, the worker retains
+/// custody of the entire batch even if the caller (or its Host) disappears.
+pub fn restart(init: std.process.Init, allocator: std.mem.Allocator, options: restart_all.Options) !restart_all.Batch {
+    try @import("upgrade_process.zig").check(options.cancellation);
+    var child = try submit(init, allocator, .{
+        .home = options.home,
+        .target = if (options.target) |target| target.* else null,
+        .report = .events,
+    }, .pipe);
+    const received = readEvents(init.io, allocator, child.stdout.?, options.progress);
+    // A failed reader must close before waiting: never strand the worker on a
+    // full report pipe. Report loss is diagnostic, not loss of stop custody.
+    child.stdout.?.close(init.io);
+    child.stdout = null;
+    var batch = received catch |err| {
+        _ = try child.wait(init.io);
+        return err;
     };
-    @import("upgrade_process.zig").check(cancellation) catch return .cancelled;
-    var child = try submit(init, allocator, .{ .activate = .{
-        .observed = wireObservation(plan.observed),
-        .started = plan.snapshot.started,
-        .executable = plan.snapshot.executable,
-        .argv = plan.snapshot.argv,
-        .environment = plan.snapshot.environment,
-        .launch = plan.launch,
-        .previous_version = plan.version,
-        .target = target,
-        .version = version,
-    } }, .pipe);
-    const received = readEvents(init.io, allocator, child.stdout.?, progress);
+    errdefer batch.deinit(allocator);
     const term = try child.wait(init.io);
-    const outcome = try received;
-    return if (term.success()) outcome else .{ .unconfirmed = .starting };
+    if (!term.success()) batch.failure = error.HostRestartFailed;
+    return batch;
 }
 
-fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progress: ?HostLifecycle.Progress) !HostLifecycle.ActivationOutcome {
-    var buffer: [2048]u8 = undefined;
+fn readEvents(io: std.Io, allocator: std.mem.Allocator, file: std.Io.File, progress: ?HostLifecycle.Progress) !restart_all.Batch {
+    var buffer: [event_limit]u8 = undefined;
     var output = file.readerStreaming(io, &buffer);
-    var outcome: HostLifecycle.ActivationOutcome = .{ .unconfirmed = .starting };
+    var entries: std.ArrayList(restart_all.Entry) = .empty;
+    errdefer {
+        for (entries.items) |entry| {
+            allocator.free(entry.socket);
+            if (entry.store) |store| allocator.free(store);
+        }
+        entries.deinit(allocator);
+    }
+    var result: restart_all.Batch = .{};
     while (try output.interface.takeDelimiter('\n')) |line| {
         const parsed = try std.json.parseFromSlice(Event, allocator, line, .{});
         defer parsed.deinit();
         switch (parsed.value) {
             .progress => |stage| if (progress) |value| value.report(value.context, stage),
-            .outcome => |value| outcome = value,
+            .version => |version| result.version = version,
+            .failure => |failure| result.failure = switch (failure) {
+                .cancelled => error.Cancelled,
+                .unconfirmed => error.HostRestartFailed,
+            },
+            .entry => |entry| {
+                if (entry.state == .observed) return error.HostRestartFailed;
+                const socket = try allocator.dupe(u8, entry.socket);
+                errdefer allocator.free(socket);
+                const store = if (entry.store) |path| try allocator.dupe(u8, path) else null;
+                errdefer if (store) |path| allocator.free(path);
+                try entries.append(allocator, .{ .socket = socket, .store = store, .state = entry.state });
+            },
+            .done => {
+                result.entries = try entries.toOwnedSlice(allocator);
+                return result;
+            },
         }
     }
-    return outcome;
+    return error.HostRestartFailed;
 }
 
 fn event(init: std.process.Init, value: Event) void {
-    var buffer: [1024]u8 = undefined;
+    var buffer: [event_limit]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     std.json.Stringify.value(value, .{}, &writer) catch unreachable;
     writer.writeByte('\n') catch unreachable;
     std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered()) catch {
-        // Same optional diagnostic boundary as other CLI receipts. Neither
-        // a closed report pipe nor a closed stderr abandons Host activation.
+        // Neither a closed report pipe nor closed stderr abandons later Hosts.
         stderr.diagnosticBytes(writer.buffered());
     };
 }
@@ -120,51 +129,33 @@ fn progressEvent(raw: *anyopaque, stage: HostLifecycle.Stage) void {
     event(init.*, .{ .progress = stage });
 }
 
-/// Private CLI worker entry. No Host, Store, or runtime directory is created
-/// until a complete, bounded task has been received and decoded.
+/// Private CLI entry. No Host is stopped until the complete task is accepted.
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
-    // Spawn inherited the caller's group: this fresh PID cannot be its leader.
-    // Leave both group and session before accepting any stop authority. Unlike
-    // detaching the caller in place, this also works when Bash exec'd Rui, and
-    // prevents terminal job-control signals from stopping a standalone worker.
+    // A fresh PID cannot lead the inherited group. Leave both session and group
+    // before accepting stop authority, including when Bash exec'd the caller.
     if (std.c.setsid() < 0) return error.HostRestartFailed;
     var buffer: [2048]u8 = undefined;
     var input = std.Io.File.stdin().readerStreaming(init.io, &buffer);
     const bytes = try input.interface.allocRemaining(allocator, .limited(input_limit));
-    defer {
-        std.crypto.secureZero(u8, bytes);
-        allocator.free(bytes);
-    }
+    defer allocator.free(bytes);
     const parsed = try std.json.parseFromSlice(Task, allocator, bytes, .{ .max_value_len = input_limit });
     defer parsed.deinit();
-    switch (parsed.value) {
-        .restart_all => try @import("host_restart_all.zig").run(init, allocator),
-        .activate => |value| {
-            if (value.observed.facts.store.len > value.observed.facts.store.bytes.len) return error.InvalidArguments;
-            if (value.observed.facts.innodb_doublewrite) |text| {
-                if (text.len > text.bytes.len) return error.InvalidArguments;
-            }
-            // All slices borrow the decoded task. The parser owns their storage,
-            // not Observation.deinit; no argv/environment is written to disk.
-            const observation: HostLifecycle.Observation = .{ .managed = .{
-                .observed = value.observed,
-                .snapshot = identity.Snapshot{
-                    .pid = value.observed.pid,
-                    .started = value.started,
-                    .executable = value.executable,
-                    .argv = value.argv,
-                    .environment = value.environment,
-                    .storage = &.{},
-                    .entries = &.{},
-                },
-                .launch = value.launch,
-                .version = value.previous_version,
-            } };
-            var process_init = init;
-            const outcome: HostLifecycle.ActivationOutcome = HostLifecycle.activate(init, allocator, &observation, value.target, value.version, null, .{ .context = &process_init, .report = progressEvent }) catch .{ .unconfirmed = .starting };
-            event(init, .{ .outcome = outcome });
-        },
+    const task = parsed.value;
+    if (task.report == .lines) return restart_all.run(init, allocator);
+    var process_init = init;
+    var batch = restart_all.restart(init, allocator, .{
+        .home = task.home,
+        .target = if (task.target) |*target| target else null,
+        .progress = .{ .context = &process_init, .report = progressEvent },
+    }) catch |err| restart_all.Batch{ .failure = err };
+    defer batch.deinit(allocator);
+    if (batch.version) |version| event(init, .{ .version = version });
+    for (batch.entries) |entry| event(init, .{ .entry = entry });
+    if (batch.failure) |err| {
+        stderr.diagnostic("Host restart could not finish ({s})\n", .{@errorName(err)});
+        event(init, .{ .failure = if (err == error.Cancelled) .cancelled else .unconfirmed });
     }
+    event(init, .done);
 }
 
 fn expectRoundTrip(value: anytype) !void {
@@ -175,49 +166,37 @@ fn expectRoundTrip(value: anytype) !void {
     try std.testing.expectEqualDeep(value, parsed.value);
 }
 
-test "coordinator transfers every activation outcome and progress without reduction" {
+fn outcomeEvent(outcome: HostLifecycle.ActivationOutcome) Event {
+    return .{ .entry = .{ .socket = "/socket", .store = "/store/雪\n", .state = .{ .outcome = outcome } } };
+}
+
+test "coordinator transfers every batch outcome and progress without reduction" {
     const info = @typeInfo(HostLifecycle.ActivationOutcome).@"union";
     inline for (info.field_names, info.field_types) |name, Payload| {
-        const outcome = @unionInit(HostLifecycle.ActivationOutcome, name, std.mem.zeroes(Payload));
-        try expectRoundTrip(Event{ .outcome = outcome });
+        try expectRoundTrip(outcomeEvent(@unionInit(HostLifecycle.ActivationOutcome, name, std.mem.zeroes(Payload))));
     }
     inline for (std.enums.values(HostLifecycle.Stage)) |stage| {
         try expectRoundTrip(Event{ .progress = stage });
-        try expectRoundTrip(Event{ .outcome = .{ .failed = stage } });
-        try expectRoundTrip(Event{ .outcome = .{ .unconfirmed = stage } });
+        try expectRoundTrip(outcomeEvent(.{ .failed = stage }));
+        try expectRoundTrip(outcomeEvent(.{ .unconfirmed = stage }));
     }
     inline for (std.enums.values(HostLifecycle.Limitation)) |limitation| {
-        try expectRoundTrip(Event{ .outcome = .{ .unsupported = limitation } });
+        try expectRoundTrip(outcomeEvent(.{ .unsupported = limitation }));
     }
-    try expectRoundTrip(Event{ .outcome = .{ .ready = .{ .pid = 123, .instance = @splat(42) } } });
-    try expectRoundTrip(Event{ .outcome = .{ .already_ready = .{ .pid = 456, .instance = @splat(17) } } });
-    try expectRoundTrip(Event{ .outcome = .{ .client_incompatible = 789 } });
+    try expectRoundTrip(outcomeEvent(.{ .ready = .{ .pid = 123, .instance = @splat(42) } }));
+    try expectRoundTrip(outcomeEvent(.{ .already_ready = .{ .pid = 456, .instance = @splat(17) } }));
+    try expectRoundTrip(outcomeEvent(.{ .client_incompatible = 789 }));
+    inline for (std.enums.values(restart_all.Failure)) |failure| {
+        try expectRoundTrip(Event{ .entry = .{ .socket = "/socket", .state = .{ .failed = failure } } });
+    }
+    try expectRoundTrip(Event{ .failure = .cancelled });
+    try expectRoundTrip(Event{ .failure = .unconfirmed });
+    try expectRoundTrip(Event.done);
 }
 
-test "coordinator transfers the original checked plan including private launch values" {
-    var observed: client.HostControlObservation = .{
-        .profile = .current,
-        .pid = 123,
-        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(19), .active_capacity = 2, .intake_capacity = 17, .descriptor_limit = 4096, .started_at = 100, .custody_occupied = 3, .paused = true, .innodb_doublewrite = .{ .len = 0 }, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .unserved, .chatgpt = .unserved } } },
-    };
-    try observed.facts.store.set("/store/雪\n");
-    try observed.facts.innodb_doublewrite.?.set("ON");
-    inline for (std.enums.values(@FieldType(client.HostControlObservation, "profile"))) |profile| {
-        observed.profile = profile;
-        const wire = wireObservation(observed);
-        for (wire.facts.store.bytes[wire.facts.store.len..]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
-        var options = [_]HostLifecycle.LaunchOption{.{ .name = "provider", .value = "codex" }};
-        try expectRoundTrip(Task{ .activate = .{
-            .observed = wire,
-            .started = 456,
-            .executable = "/retained/bin/rui",
-            .argv = &.{ "/retained/bin/rui", "host", "serve", "--provider", "codex" },
-            .environment = &.{ "HOME=/home/fixture", "PRIVATE=雪\n\"value\\" },
-            .launch = .{ .options = &options },
-            .previous_version = .{ .schema = 1, .patch = 2 },
-            .target = "/selected",
-            .version = .{ .schema = 3, .patch = 4 },
-        } });
+test "coordinator task pins only routing target and reporting not an activation plan" {
+    inline for (.{ .lines, .events }) |report| {
+        try expectRoundTrip(Task{ .home = "/home/雪\n", .report = report });
+        try expectRoundTrip(Task{ .home = "/home/雪\n", .target = .{ .build = "/pinned/build", .version = .{ .schema = 3, .patch = 4 } }, .report = report });
     }
-    try expectRoundTrip(Task.restart_all);
 }
