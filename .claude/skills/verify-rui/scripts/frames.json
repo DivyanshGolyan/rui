@@ -108,6 +108,125 @@
       ]
     },
     {
+      "name": "draft-chat-choice-escape",
+      "note": "B05: Esc consumes the open choice command without leaving the conversation",
+      "open": "Draft lifecycle",
+      "cast": [
+        {
+          "label": "Draft lifecycle",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "effort": "high",
+          "messages": [
+            "Ready."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "text": "/effort "
+        },
+        {
+          "wait": "default"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "sleep": 0.5
+        }
+      ],
+      "expect": [
+        "Draft lifecycle",
+        "gpt-6.1-sol"
+      ],
+      "absent": [
+        "› /effort",
+        "enter pick"
+      ]
+    },
+    {
+      "name": "draft-overview-choice-escape",
+      "note": "B05: overview shares command choice cancellation",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/configure --permission-mode "
+        },
+        {
+          "wait": "bypass"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "sleep": 0.5
+        }
+      ],
+      "expect": [
+        "Settings",
+        "Draft lifecycle"
+      ],
+      "absent": [
+        "› /configure",
+        "enter pick"
+      ]
+    },
+    {
+      "name": "draft-overview-unknown",
+      "note": "B06: an unknown command reports its error without retaining its draft",
+      "open": "overview",
+      "steps": [
+        {
+          "text": "/nope"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Unknown command /nope"
+        }
+      ],
+      "expect": [
+        "Unknown command /nope",
+        "Settings"
+      ],
+      "absent": [
+        "› /nope"
+      ]
+    },
+    {
+      "name": "draft-chat-unknown",
+      "note": "B06: conversation counterpart uses the same draft-ending rule",
+      "open": "Draft lifecycle",
+      "steps": [
+        {
+          "text": "/nope"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Unknown command /nope"
+        }
+      ],
+      "expect": [
+        "Unknown command /nope",
+        "Draft lifecycle"
+      ],
+      "absent": [
+        "› /nope"
+      ]
+    },
+    {
       "name": "settings",
       "note": "App settings by selecting the list's Settings row (End) and pressing Enter",
       "open": "overview",
