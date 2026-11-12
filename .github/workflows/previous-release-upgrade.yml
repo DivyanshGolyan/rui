@@ -87,6 +87,32 @@ jobs:
           mkdir -p "$previous/.zig-cache/h"
           "$RUNNER_TEMP/zig-cache-restat" "$previous/.zig-cache/h" -- \
             "$previous" "$RUNNER_TEMP/rui-zig/lib" "$previous/.zig-cache" "$HOME/.cache/zig"
+      # The historical source pin above tests unsupported-format refusal. Keep
+      # a recent, compatible shipped binary too: its Host must stay running
+      # across the candidate installer, not be stopped by the fixture first.
+      - name: Download the running-Host baseline release
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          case "$(uname -s)/$(uname -m)" in
+            Linux/x86_64) platform=linux-x86_64 ;;
+            Darwin/arm64) platform=darwin-arm64 ;;
+            *) exit 1 ;;
+          esac
+          baseline="$RUNNER_TEMP/previous-running-release"
+          mkdir -p "$baseline/bin"
+          archive="rui-0.69.1-$platform.tar.gz"
+          for asset in "$archive" SHA256SUMS; do
+            curl --fail --location --show-error --silent --connect-timeout 10 --max-time 150 \
+              "https://github.com/DivyanshGolyan/rui/releases/download/v0.69.1/$asset" -o "$baseline/$asset"
+          done
+          expected=$(awk -v name="$archive" '$2 == name {print $1}' "$baseline/SHA256SUMS")
+          test "${#expected}" = 64
+          test "$(shasum -a 256 "$baseline/$archive" | awk '{print $1}')" = "$expected"
+          tar -xzOf "$baseline/$archive" "${archive%.tar.gz}/bin/rui" > "$baseline/bin/rui"
+          chmod 700 "$baseline/bin/rui"
+          tar -xzOf "$baseline/$archive" "${archive%.tar.gz}/THIRD_PARTY_NOTICES.md" > "$baseline/THIRD_PARTY_NOTICES.md"
+          "$baseline/bin/rui" --version
       - name: Start detached, then install, save real work, reinstall and restart the same Store
         # Each check's only copy; steps.py records the failed ones for a promotion to replay.
         timeout-minutes: 45
@@ -107,6 +133,7 @@ jobs:
           python3 -B tests/ci/steps.py --output-root "$RUNNER_TEMP/rui-upgrade-data" \
             ${startup[@]+"${startup[@]}"} \
             'current-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py . .' \
+            'running-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py --running-host "$RUNNER_TEMP/previous-running-release" .' \
             'previous-upgrade=mkdir -p "$STEP_OUTPUT"; RUI_UPGRADE_FAILURES="$STEP_OUTPUT" python3 -B tests/integration/previous_release_upgrade.py "$RUNNER_TEMP/previous-release" .'
       - name: Retain bounded failed-fixture diagnostics
         if: ${{ failure() }}

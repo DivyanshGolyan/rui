@@ -12,6 +12,13 @@ const Self = @This();
 pub const list_width = 40;
 pub const split_at = 100;
 
+/// The composed main screen ends its presentation when Root changes panes.
+pub const MainPresentation = struct {
+    context: *anyopaque,
+    close: *const fn (*anyopaque) void,
+};
+main_presentation: ?MainPresentation = null,
+
 overview: vxfw.Widget,
 list: vxfw.Widget,
 compose: vxfw.Widget,
@@ -51,6 +58,10 @@ fn chooseLayout(self: *const Self) Layout {
     };
 }
 
+pub fn closeMainPresentation(self: *Self) void {
+    if (self.main_presentation) |owner| owner.close(owner.context);
+}
+
 pub fn openSession(self: *Self, ctx: *vxfw.EventContext, session: vxfw.Widget) !void {
     std.debug.assert(self.session == null);
     self.session = session;
@@ -70,11 +81,14 @@ pub fn showMain(self: *Self, ctx: *vxfw.EventContext) !void {
 /// The page reloads first, so a failed reload leaves the layer as it was.
 pub fn openSettings(self: *Self, ctx: *vxfw.EventContext) !void {
     try self.settings_page.refresh();
+    self.closeMainPresentation();
     try self.navigate(ctx, .open_settings);
 }
 
 /// The sign-in page covers the main pane or settings until it closes back.
 pub fn openSignIn(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.closeMainPresentation();
+    self.settings_page.closeStandaloneChoice();
     try self.navigate(ctx, .open_sign_in);
 }
 
@@ -115,7 +129,8 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
         .close_keys => self.settings_page.keys_open = false,
         .cancel_choice => self.settings_page.cancelChoice(),
         .reset => {
-            self.settings_page.cancelChoice();
+            self.closeMainPresentation();
+            self.settings_page.closeStandaloneChoice();
             self.settings_page.keys_open = false;
         },
     }
@@ -142,7 +157,9 @@ fn apply(self: *Self, ctx: *vxfw.EventContext, effects: app_input.Effects, route
 /// The Session has settled its borrowers before calling this. No terminal
 /// leaves raw mode and no input stream is transferred between screens.
 pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
+    self.closeMainPresentation();
     self.session = null;
+    if (!self.input.layer.settingsOpen()) self.settings_page.closeStandaloneChoice();
     if (self.input.layer == .main) try ctx.requestFocus(self.overview);
     ctx.redraw = true;
 }
@@ -529,7 +546,7 @@ test "App root gives Escape to a cancellable Upgrade after a choice and before c
             return .{ .widget = self.widget(), .size = ctx.max.size(), .buffer = &.{}, .children = &.{} };
         }
     };
-    const found: upgrade_status.Found = .{ .version = .{ .schema = 61, .patch = 0 }, .host = .none };
+    const found: upgrade_status.Found = .{ .host = .none };
     const runs = [_]?upgrade_status.Run{
         null,
         .checking,
@@ -929,4 +946,50 @@ test "Sign-in takes every click at each stage, over settings or not, and changes
         try std.testing.expectEqual(stage, page.state.stage);
         try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
     };
+}
+
+test "Root navigation closes the composed main presentation before focusing another pane" {
+    const Owner = struct {
+        root: *Self = undefined,
+        closes: usize = 0,
+        settings_when_closed: bool = false,
+        session_when_closed: bool = false,
+        fn close(raw: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.closes += 1;
+            self.settings_when_closed = self.root.input.layer.settingsOpen();
+            self.session_when_closed = self.root.session != null;
+        }
+    };
+    const empty: vxfw.Text = .{ .text = "" };
+    var owner: Owner = .{};
+    var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .main_presentation = .{ .context = &owner, .close = Owner.close } };
+    owner.root = &root;
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try root.openSettings(&ctx);
+    try std.testing.expectEqual(@as(usize, 1), owner.closes);
+    try std.testing.expect(!owner.settings_when_closed);
+    try root.showMain(&ctx);
+    try std.testing.expectEqual(@as(usize, 2), owner.closes);
+    // The reducer commits the main layer before its reset effect closes scope.
+    try std.testing.expect(!owner.settings_when_closed);
+    try root.openSession(&ctx, empty.widget());
+    try std.testing.expectEqual(@as(usize, 3), owner.closes);
+    try root.closeSession(&ctx);
+    try std.testing.expectEqual(@as(usize, 4), owner.closes);
+    try std.testing.expect(owner.session_when_closed);
+    try std.testing.expect(root.session == null);
+    // An unseen Session may leave while ordinary Settings remains active.
+    // Its main presentation ends without cancelling the Settings field edit.
+    try root.openSession(&ctx, empty.widget());
+    try root.openSettings(&ctx);
+    root.settings_page.panel.fields = &.{.{ .label = "Effort", .value = "high" }};
+    root.settings_page.panel.selected = 0;
+    root.settings_page.panel.openChoice(&.{ "low", "high" }, 1);
+    try root.closeSession(&ctx);
+    try std.testing.expect(root.input.layer.settingsOpen());
+    try std.testing.expect(root.settings_page.panel.choice != null);
+    try std.testing.expectEqual(@as(usize, 7), owner.closes);
 }
