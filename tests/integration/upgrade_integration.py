@@ -687,6 +687,25 @@ class TerminalScreen:
         assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", frame), ("overview has a composer", frame)
         return frame
 
+    def empty_chat(self, case, session):
+        """The sole accepted Session is open with its empty-chat facts.
+
+        Empty-chat footers show model/effort/folder, not the reference. Bind
+        identity through the public report and list instead; a mistaken New
+        Session would add a second reference. Unsent drafts remain editor
+        state and do not change this no-Message contract after relaunch.
+        """
+        report = case.json("session", "inspect", "--store", case.store, "--session", session)
+        facts = report["session"]
+        assert facts["reference"] == session, report
+        assert report["selected_message"] is None and report["recent_messages"] == [], report
+        frame = wait_for(self.observe, "empty chat model facts and info action", timeout=15,
+                         ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
+                         and shown("alt+i info", screen))
+        listing = case.json("session", "list", "--store", case.store, "--all")
+        assert {row["reference"] for row in listing["sessions"]} == {session}, listing
+        return frame
+
     def ignored_overview_input(self, text, *markers):
         self.overview(ready=False)
         # End and Enter open Settings after every ignored byte. Observing that
@@ -1053,7 +1072,7 @@ def terminal_cases(root, binary, releases, artifacts):
             published.unlink()
             proof_relaunched(c, screen, process)
             proof_ready(c, previous, old_host)
-            assert not shown(f"│ {session} · gpt-6-luna", screen.observe()), "overview reopened as a conversation"
+            assert "alt+i info" not in screen.observe(), "overview reopened as a conversation"
             screen.overview()
             screen.save(artifacts, "overview-installed")
             screen.ignored_overview_input("/x\x1b[200~returned γ paste\x1b[201~", "returned γ paste")
@@ -1093,9 +1112,9 @@ def conversation_case(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
-            # The wide shell keeps the list alongside the conversation; its
-            # footer identifies the opened Session in the right pane.
-            screen.contains(f"│ {session} · gpt-6-luna")
+            # The empty chat footer carries model facts; the public Session
+            # boundaries retain its exact accepted identity.
+            screen.empty_chat(c, session)
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "conversation installation archive gate")
             screen.contains("preparing Upgrade")
@@ -1114,7 +1133,7 @@ def conversation_case(root, binary, releases, artifacts):
             screen = TerminalScreen(master, process)
             screen.contains(session)
             screen.send("\r")
-            screen.contains(f"│ {session} · gpt-6-luna")
+            screen.empty_chat(c, session)
             screen.start_upgrade()
             screen.contains(" · publishing")
             screen.close_settings()
@@ -1123,7 +1142,7 @@ def conversation_case(root, binary, releases, artifacts):
             screen.draft("conversation β draft", 5)
             published.unlink()
             proof_relaunched(c, screen, process)
-            screen.contains(f"│ {session} · gpt-6-luna")
+            screen.empty_chat(c, session)
             screen.draft("conversation β draft", 5)
             screen.save(artifacts, "conversation-installed")
             proof_ready(c, previous, old_host)
@@ -1295,7 +1314,7 @@ def startup_cases(root, binary, releases, artifacts):
                 with terminal_process(arguments, env=c.env, cwd=c.root) as (process, master):
                     screen = TerminalScreen(master, process)
                     if screen_kind == "resume":
-                        screen.contains(f"│ {session} · gpt-6-luna")
+                        screen.empty_chat(c, session)
                     else:
                         screen.overview()
                         screen.contains(session)
@@ -1324,14 +1343,14 @@ def startup_cases(root, binary, releases, artifacts):
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
                     if screen_kind == "resume":
-                        screen.contains(f"│ {session} · gpt-6-luna")
+                        screen.empty_chat(c, session)
                         screen.draft("startup α draft", 5)
                         screen.send("X")
                         screen.draft("staXrtup α draft", 6)
                     else:
                         screen.overview()
                         screen.contains(session)
-                        assert not shown(f"│ {session} · gpt-6-luna", screen.observe()), "overview opened a conversation"
+                        assert "alt+i info" not in screen.observe(), "overview opened a conversation"
                         screen.ignored_overview_input("/xreturned γ ignored\x1b[200~returned δ paste\x1b[201~",
                                                       "returned γ ignored", "returned δ paste")
                     screen.save(artifacts, name)
