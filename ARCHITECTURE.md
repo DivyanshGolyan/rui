@@ -123,7 +123,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
-| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, which also names its sign-in (a key reads "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
+| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("Codex", "ChatGPT", "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
@@ -794,6 +794,8 @@ Pressure uses eligible usage from the latest accepted same-binding output plus e
 The threshold fires at equality.
 Admission reads its Session's facts with its selection, inside the Store hold and before its transaction, and does not read the appended bytes: where only their count decides the purpose it writes an assistant call whose first write is a guard that the count is under the policy's limit, and a failed guard rolls back and admits the compaction instead.
 On a network Store the admitted Attempt's request starts in the same message: its settings read follows COMMIT, whole or not at all, and a request whose settings did not ride reads them in a round of its own.
+Where the [history memo](#history-memo) remembers the Session's last request, that message also reads the request's first history round, from where the memo ends and by the keys that request's view had.
+The memory is a hint: the round is kept only when the new view's own boundary gives the same keys and preparation then reads from the same position and tool-group scan position, and otherwise preparation reads the round itself, so a stale hint costs the round it would have saved and never a wrong entry.
 The assistant successor of a compaction applies pending input even if the estimate remains above the threshold.
 Provider-reported overflow still permits recovery without a configured trigger; unchanged context after an accepted base, or overflow during compaction itself, fails with `ResourceExceeded` instead of repeating compaction.
 
@@ -986,7 +988,7 @@ The history in a request's `input` array is one contiguous span, a pure function
 When a request seals, the execution owner copies that span's exact bytes from the sealed request into the Session's memo file and records their 64-bit Wyhash digest, appending only the bytes after a span the memo itself supplied.
 That copy is part of preparation: it yields in chunks under the preparation byte allowance, so a large history never blocks controls, Bash, provider completions or cleanup, and preparation hands the request on only after the copy ends.
 A preparation stopped or failed during the copy keeps no memo and removes its file like an eviction.
-Process memory keeps only a fixed-size index entry: Session, requested model and anchor, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force, and `openai-responses/3` holds only the comma, as `/1` does), the tool-group scan position, the span length and the digest.
+Process memory keeps only a fixed-size index entry: Session, requested model and anchor, with the producing admission position, the last covered history position, the codec's carry (its encoder state where the span ends, a value of the codec's own type; for `openai-responses/1`, whether the next input item takes a comma; `openai-responses/2` adds the effort in force, and `openai-responses/3` holds only the comma, as `/1` does), the tool-group scan position, the keys the producing view read its history by (its floor, the Session's first Message, the selected base's Operation and the frozen tool set), the span length and the digest.
 When the next request of that Session selects the same model and anchor and its frozen view contains the producing admission position, preparation opens the file, requires exactly the recorded length, and reads it into the request through the request writer in bounded chunks, hashing as it goes, in place of re-reading and re-encoding the covered entries; it then closes the file and encodes only later entries.
 The copied bytes count only once the whole span matches the recorded digest.
 The copy consumes the byte allowance and scratch charge like any other emitted bytes and the request stays byte-identical to a full rebuild.
@@ -1095,6 +1097,7 @@ Accept completed items in provider output order, not token-delta arrival order.
 Require successful `response.completed` before settlement.
 The managed route can send an empty `response.completed.output` after completed stream items; this does not discard those items, while any nonempty terminal output must match all of them in order, kind, ID and exact raw item bytes, including unknown open fields and JSON spelling.
 The one exception is reasoning and compaction items: the provider encrypts their content afresh for `response.completed`, so they agree by order, kind and ID, and the streamed copy is kept.
+A superseded compaction prefix has no kept record, so its entries in a nonempty list are counted but not compared.
 Failed, incomplete, disconnected or contradictory streams cannot publish a successful candidate.
 Keep response ID, provider request correlation when supplied, terminal status, usage and reported model evidence with the producing Operation/execution; none is a replay input item.
 
@@ -1182,14 +1185,14 @@ An auto-started Host adds `--provider openai` whenever a usable key is saved.
 `--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
 It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
-Its provider fact names `rui auth login chatgpt`, so the guided choice, the Host line, the overview band and its notices name that command.
+Its provider fact names `rui auth login chatgpt`, so the Host line and the overview's notices name that command; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." so the 40-column list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
 An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
 
 `rui auth login chatgpt` (`src/chatgpt_plan_login.zig`) makes the host id `~/.config/rui/host-id` (owner-only, a version 4 UUID URN, never replaced) before its first authorization.
 It listens on `127.0.0.1:1455`, else any free loopback port, prints the authorization link, opens a browser when there is one, and reads a callback address pasted on stdin at the same time; the first answer that is this attempt's wins, so a machine whose browser cannot reach the listener signs in by pasting.
 A first sign-in names `dynamic_agent_client` and the agent name; a returning one names the saved issued client id and no agent, sends no `id_token_hint` because the link is printed, and refuses an answer for another client.
-The checked record is installed through the same custody and SIGINT gate as a Codex login and, like it, fills only an unset provider default, except that choosing it in the guided login saves it; a Host already serving `chatgpt` uses it from its next lease.
+The checked record is installed through the same custody and SIGINT gate as a Codex login and, like it, fills only an unset provider default; a Host already serving `chatgpt` uses it from its next lease.
 `rui auth logout chatgpt` revokes the refresh token as the issued client under the exclusive credential lock, retrying a server failure, then publishes the record `signed_out` at a new generation even when the revocation was not confirmed, which it reports.
 A `signed_out` record holds no tokens and keeps its account and issued client id, which the next sign-in reuses as the issuer's guide asks; every reader treats it as no sign-in, so a lease fails with `provider_sign_in_required` and local status reports it missing.
 `rui auth status` prints each provider's local sign-in, with the ChatGPT account's email and access-token expiry.
@@ -1262,11 +1265,15 @@ V1 depends on neither that endpoint nor automatic `context_management` support.
 Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead ends with the top-level `"tool_choice":"none","context_management":[{"type":"compaction","compact_threshold":1000}]`, after the history span, so the span and its carry are unchanged.
 The provider refuses a threshold under 1000 tokens, and a compaction Operation runs only on a large context, so 1000 always compacts; `tool_choice` keeps the reply the provider writes while compacting from calling a function or searching the web.
 With `context_management` the provider's response is `compaction`, `message`, `compaction`, and the last compaction item alone carries the whole memory: replaying only it keeps the context.
-The rule above still expects exactly one compaction item, so a version-three compaction does not settle yet; only `chatgpt` pins `openai-responses/3`, so a ChatGPT plan Session's compaction fails until accepting that shape, a separate decision, lands.
+Only `chatgpt` pins `openai-responses/3`, so a ChatGPT plan Session's `compaction`, `message`, `compaction` response settles on its last compaction item: a later compaction item supersedes everything before it, as the rule below states.
 
-Require a completed response with exactly one nonempty supported compaction item for explicit compaction.
-Store the complete ordered output once on that Operation.
-The base anchor is its Operation ID and the compaction item's ordinal within that canonical output.
+Require a completed response with at least one nonempty supported compaction item for explicit compaction.
+The last compaction item is the new base.
+A later compaction item supersedes all output before it, the earlier compaction item included: the response interpreter keeps no record of it, so it is never stored, replayed, selected as the answer or forwarded.
+The first compaction item supersedes nothing, so a response with one compaction item is unchanged, whatever comes before or after it.
+Superseded items are not stored because one owner then decides what replays: the Store receives exactly one compaction item, and every later reader (the base anchor, history replay, the feed's compaction row, drop-unit accounting and the history memo) keeps reading that one item, as before.
+Store the kept output once on that Operation: the whole response when it holds one compaction item, else the last compaction item through the end of the response.
+The base anchor is its Operation ID and the compaction item's ordinal within that output.
 
 Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix.
 Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body.
@@ -1281,7 +1288,7 @@ Result acceptance determines when the new base becomes available, not what it co
 Pending messages and later instruction updates remain outside that frontier and appear once in subsequent context.
 
 Keep call/result pairs intact when selecting the frontier.
-Missing/duplicate compaction, unknown compaction variants, truncated output and unresolved/failed compaction cannot advance it.
+Missing compaction, unknown compaction variants, truncated output and unresolved/failed compaction cannot advance it.
 If a supported assistant-response protocol later enables automatic compaction, its base must likewise be a slice of that producing Operation, retaining every item after the anchor; it cannot invent a separate compaction result or drop later calls.
 That route needs its own capability evidence before enablement.
 Do not copy another client's message truncation, local-summary or model-fallback policy.
@@ -1593,15 +1600,44 @@ The Version row of app settings starts an Upgrade run, available from the overvi
 The overview owns the one run and runs its worker once its own and the conversation's Client work has settled; both screens hand Esc to that run.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
-A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another Version-row activation; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
+When this run installs a different Rui, compatible or incompatible with the old client, the terminal leaves through its ordinary cancellation, save-flush and restoration path, then the CLI replaces its process image with the published selection's `bin/rui` (same PID and terminal, never PATH or the old executable).
+It reopens the overview or the same conversation (`Overview.Options.open`), pinning the old client's actual canonical Store explicitly and preserving its explicit `--provider` and `--model` selectors, the overview draft and every chat draft, including the open editor's bytes, caret, recall anchor and rejection state.
+A changed saved Store cannot redirect this restart.
+The new screen shows the run's ending line; scroll position resets.
+A run that installs nothing does not relaunch, even if it activates an already-selected Host build.
+An unresolved capture or recovery handle, failed save, retained cleanup path, run failure, activation recovery/owner instruction or PATH warning prevents relaunch: ordinary departure guidance remains intact, including the old-client restart instruction when needed.
+Old-client-only protocol/restart holds do not themselves prevent relaunch: a bounded protocol rejection from the exact launched Host (same peer PID, process generation, pinned executable and target version) is distinct from activation failure or uncertainty, and grants no ordinary-request readiness or invented Host facts.
+Timeouts, malformed replies, failed activation and uncertain/replacement identities still retain their recovery guidance.
+Guidance already known keeps the old screen open; resolving it later does not turn an ordinary quit into a delayed relaunch, and a later successful run cannot swallow an earlier retained report.
+If handoff preparation or process replacement fails, the ordinary departure remains; replacement failure also says the new Rui could not be started.
+Shell `rui upgrade` never replaces another terminal's client.
+Divyansh chose in-place TUI restart on 2026-11-12, superseding manual restart after a successful inline installation.
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
 The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another Version-row activation is a no-op by it alone.
-A conversation keeps only that its own reading of the Session predates a run: after the run it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
-One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
+A conversation keeps only that its own reading of the Session predates a run: when the old client continues after a run that does not relaunch, it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
+One pure core, `upgrade_status`, turns that value into the Version field and status bar's line for both screens.
+`UpgradeJob.ending` alone derives the small failure reason from the run error: a download failure says "couldn't reach GitHub" even while settings hides the status bar. The restored shell report retains curl's last stderr line.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
 Restart can interrupt work in every Session in that Store, not other Stores.
 No running Host means install only.
+
+The TUI handoff is a cross-version contract: the departing binary writes it and the selected binary reads it.
+`RUI_RELAUNCH` names an absolute `HOME/.rui-relaunch/<32 lowercase hexadecimal digits>.json` path; the directory is current-user-owned mode 0700, the exclusive random file is a current-user-owned regular file of mode 0600 with one link, and neither final component is followed through a symlink.
+It belongs neither to the Store nor to a shared temporary directory.
+Before fresh-Session admission, the CLI's one relaunch-startup owner consumes the environment value once, authenticates the location and file, unlinks the file before accepting its contents, and ignores missing, unreadable, malformed, unsupported-version or nonmatching canonical Store handoffs.
+A valid handoff reenters existing work through the same startup owner as `rui session resume`, opening its conversation when present or the overview otherwise; unreadable preferences and absent local provider credentials cannot trigger fresh-session admission or login.
+The CLI owns the decoded payload through that synchronous run; the overview copies its drafts and ending line before terminal startup and never rereads the environment or handoff file.
+A failed cleanup names the retained private path rather than silently losing cleanup guidance.
+
+Version 1 is compact UTF-8 JSON, with these fields in this order and explicit null/default fields:
+`{"v":1,"store":"/store","open":null,"overview":{"bytes":"","cursor":0,"anchor":null,"rejected":null},"drafts":[],"line":""}`.
+`open` is null or the six-byte Session ID to open; each `drafts` entry is `{"id":"k7m2qx","snapshot":<snapshot>}`, with no repeated ID.
+`overview` and each `snapshot` contain draft text in `bytes`, a byte-offset `cursor` at a UTF-8 boundary, a nullable recall `anchor` (`{"position":<u64>,"end":<u64>}`), and nullable `keymap.Refusal` tag text in `rejected`.
+`line` is the run's new-client ending: an incompatible old-client ending becomes `Upgraded to <version>` rather than asking for another restart; only a confirmed Host restart adds `Host restarted`.
+Each draft is bounded by `SessionInput.capacity`, the Store and ending line by their existing owner capacities, and the sparse draft population by the Session ID domain, not a smaller handoff-only limit.
+The encoded size bound allows six JSON-escaped bytes per input byte plus fixed field/integer overhead for that population; the reader streams into owned decoded drafts rather than allocating the file's advertised size.
+The exact v1 bytes are pinned in `relaunch_handoff.zig`.
 
 The thin upgrade coordinator composes `InstallationOutcome` separately from HostLifecycle `ActivationOutcome`.
 After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
@@ -1615,10 +1651,12 @@ Only an explicit wrong-wire response permits the historical read-only profile; m
 A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
 Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.
 Target configuration, exact-stop support, the current launch helper and private launch buffers are prepared before interruption.
-A terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
+When departure guidance prevents relaunch, a terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
 
 `src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
-A `release_candidate` pins validated immutable release identity, assets and digest before download.
+A `release_candidate` follows the HTTPS redirect chain from `https://ruicode.com/releases/latest` and reads curl's effective URL, requiring the exact `https://github.com/DivyanshGolyan/rui/releases/tag/v` prefix and a canonical stable version.
+It derives pinned SHA256SUMS and archive URLs on `https://ruicode.com/releases/download/vX.Y.Z/`, without GitHub's rate-limited JSON API. The archive must appear exactly once in SHA256SUMS; that membership and digest pin the candidate before archive download.
+A nonzero curl exit is a distinct download failure, not release validation or preparation failure; nothing has been published.
 The native bootstrap can download pinned SHA256SUMS and archive assets for historical v0.56.4 using the current native publication owner, without executing its old uncooperative installer.
 A permanent prefix-scoped lock serializes participating writers, with final managed eligibility and numeric release-order checks under the lock.
 External historical installers do not participate and have no new serialization or no-downgrade guarantee.
@@ -1716,7 +1754,7 @@ A sealed body shorter than its recorded length, or one that fails to map, stays 
 To interpret a response, the shell maps the sealed capture read-only, frames its SSE lines and writes each event's data to charged event-data scratch, which it maps read-only once at the capture's length, which decoded data never exceeds, so each event reaches the codec whole as one slice of that map, however large; a failure to map it fails the response `response_data_failed`, as a failed write does.
 The codec answers each event with one value, in scratch the shell lends and the codec writes before it reads: an event it ignores, a stream's end, an added item's identity, an accepted output item, the completed response or the provider's failure, or the reason it rejects the event; an output item and the completed response name cursors from which the shell asks for their bag members and parts one at a time, each a range of the event.
 The codec's stream state is a small value the shell stores between events.
-The shell keeps every rule across items and events: it decodes and hashes what the codec names, keeps the answer selection and the call and compaction counts, records metadata and evidence, compares the completed output list with the item records it wrote, mapped read-only, and maps each reason to its rejection.
+The shell keeps every rule across items and events: it decodes and hashes what the codec names, keeps the answer selection, the call count and the compaction base (dropping a superseded prefix), records metadata and evidence, compares the completed output list with the item records it wrote, mapped read-only, and maps each reason to its rejection.
 An execution receives its admitted Operation/Attempt binding, one-shot permit, immutable input readers and local cancellation control; it cannot choose another descriptor or read current Session settings to replace saved inputs.
 Keep the permit distinct from the read access needed for validation or permission preview.
 The reserved execution owner retains this binding before fallible post-commit preparation begins; preparation, authentication and launch failures remain attributable to that Attempt under its failure or canonical-shutdown rule.
@@ -2206,6 +2244,7 @@ CLI failures cross one catalog boundary and render a stable code with accepted i
 Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
 The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (`host_not_serving`, exit 6); the latter prints the exact `rui host start --store PATH` command.
 An unreachable Host is absent only when the Store lock is free; a missing or refused control socket while that lock is held is `host_stopping` (exit 5), with advice to wait for shutdown before restarting and retrying.
+A Host from another Rui version that does not speak this rui's protocol is `host_incompatible` (exit 6); pause it with the Rui version that started it, then start it again with this rui.
 Other transport failures while the lock is held, or a failed lock probe, do not establish either condition and retain their original classification.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
@@ -2372,7 +2411,14 @@ Inspection creates neither directory nor file.
 On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of unarchived Sessions in the Store; each row shows its Workspace.
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
-It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice offers each provider (Codex login, an OpenAI API key, or saving a ready one as the default) or deferral, without creating a Session.
+It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with ChatGPT and API key choices on the input row, without creating a Session.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable device-login link or masked key entry, and keeps failures on that row.
+While it is open it takes every key and click, so nothing behind it opens or navigates.
+Esc leaves it, except the first-run screen, which stays until sign-in gives a default; a screen opened from Settings always returns there.
+Its choice uses the approval row's prompt and background-only selection, including with NO_COLOR; the device row always reads `auth.openai.com/codex/device · CODE`, using the answer view's terminal hyperlink boundary.
+Either locally ready provider is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
+After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
+The shared `host_launch` result retains startup output, failure context and warnings across activation. Its reporting policy supplies terminal diagnostics after screen restoration and one plain sign-in-row line; only retryable failures offer Enter. Successful activation warnings remain a single overview notice, independently of default-save failure.
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
@@ -2465,7 +2511,7 @@ A list still loading says so and is read again with the next listing, a fallback
 A later read that gets no answer, or an answer Rui cannot read, keeps the list under a note that says which.
 On a short screen the highlighted model always shows, and the notes and `N more` take only the rows the models leave.
 When the screen leaves the picker no row, `/model` says the screen is too small instead of opening it, and a picker a resize hides takes no key until it shows again: the keys act as they would without it.
-The sign-ins are named "ChatGPT (device code)" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`); the typed word `chatgpt` names both ChatGPT sign-ins, and a row offering both keeps the saved one, else the product's. A row too narrow for its model ID drops its sign-in column before cutting the ID.
+The sign-ins are labelled by their provider facts: "Codex" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`), short enough that the list pane keeps the chosen one whole; a label's first word (`codex`, `chatgpt`, `api`) is the word that chooses it.
 Up, Down, Home and End move the highlight; Enter on a model one sign-in offers is the whole pick, and on one both offer it turns the input row into the `Use ChatGPT / API key` choice, the shape of an Action's Allow once / Deny, at the next Session's sign-in, where Left and Right move and Enter picks.
 Esc steps back from the choice to the models, then closes the picker, and typing or a paste leaves it for the draft.
 Every pick saves the person's default, the one `/setup` and `rui defaults configure --provider --model` write, through the worker, and later starts use it (Divyansh, 2026-11-02, picker plan "Answered" 2 and 3).
@@ -2474,7 +2520,7 @@ An overview left without a pick writes nothing, and a failed save is not retried
 An Other model is picked like any other and runs with default limits.
 A save that fails says why in `/setup`'s words; one whose directory sync failed still changes the default and says its durability is unconfirmed.
 A save queued or running as the overview ends finishes first: on the way out the shell runs each save the core asked for through the worker's own job path, and the departure text reports one that ended after the person left.
-The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · ChatGPT (device code)`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
+The `New Sessions use` line and the departure's line for a late save name the effort the next start applies after the model, as the conversation's Session line does (`gpt-6-luna · max · Codex`): the saved effort when the model offers it, unless `/configure` holds an effort or the launch named its Store, provider and model.
 The departure speaks for later launches, so it names the effort saved as the overview ends, whatever this launch named; one rule, `StartEffort`, decides the effort for the start and for both lines.
 The Session rows keep their highlight while the picker is open, so Ctrl-X acts on a row the person can see.
 A start the Host refuses for want of the start's sign-in (`model_capability_unavailable`) says which sign-in is missing and its login command.
@@ -2821,7 +2867,7 @@ This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
 Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
-Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
+Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Thinking · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
 The activity tail remains part of the feed's measured height while scrolled away; inspection and Message panels show their own documents instead.
 The `↓` chip uses a permanently reserved row. Its count names newly rendered Activity entries arriving beyond the scan's starting cursor, not invisible Activity positions or replayed provisional entries.
@@ -2917,6 +2963,13 @@ Neither the set nor any output is saved.
 An open row is marked by its heading's selection background alone; the footer names no close key, because Ctrl-O acts on the lowest openable row in view, which need not be the open one.
 Display eviction does not delete saved work.
 App enables mouse reporting, and wheel events scroll the visible widget.
+Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
+New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
+Hover never changes keyboard selection or focus.
+Under the pointer, rows and fields take the hover background, the per-channel midpoint of the selvedge and selection colours, or a monochrome underline, while preserving their foreground; reverse stays the keyboard selection's mark.
+A row that is both selected and hovered keeps the selection look; chips and peer links underline and show the pointer shape.
+Only drawn, clipped action regions take clicks, and their existing paste, consent, stale-content and availability guards still apply.
+Headings, fixed status fields and unkeyed summary aggregates remain inert.
 Rui does not enable alternate scroll mode 1007.
 libvaxis `Window.print` lays out and wraps text: words wrap at spaces, and continuation rows hang under leading spaces and a list or role marker, up to half the width.
 Rui's pinned vaxis patch keeps wide clusters, window-wide words and words crossing a style change off the row edge.
@@ -2995,9 +3048,11 @@ Tab adds the rest of the highlighted word, and a space when another word may fol
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
 Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
-Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
+Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
+Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
+`command_input.zig` owns that ending rule for both screens; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G cancel a command whose list the latest frame showed, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
 Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
 There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
 The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
@@ -3030,7 +3085,7 @@ Rui cannot see whether the terminal took the bytes.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
-Before the first answer each says `No answer to copy yet.`; `/copy code` on an answer with no complete fenced block says `No code block in the last answer.` A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).

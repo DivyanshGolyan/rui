@@ -4,8 +4,9 @@ const os = @import("os/os.zig");
 const client = @import("client.zig");
 const process = @import("upgrade_process.zig");
 
-pub const default_endpoint = "https://api.github.com/repos/DivyanshGolyan/rui/releases/latest";
-const download_origin = "https://github.com/DivyanshGolyan/rui";
+const download_origin = "https://ruicode.com";
+pub const default_endpoint = download_origin ++ "/releases/latest";
+const tag_origin = "https://github.com/DivyanshGolyan/rui";
 
 pub const Version = struct {
     schema: u32,
@@ -72,62 +73,51 @@ fn fixtureOrigin(endpoint: []const u8) ![]const u8 {
     return error.InvalidReleaseEndpoint;
 }
 
-pub fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8, cancellation: ?*const client.Cancellation, limit: usize) ![]u8 {
+pub fn fetch(allocator: std.mem.Allocator, io: std.Io, url: []const u8, cancellation: ?*const client.Cancellation, limit: usize, diagnostic: ?*process.DownloadDiagnostic) ![]u8 {
     const fixture = std.mem.startsWith(u8, url, "http://");
     if (fixture) _ = try fixtureOrigin(url) else if (!std.mem.startsWith(u8, url, "https://")) return error.InvalidReleaseEndpoint;
-    return process.output(allocator, io, &.{
+    return process.downloadOutput(allocator, io, &.{
         "curl",         "--disable",               "--fail",  "--silent",                         "--show-error",  "--location", "--connect-timeout", "10", "--max-time", "300",
         "--max-redirs", if (fixture) "0" else "5", "--proto", if (fixture) "=http" else "=https", "--proto-redir", "=https",     "--",                url,
-    }, cancellation, limit);
+    }, cancellation, limit, diagnostic);
 }
 
-pub fn discover(allocator: std.mem.Allocator, io: std.Io, endpoint: []const u8, cancellation: ?*const client.Cancellation) !ReleaseCandidate {
-    const origin = if (std.mem.eql(u8, endpoint, default_endpoint)) download_origin else try fixtureOrigin(endpoint);
-    _ = try platform();
-    const metadata = try fetch(allocator, io, endpoint, cancellation, 1024 * 1024);
-    defer allocator.free(metadata);
-    var result = try fromMetadata(allocator, metadata, origin, try platform());
+pub fn discover(allocator: std.mem.Allocator, io: std.Io, endpoint: []const u8, cancellation: ?*const client.Cancellation, diagnostic: ?*process.DownloadDiagnostic) !ReleaseCandidate {
+    const fixture = !std.mem.eql(u8, endpoint, default_endpoint);
+    const origin = if (fixture) try fixtureOrigin(endpoint) else download_origin;
+    const target = try platform();
+    // Follow the whole chain: a future public endpoint may redirect through
+    // GitHub's latest page before reaching the tag. Never parse page HTML.
+    const effective = try process.downloadOutput(allocator, io, &.{
+        "curl",         "--disable", "--fail",  "--silent",                         "--show-error",  "--location",                       "--connect-timeout", "10",        "--max-time",  "300",
+        "--max-redirs", "5",         "--proto", if (fixture) "=http" else "=https", "--proto-redir", if (fixture) "=http" else "=https", "--output",          "/dev/null", "--write-out", "%{url_effective}",
+        "--",           endpoint,
+    }, cancellation, 4096, diagnostic);
+    defer allocator.free(effective);
+    var result = try fromEffectiveUrl(allocator, effective, if (fixture) origin else tag_origin, origin, target);
     errdefer result.deinit(allocator);
-    const sums = try fetch(allocator, io, result.checksum_url, cancellation, 1024 * 1024);
+    const sums = try fetch(allocator, io, result.checksum_url, cancellation, 1024 * 1024, diagnostic);
     defer allocator.free(sums);
     result.sha256 = try checksum(sums, result.archive_name);
     return result;
 }
 
-pub fn fromMetadata(allocator: std.mem.Allocator, metadata: []const u8, origin: []const u8, target: []const u8) !ReleaseCandidate {
-    const Metadata = struct {
-        tag_name: []const u8,
-        draft: bool,
-        prerelease: bool,
-        assets: []const struct { name: []const u8, browser_download_url: []const u8 },
-    };
-    const parsed = try std.json.parseFromSlice(Metadata, allocator, metadata, .{ .ignore_unknown_fields = true });
-    defer parsed.deinit();
-    const release = parsed.value;
-    if (release.draft or release.prerelease) return error.NotStableRelease;
-    if (!std.mem.startsWith(u8, release.tag_name, "v")) return error.InvalidReleaseVersion;
-    const version = try Version.parse(release.tag_name[1..]);
+pub fn fromEffectiveUrl(allocator: std.mem.Allocator, effective: []const u8, final_origin: []const u8, origin: []const u8, target: []const u8) !ReleaseCandidate {
+    if (!std.mem.startsWith(u8, effective, final_origin)) return error.InvalidReleaseEndpoint;
+    const path = effective[final_origin.len..];
+    const prefix = "/releases/tag/";
+    if (!std.mem.startsWith(u8, path, prefix)) return error.InvalidReleaseEndpoint;
+    const tag = path[prefix.len..];
+    if (!std.mem.startsWith(u8, tag, "v")) return error.InvalidReleaseVersion;
+    const version = try Version.parse(tag[1..]);
     if (!std.mem.eql(u8, target, "darwin-arm64") and !std.mem.eql(u8, target, "linux-x86_64")) return error.UnsupportedReleasePlatform;
-    const archive_name = try std.fmt.allocPrint(allocator, "rui-{s}-{s}.tar.gz", .{ release.tag_name[1..], target });
+    const archive_name = try std.fmt.allocPrint(allocator, "rui-{s}-{s}.tar.gz", .{ tag[1..], target });
     errdefer allocator.free(archive_name);
-    const archive_url = try std.fmt.allocPrint(allocator, "{s}/releases/download/{s}/{s}", .{ origin, release.tag_name, archive_name });
+    const archive_url = try std.fmt.allocPrint(allocator, "{s}/releases/download/{s}/{s}", .{ origin, tag, archive_name });
     errdefer allocator.free(archive_url);
-    const checksum_url = try std.fmt.allocPrint(allocator, "{s}/releases/download/{s}/SHA256SUMS", .{ origin, release.tag_name });
+    const checksum_url = try std.fmt.allocPrint(allocator, "{s}/releases/download/{s}/SHA256SUMS", .{ origin, tag });
     errdefer allocator.free(checksum_url);
-    var archives: usize = 0;
-    var sums: usize = 0;
-    for (release.assets) |asset| {
-        if (std.mem.eql(u8, asset.name, archive_name)) {
-            archives += 1;
-            if (!std.mem.eql(u8, asset.browser_download_url, archive_url)) return error.UnpinnedReleaseAsset;
-        }
-        if (std.mem.eql(u8, asset.name, "SHA256SUMS")) {
-            sums += 1;
-            if (!std.mem.eql(u8, asset.browser_download_url, checksum_url)) return error.UnpinnedReleaseAsset;
-        }
-    }
-    if (archives != 1 or sums != 1) return error.MissingOrDuplicateReleaseAsset;
-    return .{ .version = version, .tag = try allocator.dupe(u8, release.tag_name), .archive_name = archive_name, .archive_url = archive_url, .checksum_url = checksum_url, .sha256 = @splat(0) };
+    return .{ .version = version, .tag = try allocator.dupe(u8, tag), .archive_name = archive_name, .archive_url = archive_url, .checksum_url = checksum_url, .sha256 = @splat(0) };
 }
 
 pub fn checksum(sums: []const u8, archive_name: []const u8) ![32]u8 {
@@ -165,30 +155,33 @@ test "release endpoint injection accepts only loopback HTTP fixtures" {
     for ([_][]const u8{ "https://example.com/latest", "http://127.0.0.1.evil:80/latest", "http://127.0.0.1:80@evil/latest", "http://example.com:80/latest" }) |bad| try std.testing.expectError(error.InvalidReleaseEndpoint, fixtureOrigin(bad));
 }
 
-const metadata_fixture =
-    \\{"tag_name":"v0.56.2","draft":false,"prerelease":false,"assets":[{"name":"rui-0.56.2-linux-x86_64.tar.gz","browser_download_url":"https://github.com/DivyanshGolyan/rui/releases/download/v0.56.2/rui-0.56.2-linux-x86_64.tar.gz"},{"name":"SHA256SUMS","browser_download_url":"https://github.com/DivyanshGolyan/rui/releases/download/v0.56.2/SHA256SUMS"}]}
-;
-
-test "release metadata pins exact stable assets once" {
+test "release effective URL pins a canonical tag and derived assets" {
     const allocator = std.testing.allocator;
-    var candidate = try fromMetadata(allocator, metadata_fixture, download_origin, "linux-x86_64");
-    defer candidate.deinit(allocator);
-    try std.testing.expectEqualStrings("v0.56.2", candidate.tag);
-    try std.testing.expectEqualStrings("rui-0.56.2-linux-x86_64.tar.gz", candidate.archive_name);
-    const cases = .{
-        .{ "\"draft\":false", "\"draft\":true", error.NotStableRelease },
-        .{ "\"prerelease\":false", "\"prerelease\":true", error.NotStableRelease },
-        .{ "\"tag_name\":\"v0.56.2\"", "\"tag_name\":\"v0.56.02\"", error.InvalidReleaseVersion },
-        .{ "/download/v0.56.2/SHA256SUMS", "/latest/download/SHA256SUMS", error.UnpinnedReleaseAsset },
-        .{ "\"name\":\"SHA256SUMS\"", "\"name\":\"other\"", error.MissingOrDuplicateReleaseAsset },
-    };
-    inline for (cases) |case| {
-        const changed = try std.mem.replaceOwned(u8, allocator, metadata_fixture, case[0], case[1]);
-        defer allocator.free(changed);
-        try std.testing.expectError(case[2], fromMetadata(allocator, changed, download_origin, "linux-x86_64"));
+    try std.testing.expectEqualStrings("https://ruicode.com/releases/latest", default_endpoint);
+    for ([_]struct { []const u8, []const u8, []const u8 }{
+        .{ "linux-x86_64", "rui-0.56.2-linux-x86_64.tar.gz", "https://ruicode.com/releases/download/v0.56.2/rui-0.56.2-linux-x86_64.tar.gz" },
+        .{ "darwin-arm64", "rui-0.56.2-darwin-arm64.tar.gz", "https://ruicode.com/releases/download/v0.56.2/rui-0.56.2-darwin-arm64.tar.gz" },
+    }) |case| {
+        var candidate = try fromEffectiveUrl(allocator, "https://github.com/DivyanshGolyan/rui/releases/tag/v0.56.2", tag_origin, download_origin, case[0]);
+        defer candidate.deinit(allocator);
+        try std.testing.expectEqualStrings("v0.56.2", candidate.tag);
+        try std.testing.expectEqualStrings(case[1], candidate.archive_name);
+        try std.testing.expectEqualStrings(case[2], candidate.archive_url);
+        try std.testing.expectEqualStrings("https://ruicode.com/releases/download/v0.56.2/SHA256SUMS", candidate.checksum_url);
     }
-    try std.testing.expectError(error.UnsupportedReleasePlatform, fromMetadata(allocator, metadata_fixture, download_origin, "linux-arm64"));
+    for ([_][]const u8{
+        tag_origin ++ "/releases/latest",
+        tag_origin ++ ".evil/releases/tag/v0.56.2",
+        "https://example.com/releases/tag/v0.56.2",
+        "http://github.com/DivyanshGolyan/rui/releases/tag/v0.56.2",
+    }) |bad| try std.testing.expectError(error.InvalidReleaseEndpoint, fromEffectiveUrl(allocator, bad, tag_origin, download_origin, "linux-x86_64"));
+    for ([_][]const u8{ "0.56.2", "v0.056.2", "v0.56.2-rc1", "v0.56.2/", "v0.56.2?x=1", "v0.56.2#fragment", "" }) |bad| {
+        const url = try std.fmt.allocPrint(allocator, "{s}/releases/tag/{s}", .{ tag_origin, bad });
+        defer allocator.free(url);
+        try std.testing.expectError(error.InvalidReleaseVersion, fromEffectiveUrl(allocator, url, tag_origin, download_origin, "linux-x86_64"));
+    }
+    try std.testing.expectError(error.UnsupportedReleasePlatform, fromEffectiveUrl(allocator, tag_origin ++ "/releases/tag/v0.56.2", tag_origin, download_origin, "linux-arm64"));
     var stopped: client.Cancellation = .{};
     stopped.requestStop();
-    try std.testing.expectError(error.Cancelled, discover(allocator, std.testing.io, default_endpoint, &stopped));
+    try std.testing.expectError(error.Cancelled, discover(allocator, std.testing.io, default_endpoint, &stopped, null));
 }

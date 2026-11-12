@@ -191,6 +191,15 @@ pub fn line(setting: Setting) usize {
     return comptime_lines.get(setting);
 }
 
+/// The changeable setting on a rendered logical line. Headings, work and
+/// fixed settings have no action; wrapped visual rows keep their source line.
+pub fn settingAtLine(index: usize) ?Setting {
+    for (std.enums.values(Setting)) |setting| {
+        if (line(setting) == index and rows.get(setting).change != .fixed) return setting;
+    }
+    return null;
+}
+
 const comptime_lines = blk: {
     var lines: std.enums.EnumArray(Setting, usize) = undefined;
     var at: usize = 1;
@@ -397,7 +406,7 @@ fn writeTokens(out: *std.Io.Writer, tokens: u64) !void {
 }
 
 /// `value` with a comma between each group of three digits.
-fn writeGrouped(out: *std.Io.Writer, value: u64) !void {
+pub fn writeGrouped(out: *std.Io.Writer, value: u64) !void {
     var digits: [20]u8 = undefined;
     const text = std.fmt.bufPrint(&digits, "{d}", .{value}) catch unreachable;
     for (text, 0..) |digit, index| {
@@ -521,11 +530,11 @@ test "the page shows the approved rows, `›` on the selected one, then the work
             "   Folder          ~/code/rui\n" ++
             "   Compact at      245,000 tokens · now 31,200" ++ grey ++ "model default" ++ end ++
             "   Headroom        0 tokens" ++ grey ++ "model default" ++ end ++
-            "   Model           gpt-6.1-sol · ChatGPT (device code)\n" ++
+            "   Model           gpt-6.1-sol · Codex\n" ++
             "   Store           ~/.local/share/rui/store" ++ grey ++ "fixed for this Session" ++ end ++
             "   Instructions    set from a shell\n" ++
             " New Sessions\n" ++
-            "   Model           gpt-6.1-sol · ChatGPT (device code)" ++ grey ++ "Rui default" ++ end ++
+            "   Model           gpt-6.1-sol · Codex" ++ grey ++ "Rui default" ++ end ++
             "   Effort          model default\n" ++
             "   Notifications   on\n" ++
             "   Store           ~/.rui/store\n" ++
@@ -639,7 +648,7 @@ test "each value stays on its row and says where it came from" {
         "Tools           bash\n",
         "Compact at      1,234,567 tokens  \x1b[90mSession override",
         "Headroom        999 tokens  \x1b[90mSession override",
-        "Model           model-a · ChatGPT",
+        "Model           model-a · Codex",
         "Instructions    none\n",
         "Model           gpt-x · API key\n",
         "Effort          low\n",
@@ -756,4 +765,10 @@ test "status defaults compare the provider-aware client product choices" {
     try std.testing.expectEqualStrings("Session override", (try writeValue(.compact_at, held.facts(), &out)).?);
     held.session.compaction_trigger = 945000;
     try std.testing.expectEqualStrings("model default", (try writeValue(.compact_at, held.facts(), &out)).?);
+}
+
+test "status change targets include every editable line and exclude fixed rows headings and work" {
+    const expected = [_]?Setting{ null, null, .effort, .permissions, .tools, .name, .folder, .compact_at, .headroom, .model, null, null, null, .default_model, .default_effort, .notifications, .default_store, null, null, null };
+    for (expected, 0..) |setting, index| try std.testing.expectEqual(setting, settingAtLine(index));
+    try std.testing.expectEqual(null, settingAtLine(std.math.maxInt(usize)));
 }

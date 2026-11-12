@@ -610,9 +610,12 @@ const Grammar = struct {
     operation: output_format.ModelOperationKind,
     rejection: *Rejection,
     provider_failure: *ProviderFailure,
+    /// The items kept, which the Store imports, and the streamed items
+    /// before them that a later compaction item superseded.
     item_count: u64,
+    superseded: u64,
     call_count: u64,
-    compaction_count: u64,
+    compacted: bool,
     answer: AnswerSelection,
     /// The caller's, which the completed response fills.
     evidence: *Evidence,
@@ -636,8 +639,9 @@ const Grammar = struct {
         self.rejection = rejection;
         self.provider_failure = provider_failure;
         self.item_count = 0;
+        self.superseded = 0;
         self.call_count = 0;
-        self.compaction_count = 0;
+        self.compacted = false;
         self.answer = .{ .digest = protocol.contentDigest("") };
         self.evidence = evidence;
         self.added = null;
@@ -660,12 +664,29 @@ const Grammar = struct {
         }
     }
 
+    /// Drops every item kept so far, its records and its answer, before a
+    /// compaction item that supersedes them. A compaction Operation holds
+    /// no calls.
+    fn supersede(self: *Grammar) !void {
+        std.debug.assert(self.call_count == 0 and self.item_count != 0);
+        try self.metadata.discard();
+        self.superseded += self.item_count;
+        self.item_count = 0;
+        self.answer = .{ .digest = protocol.contentDigest("") };
+    }
+
     /// The codec accepted an item: its parts and bags, then the Host's own
     /// rules on it, in the order acceptance has always applied them, and
     /// then its record.
     noinline fn closeItem(self: *Grammar, data: []const u8, item: *const codec_abi.OutputItem) !void {
         const metadata = self.metadata;
         const kind = outputKind(item.kind);
+        // In a compaction Operation the last compaction item is the new
+        // base: a later compaction item supersedes every item before it,
+        // the earlier compaction item included, so none is kept, replayed
+        // or selected as the answer. The first compaction item supersedes
+        // nothing, so a response with one is kept whole.
+        if (kind == .compaction and self.operation == .compaction and self.compacted) try self.supersede();
         const ordinal = self.item_count;
         const bag = &self.bag;
         bag.reset(.item);
@@ -737,10 +758,7 @@ const Grammar = struct {
         if (self.added) |added| if (added.kind != kind or !std.mem.eql(u8, &added.id_digest, &id_digest)) return error.ContradictoryProviderOutput;
         self.added = null;
         switch (kind) {
-            .compaction => {
-                self.compaction_count += 1;
-                if (self.compaction_count > 1) return error.UnsupportedProviderOutput;
-            },
+            .compaction => self.compacted = true,
             .message => self.answer.accept(&.{ .ordinal = ordinal, .phase = item.answer_phase, .length = text_length, .digest = text_digest, .non_whitespace = non_whitespace }),
             .function_call => self.call_count += 1,
             .reasoning, .web_search_call => {},
@@ -769,7 +787,7 @@ const Grammar = struct {
         if (self.item_count == 0) return error.MissingProviderOutputItems;
         if (self.answer.finals > 1) return error.MultipleFinalAnswers;
         if (self.operation == .assistant_response and self.answer.ordinal == null and self.call_count == 0) return error.MissingAssistantAnswer;
-        if (self.operation == .compaction and self.compaction_count != 1) return error.MissingCompactionItem;
+        if (self.operation == .compaction and !self.compacted) return error.MissingCompactionItem;
         if (completed.check) |reason| return reasonError(reason);
         _ = Decoded.of(data, completed.response_id, null, &self.evidence.response_id);
         if (completed.served_model) |model| _ = Decoded.of(data, model, null, &self.evidence.served_model);
@@ -783,8 +801,10 @@ const Grammar = struct {
             // One item of the output list must be the streamed item at its
             // index: byte for byte, except an encrypted item, which the
             // provider re-encrypts for the terminal copy.
+            // A superseded item was not kept, so nothing it could agree
+            // with remains.
             .terminal => |*terminal| {
-                if (!try streamedAs(&records, data, terminal, index)) return error.ContradictoryProviderOutput;
+                if (index >= self.superseded and !try streamedAs(&records, data, terminal, index - self.superseded)) return error.ContradictoryProviderOutput;
                 index += 1;
             },
             .terminal_failed => |reason| return reasonError(reason),
@@ -793,7 +813,7 @@ const Grammar = struct {
         // The managed stream can omit the repeated items from
         // response.completed. Any nonempty terminal list must still match
         // every streamed done item.
-        if (index != 0 and (index != self.item_count or try records.nextItem() != null)) return error.ContradictoryProviderOutput;
+        if (index != 0 and (index != self.superseded + self.item_count or try records.nextItem() != null)) return error.ContradictoryProviderOutput;
         switch (completed.usage) {
             .absent => {},
             .failed => |reason| return reasonError(reason),
@@ -1470,13 +1490,68 @@ test "compaction rejects missing double malformed unknown and Action candidates"
         try std.testing.expectError(case[1], validateTestingOperation(&tmp, sse, 4096, .compaction));
     }
     const anchor = "{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"x\"}";
-    const duplicate = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":" ++ anchor ++ "}\n\n";
-    try std.testing.expectError(error.UnsupportedProviderOutput, validateTestingOperation(&tmp, duplicate, 4096, .compaction));
     const reencrypted = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"c\",\"encrypted_content\":\"different\"}]}}\n\n";
     const kept = try validateTestingOperation(&tmp, reencrypted, 4096, .compaction);
     try std.testing.expectEqual(protocol.contentDigest(anchor), kept.first_item.content_digest);
     const renamed = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":" ++ anchor ++ "}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[{\"type\":\"compaction\",\"id\":\"other\",\"encrypted_content\":\"x\"}]}}\n\n";
     try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingOperation(&tmp, renamed, 4096, .compaction));
+}
+
+test "a later compaction item supersedes everything before it, and a first one nothing" {
+    const first = "{\"type\":\"compaction\",\"id\":\"a\",\"encrypted_content\":\"first\"}";
+    const last = "{\"type\":\"compaction\",\"id\":\"b\",\"encrypted_content\":\"last\"}";
+    const between = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"unasked\"}]}";
+    const after = "{\"type\":\"message\",\"id\":\"n\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"after\"}]}";
+    const reasoning = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"thought\",\"summary\":[]}";
+    const call = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"}";
+    // The first kept item, how many are kept and the answer's length. A
+    // response with one compaction item keeps every item, as it always has.
+    const Kept = struct { first: []const u8, items: u64, answer: u64 };
+    const cases = [_]struct { items: []const []const u8, terminal: bool = false, kept: anyerror!Kept }{
+        .{ .items = &.{last}, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ reasoning, first }, .kept = .{ .first = reasoning, .items = 2, .answer = 0 } },
+        .{ .items = &.{ reasoning, first }, .terminal = true, .kept = .{ .first = reasoning, .items = 2, .answer = 0 } },
+        .{ .items = &.{ first, between }, .kept = .{ .first = first, .items = 2, .answer = "unasked".len } },
+        .{ .items = &.{ reasoning, first, between }, .kept = .{ .first = reasoning, .items = 3, .answer = "unasked".len } },
+        .{ .items = &.{ first, between, last }, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ first, between, last }, .terminal = true, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ reasoning, first, between, last }, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ first, last }, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ first, between, last, after }, .kept = .{ .first = last, .items = 2, .answer = "after".len } },
+        .{ .items = &.{ first, between, last, after }, .terminal = true, .kept = .{ .first = last, .items = 2, .answer = "after".len } },
+        .{ .items = &.{between}, .kept = error.MissingCompactionItem },
+        .{ .items = &.{ reasoning, between }, .kept = error.MissingCompactionItem },
+        .{ .items = &.{ call, first, between, last }, .kept = error.UnsupportedProviderOutput },
+        .{ .items = &.{ first, call, last }, .kept = error.UnsupportedProviderOutput },
+        .{ .items = &.{ first, between, last, call }, .kept = error.UnsupportedProviderOutput },
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var single: ?u64 = null;
+    for (cases) |case| {
+        var sse: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer sse.deinit();
+        for (case.items, 0..) |item, index| try sse.writer.print("data: {{\"type\":\"response.output_item.done\",\"output_index\":{d},\"item\":{s}}}\n\n", .{ index, item });
+        try sse.writer.writeAll("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r\",\"status\":\"completed\",\"output\":[");
+        if (case.terminal) for (case.items, 0..) |item, index| try sse.writer.print("{s}{s}", .{ if (index == 0) "" else ",", item });
+        try sse.writer.writeAll("]}}\n\n");
+        const expected = case.kept catch |err| {
+            try std.testing.expectError(err, validateTestingOperation(&tmp, sse.written(), 4096, .compaction));
+            continue;
+        };
+        const result = try validateTestingOperation(&tmp, sse.written(), 4096, .compaction);
+        try std.testing.expectEqual(expected.items, result.output.item_count);
+        try std.testing.expectEqual(@as(u64, 0), result.first_item.ordinal);
+        try std.testing.expectEqual(protocol.contentDigest(expected.first), result.first_item.content_digest);
+        try std.testing.expectEqual(expected.answer, result.output.answer_length);
+        // A superseded item's records are gone with their charge: keeping
+        // the last item alone charges what that item alone does.
+        if (expected.items == 1) {
+            const alone = single orelse result.metadata_bytes;
+            single = alone;
+            try std.testing.expectEqual(alone, result.metadata_bytes);
+        }
+    }
 }
 
 test "SSE line framing accepts spec fields and line endings without losing validation" {

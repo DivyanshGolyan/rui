@@ -135,11 +135,19 @@ const EndingLine = struct {
     /// words are not part of the retry link.
     fn hit(self: *const EndingLine, row: u16, cells: []vaxis.Cell, col: usize) bool {
         if (col >= cells.len) return false;
+        self.paint(row, cells);
+        return self.linked(cells[col]);
+    }
+
+    fn paint(self: *const EndingLine, row: u16, cells: []vaxis.Cell) void {
         @memset(cells, .{});
         var screen: vaxis.Screen = .{ .width = @intCast(cells.len), .height = 1, .width_method = self.document.width_method, .buf = cells };
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = 1, .screen = &screen };
         _ = self.document.draw(window, .{ .row = row }, true, false, .{}, .{});
-        const offset = self.document.cellOffset(cells[col]) orelse return false;
+    }
+
+    fn linked(self: *const EndingLine, cell: vaxis.Cell) bool {
+        const offset = self.document.cellOffset(cell) orelse return false;
         return offset >= self.key_start and offset < self.key_end;
     }
 };
@@ -351,6 +359,24 @@ pub const Window = struct {
         return if (position.row >= self.document.lineRows(layout, position.offset)) .padding else null;
     }
 
+    /// The painted retry suffix's columns, shared by hover and the click query.
+    /// `cells` is one pane-width scratch row; no resident offsets are invented.
+    pub fn retryColumns(self: *const Window, position: viewport.Position, cells: []vaxis.Cell, presentation: Presentation) ?struct { start: u16, end: u16 } {
+        if (cells.len == 0) return null;
+        const point = self.pointAt(position.offset) orelse return null;
+        const entry = self.entries[self.indexOf(point.key) orelse return null];
+        var ending: EndingLine = .{};
+        if (!ending.init(self, entry, position.offset, presentation)) return null;
+        ending.paint(position.row, cells);
+        var start: ?u16 = null;
+        var end: u16 = 0;
+        for (cells, 0..) |cell, col| if (ending.linked(cell)) {
+            if (start == null) start = @intCast(col);
+            end = @intCast(col + 1);
+        };
+        return .{ .start = start orelse return null, .end = end };
+    }
+
     /// Logical text row beneath the pointer, excluding adjacency gaps/tail.
     pub fn positionAt(self: *const Window, visible: Feed.Visible, row: u32, layout: viewport.Layout) ?viewport.Position {
         return self.positionAtWith(visible, row, layout, .{});
@@ -379,6 +405,66 @@ pub const Window = struct {
         }
         return null;
     }
+
+    /// Screen rows from row 0 of `visible` down, in one forward pass that
+    /// measures each line once: the nth `next` answers what positionAtWith
+    /// answers for row n. A frame walks every row through this, not through
+    /// repeated positionAtWith, whose prefix walk would make it quadratic.
+    pub fn rowsWith(self: *const Window, visible: Feed.Visible, layout: viewport.Layout, presentation: Presentation) Rows {
+        var rows: Rows = .{ .window = self, .layout = layout, .presentation = presentation, .pad = visible.pad, .index = @min(visible.first, self.count), .row = visible.row };
+        if (rows.index == self.count) return rows;
+        const entry = self.entries[rows.index];
+        rows.offset = entry.offset;
+        var line: u32 = 0;
+        while (line < visible.line and rows.offset < entry.offset + entry.length) : (line += 1) rows.offset = self.document.lineEnd(rows.offset) + 1;
+        return rows;
+    }
+
+    /// Borrows the window; any edit invalidates it.
+    pub const Rows = struct {
+        /// A pad or adjacency gap row has no text position.
+        pub const Row = ?viewport.Position;
+
+        window: *const Window,
+        layout: viewport.Layout,
+        presentation: Presentation,
+        pad: u32,
+        index: usize,
+        offset: usize = 0,
+        /// The next wrapped row of the line at `offset`; its row count is its gap.
+        row: u32,
+        /// The line at `offset`'s rows, measured on its first row.
+        used: ?u16 = null,
+
+        /// The next screen row, or null below the last line.
+        pub fn next(self: *Rows) ?Row {
+            if (self.pad != 0) {
+                self.pad -= 1;
+                return @as(Row, null);
+            }
+            const window = self.window;
+            while (self.index < window.count) {
+                const entry = window.entries[self.index];
+                const end = entry.offset + entry.length;
+                if (self.offset < end) {
+                    const used = self.used orelse window.lineRows(entry, self.layout, self.offset, self.presentation);
+                    self.used = used;
+                    const row = self.row;
+                    self.row += 1;
+                    if (row < used) return .{ .offset = self.offset, .row = @intCast(row) };
+                    const next_line = window.document.lineEnd(self.offset) + 1;
+                    if (row == used and next_line == end and window.gapAfter(self.index) != 0) return @as(Row, null);
+                    self.offset = next_line;
+                } else {
+                    self.index += 1;
+                    if (self.index < window.count) self.offset = window.entries[self.index].offset;
+                }
+                self.row = 0;
+                self.used = null;
+            }
+            return null;
+        }
+    };
 
     /// Feed.Visible must have been obtained at this window's current width and
     /// width method. The supplied vaxis window is already the shell's feed pane.
@@ -1033,4 +1119,63 @@ test "feed_window target capacity admits whole entries atomically across trim re
     try window.prepend(&.{.{ .key = .{ .position = 1 }, .text = Text.fromDocument(&prepared), .messages = &targets }});
     try testing.expectEqual(@as(usize, 512), window.target_count);
     try testing.expectEqual(@as(u64, 9000), window.messageAt(.{ .key = .{ .position = 1 }, .offset = 0 }).?.position);
+}
+
+test "feed_window rows answer positionAtWith for every screen row from every first row" {
+    const tool_fold = @import("tool_fold.zig");
+    var tool: viewport.Sized(1024, true) = .{};
+    try tool.append(tool_fold.heading_marker ++ "$ Bash done\n  wide 漢字漢字漢字 cells wrap here\n" ++ View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n");
+    try tool.prepare();
+    var window: Window = .{};
+    var tight = testEntry(30, "tight one\ntight two two two\n");
+    tight.tight = true;
+    var empty = testEntry(35, "");
+    empty.provisional = true;
+    try window.append(&.{
+        testEntry(10, "alpha beta gamma delta epsilon zeta\n\nshort\n"),
+        .{ .key = .{ .position = 20 }, .text = Text.fromDocument(&tool), .tight = true },
+        tight,
+        empty,
+        testEntry(40, "× Provider unreachable\n"),
+    });
+    const presentation: Presentation = .{ .latest_ending = .{ .key = .{ .position = 40 }, .cause = @import("marks.zig").cause("provider_http_500") }, .retry_actionable = true };
+    for ([_]u16{ 1, 3, 7, 16, 80 }) |width| {
+        const layout: viewport.Layout = .{ .width = width, .method = .unicode };
+        const entries = window.heightsWith(layout, presentation);
+        var total: u32 = 0;
+        for (entries) |entry| for (entry.lines) |rows| {
+            total += rows;
+        };
+        // Every first row a Feed can choose, gap rows included, with and
+        // without padding above, and the empty window.
+        for (0..window.count + 1) |first| {
+            const lines = if (first < window.count) entries[first].lines else &[_]u32{1};
+            for (lines, 0..) |line_rows, line| for (0..line_rows) |row| for ([_]u32{ 0, 2 }) |pad| {
+                const visible: Feed.Visible = .{ .first = first, .line = @intCast(line), .row = @intCast(row), .pad = pad };
+                var rows = window.rowsWith(visible, layout, presentation);
+                for (0..total + pad + 2) |screen_row| {
+                    try testing.expectEqual(window.positionAtWith(visible, @intCast(screen_row), layout, presentation), rows.next() orelse null);
+                }
+                try testing.expectEqual(@as(?Window.Rows.Row, null), rows.next());
+            };
+        }
+    }
+    // A tall window, from its top: each row once, in order.
+    const tall = try testing.allocator.create(Window);
+    defer testing.allocator.destroy(tall);
+    tall.* = .{};
+    var entries: [200]Entry = undefined;
+    for (&entries, 0..) |*entry, i| {
+        entry.* = testEntry(100 + i, if (i % 3 == 0) "one\ntwo words wrap\n" else "row\n");
+        entry.tight = i % 2 == 0;
+    }
+    try tall.append(&entries);
+    const narrow: viewport.Layout = .{ .width = 5, .method = .unicode };
+    var total: u32 = 0;
+    for (tall.heights(narrow)) |entry| for (entry.lines) |rows| {
+        total += rows;
+    };
+    try testing.expect(total > 400);
+    var rows = tall.rowsWith(.{ .first = 0 }, narrow, .{});
+    for (0..total + 1) |screen_row| try testing.expectEqual(tall.positionAt(.{ .first = 0 }, @intCast(screen_row), narrow), rows.next() orelse null);
 }

@@ -13,6 +13,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -75,9 +76,13 @@ class Login:
     """One `rui auth login chatgpt` run: its link, and its outcome."""
 
     def __init__(self, url):
+        # With no test issuer, the sign-in is OpenAI's; no display, so no
+        # browser opens.
+        test_issuer = ["--test-chatgpt-fixture-endpoint", url] if url else []
+        environment = {name: value for name, value in os.environ.items() if name not in ("DISPLAY", "WAYLAND_DISPLAY")}
         self.process = subprocess.Popen(
-            [str(fixture.RUI), "auth", "login", "chatgpt", "--test-chatgpt-fixture-endpoint", url],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            [str(fixture.RUI), "auth", "login", "chatgpt", *test_issuer],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment,
         )
         self.lines = []
         self.reader = threading.Thread(target=self.read, daemon=True)
@@ -87,9 +92,9 @@ class Login:
         for line in self.process.stderr:
             self.lines.append(line)
 
-    def link(self, base):
+    def link(self, base, authorize="/oauth/authorize?"):
         found = fixture.wait_for(
-            lambda: next((line.strip() for line in list(self.lines) if line.startswith(base + "/oauth/authorize?")), None),
+            lambda: next((line.strip() for line in list(self.lines) if line.startswith(base + authorize)), None),
             "the sign-in link",
         )
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(found).query, strict_parsing=True)
@@ -163,6 +168,25 @@ def run():
         nothing = subprocess.run([str(fixture.RUI), "auth", "logout", "chatgpt", "--test-chatgpt-fixture-endpoint", url],
                                  capture_output=True, text=True, timeout=15)
         assert nothing.returncode == 0 and not credential_file.exists() and not endpoint.revoke_requests, nothing
+        # Only the ChatGPT sign-in takes a test issuer.
+        other = subprocess.run([str(fixture.RUI), "auth", "login", "codex", "--test-chatgpt-fixture-endpoint", url],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+        assert other.returncode == 2 and not credential_file.exists(), other
+        # Ctrl-C while waiting for the answer is a failed invocation, never a
+        # death by signal, and installs nothing.
+        interrupted = Login(url)
+        interrupted.link(base)
+        interrupted.process.send_signal(signal.SIGINT)
+        code, _, _ = interrupted.finish()
+        assert code == 1 and not credential_file.exists() and not endpoint.token_requests, code
+        # Without a test issuer the command is the real sign-in: OpenAI's
+        # link, sent nowhere until an answer arrives.
+        real = Login(None)
+        real_link = real.link(ISSUER, "/api/accounts/authorize?")
+        assert real_link["client_id"] == "dynamic_agent_client" and "id_token_hint" not in real_link, real_link
+        real.process.send_signal(signal.SIGINT)
+        code, _, _ = real.finish()
+        assert code == 1 and not credential_file.exists(), code
 
         # First sign-in, through the listener. The host id exists before the
         # link names it, and only the port of the redirect varies.

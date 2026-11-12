@@ -168,10 +168,7 @@ pub const Row = struct {
 pub const Query = struct {
     words: []const u8,
     effort: ?ReasoningEffort = null,
-    /// The providers the last whole sign-in word names: `chatgpt` names
-    /// each provider signed in with ChatGPT, and a row takes the one it
-    /// offers.
-    providers: Providers = .empty,
+    provider: ?Provider = null,
 
     pub fn parse(words: []const u8) Query {
         var query: Query = .{ .words = words };
@@ -180,11 +177,9 @@ pub const Query = struct {
             for (std.enums.values(ReasoningEffort)) |effort| {
                 if (std.ascii.eqlIgnoreCase(@tagName(effort), word)) query.effort = effort;
             }
-            var named: Providers = .empty;
             for (std.enums.values(Provider)) |provider| {
-                if (std.ascii.eqlIgnoreCase(signInWord(provider), word)) named.insert(provider);
+                if (std.ascii.eqlIgnoreCase(signInWord(provider), word)) query.provider = provider;
             }
-            if (named.count() != 0) query.providers = named;
         }
         return query;
     }
@@ -201,7 +196,7 @@ pub const Query = struct {
     /// An explicitly typed, unlisted choice bypasses list admission. Its ID
     /// and controls go to the provider rather than pretending it is listed.
     pub fn typed(self: Query, entry: Entry, defaults: Defaults) Row {
-        return (Query{ .words = "", .effort = self.effort, .providers = self.providers }).match(entry, defaults).?;
+        return (Query{ .words = "", .effort = self.effort, .provider = self.provider }).match(entry, defaults).?;
     }
 
     fn match(self: Query, entry: Entry, defaults: Defaults) ?Row {
@@ -216,15 +211,11 @@ pub const Query = struct {
             return null;
         }
         const product_provider = comptime std.meta.stringToEnum(Provider, product_defaults.provider).?;
-        // The typed sign-in's providers the entry offers, else all it
-        // offers, which are never empty; among them the saved, the
-        // product's, else the first.
-        var offered = self.providers.intersectWith(entry.providers);
-        if (offered.count() == 0) offered = entry.providers;
-        const provider = for ([_]?Provider{ defaults.provider, product_provider }) |wanted| {
-            if (wanted) |one| if (offered.contains(one)) break one;
+        // An entry's providers are never empty.
+        const provider = for ([_]?Provider{ self.provider, defaults.provider, product_provider }) |wanted| {
+            if (wanted) |one| if (entry.providers.contains(one)) break one;
         } else for (std.enums.values(Provider)) |one| {
-            if (offered.contains(one)) break one;
+            if (entry.providers.contains(one)) break one;
         } else unreachable;
         return .{
             .effort = model_capability.startEffort(catalog.shipped, self.effort, entry.id) orelse client_defaults.startEffort(entry.id, defaults.effort),
@@ -245,7 +236,7 @@ pub const Query = struct {
     }
 };
 
-/// The word a sign-in is typed as: its name's first, `chatgpt` or `api`.
+/// The word a sign-in is typed as: its label's first, `codex`, `chatgpt` or `api`.
 fn signInWord(provider: Provider) []const u8 {
     const name = provider.signIn();
     return name[0 .. std.mem.indexOfScalar(u8, name, ' ') orelse name.len];
@@ -615,7 +606,7 @@ test "/model terra low api leaves one row, set to low on the API key, whatever w
     defer menu.deinit(std.testing.allocator);
     const saved: Defaults = .{ .model = "gpt-6.1-sol", .provider = .codex, .effort = .high };
     // Word order and case do not matter, and extra spaces are no words.
-    for ([_][]const u8{ "terra low api", "api low terra", "  TERRA  Low API ", "terra high low api chatgpt api" }) |typed| {
+    for ([_][]const u8{ "terra low api", "api low terra", "  TERRA  Low API ", "terra high low api codex api" }) |typed| {
         try expectRows(&menu, typed, &.{"gpt-6.1-terra"});
         const row = Query.parse(typed).row(entryOf(&menu, "gpt-6.1-terra"), saved).?;
         try std.testing.expectEqual(@as(?ReasoningEffort, .low), row.effort);
@@ -624,10 +615,10 @@ test "/model terra low api leaves one row, set to low on the API key, whatever w
     }
     // Without the sign-in, ChatGPT's gpt-5.6-terra stays too.
     try expectRows(&menu, "terra low", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
-    try expectRows(&menu, "terra chatgpt", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
-    const chatgpt = Query.parse("terra chatgpt").row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .openai, .effort = .medium }).?;
-    try std.testing.expectEqual(Provider.codex, chatgpt.provider);
-    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), chatgpt.effort);
+    try expectRows(&menu, "terra codex", &.{ "gpt-5.6-terra", "gpt-6.1-terra" });
+    const codex = Query.parse("terra codex").row(entryOf(&menu, "gpt-6.1-terra"), .{ .provider = .openai, .effort = .medium }).?;
+    try std.testing.expectEqual(Provider.codex, codex.provider);
+    try std.testing.expectEqual(@as(?ReasoningEffort, .medium), codex.effort);
 }
 
 test "a word narrows to the rows whose ID holds it or that offer the effort or sign-in it begins" {
