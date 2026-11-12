@@ -873,7 +873,7 @@ def persistent_copy_case():
             assert not saved.is_symlink() and stat.S_ISREG(saved.lstat().st_mode), saved
             assert saved.read_bytes() == large.encode() and saved.lstat().st_mode & 0o777 == 0o600, saved
             assert list(here.iterdir()) == [saved], list(here.iterdir())
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert caller.wait(timeout=5) == 0
         completed = True
         print("persistent copy: /copy and /copy code sent exact OSC 52 bytes; /copy file saved the exact answer", flush=True)
@@ -1095,7 +1095,7 @@ int fsync(int fd) {
         listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
         assert handle in listing and failed_notice in listing and f"{stopped} (session_stop)" in listing, listing
         assert invalid not in listing and all(handle not in listing for handle in rejected_handles), listing
-        terminal_step(master, "/exit", "Detached.")
+        terminal_step(master, "\x03", "Detached.")
         assert entered.wait(timeout=5) == 0
     print("saved capture owner: pinned original bytes, preference-independent recovery, failed announcement, "
         "sync uncertainty, listing asymmetry", flush=True)
@@ -1487,7 +1487,7 @@ def renderer_cases():
             assert tty.capture.draft("kept", 2), tty.capture.completed
             # Rejection leaves a usable editor, not a latent fatal redraw.
             tty.send("é", predicate=lambda: tty.capture.draft("ékept", 3))
-            assert os.write(tty.master, b"\x15\x0b/exit\r") == 8
+            assert os.write(tty.master, b"\x03") == 1
             tty.finish()
         env = {**os.environ, "HOME": str(home)}
         rejected = subprocess.run([str(fixture.RUI), "session", "resume", "--store", str(store), geometry],
@@ -1538,7 +1538,7 @@ def renderer_cases():
             tty.send("\r", answer("multiline"))
             submitted(multiline)
             joined(tty)
-            os.write(tty.master, b"/exit\r")
+            os.write(tty.master, b"\x03")
             tty.finish()
         print("renderer: wide5000X resize, long combining cells, tabs, multiline paste and exact submitted bytes passed", flush=True)
 
@@ -2190,7 +2190,7 @@ def main(selected="all"):
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         saved.unlink()
         fallback.parent.mkdir(parents=True)
@@ -2200,7 +2200,7 @@ def main(selected="all"):
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
             assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         fallback.unlink()
         saved.write_text(f"version=1\nstore={state / 'missing'}\nprovider=codex\nmodel=gpt-6-luna\n")
@@ -2433,7 +2433,7 @@ def main(selected="all"):
                 assert permission_row(status, mode), status
                 assert fixture.command("session", "inspect", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
                 assert mode == "bypass" or "without asking" not in status, status
-                terminal_step(master, "/exit", "Detached.")
+                terminal_step(master, "\x03", "Detached.")
                 assert caller.wait(timeout=5) == 0
         records = preferences_home / ".config/rui/requests"
         before_records = set(records.glob("*.json"))
@@ -2604,9 +2604,9 @@ def main(selected="all"):
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
             assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/inspect-action", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
+            for command in ("/status", "/requests", "/result KEY", "/setup", "/configure", "ctrl+r"):
                 assert command in help_text, help_text
-            assert "/history" not in help_text and "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
+            assert all(command not in help_text for command in ("/history", "/upgrade", "/exit", "/inspect-action", "/wait", "/login")) and "rui auth login codex" in help_text, help_text
             # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
             assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
@@ -2614,8 +2614,8 @@ def main(selected="all"):
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command, notice in (("/wait", "Work continues."),
-                                    ("/login", "Login uses rui auth login codex in your shell.")):
+            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit"):
+                notice = f"! Unknown command {command} · /help"
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
@@ -2665,7 +2665,7 @@ def main(selected="all"):
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
                 assert receipt not in configured, configured
             terminal_step(master, "/status", f" Status · {session}", composer=True)
-            assert "Detached. Host work continues." in terminal_step(master, "/exit", "Detached.")
+            assert "Detached. Host work continues." in terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(entered, timeout=5),
@@ -2778,7 +2778,7 @@ def main(selected="all"):
             assert "code: provider_http_422" in failed and "successor done" not in failed, failed
             result = terminal_step(master, f"/result {queued_key}", "result: completed", composer=True)
             assert "result: completed\nsuccessor done" in conversation_text(result), result
-            terminal_step(master, "/exit", "Detached.")
+            terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
 
         stop_release = threading.Event()
@@ -2962,7 +2962,7 @@ def main(selected="all"):
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {control_session}" in status and shown(folder_row(home, escaped_workspace) + "\n", status), status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
-            farewell = terminal_step(master, "/exit", "Resume: ")
+            farewell = terminal_step(master, "\x03", "Resume: ")
             assert entered.wait(timeout=5) == 0
             resume = farewell.split("Resume: ", 1)[1].split("\n", 1)[0]
             assert "\x1b" not in resume and "\u202e" not in resume, resume
@@ -2981,7 +2981,7 @@ def main(selected="all"):
             read_terminal(master, "› ")
             resumed = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {control_session}" in resumed and shown(folder_row(home, escaped_workspace) + "\n", resumed), resumed
-            terminal_step(master, "/exit", "Resume: ")
+            terminal_step(master, "\x03", "Resume: ")
             assert entered.wait(timeout=5) == 0
             defaults(home, "--store", store)
         unsafe_key = "message\n\x1b[2J\u202e"
@@ -3006,7 +3006,7 @@ def main(selected="all"):
                 read_terminal(master, "› ")
                 status = terminal_step(master, "/status", " Status · ", composer=True)
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
-                assert "Detached." in terminal_step(master, "/exit", "Detached.")
+                assert "Detached." in terminal_step(master, "\x03", "Detached.")
                 assert entered.wait(timeout=5) == 0
         finally:
             unsafe_release.set()
@@ -3021,7 +3021,7 @@ def main(selected="all"):
             status = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {unsafe_session}" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
-            assert "Detached." in terminal_step(master, "/exit", "Detached.")
+            assert "Detached." in terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         empty_session = create_session(home, "--store", store,
             "--workspace", workspace, "--provider", "codex", "--model", "gpt-6-sol")

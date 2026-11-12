@@ -118,7 +118,7 @@ class Chrome:
         return keyed_frame(master, keys, lambda screen, x, y: accept(screen), timeout)
 
     def leave(self, master, caller):
-        os.write(master, b"\x15/exit\r")
+        os.write(master, b"\x03")
         _, errors = terminal_exit(caller, master)
         assert caller.returncode == 0, errors
 

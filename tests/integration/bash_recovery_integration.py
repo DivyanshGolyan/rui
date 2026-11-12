@@ -80,7 +80,7 @@ def prove_effect_without_result_becomes_indeterminate(state):
             status = human.terminal_step(master, "/status", " Status · ", composer=True)
             assert "Indeterminate Action: 1" in status, status
             assert "The command may have run; Rui did not replay it." in status, status
-            human.terminal_step(master, "/exit", "Detached.")
+            human.terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         continuation_release.set()
         fixture.wait_for(lambda: fixture.completed_observation(store, "effect-before-result-message"), "continuation")
