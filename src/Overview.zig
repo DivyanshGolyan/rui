@@ -7022,7 +7022,7 @@ test "pinned New Session wins the last header row over a provider band" {
         const row = &state.rows.items[state.order.items[0]];
         row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
         try row.state.failed.code.set("provider_http_401");
-        try std.testing.expect(view.band(state.rows.items, state.now_ms, state.login_at) != null);
+        try std.testing.expect(view.band(state) != null);
         // Narrow screens reserve four input rows; the wide list has no input.
         var shown = try rig.shown(width, if (width == 46) 5 else 1);
         defer shown.deinit();
