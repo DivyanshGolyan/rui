@@ -12713,8 +12713,8 @@ test "effort provenance excludes refused Operations across unrelated revisions" 
                 if (before == .after_admission) try std.testing.expect(try storage.configure(&unrelated, .{}) == .accepted);
                 try expectEffort(&storage, binding, rejected);
                 try store_testing.settleModelFailureWithTimings(&storage, binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: effort update" } }, .effort_change_refused, .{ .latency_ms = 999, .first_event_ms = 111 }, .{});
-                // The refused Attempt retries; it has no resolved model_call or final timings.
-                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL AND latency_ms IS NULL AND first_event_ms IS NULL", .{binding.operation_id}));
+                // Backoff retains the refused Attempt's pair without resolving a model_call.
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE operation_id=?1 AND resolution_code IS NULL AND attempt_at IS NULL AND retry_scheduled_at IS NOT NULL AND latency_ms=999 AND first_event_ms=111", .{binding.operation_id}));
                 const refused = try storage.inspectSessionForTesting(session.slice());
                 try std.testing.expectEqual(effort, refused.reasoning_effort);
                 try std.testing.expectEqual(override, refused.reasoning_effort_override);
