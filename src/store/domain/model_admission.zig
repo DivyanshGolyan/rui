@@ -22,6 +22,7 @@ const operation_effort = @import("operation_effort.zig");
 const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_settlement_domain = @import("model_settlement.zig");
+const model_attempt = @import("model_attempt.zig");
 const reads_domain = @import("reads.zig");
 const tool_offer = @import("tool_offer.zig");
 const store_schema = @import("../schema.zig");
@@ -1009,7 +1010,7 @@ const next_scheduled_retry = rsql.Read(.{
 pub const retry_admission_select_sql = due_retries.sql;
 
 const retry_attempt = rsql.Write(.{
-    .sql = "UPDATE model_operation SET attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=@now,retry_scheduled_at=NULL " ++
+    .sql = "UPDATE model_operation SET " ++ model_attempt.replacement_sql ++ ",attempt_ordinal=?2,retry_due_at_ms=0,attempt_at=@now,retry_scheduled_at=NULL " ++
         "WHERE operation_id=?1 AND session_ref=@session(?6) AND turn_id=?3 AND resolution_code IS NULL " ++
         "AND attempt_ordinal=?4 AND " ++ retry_allowance_open_sql ++ " AND retry_due_at_ms<=?5",
     .Args = struct { operation_id: u64, replacement: u64, turn_id: u64, attempt_ordinal: u64, now_ms: u64, session: rsql.SessionHead },

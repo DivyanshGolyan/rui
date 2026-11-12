@@ -27,7 +27,7 @@ state() {{
 }}
 case "$*" in
     --publish-install*) exec "$RUI_TEST_PUBLISH_HELPER" "$@" ;;
-    --installation-path)
+    --installation-path|--installation-path-state)
         [ -z "${{TEST_PATH_FAULT-}}" ] || exit 1
         exec "$RUI_TEST_PUBLISH_HELPER" "$@" ;;
     --installation-facts)
@@ -91,6 +91,13 @@ pub fn main(init: std.process.Init) !void {
         defer output.deinit();
         try path.write(&output.writer, &observed, home);
         return std.Io.File.stdout().writeStreamingAll(init.io, output.written());
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--installation-path-state")) {
+        const home = init.environ_map.get("HOME") orelse return error.InvalidArguments;
+        var observed = try path.inspect(allocator, init.io, home, init.environ_map.get("PATH") orelse "");
+        defer observed.deinit(allocator);
+        var line: [16]u8 = undefined;
+        return std.Io.File.stdout().writeStreamingAll(init.io, try std.fmt.bufPrint(&line, "{s}\\n", .{@tagName(observed.state)}));
     }
     if (args.len != 5 or !std.mem.eql(u8, args[1], "--publish-install")) return error.InvalidArguments;
     const intent: Installation.Intent = if (std.mem.eql(u8, args[4], "intentional-source")) .intentional_source

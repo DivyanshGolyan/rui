@@ -165,8 +165,9 @@ pub const ActivityPage = struct {
         const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
+        const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
         const Stop = struct { key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), cutoff: JsonString(20), completion: JsonEnum(@FieldType(Fact.Stop, "completion")) };
-        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted } };
+        const Item = struct { position: JsonString(20), ordinal: JsonString(20), at: JsonString(20), value: union(enum) { admission: Message, user: Message, assistant: struct { content: Ref, final: bool }, call: Call, tool_result: struct { content: Ref, presentation: JsonToolPresentation }, hosted_call: struct { presentation: JsonToolPresentation }, turn_ended: TurnEnded, stop: Stop, sent: Sent, send_failed: SendFailed, received: Message, approval_requested: ApprovalRequested, session_changed: SessionChanged, compacted: Compacted, model_call: ModelCall } };
         const Items = struct {
             values: [16]Item = undefined,
             count: usize = 0,
@@ -260,6 +261,20 @@ pub const ActivityPage = struct {
                     fact.value = .{ .session_changed = .{ .revision = revision, .field = change.field, .provider_text = if (change.provider_text) |text| text.value else null } };
                 },
                 .compacted => |compacted| fact.value = .{ .compacted = .{ .operation = try id(compacted.operation, false), .dropped = try id(compacted.dropped, true) } },
+                .model_call => |call| {
+                    if (call.model.slice().len == 0 or call.status.slice().len == 0 or (call.served_model != null and call.served_model.?.slice().len == 0)) return error.InvalidActivityPage;
+                    fact.value = .{ .model_call = .{
+                        .model = call.model.value,
+                        .served_model = if (call.served_model) |model| model.value else null,
+                        .input_tokens = if (call.input_tokens) |count| try decimalId(count, true) else null,
+                        .output_tokens = if (call.output_tokens) |count| try decimalId(count, true) else null,
+                        .cached_tokens = if (call.cached_tokens) |count| try decimalId(count, true) else null,
+                        .latency_ms = if (call.latency_ms) |count| try id(count, true) else null,
+                        .first_event_ms = if (call.first_event_ms) |count| try id(count, true) else null,
+                        .status = call.status.value,
+                        .attempts = try id(call.attempts, false),
+                    } };
+                },
                 .send_failed => |failed| {
                     if (failed.code.slice().len == 0) return error.InvalidActivityPage;
                     fact.value = .{ .send_failed = .{ .key = failed.key.value, .target = if (failed.target) |peer| try peer.peer() else null, .code = failed.code.value } };
@@ -3810,4 +3825,55 @@ test "inline skills suggestion decoder owns bounded metadata and rejects path or
         prefix ++ "]}",
         prefix ++ "{\"name\":3,\"description\":\"A skill\"}]}",
     }) |wire| try std.testing.expectError(error.InvalidResponse, decodeSkillSuggestions(std.testing.allocator, wire));
+}
+
+test "activity golden model call null evidence and zero usage roundtrip" {
+    const facts = try std.testing.allocator.create(protocol.ActivityFacts);
+    defer std.testing.allocator.destroy(facts);
+    facts.* = .{ .end = 4, .count = 1, .work = .{ .revision = 1, .workspace = .{ .len = 0 }, .work = .{ .state = .{ .idle = .{ .since = 1 } } } } };
+    try facts.work.workspace.set("/w");
+    facts.items[0] = .{ .position = 4, .at = 7, .value = .{ .model_call = .{
+        .model = .{ .len = 0 },
+        .served_model = null,
+        .input_tokens = null,
+        .output_tokens = null,
+        .cached_tokens = null,
+        .latency_ms = 0,
+        .first_event_ms = null,
+        .status = .{ .len = 0 },
+        .attempts = 2,
+    } } };
+    try facts.items[0].value.model_call.model.set("requested");
+    try facts.items[0].value.model_call.status.set("provider_connection_closed");
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try @import("host_reply.zig").renderActivityPage(.{ .writer = &out.writer }, facts);
+    const expected = "{\"model\":\"requested\",\"served_model\":null,\"input_tokens\":null,\"output_tokens\":null,\"cached_tokens\":null,\"latency_ms\":\"0\",\"first_event_ms\":null,\"status\":\"provider_connection_closed\",\"attempts\":\"2\"}";
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    const value = parsed.value.object.get("items").?.array.items[0].object.get("value").?.object.get("model_call").?;
+    var row: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer row.deinit();
+    try std.json.Stringify.value(value, .{}, &row.writer);
+    try std.testing.expectEqualStrings(expected, row.written());
+    const native = try std.testing.allocator.create(ActivityPage);
+    defer std.testing.allocator.destroy(native);
+    native.* = try ActivityPage.parse(out.written(), .{});
+    try std.testing.expectEqualStrings(facts.items[0].value.model_call.model.slice(), native.facts.items[0].value.model_call.model.slice());
+    try std.testing.expectEqualStrings(facts.items[0].value.model_call.status.slice(), native.facts.items[0].value.model_call.status.slice());
+    inline for (.{ "served_model", "input_tokens", "output_tokens", "cached_tokens", "latency_ms", "first_event_ms", "attempts" }) |field_name| {
+        try std.testing.expectEqual(@field(facts.items[0].value.model_call, field_name), @field(native.facts.items[0].value.model_call, field_name));
+    }
+    facts.items[0].value.model_call.input_tokens = 0;
+    facts.items[0].value.model_call.output_tokens = 0;
+    facts.items[0].value.model_call.cached_tokens = 0;
+    out.clearRetainingCapacity();
+    try @import("host_reply.zig").renderActivityPage(.{ .writer = &out.writer }, facts);
+    native.* = try ActivityPage.parse(out.written(), .{});
+    try std.testing.expectEqualStrings(facts.items[0].value.model_call.model.slice(), native.facts.items[0].value.model_call.model.slice());
+    try std.testing.expectEqualStrings(facts.items[0].value.model_call.status.slice(), native.facts.items[0].value.model_call.status.slice());
+    inline for (.{ "served_model", "input_tokens", "output_tokens", "cached_tokens", "latency_ms", "first_event_ms", "attempts" }) |field_name| {
+        try std.testing.expectEqual(@field(facts.items[0].value.model_call, field_name), @field(native.facts.items[0].value.model_call, field_name));
+    }
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"input_tokens\":\"0\",\"output_tokens\":\"0\",\"cached_tokens\":\"0\"") != null);
 }
