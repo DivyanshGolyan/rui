@@ -591,6 +591,27 @@ pub fn observeHostProcess(io: std.Io, store_path: []const u8, deadline: ?i128) !
     return .{ .ready = observed.facts, .pid = observed.pid };
 }
 
+/// A wire mismatch is not readiness. Only Upgrade's pinned-process owner may
+/// use its same-connection peer PID to replace an obsolete terminal client.
+pub const HostProcessReading = union(enum) {
+    ready: ObservedHost,
+    incompatible: c_int,
+
+    pub fn pid(self: HostProcessReading) c_int {
+        return switch (self) {
+            .ready => |observed| observed.pid,
+            .incompatible => |peer| peer,
+        };
+    }
+};
+
+pub fn observeHostProcessForUpgrade(io: std.Io, store_path: []const u8, deadline: ?i128) !HostProcessReading {
+    return switch (try readHostControlProfile(io, store_path, .current, deadline, .upgrade)) {
+        .compatible => |observed| .{ .ready = .{ .ready = observed.facts, .pid = observed.pid } },
+        .incompatible => |peer| .{ .incompatible = peer },
+    };
+}
+
 /// Control facts only: a historical profile never establishes ordinary readiness.
 pub const HostControlObservation = struct {
     profile: protocol_reply.HostInfoProfile,
@@ -614,6 +635,16 @@ fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
 
 /// Reobserves exactly one read-only profile; never falls back to a different peer protocol.
 pub fn observeHostForUpgradeProfile(io: std.Io, store_path: []const u8, profile: protocol_reply.HostInfoProfile, deadline: ?i128) !HostControlObservation {
+    return switch (try readHostControlProfile(io, store_path, profile, deadline, .strict)) {
+        .compatible => |observed| observed,
+        .incompatible => error.WrongWireVersion,
+    };
+}
+
+const HostControlReading = union(enum) { compatible: HostControlObservation, incompatible: c_int };
+const HostObservationMode = enum { strict, upgrade };
+
+fn readHostControlProfile(io: std.Io, store_path: []const u8, profile: protocol_reply.HostInfoProfile, deadline: ?i128, mode: HostObservationMode) !HostControlReading {
     const until = hostObservationDeadline(io, deadline);
     const paths = try platform.resolveClientPaths(io, store_path);
     const requests: Requests = .{ .io = io };
@@ -623,14 +654,45 @@ pub fn observeHostForUpgradeProfile(io: std.Io, store_path: []const u8, profile:
     const pid = try @import("host_identity.zig").peer(fd);
     try uploadHostInfoRequest(requests, fd, paths.store.slice(), profile, until);
     var reply_buffer: ReplyBuffer = .{};
-    const head = try readResponseHeadForProfileUntil(requests, fd, .{}, until, profile);
+    const envelope = try readResponseEnvelopeForProfileUntil(requests, fd, .{}, until, profile);
+    // Strict and historical observers retain their original wire error. Only
+    // pinned Upgrade activation can consume authenticated mismatch evidence.
+    if (!envelope.wire_matches and mode == .strict) return error.WrongWireVersion;
+    const head = envelope.head;
     if (head.kind != .command_json) return error.InvalidResponse;
+    if (!envelope.wire_matches and head.status != 200 and head.status != 400) return error.InvalidHostInfo;
     const reply = try readCommandBodyUntil(requests, fd, head, &reply_buffer, .{}, until);
+    if (!envelope.wire_matches) {
+        if (!hostProtocolMismatch(envelope, reply.body, paths.store.slice())) return error.InvalidHostInfo;
+        return .{ .incompatible = pid };
+    }
     if (reply.status != 200) return error.InvalidHostInfo;
-    return .{
+    return .{ .compatible = .{
         .profile = profile,
         .facts = try protocol_reply.parseHostInfoForProfile(reply.body, paths.store.slice(), profile),
         .pid = pid,
+    } };
+}
+
+// A foreign wire header alone says nothing about a 500/503 or malformed
+// body. Retain the stable discovery/error envelope, not foreign readiness
+// facts. In particular the server's real 400 rejection code is WrongWireVersion.
+fn hostProtocolMismatch(envelope: ResponseEnvelope, body: []const u8, store: []const u8) bool {
+    if (envelope.wire.len == 0) return false;
+    const Body = struct { version: []const u8, type: []const u8, store: ?[]const u8 = null, code: ?[]const u8 = null };
+    var memory: [2 * protocol.max_store_bytes + 256]u8 = undefined;
+    var fixed: std.heap.FixedBufferAllocator = .init(&memory);
+    const decoded = std.json.parseFromSliceLeaky(Body, fixed.allocator(), body, .{
+        .ignore_unknown_fields = true,
+        .max_value_len = protocol.max_store_bytes,
+    }) catch return false;
+    if (!std.mem.eql(u8, decoded.version, envelope.wire.slice())) return false;
+    return switch (envelope.head.status) {
+        200 => std.mem.eql(u8, decoded.type, "host_info") and decoded.code == null and
+            std.mem.eql(u8, decoded.store orelse return false, store),
+        400 => std.mem.eql(u8, decoded.type, "invocation_error") and
+            std.mem.eql(u8, decoded.code orelse return false, "WrongWireVersion"),
+        else => false,
     };
 }
 
@@ -645,8 +707,61 @@ fn uploadHostInfoRequest(requests: Requests, fd: std.posix.fd_t, store: []const 
     try writeAllRequest(requests, fd, body.slice(), until);
 }
 
+test "upgrade Host observation validates exact foreign rejection envelopes" {
+    var envelope: ResponseEnvelope = .{
+        .head = .{ .status = 400, .content_length = 0, .kind = .command_json },
+        .wire_matches = false,
+    };
+    const foreign_wire = comptime protocol_reply.HostInfoProfile.released_9.wire();
+    try envelope.wire.set(foreign_wire);
+    const rejected = "{\"version\":\"" ++ foreign_wire ++ "\",\"type\":\"invocation_error\",\"code\":\"WrongWireVersion\"}";
+    try std.testing.expect(hostProtocolMismatch(envelope, rejected, "/store"));
+    for ([_][]const u8{
+        "{",
+        rejected ++ "trailing",
+        "{\"version\":\"" ++ foreign_wire ++ "\",\"type\":\"invocation_error\"}",
+        "{\"version\":\"" ++ foreign_wire ++ "\",\"type\":\"invocation_error\",\"code\":\"wrongwireversion\"}",
+        "{\"version\":\"" ++ foreign_wire ++ "\",\"type\":\"invocation_error\",\"code\":\"SomeOtherFailure\"}",
+        "{\"version\":\"" ++ foreign_wire ++ "\",\"type\":\"host_unavailable\",\"code\":\"WrongWireVersion\"}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"invocation_error\",\"code\":\"WrongWireVersion\"}",
+        "{\"version\":\"" ++ foreign_wire ++ "\",\"type\":\"invocation_error\",\"code\":\"WrongWireVersion\",\"code\":\"SomeOtherFailure\"}",
+    }) |body| try std.testing.expect(!hostProtocolMismatch(envelope, body, "/store"));
+    for ([_]u16{ 409, 500, 503 }) |status| {
+        envelope.head.status = status;
+        try std.testing.expect(!hostProtocolMismatch(envelope, rejected, "/store"));
+    }
+    envelope.head.status = 200;
+    const foreign = "{\"version\":\"" ++ foreign_wire ++ "\",\"type\":\"host_info\",\"store\":\"/store\"}";
+    try std.testing.expect(hostProtocolMismatch(envelope, foreign, "/store"));
+    try std.testing.expect(!hostProtocolMismatch(envelope, foreign, "/other"));
+    try std.testing.expect(!hostProtocolMismatch(envelope, rejected, "/store"));
+}
+
 test "upgrade Host observation uses exact read-only profiles on each authenticated connection" {
-    const Mode = enum { current, historical, strict, exact, body_mismatch, malformed_header, unavailable, unknown, budget };
+    const Mode = enum {
+        current,
+        historical,
+        strict,
+        exact,
+        body_mismatch,
+        malformed_header,
+        unavailable,
+        unknown,
+        budget,
+        activation_current,
+        activation_200,
+        activation_400,
+        activation_bad_rejection,
+        activation_500,
+        activation_503,
+        activation_malformed,
+        activation_truncated,
+        activation_bad_body,
+        activation_body_version,
+        activation_wrong_store,
+        activation_oversize,
+        strict_503,
+    };
     const Phase = enum { temporary_store, store_permissions, store_path, lease, runtime, listener, peer_spawn, observation, verification, expired_current, expired_released_9 };
     const Clock = struct {
         var nanoseconds: std.atomic.Value(i64) = .init(0);
@@ -723,20 +838,62 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                     }
                 }
                 const response_wire = switch (self.mode) {
-                    .current, .unavailable => protocol.wire_version,
+                    .current, .unavailable, .activation_current => protocol.wire_version,
                     .unknown => "8",
                     else => "9",
                 };
-                const body_wire = if (self.mode == .body_mismatch) protocol.wire_version else response_wire;
+                const body_wire = if (self.mode == .body_mismatch or self.mode == .activation_body_version) protocol.wire_version else response_wire;
                 var body_buffer: [1024]u8 = undefined;
-                const body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}}}}", .{ body_wire, self.store });
+                const host_body = try std.fmt.bufPrint(&body_buffer, "{{\"version\":\"{s}\",\"type\":\"host_info\",\"store\":\"{s}\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{{\"bash\":true,\"providers\":{{\"codex\":\"endpoint\",\"openai\":\"unserved\"{s}}}}}}}", .{ body_wire, if (self.mode == .activation_wrong_store) "/wrong-store" else self.store, if (std.mem.eql(u8, response_wire, protocol.wire_version)) ",\"chatgpt\":\"unserved\"" else "" });
+                var error_buffer: [256]u8 = undefined;
+                const body: []const u8 = switch (self.mode) {
+                    .activation_400, .activation_bad_rejection, .activation_500, .activation_503, .strict_503 => try std.fmt.bufPrint(&error_buffer, "{{\"version\":\"{s}\",\"type\":\"invocation_error\",\"code\":\"{s}\"}}", .{ response_wire, if (self.mode == .activation_bad_rejection) "SomeOtherFailure" else "WrongWireVersion" }),
+                    .activation_bad_body => "{",
+                    else => host_body,
+                };
+                const status: []const u8 = switch (self.mode) {
+                    .activation_400, .activation_bad_rejection => "400 Bad Request",
+                    .activation_500 => "500 Failure",
+                    .unavailable, .activation_503, .strict_503 => "503 Unavailable",
+                    else => "200 OK",
+                };
+                const length = if (self.mode == .activation_oversize) protocol.max_response_bytes + 1 else body.len;
+                const sent = if (self.mode == .activation_truncated) body[0 .. body.len - 1] else body;
                 var response_buffer: [2048]u8 = undefined;
-                const response = try std.fmt.bufPrint(&response_buffer, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: {s}\r\n{s}\r\n{s}", .{ if (self.mode == .unavailable) "503 Unavailable" else "200 OK", body.len, response_wire, if (self.mode == .malformed_header) "Content-Length: 0\r\n" else "", body });
+                const response = try std.fmt.bufPrint(&response_buffer, "HTTP/1.1 {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nX-Rui-Wire-Version: {s}\r\n{s}\r\n{s}", .{ status, length, response_wire, if (self.mode == .malformed_header or self.mode == .activation_malformed) "Content-Length: 0\r\n" else "", sent });
                 try writeAllRequest(.{ .io = io }, fd, response, until);
             }
         }
     };
     const Run = struct {
+        fn observe(io: std.Io, root: []const u8, mode: Mode) !HostControlReading {
+            switch (mode) {
+                .activation_current,
+                .activation_200,
+                .activation_400,
+                .activation_bad_rejection,
+                .activation_500,
+                .activation_503,
+                .activation_malformed,
+                .activation_truncated,
+                .activation_bad_body,
+                .activation_body_version,
+                .activation_wrong_store,
+                .activation_oversize,
+                => return switch (try observeHostProcessForUpgrade(io, root, null)) {
+                    .ready => |observed| .{ .compatible = .{ .profile = .current, .facts = observed.ready, .pid = observed.pid } },
+                    .incompatible => |pid| .{ .incompatible = pid },
+                },
+                else => {},
+            }
+            const observed = switch (mode) {
+                .strict, .strict_503 => if (observeHostProcess(io, root, null)) |_| return error.TestUnexpectedResult else |err| return err,
+                .exact => try observeHostForUpgradeProfile(io, root, .released_9, null),
+                else => try observeHostForUpgrade(io, root, null),
+            };
+            return .{ .compatible = observed };
+        }
+
         fn execute(phase: *Phase, active_mode: *?Mode) !void {
             const io = std.testing.io;
             var tmp = std.testing.tmpDir(.{ .iterate = true });
@@ -752,7 +909,7 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
             phase.* = .runtime;
             try lease.prepareForServing(false);
             const paths = lease.paths;
-            for (std.meta.tags(Mode)) |mode| {
+            for (std.enums.values(Mode)) |mode| {
                 active_mode.* = mode;
                 phase.* = .listener;
                 var listener = try (try std.Io.net.UnixAddress.init(paths.socket.slice())).listen(io, .{});
@@ -774,30 +931,43 @@ test "upgrade Host observation uses exact read-only profiles on each authenticat
                 clock_vtable.now = Clock.now;
                 const observation_io: std.Io = if (mode == .budget) .{ .userdata = io.userdata, .vtable = &clock_vtable } else io;
                 phase.* = .observation;
-                const result: anyerror!HostControlObservation = switch (mode) {
-                    .strict => if (observeHostProcess(io, root, null)) |_| error.TestUnexpectedResult else |err| err,
-                    .exact => observeHostForUpgradeProfile(io, root, .released_9, null),
-                    else => observeHostForUpgrade(observation_io, root, null),
-                };
+                const result = observe(observation_io, root, mode);
                 Clock.observation_finished.set(io);
                 thread.join();
                 joined = true;
                 phase.* = .verification;
                 errdefer {
-                    if (result) |observed| {
-                        std.debug.print("upgrade observation failure phase={s} mode={s} result.profile={s} result.pid={d} peer.failure={any} seen={d}\n", .{ @tagName(phase.*), @tagName(mode), @tagName(observed.profile), observed.pid, peer.failure, peer.seen });
+                    if (result) |reading| {
+                        std.debug.print("upgrade observation failure phase={s} mode={s} result={s} peer.failure={any} seen={d}\n", .{ @tagName(phase.*), @tagName(mode), @tagName(reading), peer.failure, peer.seen });
                     } else |observation_error| {
                         std.debug.print("upgrade observation failure phase={s} mode={s} result.error={s} peer.failure={any} seen={d}\n", .{ @tagName(phase.*), @tagName(mode), @errorName(observation_error), peer.failure, peer.seen });
                     }
                 }
                 switch (mode) {
-                    .strict, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
+                    .strict, .strict_503, .unknown => try std.testing.expectError(error.WrongWireVersion, result),
                     .budget => try std.testing.expectError(error.ResponseInactive, result),
-                    .body_mismatch, .unavailable => try std.testing.expectError(error.InvalidHostInfo, result),
-                    .malformed_header => try std.testing.expectError(error.InvalidResponse, result),
-                    .current, .historical, .exact => {
-                        const observed = try result;
-                        try std.testing.expectEqual(if (mode == .current) protocol_reply.HostInfoProfile.current else .released_9, observed.profile);
+                    .body_mismatch,
+                    .unavailable,
+                    .activation_bad_rejection,
+                    .activation_500,
+                    .activation_503,
+                    .activation_bad_body,
+                    .activation_body_version,
+                    .activation_wrong_store,
+                    => try std.testing.expectError(error.InvalidHostInfo, result),
+                    .malformed_header, .activation_malformed => try std.testing.expectError(error.InvalidResponse, result),
+                    .activation_truncated => try std.testing.expectError(error.TruncatedResponse, result),
+                    .activation_oversize => try std.testing.expectError(error.ResponseTooLarge, result),
+                    .activation_200, .activation_400 => {
+                        const reading = try result;
+                        try std.testing.expect(reading == .incompatible);
+                        try std.testing.expectEqual(std.c.getpid(), reading.incompatible);
+                    },
+                    .current, .historical, .exact, .activation_current => {
+                        const reading = try result;
+                        try std.testing.expect(reading == .compatible);
+                        const observed = reading.compatible;
+                        try std.testing.expectEqual(if (mode == .current or mode == .activation_current) protocol_reply.HostInfoProfile.current else .released_9, observed.profile);
                         try std.testing.expectEqual(std.c.getpid(), observed.pid);
                         try std.testing.expect(observed.facts.store.eql(paths.store.slice()));
                         try std.testing.expectEqual(@as(usize, 17), observed.facts.active_capacity);
@@ -2242,6 +2412,21 @@ fn readResponseHeadUntil(requests: Requests, fd: std.posix.fd_t, timing: Respons
 }
 
 fn readResponseHeadForProfileUntil(requests: Requests, fd: std.posix.fd_t, timing: ResponseTiming, until: ?i128, profile: protocol_reply.HostInfoProfile) !ResponseHead {
+    const envelope = try readResponseEnvelopeForProfileUntil(requests, fd, timing, until, profile);
+    if (!envelope.wire_matches) return error.WrongWireVersion;
+    return envelope.head;
+}
+
+const ResponseEnvelope = struct {
+    head: ResponseHead,
+    wire_matches: bool,
+    // Discovery already uses an eight-byte version field. An unrepresentable
+    // foreign value remains WrongWireVersion for strict callers, never proof
+    // of a well-formed protocol rejection for Upgrade.
+    wire: protocol.Bounded(8) = .{},
+};
+
+fn readResponseEnvelopeForProfileUntil(requests: Requests, fd: std.posix.fd_t, timing: ResponseTiming, until: ?i128, profile: protocol_reply.HostInfoProfile) !ResponseEnvelope {
     var header_buffer: [protocol.max_header_bytes]u8 = undefined;
     const first_deadline = timing.deadline(std.Io.Clock.Timestamp.now(requests.io, .awake).raw.nanoseconds, until, false);
     const first_count = try readRequest(requests, fd, header_buffer[0..1], first_deadline);
@@ -2254,7 +2439,7 @@ fn readResponseHeadForProfileUntil(requests: Requests, fd: std.posix.fd_t, timin
         if (count == 0) return requests.transportFailure(error.TruncatedResponse);
         used += count;
     } else return error.ResponseHeaderTooLarge;
-    return parseResponseHeadForProfile(header_buffer[0..used], profile);
+    return parseResponseEnvelopeForProfile(header_buffer[0..used], profile);
 }
 
 // Rui uses Content-Length framing. Validate the entire bounded header before
@@ -2264,6 +2449,12 @@ fn parseResponseHead(bytes: []const u8) !ResponseHead {
 }
 
 fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostInfoProfile) !ResponseHead {
+    const envelope = try parseResponseEnvelopeForProfile(bytes, profile);
+    if (!envelope.wire_matches) return error.WrongWireVersion;
+    return envelope.head;
+}
+
+fn parseResponseEnvelopeForProfile(bytes: []const u8, profile: protocol_reply.HostInfoProfile) !ResponseEnvelope {
     if (!std.mem.endsWith(u8, bytes, "\r\n\r\n")) return error.InvalidResponse;
     var lines = std.mem.splitSequence(u8, bytes[0 .. bytes.len - 4], "\r\n");
     const status_line = lines.next() orelse return error.InvalidResponse;
@@ -2275,6 +2466,7 @@ fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostIn
     const status = try std.fmt.parseInt(u16, code, 10);
     var length: ?u64 = null;
     var wire_ok: ?bool = null;
+    var wire: protocol.Bounded(8) = .{};
     var kind: ?ResponseKind = null;
     var total: ?u64 = null;
     var next: ?u64 = null;
@@ -2299,6 +2491,7 @@ fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostIn
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Wire-Version")) {
             if (wire_ok != null) return error.InvalidResponse;
             wire_ok = std.mem.eql(u8, value, profile.wire());
+            wire.set(value) catch {};
         } else if (std.ascii.eqlIgnoreCase(name, "X-Rui-Content-Bytes")) {
             if (total != null) return error.InvalidResponse;
             total = try std.fmt.parseInt(u64, value, 10);
@@ -2328,9 +2521,7 @@ fn parseResponseHeadForProfile(bytes: []const u8, profile: protocol_reply.HostIn
         .total = total,
         .next = next,
     };
-    if (wire_ok == null) return error.InvalidResponse;
-    if (!wire_ok.?) return error.WrongWireVersion;
-    return head;
+    return .{ .head = head, .wire_matches = wire_ok orelse return error.InvalidResponse, .wire = wire };
 }
 
 fn readCommandResponse(fd: std.posix.fd_t, reply_buffer: *ReplyBuffer) !protocol_reply.CommandReply {
@@ -2538,7 +2729,7 @@ const empty_test_response =
 
 test "upgrade Host observation encoder sends exactly the selected read-only profile" {
     const io = std.testing.io;
-    inline for (std.meta.tags(protocol_reply.HostInfoProfile)) |profile| {
+    inline for (std.enums.values(protocol_reply.HostInfoProfile)) |profile| {
         const sockets = try socketPair();
         defer closeTestDescriptor(sockets[0]);
         defer closeTestDescriptor(sockets[1]);
@@ -2568,7 +2759,10 @@ test "upgrade Host observation headers preserve strict framing and profile ident
     try std.testing.expectError(error.WrongWireVersion, parseResponseHead(old));
     try std.testing.expectError(error.WrongWireVersion, parseResponseHeadForProfile(empty_test_response, .released_9));
     _ = try parseResponseHead(empty_test_response);
-    inline for (std.meta.tags(protocol_reply.HostInfoProfile)) |profile| {
+    const long_wire = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\nX-Rui-Wire-Version: unrecognized-long-wire-version\r\n\r\n";
+    try std.testing.expectError(error.WrongWireVersion, parseResponseHead(long_wire));
+    inline for (std.enums.values(protocol_reply.HostInfoProfile)) |profile| {
+        try std.testing.expectError(error.WrongWireVersion, parseResponseHeadForProfile(long_wire, profile));
         const good = if (profile == .released_9) old else empty_test_response;
         for ([_]struct { from: []const u8, to: []const u8 }{
             .{ .from = "Content-Length: 0", .to = "Content-Length: 0\r\nContent-Length: 0" },

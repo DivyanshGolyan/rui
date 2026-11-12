@@ -352,7 +352,7 @@ test "the status row shows the notice under what needs the person, and preserves
     var transcript: @import("DocumentView.zig") = .{ .document = document };
     var facade: AppScreen.Content = .{ .shown = transcript.widget() };
     var screen: AppScreen.Session = .{ .content = &facade, .input = &input, .userdata = &recorder, .on_event = Recorder.event };
-    const palette: vxfw.Text = .{ .text = "/model" };
+    const palette: vxfw.Text = .{ .text = "/setup" };
 
     self.place(&screen, .{ .width = 80, .notice = "Copied 12 lines", .overlay = palette.widget() });
     try std.testing.expectEqualStrings("Copied 12 lines", self.status.bar.left);

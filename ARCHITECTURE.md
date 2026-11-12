@@ -123,7 +123,7 @@ This source map locates the existing owners; file boundaries are not part of the
 | Bash process and output lifetime | `src/bash.zig`: preparation, launch, process-group retirement, capture and cleanup. `src/BashLifecycle.zig` owns the value transitions those handles follow: process phases, pipe terminal reasons, stop reason, signaling facts and resolution. |
 | Temporary storage | `src/ScratchBudget.zig` accounts for bytes; `src/named_scratch.zig` retains failed reclamation; `src/output_retention.zig` owns disposable-output retention and eviction. |
 | Product defaults | `src/product_defaults.zig`: values supplied for omitted settings, namely default Active and intake capacity, fresh-Session tools and permission mode, the recommended model and compaction policy. |
-| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name a person knows it by, its sign-in name, whether its credential is a sign-in or a key, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
+| Provider facts | `src/provider_name.zig`: one table of what each provider fixes (its codec, the name prose knows it by ("ChatGPT (device code)", "ChatGPT", "OpenAI"), the short label of its sign-in where one is chosen or read beside a model ("Codex", "ChatGPT", "API key"), whether its credential is a sign-in or a key, whether `rui auth login` signs it in, and whether its model list is Rui's catalog or fetched live). Whether a Session may ask for structured output depends on the sign-in source, so `src/providers.zig` answers it. Core asks a provider for a fact and never switches on which provider it is; [provider_locality.py](tests/ci/provider_locality.py) fails CI when core production code imports a sign-in file, names a ChatGPT header, endpoint or OpenAI error code, or names a provider by its tag. |
 | Model capability | `src/model_catalog.zig`: identifier syntax, the reasoning-effort grammar and the shipped models.dev facts; the Store selects saved facts when a source exists, otherwise shipped facts. `src/model_capability.zig` derives capability from the operation's supplied facts (listed efforts and optional context window). |
 | Session work | `src/session_work.zig` derives each Session's work state, a functional core; `src/store/domain/report.zig` reads its inputs under one Store lock. |
 | Session change hint | `src/change_ring.zig`: the fixed in-memory ring of recent (Session, commit, Workspace key) entries behind Session listing's `since`. `src/store/Store.zig` records into it where its commit counter advances. |
@@ -1097,6 +1097,7 @@ Accept completed items in provider output order, not token-delta arrival order.
 Require successful `response.completed` before settlement.
 The managed route can send an empty `response.completed.output` after completed stream items; this does not discard those items, while any nonempty terminal output must match all of them in order, kind, ID and exact raw item bytes, including unknown open fields and JSON spelling.
 The one exception is reasoning and compaction items: the provider encrypts their content afresh for `response.completed`, so they agree by order, kind and ID, and the streamed copy is kept.
+A superseded compaction prefix has no kept record, so its entries in a nonempty list are counted but not compared.
 Failed, incomplete, disconnected or contradictory streams cannot publish a successful candidate.
 Keep response ID, provider request correlation when supplied, terminal status, usage and reported model evidence with the producing Operation/execution; none is a replay input item.
 
@@ -1181,6 +1182,14 @@ A missing or unreadable key fails startup.
 A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resend; the Session and overview say to save a new key and restart the Host, which keeps the key it started with.
 An auto-started Host adds `--provider openai` whenever a usable key is saved.
 
+`--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
+It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
+Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
+The terminal cannot sign it in yet: its provider fact has no login, so `rui auth login chatgpt` changes nothing and says so, the Host line and the overview's missing-sign-in notice say the terminal cannot sign in to it instead of naming a command, and its band reads only "ChatGPT sign-in expired." so the list pane keeps it whole.
+The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
+An auto-started Host adds `--provider chatgpt` whenever that credential is usable.
+`subscription_sharing_usage_limit_exceeded` and `subscription_sharing_usage_unavailable` are quota refusals, never retried.
+
 The credential owner serializes mutations across Hosts and login processes.
 Login advances a generation.
 A compact access token with `exp` refreshes at or within 300 seconds of expiry; otherwise Rui refreshes eight days after the last successful exchange.
@@ -1248,11 +1257,15 @@ V1 depends on neither that endpoint nor automatic `context_management` support.
 Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead ends with the top-level `"tool_choice":"none","context_management":[{"type":"compaction","compact_threshold":1000}]`, after the history span, so the span and its carry are unchanged.
 The provider refuses a threshold under 1000 tokens, and a compaction Operation runs only on a large context, so 1000 always compacts; `tool_choice` keeps the reply the provider writes while compacting from calling a function or searching the web.
 With `context_management` the provider's response is `compaction`, `message`, `compaction`, and the last compaction item alone carries the whole memory: replaying only it keeps the context.
-The rule above still expects exactly one compaction item, so a version-three compaction does not settle yet; no provider pins `openai-responses/3`, and accepting that shape is a separate decision.
+Only `chatgpt` pins `openai-responses/3`, so a ChatGPT plan Session's `compaction`, `message`, `compaction` response settles on its last compaction item: a later compaction item supersedes everything before it, as the rule below states.
 
-Require a completed response with exactly one nonempty supported compaction item for explicit compaction.
-Store the complete ordered output once on that Operation.
-The base anchor is its Operation ID and the compaction item's ordinal within that canonical output.
+Require a completed response with at least one nonempty supported compaction item for explicit compaction.
+The last compaction item is the new base.
+A later compaction item supersedes all output before it, the earlier compaction item included: the response interpreter keeps no record of it, so it is never stored, replayed, selected as the answer or forwarded.
+The first compaction item supersedes nothing, so a response with one compaction item is unchanged, whatever comes before or after it.
+Superseded items are not stored because one owner then decides what replays: the Store receives exactly one compaction item, and every later reader (the base anchor, history replay, the feed's compaction row, drop-unit accounting and the history memo) keeps reading that one item, as before.
+Store the kept output once on that Operation: the whole response when it holds one compaction item, else the last compaction item through the end of the response.
+The base anchor is its Operation ID and the compaction item's ordinal within that output.
 
 Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix.
 Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body.
@@ -1267,7 +1280,7 @@ Result acceptance determines when the new base becomes available, not what it co
 Pending messages and later instruction updates remain outside that frontier and appear once in subsequent context.
 
 Keep call/result pairs intact when selecting the frontier.
-Missing/duplicate compaction, unknown compaction variants, truncated output and unresolved/failed compaction cannot advance it.
+Missing compaction, unknown compaction variants, truncated output and unresolved/failed compaction cannot advance it.
 If a supported assistant-response protocol later enables automatic compaction, its base must likewise be a slice of that producing Operation, retaining every item after the anchor; it cannot invent a separate compaction result or drop later calls.
 That route needs its own capability evidence before enablement.
 Do not copy another client's message truncation, local-summary or model-fallback policy.
@@ -1579,15 +1592,44 @@ The Version row of app settings starts an Upgrade run, available from the overvi
 The overview owns the one run and runs its worker once its own and the conversation's Client work has settled; both screens hand Esc to that run.
 It checks (`Checking for updates…`), then installs a found release at once, with no Enter step even while Sessions work, and its first line says what the restart will do: `Upgrading to 0.60.0 · restarts the Host (2 Sessions working) · esc cancels`.
 Esc cancels while it checks or prepares, before Esc clears the draft, and not once publishing starts (`Publishing; cancelling no longer rolls back`); the run then says `Restarting the Host…` and ends `Upgraded to 0.60.0 · Host restarted`, or as a notice when it installs nothing.
-A release the running client cannot use leaves `Rui 0.61.0 installed · restart rui to continue · your draft is kept until you leave` on the status bar until another Version-row activation; longer text, such as PATH warnings, the full check and retained cleanup paths, prints with the departure message.
+When this run installs a different Rui, compatible or incompatible with the old client, the terminal leaves through its ordinary cancellation, save-flush and restoration path, then the CLI replaces its process image with the published selection's `bin/rui` (same PID and terminal, never PATH or the old executable).
+It reopens the overview or the same conversation (`Overview.Options.open`), pinning the old client's actual canonical Store explicitly and preserving its explicit `--provider` and `--model` selectors, the overview draft and every chat draft, including the open editor's bytes, caret, recall anchor and rejection state.
+A changed saved Store cannot redirect this restart.
+The new screen shows the run's ending line; scroll position resets.
+A run that installs nothing does not relaunch, even if it activates an already-selected Host build.
+An unresolved capture or recovery handle, failed save, retained cleanup path, run failure, activation recovery/owner instruction or PATH warning prevents relaunch: ordinary departure guidance remains intact, including the old-client restart instruction when needed.
+Old-client-only protocol/restart holds do not themselves prevent relaunch: a bounded protocol rejection from the exact launched Host (same peer PID, process generation, pinned executable and target version) is distinct from activation failure or uncertainty, and grants no ordinary-request readiness or invented Host facts.
+Timeouts, malformed replies, failed activation and uncertain/replacement identities still retain their recovery guidance.
+Guidance already known keeps the old screen open; resolving it later does not turn an ordinary quit into a delayed relaunch, and a later successful run cannot swallow an earlier retained report.
+If handoff preparation or process replacement fails, the ordinary departure remains; replacement failure also says the new Rui could not be started.
+Shell `rui upgrade` never replaces another terminal's client.
+Divyansh chose in-place TUI restart on 2026-11-12, superseding manual restart after a successful inline installation.
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
 The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another Version-row activation is a no-op by it alone.
-A conversation keeps only that its own reading of the Session predates a run: after the run it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
-One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
+A conversation keeps only that its own reading of the Session predates a run: when the old client continues after a run that does not relaunch, it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
+One pure core, `upgrade_status`, turns that value into the Version field and status bar's line for both screens.
+`UpgradeJob.ending` alone derives the small failure reason from the run error: a download failure says "couldn't reach GitHub" even while settings hides the status bar. The restored shell report retains curl's last stderr line.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
 Restart can interrupt work in every Session in that Store, not other Stores.
 No running Host means install only.
+
+The TUI handoff is a cross-version contract: the departing binary writes it and the selected binary reads it.
+`RUI_RELAUNCH` names an absolute `HOME/.rui-relaunch/<32 lowercase hexadecimal digits>.json` path; the directory is current-user-owned mode 0700, the exclusive random file is a current-user-owned regular file of mode 0600 with one link, and neither final component is followed through a symlink.
+It belongs neither to the Store nor to a shared temporary directory.
+Before fresh-Session admission, the CLI's one relaunch-startup owner consumes the environment value once, authenticates the location and file, unlinks the file before accepting its contents, and ignores missing, unreadable, malformed, unsupported-version or nonmatching canonical Store handoffs.
+A valid handoff reenters existing work through the same startup owner as `rui session resume`, opening its conversation when present or the overview otherwise; unreadable preferences and absent local provider credentials cannot trigger fresh-session admission or login.
+The CLI owns the decoded payload through that synchronous run; the overview copies its drafts and ending line before terminal startup and never rereads the environment or handoff file.
+A failed cleanup names the retained private path rather than silently losing cleanup guidance.
+
+Version 1 is compact UTF-8 JSON, with these fields in this order and explicit null/default fields:
+`{"v":1,"store":"/store","open":null,"overview":{"bytes":"","cursor":0,"anchor":null,"rejected":null},"drafts":[],"line":""}`.
+`open` is null or the six-byte Session ID to open; each `drafts` entry is `{"id":"k7m2qx","snapshot":<snapshot>}`, with no repeated ID.
+`overview` and each `snapshot` contain draft text in `bytes`, a byte-offset `cursor` at a UTF-8 boundary, a nullable recall `anchor` (`{"position":<u64>,"end":<u64>}`), and nullable `keymap.Refusal` tag text in `rejected`.
+`line` is the run's new-client ending: an incompatible old-client ending becomes `Upgraded to <version>` rather than asking for another restart; only a confirmed Host restart adds `Host restarted`.
+Each draft is bounded by `SessionInput.capacity`, the Store and ending line by their existing owner capacities, and the sparse draft population by the Session ID domain, not a smaller handoff-only limit.
+The encoded size bound allows six JSON-escaped bytes per input byte plus fixed field/integer overhead for that population; the reader streams into owned decoded drafts rather than allocating the file's advertised size.
+The exact v1 bytes are pinned in `relaunch_handoff.zig`.
 
 The thin upgrade coordinator composes `InstallationOutcome` separately from HostLifecycle `ActivationOutcome`.
 After publication it pauses only the exact observed Host instance, waits for lease retirement, starts the pinned target identity with preserved settings and verifies readiness before claiming activation.
@@ -1601,10 +1643,12 @@ Only an explicit wrong-wire response permits the historical read-only profile; m
 A historical managed Host is paused through its retained executable with the captured exact instance, then the same Store lease must retire.
 Target readiness still requires the current protocol and the pinned launch identity; historical control facts never grant Session access.
 Target configuration, exact-stop support, the current launch helper and private launch buffers are prepared before interruption.
-A terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
+When departure guidance prevents relaunch, a terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
 
 `src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
-A `release_candidate` pins validated immutable release identity, assets and digest before download.
+A `release_candidate` follows the HTTPS redirect chain from `https://ruicode.com/releases/latest` and reads curl's effective URL, requiring the exact `https://github.com/DivyanshGolyan/rui/releases/tag/v` prefix and a canonical stable version.
+It derives pinned SHA256SUMS and archive URLs on `https://ruicode.com/releases/download/vX.Y.Z/`, without GitHub's rate-limited JSON API. The archive must appear exactly once in SHA256SUMS; that membership and digest pin the candidate before archive download.
+A nonzero curl exit is a distinct download failure, not release validation or preparation failure; nothing has been published.
 The native bootstrap can download pinned SHA256SUMS and archive assets for historical v0.56.4 using the current native publication owner, without executing its old uncooperative installer.
 A permanent prefix-scoped lock serializes participating writers, with final managed eligibility and numeric release-order checks under the lock.
 External historical installers do not participate and have no new serialization or no-downgrade guarantee.
@@ -1689,7 +1733,7 @@ Request headers come from two owners.
 The codec writes its own once per request from the frozen settings, which carry the Session's affinity, into the prepared request's own bounded storage: at most 8, whose values total at most 192 bytes.
 Each name is a tag of the codec's constant `RequestHeader` enum, so the request stores only its index and the 192 bytes count values alone.
 Each name is a lowercase token that names no field the Host or h2 writes itself (`content-type`, the credential's `authorization` and `chatgpt-account-id`, `user-agent`, `x-openai-fedramp`, every codec's routing header, and h2's `content-length`, `accept-encoding`, `host` and connection fields) and no earlier header, and each value is printable ASCII without a leading or trailing space; a built-in codec's headers are tested against these rules over its settings domain rather than checked at runtime.
-The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT sign-in's `authorization` and `chatgpt-account-id`, or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
+The Host writes the rest: a transfer sends `content-type`, then the codec's headers in the codec's order, then the sign-in source's fields (a ChatGPT device sign-in's `authorization` and `chatgpt-account-id`, or a ChatGPT plan sign-in's or a key's `authorization`), `user-agent`, `x-openai-fedramp` when a ChatGPT binding is FedRAMP and, for any credential, the Turn's routing value under the codec's routing header when it has one.
 A route without a credential sends the codec's headers and no credential-path fields.
 To classify an HTTP error body, the shell maps the sealed body read-only and gives it whole, as one slice, to the classifier of the codec the request was encoded with, with scratch the shell lends for that call and the classifier writes before it reads.
 The classifier writes its answer into one value the shell lends: context overflow, or else the `codec_abi.Refusal` its code names with the reset time when given, and the report's `code` and `message` parts as ranges of the body with a pinned escape.
@@ -1702,7 +1746,7 @@ A sealed body shorter than its recorded length, or one that fails to map, stays 
 To interpret a response, the shell maps the sealed capture read-only, frames its SSE lines and writes each event's data to charged event-data scratch, which it maps read-only once at the capture's length, which decoded data never exceeds, so each event reaches the codec whole as one slice of that map, however large; a failure to map it fails the response `response_data_failed`, as a failed write does.
 The codec answers each event with one value, in scratch the shell lends and the codec writes before it reads: an event it ignores, a stream's end, an added item's identity, an accepted output item, the completed response or the provider's failure, or the reason it rejects the event; an output item and the completed response name cursors from which the shell asks for their bag members and parts one at a time, each a range of the event.
 The codec's stream state is a small value the shell stores between events.
-The shell keeps every rule across items and events: it decodes and hashes what the codec names, keeps the answer selection and the call and compaction counts, records metadata and evidence, compares the completed output list with the item records it wrote, mapped read-only, and maps each reason to its rejection.
+The shell keeps every rule across items and events: it decodes and hashes what the codec names, keeps the answer selection, the call count and the compaction base (dropping a superseded prefix), records metadata and evidence, compares the completed output list with the item records it wrote, mapped read-only, and maps each reason to its rejection.
 An execution receives its admitted Operation/Attempt binding, one-shot permit, immutable input readers and local cancellation control; it cannot choose another descriptor or read current Session settings to replace saved inputs.
 Keep the permit distinct from the read access needed for validation or permission preview.
 The reserved execution owner retains this binding before fallible post-commit preparation begins; preparation, authentication and launch failures remain attributable to that Attempt under its failure or canonical-shutdown rule.
@@ -1814,7 +1858,7 @@ Malformed JSON or framing, explicit incomplete generation and contradictory comp
 No failed prefix becomes accepted output.
 Scheduled retries save no rejection content; exhaustion retains only the settling Attempt's diagnostic and request correlation in the existing Resolution.
 
-HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted` and the two spend limits a quota and `usage_not_included` a plan.
+HTTP 429 whose code the codec names a quota or plan refusal is a permanent quota refusal, not a temporary rate limit; the Responses codec names `usage_limit_reached`, `insufficient_quota`, `credit_balance_exhausted`, the two spend limits and the two `subscription_sharing_usage_*` codes a quota and `usage_not_included` a plan.
 Each retains its neutral failure code, its refusal and optional nonnegative integer `resets_at` timestamp in the existing Resolution diagnostic and failed-response record.
 A Turn saved before refusal and sign-in codes became neutral keeps its old code (such as `provider_usage_limit_reached` or `provider_authentication_failed`), which now reads as an unknown failure: it shows its code, no trouble band and no reset time, and the Store does not fence it.
 Missing, null, invalid or duplicate reset metadata stays absent without making the quota refusal retryable.
@@ -2462,6 +2506,7 @@ The compact context-size column follows the longest model name actually shown, n
 The overview's worker reads the Host's [`/v1/model-list`](#public-session-activity), so the screen never blocks on a model list.
 The choice uses a revisioned snapshot and validates it before drawing or handling an event; replacing or releasing a list closes the old choice before it can use retired storage.
 It falls back to the compiled model catalog when no live list is available.
+The short sign-in labels come from provider facts: "Codex" (`codex`), "ChatGPT" (`chatgpt`) and "API key" (`openai`), distinct from their longer prose names.
 The selected sign-in scopes the models offered; typing filters, Up and Down move, and Enter picks a model through app settings' typed backend.
 An empty match keeps the field's choice open with feedback rather than saving an invalid model.
 Every successful pick saves the default for future Sessions through the same preferences writer as `rui defaults configure`; existing Sessions keep their settings.
@@ -2489,7 +2534,7 @@ Codex owns the local identifier syntax: 1–256 printable non-space ASCII bytes,
 Syntax validation is the only model check: an ID Rui's [list](#supported-model-ids) lacks runs with default limits, as the picker offers it from the provider's live list (Divyansh, 2026-11-01, picker plan "Where the list comes from").
 A bad ID fails at the provider’s first request, whose remedy is the Model field in app settings.
 Old pins remain readable and clearable, never substituted.
-The built-in providers are Codex and OpenAI; they share one catalog and the recommended model `gpt-6.1-sol`.
+The built-in providers are Codex, OpenAI and ChatGPT; they share one catalog and the recommended model `gpt-6.1-sol`.
 `rui defaults inspect` shows the prospective choice, each provider's local Rui-owned credential state (`local_credentials` in JSON) and separately the selected Store's actual readable Host capabilities.
 It never refreshes, contacts a provider, creates a Host/Session or imports another CLI's credentials.
 The bare-entry provider chooser can begin Codex device login or defer; explicit `rui auth login codex` uses the same publication rule.
@@ -2834,6 +2879,8 @@ A stop finds excluded Messages by walking Admission-only pages backward from its
 Every page carries `queued`: the field came with wire version 3, and a frontend and Host on different wire versions refuse each other as incompatible.
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
+Wire version 13 adds the `chatgpt` provider key, and the `chatgpt_plan` route, to `host_info`'s `capabilities.providers`; different versions refuse each other.
+
 Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
 Wire version 10 adds explicit native skill invocation and idle catalog reload intent, typed capture refusals and reload acknowledgements; different versions refuse each other rather than silently discarding the new intent.
@@ -3005,13 +3052,15 @@ The rows sit right above the input, in the rows a growing draft would take, unde
 When more match than fit, the last row says `+N more · type to narrow`, unless the list has only one row, which then shows the highlighted match.
 It goes when nothing matches.
 One row is highlighted, reversed as the Action's choice is: the first, until Up or Down moves it; any edit, a word Enter adds among them, returns it to the first, the rows follow it, and a list that narrows under it (another model, say) highlights its last row.
-Tab adds the rest of the highlighted word, and a space when another word may follow, also after Esc closed the list; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
+Tab adds the rest of the highlighted word, and a space when another word may follow; in a draft no list is for, or over a partial character or a rejected draft, Tab does what it always did.
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
 Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, or the overview’s `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
-Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
+Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
+Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
+`command_input.zig` owns that ending rule for both screens; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+The overview lists its own commands, `/archive`, `/configure`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G cancel a command whose list the latest frame showed, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
 Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
 There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
 The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
@@ -3881,7 +3930,7 @@ Host information is a read-only, bounded `/v1/host-info` exchange for the canoni
 A client first probes the existing `host.lock` with a nonblocking shared lock, without creating a Store or lock: no owner means unavailable even if a stale socket exists; an exclusive owner permits a protected socket request.
 One absolute probe deadline covers connect, write, first byte, header and full body; ordinary commands retain their separate processing and transfer waits.
 The shared response parser accepts only valid bounded HTTP/1.1 headers with one decimal Content-Length, supported Content-Type and wire version; it rejects malformed field names/values, duplicates of consequential fields and unsupported transfer or content encodings rather than interpreting ambiguous framing.
-A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device` or `key_file`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
+A complete compatible reply from that owner means ready and reports the canonical Store selector, wire version, actual allocated Active Capacity, slots in use, the Host's start time, whether it holds new Turns (`paused`), its Bash capability and each built-in provider's route (`unserved`, `endpoint`, `chatgpt_device`, `key_file` or `chatgpt_plan`). **Slots in use** (`custody_occupied`) counts held custody records, including detached cleanup; it is the value Current reports as `execution.custody_occupied`.
 The start time (`started_at`) is the Host Unix second read once before execution starts; every reply of one Host reports the same value, and like every Host time it orders nothing across clock changes.
 Both are read from Host memory, so the reply still never touches SQLite.
 Missing credentials do not change readiness.

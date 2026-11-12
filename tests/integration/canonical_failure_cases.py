@@ -24,6 +24,7 @@ import host_process
 from host_process import canonical_fixture_root, preserve_failure_metadata, retain_failure_state
 import os_semantics
 from canonical_fixture import ERROR, ERROR_BYTES, ReplyProxy, announced, invoke
+from conversation_page_fixture import request
 
 def content_failure(result):
     """Content readers keep stdout content-only: the typed diagnostic is stderr's first line."""
@@ -629,15 +630,29 @@ def permission_read_cases(state):
                     '{"cmd":"printf saved-output","timeout_ms":null,"description":"Read saved fold output"}')]),
                 fixture.sse_answer("fold-answer", "fold-reason", "fold-message", "saved fold ready")[0],
             ])
-        assert invoke(home, "session", "send", "--store", store, "--to", fold_session,
-            input="produce saved output").returncode == 0
+        sent = invoke(home, "session", "send", "--store", store, "--to", fold_session,
+            input="produce saved output")
+        assert sent.returncode == 0, sent
+        settled = invoke(home, "request", "wait", announced(sent))
+        assert settled.returncode == 0, settled
         before = {path.name: path.read_bytes() for path in records.glob("*.json")}
         body = b'{"version":"' + host_process.WIRE_VERSION.encode() + b'","type":"busy","code":"host_busy"}'
         response = (b"HTTP/1.1 503 Rejected\r\nContent-Type: application/json\r\n"
             b"X-Rui-Wire-Version: " + host_process.WIRE_VERSION.encode() + b"\r\nConnection: close\r\nContent-Length: "
             + str(len(body)).encode() + b"\r\n\r\n" + body)
+        # The overview also reads activity-content, even behind a narrow open
+        # conversation. Its Message prefixes (ordinal 0) are not fold reads.
+        head, page = request(host.rui_ready_fields["socket"], store,
+            "/v1/activity-page", "activity_page", fold_session, end=None,
+            position="0", ordinal=None, direction="forward", kinds=["tool_result"], limit="2")
+        assert head.startswith(b"HTTP/1.1 200 "), (head, page)
+        items = json.loads(page)["items"]
+        assert len(items) == 1, items
+        fold_content = {"session": fold_session,
+            **{field: items[0][field] for field in ("position", "ordinal")}}
         armed = threading.Event()
-        proxy = ReplyProxy(host, "/v1/activity-content", lambda reply: response if armed.is_set() else reply)
+        proxy = ReplyProxy(host, "/v1/activity-content", lambda reply: response if armed.is_set() else reply,
+            match_record=fold_content)
         master, slave = open_pty()
         original = termios.tcgetattr(slave)
         caller = None

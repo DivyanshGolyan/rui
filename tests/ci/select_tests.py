@@ -89,6 +89,8 @@ FIXTURES = {
     "sender-identity-integration": ((I + "sender_identity_integration.py",), (), ("src/bash.zig",)),
     "codex-integration": ((I + "codex_integration.py",), (), ("src/providers.zig", *CREDENTIALS)),
     "codex-h2-integration": ((I + "codex_h2_integration.py",), (), ("src/providers.zig", *CREDENTIALS)),
+    "chatgpt-plan-integration": ((I + "chatgpt_plan_integration.py",), (),
+                                 ("src/providers.zig", "src/codex_auth.zig", "src/chatgpt_plan_wire.zig", *CREDENTIALS)),
     "transport-h2-integration": ((I + "transport_h2_integration.py", I + "transport_h2_integration_test.py"), (),
                                  ("src/providers.zig", "src/model_adapter.zig", *MODEL)),
     "login-signal-integration": ((I + "login_signal_integration.py",), (), ()),

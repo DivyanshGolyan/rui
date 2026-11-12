@@ -970,7 +970,7 @@ test "idle reactor reports zero finished transfers and no completion" {
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     try reactor.init(std.testing.allocator, std.testing.io, .{
-        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
+        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",
@@ -991,7 +991,7 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     const options: Options = .{
-        .endpoints = .init(.{ .codex = null, .openai = "http://127.0.0.1:1/responses" }),
+        .endpoints = .init(.{ .codex = null, .openai = "http://127.0.0.1:1/responses", .chatgpt = null }),
         .ca_file = "/nonexistent/rui-catalog-ca.pem",
         .capacity = 1,
         .inactivity_seconds = 1,
@@ -1279,7 +1279,7 @@ test "model timings start at handoff and capture only the first HTTP response ev
     var used: std.atomic.Value(u64) = .init(0);
     var reactor: Reactor = undefined;
     try reactor.init(std.testing.allocator, io, .{
-        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
+        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
         .capacity = 1,
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",

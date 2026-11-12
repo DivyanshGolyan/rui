@@ -62,6 +62,9 @@ pub const ActivationOutcome = union(enum) {
     superseded,
     already_ready: struct { instance: protocol.InstanceId, pid: c_int },
     ready: struct { instance: protocol.InstanceId, pid: c_int },
+    /// The exact launched build answered, but only a new client can read its
+    /// protocol. No activation failure or uncertain process identity is hidden.
+    client_incompatible: c_int,
     unsupported: Limitation,
     replacement_observed,
     cancelled,
@@ -418,23 +421,37 @@ fn startPinned(init: std.process.Init, allocator: std.mem.Allocator, plan: *cons
         }
         wait.observe(startup[0..used], std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
         const until = wait.until(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds);
-        if (client.observeHostProcess(io, store, until)) |observed| {
-            if (observed.pid != launched_pid) return .replacement_observed;
-            var snapshot = identity.snapshot(allocator, observed.pid) catch return .{ .unconfirmed = .verifying };
+        if (client.observeHostProcessForUpgrade(io, store, until)) |reading| {
+            if (reading.pid() != launched_pid) return .replacement_observed;
+            var snapshot = identity.snapshot(allocator, reading.pid()) catch return .{ .unconfirmed = .verifying };
             defer snapshot.deinit(allocator);
-            if (!matchesLaunch(launched_pid, launched_started, &snapshot, prepared.executable)) return .{ .unconfirmed = .verifying };
+            const activation = activationReading(reading, launched_pid, launched_started, &snapshot, prepared.executable, plan.observed.facts.active_capacity);
+            if (activation != .ready and activation != .client_incompatible) return activation;
             const reported = process.output(allocator, io, &.{ prepared.executable, "--version" }, null, 512) catch return .{ .unconfirmed = .verifying };
             defer allocator.free(reported);
             if (releaseVersion(reported)) |actual| {
                 if (actual.order(version) != .eq) return .{ .unconfirmed = .verifying };
             } else return .{ .unconfirmed = .verifying };
-            if (observed.ready.active_capacity != plan.observed.facts.active_capacity) return .{ .unconfirmed = .verifying };
-            return .{ .ready = .{ .instance = observed.ready.instance, .pid = observed.pid } };
+            return activation;
         } else |_| {}
         const remaining = until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
         if (remaining > 0) try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 50 * std.time.ns_per_ms))), .awake);
     }
     return .{ .unconfirmed = .verifying };
+}
+
+/// Both wire-compatible and wire-incompatible replies require the same pinned
+/// launch identity. A mismatch never grants ordinary Host request readiness.
+fn activationReading(reading: client.HostProcessReading, launched_pid: c_int, launched_started: u64, snapshot: *const identity.Snapshot, executable: []const u8, capacity: usize) ActivationOutcome {
+    if (reading.pid() != launched_pid) return .replacement_observed;
+    if (!matchesLaunch(launched_pid, launched_started, snapshot, executable)) return .{ .unconfirmed = .verifying };
+    return switch (reading) {
+        .incompatible => |pid| .{ .client_incompatible = pid },
+        .ready => |observed| if (observed.ready.active_capacity != capacity)
+            .{ .unconfirmed = .verifying }
+        else
+            .{ .ready = .{ .instance = observed.ready.instance, .pid = observed.pid } },
+    };
 }
 
 fn matchesLaunch(pid: c_int, started: u64, snapshot: *const identity.Snapshot, executable: []const u8) bool {
@@ -543,6 +560,42 @@ test "upgrade launch identity rejects same PID with a replacement generation" {
     try std.testing.expect(!matchesLaunch(42, 12, &snapshot, "/other/rui"));
 }
 
+test "relaunch activation reading requires the pinned launch for either wire" {
+    const good: identity.Snapshot = .{ .pid = 42, .started = 12, .executable = "/pinned/rui", .argv = &.{}, .environment = &.{}, .storage = &.{}, .entries = &.{} };
+    for ([_]bool{ false, true }) |incompatible| {
+        for (0..6) |fault| {
+            var snapshot = good;
+            var reading: client.HostProcessReading = if (incompatible) .{ .incompatible = 42 } else .{ .ready = .{ .pid = 42, .ready = .{
+                .store = .{},
+                .instance = @splat(1),
+                .active_capacity = 17,
+                .started_at = 1,
+                .custody_occupied = 0,
+                .paused = false,
+                .capabilities = .{ .bash = false, .providers = .{ .codex = .unserved, .openai = .unserved, .chatgpt = .unserved } },
+            } } };
+            switch (fault) {
+                0 => {},
+                1 => if (incompatible) {
+                    reading.incompatible = 43;
+                } else {
+                    reading.ready.pid = 43;
+                },
+                2 => snapshot.pid = 43,
+                3 => snapshot.started = 13,
+                4 => snapshot.executable = "/other/rui",
+                5 => if (!incompatible) {
+                    reading.ready.ready.active_capacity = 18;
+                },
+                else => unreachable,
+            }
+            const result = activationReading(reading, 42, 12, &snapshot, "/pinned/rui", 17);
+            const expected: std.meta.Tag(ActivationOutcome) = if (fault == 1) .replacement_observed else if (fault >= 2 and fault <= 4 or (fault == 5 and !incompatible)) .unconfirmed else if (incompatible) .client_incompatible else .ready;
+            try std.testing.expectEqual(expected, std.meta.activeTag(result));
+        }
+    }
+}
+
 test "upgrade lifecycle derives launch semantics before disruption" {
     const allocator = std.testing.allocator;
     for ([_][]const []const u8{
@@ -579,7 +632,7 @@ test "upgrade lifecycle control cannot equate different wire profiles or instanc
     var original: client.HostControlObservation = .{
         .profile = .released_9,
         .pid = 123,
-        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .unserved } } },
+        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = protocol.routesAll(.unserved) } },
     };
     try original.facts.store.set("/fixture/store");
     try std.testing.expect(sameHost(original, original));

@@ -48,6 +48,7 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const command_input = @import("command_input.zig");
 const slash_commands_shared = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -615,7 +616,7 @@ fn showSubmissionFailure(self: *Self) !void {
     var output = file.writerStreaming(self.init.io, &buffer);
     try reads.writeSubmission(self.submission.view(), if (self.heldFailure()) |failure| failure.page else null, &output.interface);
     try output.flush();
-    try self.screen.showFile(self.init.io, file, false);
+    try self.screen.showFile(self.init.io, file, .details);
     self.dirty = true;
 }
 
@@ -865,7 +866,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 // keeps the terminal paste flag until its actual end arrives.
                 const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
                 if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
-                try self.screen.showFile(self.init.io, self.files.action, true);
+                try self.screen.showFile(self.init.io, self.files.action, .action);
                 self.action_summary = self.reading.prepared_summary;
                 self.reading.prepared_action = null;
                 self.reading.phase = .activity;
@@ -1606,36 +1607,59 @@ pub const Departure = struct {
     failure_notice: bool,
     /// The recovery guide is written; otherwise a failed notice writes it.
     recovery_shown: bool,
+    /// Anything beyond the ordinary Detached notice must survive departure.
+    has_guidance: bool,
+    failure: ?anyerror,
 };
 
 /// Joins what the Session stopped, after the caller restored the terminal, and writes
 /// the guidance that follows restoration. The caller prints the Detached notice.
 pub fn leave(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
+    const result = self.settleDeparture(ended, restored);
+    self.writeDeparture(result);
+    return result;
+}
+
+/// Settles every borrower before the caller decides whether departure can be
+/// replaced by a new TUI. No terminal guidance is emitted here.
+pub fn settleDeparture(self: *Self, ended: anyerror!Outcome, restored: anyerror!void) Departure {
     const settled = self.settle(restored);
     self.submission.close();
+    const cause: ?anyerror = if (ended) |_| null else |err| err;
+    const plan = departure.exit(settled, cause, self.submission.view() != null);
+    const action_view = self.screen.action_view != null;
+    return .{
+        .end = if (plan.failure) |err| err else ended,
+        .action = if (action_view) self.live.work.first_action else null,
+        .failure_notice = action_view and !std.meta.isError(restored),
+        .recovery_shown = plan.recovery_before_notice,
+        .has_guidance = self.hasDepartureGuidance() or plan.recovery_before_notice or plan.failure != null,
+        .failure = plan.failure,
+    };
+}
+
+/// Known guidance while the screen is still open. A later settlement can add
+/// failures, so `settleDeparture` always checks again before any replacement is allowed.
+pub fn hasDepartureGuidance(self: *const Self) bool {
+    return self.reading.pending_diagnostic != null or self.submission.view() != null or
+        self.inspection.command_running or self.screen.action_view != null;
+}
+
+/// Emits the already-settled departure. Relaunch never swallows these bytes.
+pub fn writeDeparture(self: *Self, result: Departure) void {
     if (self.reading.pending_diagnostic != null) {
         var bytes: [1024]u8 = undefined;
         var out = std.Io.Writer.fixed(&bytes);
         self.writePendingDiagnostic(&out) catch unreachable;
         stderr.diagnostic("rui: Read failed: {s}\n", .{out.buffered()});
     }
-    const cause: ?anyerror = if (ended) |_| null else |err| err;
-    const plan = departure.exit(settled, cause, self.submission.view() != null);
-    if (plan.recovery_before_notice) self.recoveryGuide();
+    if (result.recovery_shown) self.recoveryGuide();
     if (self.inspection.command_running and self.inspection.kind == .command) self.commandOutputGuide();
-    if (plan.failure) |err| switch (err) {
+    if (result.failure) |err| switch (err) {
         error.TerminalTooSmall => stderr.diagnostic("rui: Enlarge the terminal and resume this Session. Required instructions do not fit; nothing was authorized by the clipped view.\n", .{}),
         error.TerminalTooLarge => stderr.diagnostic("rui: Rui supports at most 49,152 terminal cells (for example 256 × 192). Shrink the terminal and resume; saved content is unchanged.\n", .{}),
         error.OutOfMemory, error.UnrepresentableTerminalGrapheme, error.DisplayGraphemeTooLarge => stderr.diagnostic("rui: This frame exceeds Rui's bounded display. Shrink the terminal and resume; saved content is unchanged. One-shot session, request and action commands remain available.\n", .{}),
         else => {},
-    };
-    const action_view = self.screen.action_view != null;
-    return .{
-        .end = if (plan.failure) |err| err else ended,
-        .action = if (action_view) self.live.work.first_action else null,
-        // Never a main-screen notice before confirmed restoration.
-        .failure_notice = action_view and !std.meta.isError(restored),
-        .recovery_shown = plan.recovery_before_notice,
     };
 }
 
@@ -2508,6 +2532,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc closes only a list the person saw.
             if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
+                if (command_input.consumesDraft(self.input.composition().bytes, .cancelled)) self.input.clear();
                 self.dirty = true;
                 return;
             };
@@ -2622,7 +2647,7 @@ const OpenRequest = struct { target: reads.Target, asked: reader_policy.Asked };
 fn pagePlace(self: *const Self) reader_policy.Place {
     return switch (self.screen.view) {
         .feed => .feed,
-        .inspection, .action, .message => .elsewhere,
+        .inspection, .details, .action, .message => .elsewhere,
     };
 }
 
@@ -2768,8 +2793,8 @@ fn commandLine(self: *Self) !void {
 /// stays until the hold lifts.
 fn runLine(self: *Self) !void {
     const text = self.input.composition().bytes;
-    const takes = !self.upgradeHeld();
-    defer if (takes) self.input.clear();
+    const end: command_input.DraftEnd = if (self.upgradeHeld()) .held else .submitted;
+    defer if (command_input.consumesDraft(text, end)) self.input.clear();
     try self.slashCommand(text);
 }
 
@@ -3347,7 +3372,7 @@ fn showInspection(self: *Self) !void {
         self.notice = slash_commands_shared.no_output;
         return;
     }
-    try self.screen.showFile(self.init.io, self.files.inspection, false);
+    try self.screen.showFile(self.init.io, self.files.inspection, .inspection);
     if (self.inspection.kind == .requests) self.saved_requests = self.job.result.requests;
     // The page heading already says how to return.
     self.notice = null;
@@ -3957,7 +3982,7 @@ test "each source admits a slash command while another is active as it always di
     try std.testing.expectEqualStrings("/requests", self.input.queuedCommand().?);
     try std.testing.expectEqualStrings("", self.input.composition().bytes);
     // A queued one: every draft command waits, local ones too, and keeps the draft.
-    for ([_][]const u8{ "/model", "/archive", "/requests" }) |text| {
+    for ([_][]const u8{ "/discard", "/archive", "/requests" }) |text| {
         self.notice = null;
         self.shown_notice.dismiss();
         try sendKeys(self, text);
@@ -4077,11 +4102,12 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try held.settle();
     try std.testing.expectEqualStrings("r", held.screen.commands.?.list.typed);
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
-    // Esc on `/re`, typed after the frame drew `/r`'s list, closes the list.
+    // Esc on `/re`, typed after the frame drew `/r`'s list, cancels the command.
     try stepKeys(held, "e\x07");
     try std.testing.expectEqualStrings("", try barShows(held));
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+    try std.testing.expect(held.screen.commands == null);
 }
 
 test "Tab focuses footer without completing a command and Enter still takes drawn command choices" {
@@ -4124,19 +4150,21 @@ test "Esc closes the command list first only when the latest frame drew it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     try held.settle();
-    // Drawn: the first Esc closes only the list, the next one acts as Esc.
-    try stepKeys(held, "/se");
+    held.self.line.read = .{ .revision = 1, .end = 1 };
+    try held.self.line.model.set("gpt-6.1-sol");
+    // The first Esc consumes a drawn command; it does not leave the chat.
+    try stepKeys(held, "/effort ");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.leaving == null);
     try std.testing.expect((try barShows(held)).len == 0);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
-    try stepKeys(held, "\x07");
-    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
-    // The latest frame drew no list, the first being closed: Esc acts at
-    // once.
-    try stepKeys(held, "\x15/se\x07");
+    try std.testing.expect(held.screen.commands == null);
+    // A command the latest frame did not list is not cancelled by Esc.
+    try stepKeys(held, "/st\x07");
+    try std.testing.expectEqualStrings("/st", held.self.input.composition().bytes);
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
 }
 
@@ -4159,7 +4187,7 @@ test "the /requests page lists its rows over an empty draft, Enter takes a row a
     const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
     defer page.close(std.testing.io);
     try page.writePositionalAll(std.testing.io, "Rui: Local recovery handles (not Host work status):\n", 0);
-    try held.screen.showFile(std.testing.io, page, false);
+    try held.screen.showFile(std.testing.io, page, .inspection);
     self.inspection.kind = .requests;
     self.dirty = true;
     try held.settle();
@@ -4238,7 +4266,7 @@ test "a pending decision, or a Message that carries one, has no /recover row, an
         const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
         defer page.close(std.testing.io);
         try page.writePositionalAll(std.testing.io, "Rui: Local recovery handles (not Host work status):\n", 0);
-        try held.screen.showFile(std.testing.io, page, false);
+        try held.screen.showFile(std.testing.io, page, .inspection);
         self.inspection.kind = .requests;
         self.dirty = true;
         try held.settle();
@@ -6166,7 +6194,7 @@ test "App Session info opens while commands wait and refused originals keep thei
     defer self.files.details.close(std.testing.io);
     try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
     try std.testing.expect(self.input.queuedCommand() == null);
-    try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+    try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
     try std.testing.expectEqual(Submission.State.not_started, self.submission.view().?.state);
 }
 
@@ -8758,13 +8786,120 @@ test "repair details rewrite from byte zero on first repeated and changed held f
                 try std.testing.expectEqualStrings(expected, bytes);
                 try std.testing.expectEqualStrings(expected, self.screen.browsing.text());
                 try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0) == null);
-                try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+                try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
                 try std.testing.expect(self.screen.preview_complete);
                 try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
                 try std.testing.expectEqual(cursor, self.input.composition().cursor);
                 try std.testing.expectEqualStrings("original message", try self.input.message(original));
             }
         }
+    }
+}
+
+test "repair details own their page identity and one Escape returns without inheriting request rows" {
+    const Prior = enum { initial, requests_page, command_read, copy_read };
+    const Original = enum { unconfirmed_message, rejected_message, unsaved_message, decision };
+    const Entry = enum { owner, alt_d, details_control };
+    const original_key = "01234567-89ab-4cde-8012-0123456789ab";
+    for (std.enums.values(Prior)) |prior| for (std.enums.values(Original)) |original| {
+        for ([_]bool{ false, true }) |saved| for ([_][]const u8{ "", "kept draft" }) |draft| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            const self = &held.self;
+            self.files.details = try held.tmp.dir.createFile(std.testing.io, "repair-details", .{ .read = true });
+            defer self.files.details.close(std.testing.io);
+            const requests = try held.tmp.dir.createFile(std.testing.io, "requests", .{ .read = true });
+            defer requests.close(std.testing.io);
+            try requests.writePositionalAll(std.testing.io, "Local recovery handles\n", 0);
+            const message = self.input.submitText("exact original");
+            self.submission.intent = if (original == .decision)
+                .{ .decision = .{ .action = 7, .decision = .deny } }
+            else
+                .{ .message = message };
+            self.submission.key = original_key.*;
+            self.submission.state = switch (original) {
+                .unconfirmed_message, .decision => .unconfirmed,
+                .rejected_message => .rejected,
+                .unsaved_message => .not_started,
+            };
+            self.submission.last_error = error.RequestBindingMismatch;
+            if (saved) self.saved_requests.offer(.{ .nanoseconds = 1 }, "09:00", "22222222-89ab-4cde-8012-0123456789ab");
+            self.inspection.kind = switch (prior) {
+                .initial, .requests_page => .requests,
+                .command_read => .command,
+                .copy_read => .{ .copy = .answer },
+            };
+            const read_kind = self.inspection.kind;
+            if (draft.len != 0) try held.keys(draft);
+            const cursor = self.input.composition().cursor;
+            for (std.enums.values(Entry)) |entry| for ([_][]const u8{ "\x1b", "\x07" }) |close| {
+                errdefer std.debug.print("repair close prior={s} original={s} saved={} draft={s} entry={s} key={x}\n", .{ @tagName(prior), @tagName(original), saved, draft, @tagName(entry), close[0] });
+                if (prior == .requests_page) {
+                    try self.screen.showFile(std.testing.io, requests, .inspection);
+                    _ = try held.draw();
+                    // A real requests page still owns its recovery palette.
+                    if (draft.len == 0 and (saved or original == .unconfirmed_message))
+                        try std.testing.expect(self.requestList() != null);
+                }
+                switch (entry) {
+                    .owner => try self.showSubmissionFailure(),
+                    .alt_d => try held.keys("\x1bd"),
+                    .details_control => {
+                        var ctx = held.context();
+                        try chromeClick(.details)(self, &ctx);
+                    },
+                }
+                // The current reader's operation is not the presented page.
+                try std.testing.expectEqualDeep(read_kind, self.inspection.kind);
+                try std.testing.expect(self.requestList() == null);
+                _ = try held.draw();
+                try std.testing.expect(self.screen.commands == null);
+                try held.keys(close);
+                try std.testing.expectEqual(Screen.ViewKind.feed, self.screen.view);
+                try std.testing.expect(self.leaving == null and held.left == null);
+                try std.testing.expectEqualStrings(draft, self.input.composition().bytes);
+                try std.testing.expectEqual(cursor, self.input.composition().cursor);
+                try std.testing.expectEqualStrings(original_key, &self.submission.key);
+                try std.testing.expectEqualStrings("exact original", try self.input.message(message));
+                try std.testing.expect(self.submission.intent != null and self.submission.retry == null);
+                try std.testing.expect(self.input.queuedCommand() == null);
+            };
+        };
+    };
+}
+
+test "repair details keep explicit command cancellation and return to the adopted Action" {
+    for ([_]bool{ false, true }) |action| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.files.details = try held.tmp.dir.createFile(std.testing.io, "repair-details", .{ .read = true });
+        defer self.files.details.close(std.testing.io);
+        const action_file = if (action) try held.adopt(2) else null;
+        defer if (action_file) |file| file.close(std.testing.io);
+        self.submission.intent = .{ .message = self.input.submitText("exact original") };
+        self.submission.state = .unconfirmed;
+        self.submission.key = "01234567-89ab-4cde-8012-0123456789ab".*;
+        try self.showSubmissionFailure();
+        if (!action) {
+            // A visible command still owns the first Escape. An adopted
+            // Action intentionally hides command choices instead.
+            try held.keys("/ef");
+            _ = try held.draw();
+            try std.testing.expectEqual(.drawn, self.screen.commands.?.seen);
+            try held.keys("\x1b");
+            try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
+            try std.testing.expectEqualStrings("", self.input.composition().bytes);
+        }
+        _ = try held.draw();
+        try std.testing.expect(self.screen.commands == null);
+        const consent = self.screen.consent;
+        try held.keys("\x1b");
+        try std.testing.expectEqual(if (action) Screen.ViewKind.action else Screen.ViewKind.feed, self.screen.view);
+        try std.testing.expectEqualDeep(consent, self.screen.consent);
+        try std.testing.expect(self.leaving == null and held.left == null);
+        try std.testing.expectEqualStrings("exact original", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expect(self.submission.retry == null and self.input.queuedCommand() == null);
     }
 }
 
@@ -8798,7 +8933,7 @@ test "chat info repair details never overwrite the active reader staging file" {
     }
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &Staging.ready, test_poll.isSet);
     try self.showSubmissionFailure();
-    try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+    try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
     try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), "Original reserved request: KKK") != null);
     var bytes: [128]u8 = undefined;
     const count = try self.files.inspection.readPositionalAll(std.testing.io, &bytes, 0);
