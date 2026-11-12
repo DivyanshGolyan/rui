@@ -42,7 +42,8 @@ SOURCE_POLICY = (
     (("tests/qualification/*.go",), (("test_harness_contracts.py", "QualificationEvidenceTest"),)),
     (("src/store/*.zig", "src/store.zig"), (("test_store_engine_boundary.py", "*"),
                                           ("test_store_conformance.py", "*"))),
-    (("src/store/schema.zig", "tests/integration/host_process.py"), (("test_store_schema_fixtures.py", "*"),)),
+    (("tests/ci/caller_errors.py",), (("test_store_engine_boundary.py", "*"),)),
+    (("src/store/schema.zig", "tests/integration/host_process.py"),(("test_store_schema_fixtures.py", "*"),)),
     (("src/store/schema.zig",), (("test_store_schema_version.py", "*"),)),
     (("tests/ci/prepush.py",), (("test_caller_errors.py", "CallerErrors.test_gate_is_explicitly_wired_before_development_builds"),
                               ("test_selection.py", "SelectionTest.test_prepush_leaves_server_targets_to_ci"))),
@@ -191,7 +192,20 @@ def install_hook():
     print(f"Installed {hook}: each push runs python3 tests/ci/prepush.py --quick.")
 
 
+# Git runs a hook with these naming the pushing repository, and in a linked
+# worktree they outrank `git -C`: a check's scratch repository would commit
+# to the pushing branch. Every git this script starts finds its repository
+# from its directory.
+HOOK_REPOSITORY = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_PREFIX")
+
+
+def leave_hook_repository():
+    for name in HOOK_REPOSITORY:
+        os.environ.pop(name, None)
+
+
 def main():
+    leave_hook_repository()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base", default="origin/main")
     parser.add_argument("--plan", action="store_true", help="print selected commands without executing them")

@@ -88,7 +88,7 @@ app_screen: AppScreen.Session = undefined,
 app_preview: DocumentView = undefined,
 app_consent: ActionConsent = .{},
 app_card: PermissionCard = undefined,
-app_palette: Palette = undefined,
+app_palette: Palette = .{ .shown = undefined },
 app_hooks: AppHooks = .{ .root = undefined, .context = undefined, .leave = undefined, .copy = undefined, .on_open = undefined },
 app_caps: overview_view.Caps = .{},
 /// Stops when the caller is signalled; a running command stops with it.
@@ -426,7 +426,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.submission = .{ .io = init.io, .store = store, .session = session, .directory = directory, .input = &self.input, .environment = .{ .map = init.environ_map } };
     self.app_content = .{ .window = &screen.feed, .anchor = &screen.anchor, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appClick, .on_retry = appRetry } };
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
-    self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
+    self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appStatusClick, .action_at = appStatusActionable } };
     self.app_body = .{ .shown = self.app_content.widget() };
     self.app_screen = .{ .content = &self.app_body, .input = &self.app_input, .content_gutter = true, .userdata = self, .on_event = appEvent };
 }
@@ -611,6 +611,33 @@ fn appPreviewClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: viewport.Positi
     try self.afterInput(ctx);
 }
 
+/// Both document hover and click ask the same owner for an editable field.
+/// Positions identify source lines, including any wrapped continuation rows.
+fn statusSettingAt(self: *const Self, at: viewport.Position) ?status_page.Setting {
+    if (!self.statusShown() or self.leaving != null or self.app_consent.request != null or
+        self.app_hooks.root.pasting or self.input.composition().bytes.len != 0) return null;
+    const document = &self.screen.browsing;
+    if (self.app_document.document != document or !self.app_document.drawnNow() or document.origin != 0) return null;
+    const text = document.text();
+    if (at.offset >= text.len or (at.offset != 0 and text[at.offset - 1] != '\n')) return null;
+    return status_page.settingAtLine(std.mem.count(u8, text[0..at.offset], "\n"));
+}
+
+fn appStatusActionable(raw: *anyopaque, at: viewport.Position) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.statusSettingAt(at) != null;
+}
+
+/// Starting a field's change only drafts its command, just as Enter does.
+fn appStatusClick(raw: *anyopaque, ctx: *vxfw.EventContext, at: viewport.Position) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    const setting = self.statusSettingAt(at) orelse return;
+    self.inspection.selected = setting;
+    try self.refreshStatusPage();
+    _ = self.startChange();
+    try self.afterInput(ctx);
+}
+
 fn appDragScroll(raw: *anyopaque, _: *vxfw.EventContext, up: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     try self.scroll(!up, 1);
@@ -644,6 +671,18 @@ fn hostFailure(self: *Self) bool {
     host.lost(host.context);
     self.dirty = true;
     return true;
+}
+
+/// A palette click chooses the drawn row, then uses the input's Enter path:
+/// command choices run, incomplete words and skills replace the draft.
+fn appSelectCommand(raw: *anyopaque, ctx: *vxfw.EventContext, pressed: slash_commands_shared.Shown.Pick) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (self.app_consent.request != null or self.app_hooks.root.pasting) return;
+    // A pointer names the row in the list the last frame drew, not the
+    // list a key has stored since for a newly edited draft.
+    const stored = &self.screen.commands;
+    _ = slash_commands_shared.Shown.pickedNow(stored, self.nextCommands(stored.*), pressed) orelse return;
+    try appEvent(raw, ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
 }
 
 fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
@@ -834,6 +873,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_preview.colours = colours;
     self.app_preview.method = self.app_caps.width;
     self.app_content.style = normal;
+    self.app_content.hover_style = style.of(self.app_caps, .{ .background = .selection });
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
     self.app_document.style = normal;
@@ -844,7 +884,12 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     screen.commands = self.nextCommands(screen.commands);
     var palette: ?vxfw.Widget = null;
     if (self.app_consent.request == null) if (screen.commands) |*shown| {
-        self.app_palette = .{ .shown = shown, .method = self.app_caps.width, .style = normal, .quiet = quiet };
+        self.app_palette.shown = shown;
+        self.app_palette.method = self.app_caps.width;
+        self.app_palette.style = normal;
+        self.app_palette.quiet = quiet;
+        self.app_palette.userdata = self;
+        self.app_palette.on_select = appSelectCommand;
         palette = self.app_palette.widget();
     };
     const now_ms = self.nowMs();
@@ -8103,4 +8148,274 @@ test "SessionFrontend summary bounds keep Ctrl-O and clicks exact across sixteen
     try Domain.click(held, 34, 0, Domain.target(34, 0));
     try Domain.click(held, 34, 15, Domain.target(34, 15));
     try std.testing.expect(held.screen.anchor.following());
+}
+
+test "App Session palette clicks follow Enter for command words options and values and retain hover across frames" {
+    const Case = struct { draft: []const u8, word: []const u8, after: []const u8, queued: ?[]const u8 = null, notice: ?[]const u8 = null };
+    for ([_]Case{
+        .{ .draft = "/c", .word = "configure ", .after = "/configure " },
+        .{ .draft = "/configure ", .word = "--permission-mode ", .after = "/configure --permission-mode " },
+        .{ .draft = "/configure --permission-mode ", .word = "ask", .after = "", .queued = "/configure --permission-mode ask" },
+        .{ .draft = "/mod", .word = "model", .after = "", .notice = "The model shows once the Session is read." },
+    }) |case| {
+        errdefer std.debug.print("draft={s}, word={s}\n", .{ case.draft, case.word });
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try held.keys(case.draft);
+        _ = try held.draw();
+        const shown = &held.screen.commands.?;
+        const index = for (shown.list.shown(), 0..) |entry, index| {
+            if (std.mem.eql(u8, case.word, entry.word)) break index;
+        } else return error.TestExpectedRow;
+        shown.highlight = if (index == 0) shown.list.count - 1 else 0;
+        const selected = shown.highlight;
+        _ = try held.draw();
+        const row: i16 = @intCast(index - held.self.app_palette.first);
+        const widget_ = held.self.app_palette.widget();
+        var events = held.context();
+        try widget_.handleEvent(&events, .mouse_enter);
+        try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+        // Parent redraws must not replace the widget's pointer state.
+        _ = try held.draw();
+        try std.testing.expect(held.self.app_palette.hover.pointing);
+        const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+        try std.testing.expect(palette.readCell(2, @intCast(row)).style.reverse);
+        try std.testing.expectEqual(selected, held.screen.commands.?.highlight);
+        try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
+        for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
+        try widget_.handleEvent(&events, .mouse_leave);
+        _ = try held.draw();
+        try std.testing.expect(!held.self.app_palette.hover.pointing);
+        if (selected != index) {
+            const plain = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
+            try std.testing.expect(!plain.readCell(2, @intCast(row)).style.reverse);
+        }
+        try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqualStrings(case.after, held.self.input.composition().bytes);
+        if (case.queued) |expected| try std.testing.expectEqualStrings(expected, held.self.input.queuedCommand().?) else try std.testing.expectEqual(null, held.self.input.queuedCommand());
+        if (case.notice) |expected| try std.testing.expectEqualStrings(expected, held.self.shown_notice.current(held.self.nowMs()).?);
+        try std.testing.expect(held.self.submission.view() == null);
+    }
+}
+
+test "App Session palette refuses clicks on stale drafts closed lists and during paste or approval" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try held.keys("/c");
+    _ = try held.draw();
+    const widget_ = held.self.app_palette.widget();
+    var events = held.context();
+    const click: vxfw.Event = .{ .mouse = .{ .col = 2, .row = 0, .button = .left, .type = .press, .mods = .{} } };
+    try held.keys("o"); // The drawn /configure row is not the new /copy row.
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/co", held.self.input.composition().bytes);
+    // A key that acts on `/co`'s list before a frame draws it does not make
+    // the drawn `/c` row its row.
+    try held.keys("\x1b[B\x1b[A");
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/co", held.self.input.composition().bytes);
+    try std.testing.expectEqual(null, held.self.input.queuedCommand());
+    _ = try held.draw();
+    held.root.pasting = true;
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/co", held.self.input.composition().bytes);
+    held.root.pasting = false;
+    held.self.app_consent.adopt(41);
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/co", held.self.input.composition().bytes);
+    held.self.app_consent.withdraw();
+    held.screen.commands.?.close();
+    try widget_.handleEvent(&events, click);
+    try std.testing.expectEqualStrings("/co", held.self.input.composition().bytes);
+    try std.testing.expectEqual(null, held.self.input.queuedCommand());
+}
+
+test "App Session palette clicks requests rows with an empty draft as Enter does" {
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    const older = "01234567-89ab-4cde-8012-0123456789ab";
+    const newer = "01234567-89ab-4cde-8012-0123456789ac";
+    held.screen.view = .inspection;
+    held.self.inspection.kind = .requests;
+    held.self.saved_requests.offer(.{ .nanoseconds = 1 }, "09:00", older);
+    held.self.saved_requests.offer(.{ .nanoseconds = 2 }, "09:05", newer);
+    _ = try held.draw();
+    var events = held.context();
+    const widget_ = held.self.app_palette.widget();
+    try widget_.handleEvent(&events, .mouse_enter);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
+    try widget_.handleEvent(&events, .mouse_leave);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqualStrings("/result " ++ older, held.self.input.queuedCommand().?);
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+}
+
+test "App Session palette clicks replace the caret skill without sending or moving focus on hover" {
+    const Fake = struct {
+        fn read(_: client.ReadContext, gpa: std.mem.Allocator, _: []const u8, _: []const u8, _: []const u8) !skill_suggestions.Page {
+            const entries = try gpa.alloc(skill_suggestions.Entry, 2);
+            entries[0] = .{ .name = try gpa.dupe(u8, "recap"), .description = try gpa.dupe(u8, "Summarise") };
+            entries[1] = .{ .name = try gpa.dupe(u8, "review"), .description = try gpa.dupe(u8, "Review a change") };
+            return .{ .entries = entries, .total = 2 };
+        }
+        fn completed(self: *Self) bool {
+            return self.skill_task.completed();
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    held.self.skill_read = Fake.read;
+    try held.keys("please /re");
+    try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(10)), &held.self, Fake.completed);
+    try held.settle();
+    try held.keys(" now\x1b[D\x1b[D\x1b[D\x1b[D");
+    _ = try held.draw();
+    try std.testing.expectEqualStrings("/review", held.screen.commands.?.list.entries[1].shown);
+    const widget_ = held.self.app_palette.widget();
+    var events = held.context();
+    try widget_.handleEvent(&events, .mouse_enter);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    _ = try held.draw();
+    try std.testing.expectEqual(@as(usize, 0), held.screen.commands.?.highlight);
+    try std.testing.expectEqualStrings("please /re now", held.self.input.composition().bytes);
+    for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
+    try widget_.handleEvent(&events, .mouse_leave);
+    try widget_.handleEvent(&events, .{ .mouse = .{ .col = 2, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqualStrings("please /review now", held.self.input.composition().bytes);
+    try std.testing.expectEqual("please /review".len, held.self.input.composition().cursor);
+    try std.testing.expectEqual(null, held.self.input.queuedCommand());
+    try std.testing.expectEqual(null, held.self.submission.view());
+}
+
+/// Locate a source field in the child's actual (possibly bottom-clamped) frame.
+fn statusMouseRow(panel: *const DocumentView, setting: status_page.Setting, wrapped: bool) !u16 {
+    const document = panel.document;
+    var offset: usize = 0;
+    for (0..status_page.line(setting)) |_| offset = document.nextLine(offset).?;
+    const layout: viewport.Layout = .{ .width = panel.size.width, .method = panel.method };
+    const wanted: viewport.Position = .{ .offset = offset, .row = if (wrapped and document.lineRows(layout, offset) > 1) 1 else 0 };
+    for (0..panel.size.height) |row| {
+        if (std.meta.eql(document.down(layout, panel.first, row), wanted)) return @intCast(row);
+    }
+    return error.TestExpectedVisibleStatusField;
+}
+
+test "App Session status mouse targets every editable field including wrapped rows without hover selection or focus" {
+    const Case = struct { setting: status_page.Setting, draft: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .setting = .effort, .draft = "/configure --reasoning-effort " },
+        .{ .setting = .permissions, .draft = "/configure --permission-mode " },
+        .{ .setting = .tools, .draft = "/configure --tools " },
+        .{ .setting = .name, .draft = "/configure --label mouse-status" },
+        .{ .setting = .folder, .draft = "/configure --workspace /home/d/code/rui" },
+        .{ .setting = .compact_at, .draft = "/configure --compaction-trigger " },
+        .{ .setting = .headroom, .draft = "/configure --output-reservation " },
+        .{ .setting = .model, .draft = "/configure --model gpt-5.5" },
+        .{ .setting = .store, .draft = null },
+        .{ .setting = .instructions, .draft = null },
+        .{ .setting = .default_model, .draft = "/setup --provider openai --model saved-model" },
+        .{ .setting = .default_effort, .draft = "/setup --reasoning-effort " },
+        .{ .setting = .notifications, .draft = "/setup --notifications " },
+        .{ .setting = .default_store, .draft = "/setup --store /tmp/status-default-store" },
+    };
+    try std.testing.expectEqual(std.enums.values(status_page.Setting).len, cases.len);
+    for ([_]u16{ 34, 80 }) |width| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.size.width = width;
+        try statusFiles(held);
+        defer closeStatusFiles(held);
+        try showStatus(held, true, "mouse-status");
+        held.self.inspection.defaults = .{ .provider = .openai, .model = .{ .len = 0 }, .effort = null, .notifications = true, .store = .{ .len = 0 } };
+        if (held.self.inspection.defaults) |*saved| {
+            try saved.model.set("saved-model");
+            try (saved.store catch unreachable).set("/tmp/status-default-store");
+        } else |_| unreachable;
+        const document = &held.screen.browsing;
+        const panel = &held.self.app_document;
+        for (cases) |case| for ([_]bool{ false, true }) |wrapped| for ([_]bool{ false, true }) |right_edge| {
+            errdefer std.debug.print("setting={s} width={d} wrapped={} edge={}\n", .{ @tagName(case.setting), width, wrapped, right_edge });
+            held.self.input.clear();
+            held.self.inspection.selected = if (case.setting == .effort) .permissions else .effort;
+            try held.self.refreshStatusPage();
+            var offset: usize = 0;
+            for (0..status_page.line(case.setting)) |_| offset = document.nextLine(offset).?;
+            document.top = .{ .offset = offset };
+            _ = try held.draw();
+            const row = try statusMouseRow(panel, case.setting, wrapped);
+            const col: u16 = if (right_edge) panel.size.width - 1 else 0;
+            var events = held.context();
+            const before = held.self.inspection.selected;
+            const ctx: vxfw.DrawContext = .{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = panel.size.width, .height = panel.size.height }, .cell_size = .{} };
+            try panel.widget().handleEvent(&events, .mouse_leave);
+            const plain = try panel.widget().draw(ctx);
+            try panel.widget().handleEvent(&events, .mouse_enter);
+            try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .none, .type = .motion, .mods = .{} } });
+            const hovered = try panel.widget().draw(ctx);
+            try std.testing.expectEqual(case.draft != null, panel.hover.pointing);
+            if (case.draft != null) {
+                try std.testing.expectEqual(panel.colours.selection, hovered.readCell(col, row).style.bg);
+                try std.testing.expectEqual(panel.colours.selection == .default, hovered.readCell(col, row).style.reverse);
+                try std.testing.expectEqual(plain.readCell(col, row).style.fg, hovered.readCell(col, row).style.fg);
+            }
+            try std.testing.expectEqual(before, held.self.inspection.selected);
+            try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+            for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
+            try panel.widget().handleEvent(&events, .mouse_leave);
+            const left = try panel.widget().draw(ctx);
+            try std.testing.expectEqualDeep(plain.readCell(col, row).style, left.readCell(col, row).style);
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = @intCast(row), .button = .left, .type = kind, .mods = .{} } });
+            try std.testing.expectEqualStrings(case.draft orelse "", held.self.input.composition().bytes);
+            try std.testing.expectEqual(if (case.draft != null) case.setting else before, held.self.inspection.selected);
+            try std.testing.expectEqual(null, held.self.input.queuedCommand());
+            try std.testing.expectEqual(null, held.self.submission.view());
+        };
+    }
+}
+
+test "App Session status mouse refuses draft paste stale document approval and nonstatus pages" {
+    const State = enum { draft, paste, stale_press, stale_release, approval, other_page };
+    for (std.enums.values(State)) |state| {
+        errdefer std.debug.print("state={s}\n", .{@tagName(state)});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        try statusFiles(held);
+        defer closeStatusFiles(held);
+        try showStatus(held, true, "mouse-status");
+        const document = &held.screen.browsing;
+        var offset: usize = 0;
+        for (0..status_page.line(.permissions)) |_| offset = document.nextLine(offset).?;
+        document.top = .{ .offset = offset };
+        _ = try held.draw();
+        var events = held.context();
+        const panel = &held.self.app_document;
+        var row: i16 = @intCast(try statusMouseRow(panel, .permissions, false));
+        var press: vxfw.Event = .{ .mouse = .{ .col = 2, .row = row, .button = .left, .type = .press, .mods = .{} } };
+        var release: vxfw.Event = .{ .mouse = .{ .col = 2, .row = row, .button = .left, .type = .release, .mods = .{} } };
+        if (state == .stale_release) try panel.widget().handleEvent(&events, press);
+        switch (state) {
+            .draft => _ = held.self.input.append("kept draft"),
+            .paste => held.root.pasting = true,
+            .stale_press, .stale_release => try held.self.refreshStatusPage(),
+            .approval => held.self.app_consent.adopt(41),
+            .other_page => held.self.inspection.status = null,
+        }
+        if (state != .stale_press and state != .stale_release) {
+            _ = try held.draw();
+            row = @intCast(try statusMouseRow(panel, .permissions, false));
+            press.mouse.row = row;
+            release.mouse.row = row;
+            try panel.widget().handleEvent(&events, .mouse_enter);
+            try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+            try std.testing.expect(!panel.hover.pointing);
+            try panel.widget().handleEvent(&events, .mouse_leave);
+        }
+        if (state != .stale_release) try panel.widget().handleEvent(&events, press);
+        try panel.widget().handleEvent(&events, release);
+        try std.testing.expectEqualStrings(if (state == .draft) "kept draft" else "", held.self.input.composition().bytes);
+        try std.testing.expectEqual(status_page.Setting.effort, held.self.inspection.selected);
+        try std.testing.expectEqual(null, held.self.input.queuedCommand());
+        try std.testing.expectEqual(null, held.self.submission.view());
+    }
 }
