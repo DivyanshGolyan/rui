@@ -172,6 +172,11 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const outcome = self.editor.appEvent(keymap.every, input, self.pasting);
     if (outcome == .submit) {
         try self.pick(ctx);
+    } else if (outcome == .refused) {
+        // Like the other editor owners, start a clean editor when a refused
+        // line ends. Keep this field's usable filter and caret, not the
+        // rejection or partial-input state. Paste rollback stays the editor's.
+        if (outcome.refused.endsLine()) self.editor = .{ .buffer = &self.query_bytes, .length = length, .cursor = cursor };
     } else if (outcome == .append or outcome == .redraw) {
         var first: ?usize = null;
         var kept = false;
@@ -356,4 +361,72 @@ test "Model choice invalidates every replaced or released source before keys mou
         try std.testing.expect(!choice.active);
         try std.testing.expectEqual(@as(usize, 0), choice.hits.len);
     };
+}
+
+const RejectedInput = enum { typed_overflow, invalid_utf8, invalid_key, invalid_scalar, paste_overflow };
+
+fn expectFilterRecovery(failure: RejectedInput) !void {
+    const entries = [_]picker.Entry{
+        .{ .id = "alpha-one", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+        .{ .id = "alpha-two", .known = false, .catalogued = false, .providers = .initOne(.codex) },
+    };
+    const menu: picker.Menu = .{ .entries = &entries };
+    var fixture: Fixture = .{};
+    var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel };
+    choice.open(&menu, .codex, "alpha-one");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'a', .text = "alpha " } });
+    try press(&choice, &ctx, vaxis.Key.left); // Recovery must preserve a non-final caret too.
+    const spaces = @as([catalog.max_model_bytes + 1]u8, @splat(' '));
+    switch (failure) {
+        .typed_overflow => try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = ' ', .text = &spaces } }),
+        .invalid_utf8 => try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 0xfffd, .text = "\xff" } }),
+        .invalid_key => try choice.widget().handleEvent(&ctx, .invalid_key),
+        .invalid_scalar => try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = 'z', .text = "zz\x01" } }),
+        .paste_overflow => {
+            try choice.widget().handleEvent(&ctx, .paste_start);
+            try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = ' ', .text = &spaces } });
+            try choice.widget().handleEvent(&ctx, .paste_end);
+            try std.testing.expectEqualStrings("alpha ", choice.editor.buffer[0..choice.editor.length]);
+        },
+    }
+    const retained = try arena.allocator().dupe(u8, choice.editor.buffer[0..choice.editor.length]);
+    const cursor = choice.editor.cursor;
+    if (failure != .paste_overflow) {
+        try std.testing.expectEqual(@as(?keymap.Refusal, if (failure == .typed_overflow) .overflow else .invalid), choice.editor.rejected);
+        try press(&choice, &ctx, vaxis.Key.enter); // Report the rejected line, never pick it.
+    }
+    try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);
+    try std.testing.expect(choice.active);
+    try std.testing.expectEqualStrings(retained, choice.editor.buffer[0..choice.editor.length]);
+    try std.testing.expectEqual(cursor, choice.editor.cursor);
+    try std.testing.expectEqual(@as(?keymap.Refusal, null), choice.editor.rejected);
+    try press(&choice, &ctx, vaxis.Key.backspace);
+    try std.testing.expectEqual(retained.len - 1, choice.editor.length);
+    try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = ' ', .text = " " } });
+    try std.testing.expectEqual(retained.len, choice.editor.length);
+    try std.testing.expect(!choice.no_match);
+    _ = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} });
+    try std.testing.expectEqual(@as(usize, 2), choice.hits.len);
+    try press(&choice, &ctx, vaxis.Key.down);
+    try press(&choice, &ctx, vaxis.Key.enter);
+    try std.testing.expectEqualStrings("alpha-two", fixture.picked.?);
+    try std.testing.expect(!choice.active);
+}
+
+test "Model choice recovers from typed overflow with its usable filter and caret" {
+    try expectFilterRecovery(.typed_overflow);
+}
+
+test "Model choice recovers from malformed input before editing and picking" {
+    for ([_]RejectedInput{ .invalid_utf8, .invalid_key, .invalid_scalar }) |failure| {
+        errdefer std.debug.print("model filter rejection={s}\n", .{@tagName(failure)});
+        try expectFilterRecovery(failure);
+    }
+}
+
+test "Model choice preserves paste overflow rollback before editing and picking" {
+    try expectFilterRecovery(.paste_overflow);
 }
