@@ -6,6 +6,7 @@ concurrent PRs share main's unreleased number instead of racing to bump it.
 Changes to the generated wire contract since that release require a newer number.
 """
 from pathlib import Path
+from copy import deepcopy
 import json
 import re
 import subprocess
@@ -50,13 +51,28 @@ def wire_version_at(revision):
 
 
 def normalized_contract(document):
-    """Ignore release labels and prose, retaining every wire constraint."""
+    """Ignore annotations, never schema names or literal wire data."""
     documentation = {"description", "summary", "example", "examples"}
+    # These objects index named entries; their keys are not annotations.
+    named_maps = {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas",
+                  "dependentRequired", "paths", "webhooks", "responses", "content", "headers",
+                  "encoding", "callbacks", "links", "variables", "mapping", "scopes", "parameters"}
+    literal_values = {"const", "enum", "default", "value", "security"}
 
-    def normalize(value, path=()):
+    def normalize(value, path=(), named_entries=False):
         if isinstance(value, dict):
-            return {key: normalize(item, (*path, key)) for key, item in value.items()
-                    if key not in documentation and (*path, key) != ("info", "version")}
+            result = {}
+            for key, item in value.items():
+                if not named_entries and path != ("components",) and key in documentation:
+                    continue
+                if (*path, key) == ("info", "version"):
+                    continue
+                if not named_entries and (key in literal_values or key.startswith("x-")):
+                    result[key] = item
+                else:
+                    child_names = not named_entries and (key in named_maps or path == ("components",))
+                    result[key] = normalize(item, (*path, key), child_names)
+            return result
         if isinstance(value, list):
             return [normalize(item, (*path, index)) for index, item in enumerate(value)]
         return value
@@ -185,6 +201,55 @@ class WireVersionTest(unittest.TestCase):
                     self.assertEqual(error, f"wire contract differs from release v0.69.1 (wire_version 13) at {path}, "
                                      f"but wire_version is {candidate}; set src/wire_version.zig to 14, "
                                      "regenerate openapi.json")
+
+    def test_annotation_changes_at_object_positions_are_ignored(self):
+        for spelling in ("description", "summary", "example", "examples"):
+            before = {"paths": {"/v1/read": {"post": {spelling: "before"}}},
+                      "components": {"schemas": {"Thing": {spelling: "before", "properties": {
+                          "field": {"anyOf": [{"type": "string", spelling: "before"}]}}}}}}
+            after = deepcopy(before)
+            after["paths"]["/v1/read"]["post"][spelling] = "after"
+            schema = after["components"]["schemas"]["Thing"]
+            schema[spelling] = "after"
+            schema["properties"]["field"]["anyOf"][0][spelling] = "after"
+            with self.subTest(spelling=spelling):
+                self.assertIsNone(wire_contract_error("v0.1.0", 1, 1, before, after))
+
+    def test_annotation_spellings_in_named_maps_are_wire_names(self):
+        def document(container, entries):
+            if container.startswith("components."):
+                return {"components": {container.split(".", 1)[1]: entries}}
+            return {container: entries}
+
+        for container in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas",
+                          "components.schemas", "components.parameters", "components.responses", "components.examples",
+                          "paths", "responses", "content"):
+            for spelling in ("description", "summary", "example", "examples"):
+                before = {spelling: {"anyOf": [{"type": "string", "enum": ["old"], "x-rui-max-bytes": 200}]}}
+                cases = [("added", {}, before), ("removed", before, {})]
+                for constraint, value in (("x-rui-max-bytes", 999), ("enum", ["old", "new"]), ("type", "integer")):
+                    after = deepcopy(before)
+                    after[spelling]["anyOf"][0][constraint] = value
+                    cases.append((constraint, before, after))
+                for change, before_entries, after_entries in cases:
+                    with self.subTest(container=container, spelling=spelling, change=change):
+                        error = wire_contract_error("v0.1.0", 1, 1, document(container, before_entries),
+                                                    document(container, after_entries))
+                        self.assertIsNotNone(error)
+                after = deepcopy(before)
+                after[spelling]["description"] = "annotation on a named schema"
+                with self.subTest(container=container, spelling=spelling, change="annotation only"):
+                    self.assertIsNone(wire_contract_error("v0.1.0", 1, 1, document(container, before),
+                                                         document(container, after)))
+
+    def test_annotation_spellings_in_literal_values_are_wire_data(self):
+        for keyword in ("const", "enum", "default", "value", "x-rui-contract", "security"):
+            for spelling in ("description", "summary", "example", "examples"):
+                before_value, after_value = {spelling: "before"}, {spelling: "after"}
+                before = {keyword: [before_value] if keyword in ("enum", "security") else before_value}
+                after = {keyword: [after_value] if keyword in ("enum", "security") else after_value}
+                with self.subTest(keyword=keyword, spelling=spelling):
+                    self.assertIsNotNone(wire_contract_error("v0.1.0", 1, 1, before, after))
 
     def test_wire_contract_changes_bump_wire_version(self):
         tag = released_tag(ROOT)

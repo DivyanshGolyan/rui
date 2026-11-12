@@ -125,6 +125,7 @@ Darwin-only linking and settings live in `build/darwin.zig`, a Mac path.
 Other build plumbing (`build.zig`, `build.zig.zon`, the setup action, `tests/ci/qualification.py`) is not a Mac path: Linux runs it, `typecheck-macos` compiles Rui for Darwin, and promotion links and runs it on a Mac.
 The [previous installed-release upgrade](.github/workflows/previous-release-upgrade.yml) runs on Linux against that same candidate only for upgrade, installer and migration paths, the check itself, and a `schema.zig` edit that changes the Store format: its `schema_version`, a `bootstrap_digests` row or a migration step.
 Promotion runs it on both systems.
+For a Store format change, run `python3 tests/ci/schema_number.py --check`, compile unfiltered unit binaries, exercise the affected migrations with `-Dtest-filter`, and remove the new step's statements as a negative control; existing main digest rows and steps stay unchanged. Format 70's wire-label tests cover the exact one-statement step on both dialects and populated wire-13 SQLite reopen; its live MySQL witness requires a configured server.
 Renderer contracts run nonblocking only for renderer and frontend owners.
 The documentation lane skips heavyweight policy, product builds and suites, and prior-release upgrades.
 It requires a successful plan with canonical empty product outputs and a successful Linux aggregate that verifies all product producers were skipped.

@@ -2881,8 +2881,9 @@ Every page carries `queued`: the field came with wire version 3, and a frontend 
 Wire version 10 makes the refused-send target required and nullable under the [public activity contract](#public-session-activity); non-null peers keep their canonical ID grammar.
 
 Wire version 14 adds the `chatgpt` provider key, and the `chatgpt_plan` route, to `host_info`'s `capabilities.providers`; different versions refuse each other.
+A wire bump also appends a Store format step because the Store saves its wire label: format 70 moves the saved label from 13 to 14 on SQLite and MySQL, without changing ordinary rows.
 The `model_call` Activity rows shipped in v0.69.x under wire version 13 without a bump, although 13 had already shipped in v0.67.x; a 0.69 client asking a 0.67 Host for those rows therefore failed with `InvalidCursor` instead of refusing the incompatible Host.
-`tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` keys; wire constraints such as `x-rui-*` bounds remain part of the comparison.
+`tests/ci/test_wire_version.py` requires a wire version greater than the newest release's whenever generated `openapi.json` changes, ignoring only `info.version` and documentation-only `description`, `summary`, `example` and `examples` annotations (never named schema entries or literal wire data); wire constraints such as `x-rui-*` bounds remain part of the comparison.
 
 Wire version 11 drops wire 10's exclusive `skill` field: a Message's `/name` words bind skills instead. It adds the full report's `skill` Conversation entries with `source_skill_position`, and bounded skill suggestions; different versions, including saved request records, refuse each other.
 
