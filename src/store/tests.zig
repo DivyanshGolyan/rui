@@ -12388,31 +12388,37 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
 test "a start_agent child works in its caller's Workspace with its provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var create = try completeConfiguration("binding-agent-parent", "", workspace, "model-a");
-            create.configuration.tools = try .of(&.{ "bash", "start_agent" });
-            const parent = (try storage.configure(&create, .{})).accepted.session;
-            try submitTestMessage(&storage, &tmp, "binding-agent-message", "binding-agent-key", parent.slice(), "start a child");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleCallsForTesting(&storage, &tmp, model, "binding-agent-call", &.{.{
-                .item_id = "binding-item",
-                .name = "start_agent",
-                .encoded_call_id = "binding-call",
-                .decoded_call_id = "binding-call",
-                .encoded_arguments = "{}",
-                .decoded_arguments = "{}",
-            }});
-            const action = (try storage.nextCoreWork()).?.action;
-            // D122/D221: a Bash spec names no Workspace; the child inherits both.
-            var spec = try testingAgentSpec(&.{"bash"}, "ask");
-            try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "work here", true, &spec, null, .{}) == .started);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND workspace=?2 AND provider='codex'", .{ parent.slice(), workspace }));
+            for (std.enums.values(protocol.ReasoningEffort)) |effort| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("binding-agent-parent", "", workspace, "model-a");
+                create.configuration.tools = try .of(&.{ "bash", "start_agent" });
+                const parent = (try storage.configure(&create, .{})).accepted.session;
+                try submitTestMessage(&storage, &tmp, "binding-agent-message", "binding-agent-key", parent.slice(), "start a child");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, model, "binding-agent-call", &.{.{
+                    .item_id = "binding-item",
+                    .name = "start_agent",
+                    .encoded_call_id = "binding-call",
+                    .decoded_call_id = "binding-call",
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                }});
+                const action = (try storage.nextCoreWork()).?.action;
+                // D122/D221: a Bash spec names no Workspace; the child inherits both.
+                var spec = try testingAgentSpec(&.{"bash"}, "ask");
+                try spec.model.value.set("unlisted-effort-model");
+                spec.reasoning_effort.state = .value;
+                try spec.reasoning_effort.value.set(@tagName(effort));
+                try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "work here", true, &spec, null, .{}) == .started);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND workspace=?2 AND provider='codex'", .{ parent.slice(), workspace }));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision r JOIN session s ON s.session_ref=r.session_ref WHERE s.parent_ref=?1 AND r.reasoning_effort=?2", .{ parent.slice(), @tagName(effort) }));
+            }
         }
     }.run);
 }
@@ -12463,6 +12469,63 @@ test "explicit or retained null effort on a listed model refuses a mixed update 
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
             }
+        }
+    }.run);
+}
+
+test "unlisted effort passes configure preset Message creation and update unchanged" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Surface = enum { configure, preset, message };
+            for (std.enums.values(Surface)) |surface| for (std.enums.values(protocol.ReasoningEffort)) |effort| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("unlisted-create", "", workspace, "unlisted-effort-model");
+                create.configuration.reasoning_effort.state = .value;
+                try create.configuration.reasoning_effort.value.set(@tagName(effort));
+                const session = switch (surface) {
+                    .configure => configured: {
+                        const reply = try storage.configure(&create, .{});
+                        try std.testing.expect(reply == .accepted);
+                        break :configured reply.accepted.session;
+                    },
+                    .preset => configured: {
+                        create.preset = .{};
+                        try create.preset.?.set("worker");
+                        const reply = try storage.configureWithPreset(&create, &.{ .request_digest = create.presetRequestDigest() }, .{});
+                        try std.testing.expect(reply == .accepted);
+                        break :configured reply.accepted.session;
+                    },
+                    .message => configured: {
+                        const text = "work";
+                        const file = try tmp.dir.createFile(std.testing.io, "unlisted-message", .{ .read = true });
+                        try file.writeStreamingAll(std.testing.io, text);
+                        try file.sync(std.testing.io);
+                        var message = try completeMessage("unlisted-message", "", file, text);
+                        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                        message.configuration = create.configuration;
+                        const reply = storage.submitMessageWithModel(&message, null, .{});
+                        try std.testing.expect(reply == .accepted);
+                        break :configured reply.accepted.session;
+                    },
+                };
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+                // Start unspecified, then select this same word through update.
+                var empty = try completeConfiguration("unlisted-empty", "", workspace, "unlisted-effort-model");
+                empty.configuration.reasoning_effort.state = .explicit_null;
+                const target = (try storage.configure(&empty, .{})).accepted.session;
+                var update: wire_request.ConfigureCommand = .{ .session = target };
+                try update.key.set("unlisted-update");
+                update.configuration.reasoning_effort.state = .value;
+                try update.configuration.reasoning_effort.value.set(@tagName(effort));
+                try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), (try storage.inspectSessionForTesting(target.slice())).reasoning_effort);
+            };
         }
     }.run);
 }

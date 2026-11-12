@@ -3450,7 +3450,7 @@ fn presentMutationReply(writer: *std.Io.Writer, reply: protocol_reply.MutationRe
 }
 
 /// Borrowed from the resolved configuration sent with the first Message.
-/// A cleared/omitted override still reports the catalog's effective default.
+/// A cleared/omitted override reports the client-selected starting effort.
 const StartConfiguration = struct {
     provider: []const u8,
     model: []const u8,
