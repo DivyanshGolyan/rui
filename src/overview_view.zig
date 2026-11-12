@@ -1883,8 +1883,13 @@ fn keyInput(state: *State, input: KeyInput, effects: *Effects) error{OutOfMemory
     switch (input.under) {
         // Under the settings page only the keys that are the whole app's
         // stay live: leaving, and Esc for an Upgrade it can still cancel.
-        // Nothing edits the hidden draft or the list.
-        .settings => return if (action == .exit or (action == .clear and state.upgrade.takesEscape())) toComposer(state, input, action, effects) else .drop,
+        // Nothing edits the hidden draft or the list: Ctrl-D, which the
+        // line editor spends on a draft before it means leaving, leaves
+        // only from an empty one.
+        .settings => {
+            const leaves = action == .exit and (named != .ctrl_d or input.draft.bytes.len == 0);
+            return if (leaves or (action == .clear and state.upgrade.takesEscape())) toComposer(state, input, action, effects) else .drop;
+        },
         .main => {},
     }
     if (input.choice) |choice| {
@@ -7523,11 +7528,13 @@ test "every key Root hands the overview means one thing in each screen state, un
     // 309d639, before this core took its keys. Each combination matches
     // exactly one row, and every row matches some.
     const Setup = enum { plain, commands, footer_focused, choice, choice_pending, frozen, host_down_empty, host_down_draft, upgrade_cancellable };
-    const Pressed = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, left, right, tab, shift_tab, host_start };
+    const Pressed = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, ctrl_d, left, right, tab, shift_tab, host_start };
     const Under = app_input.Layer.Covered;
     const Tag = std.meta.Tag(Effect);
     const all_setups = std.enums.values(Setup);
     const closing = [_]Pressed{ .escape, .ctrl_g };
+    // Setups whose draft is empty; the rest hold one ("/", or "a task").
+    const empty_draft = [_]Setup{ .plain, .footer_focused, .choice, .choice_pending, .host_down_empty, .upgrade_cancellable };
     // The footer takes these first while focus is on the input.
     const footer_path = [_]Setup{ .plain, .commands, .host_down_empty, .host_down_draft, .upgrade_cancellable, .choice_pending };
     const Expected = struct {
@@ -7544,12 +7551,15 @@ test "every key Root hands the overview means one thing in each screen state, un
         // be cancelled, are the overview's; nothing edits the hidden draft.
         .{ .under = .settings, .setups = &.{ .plain, .commands, .footer_focused, .choice, .choice_pending, .host_down_empty, .host_down_draft, .upgrade_cancellable }, .keys = &.{.ctrl_c}, .take = .edit },
         .{ .under = .settings, .setups = &.{.frozen}, .keys = &.{.ctrl_c}, .take = .taken, .effects = &.{.exit} },
+        // Ctrl-D leaves only from an empty draft: it never edits the hidden one.
+        .{ .under = .settings, .setups = &empty_draft, .keys = &.{.ctrl_d}, .take = .edit },
+        .{ .under = .settings, .setups = &.{ .commands, .frozen, .host_down_draft }, .keys = &.{.ctrl_d}, .take = .drop },
         .{ .under = .settings, .setups = &.{.upgrade_cancellable}, .keys = &closing, .take = .edit },
         .{ .under = .settings, .setups = &.{ .plain, .commands, .footer_focused, .choice, .choice_pending, .frozen, .host_down_empty, .host_down_draft }, .keys = &closing, .take = .drop },
         .{ .under = .settings, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start }, .take = .drop },
         // Focus on the input: the footer takes Tab and Shift-Tab, the
         // composer the rest, and `r` on an empty draft starts a stopped Host.
-        .{ .setups = &footer_path, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .ctrl_c, .left, .right }, .take = .edit },
+        .{ .setups = &footer_path, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right }, .take = .edit },
         .{ .setups = &.{ .plain, .commands, .host_down_empty, .host_down_draft, .upgrade_cancellable }, .keys = &closing, .take = .edit },
         .{ .setups = &footer_path, .keys = &.{.tab}, .take = .taken, .focus = .model },
         .{ .setups = &footer_path, .keys = &.{.shift_tab}, .take = .taken, .focus = .effort },
@@ -7559,7 +7569,7 @@ test "every key Root hands the overview means one thing in each screen state, un
         .{ .setups = &.{.choice_pending}, .keys = &closing, .take = .close_choice },
         // Focus on the footer's model.
         .{ .setups = &.{.footer_focused}, .keys = &.{ .printable, .host_start }, .take = .edit, .focus = .input },
-        .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .left, .right }, .take = .edit },
+        .{ .setups = &.{.footer_focused}, .keys = &.{ .pasted_printable, .pasted_enter, .ctrl_c, .ctrl_d, .left, .right }, .take = .edit },
         .{ .setups = &.{.footer_focused}, .keys = &.{.enter}, .take = .taken, .focus = .input, .effects = &.{.open_choice} },
         .{ .setups = &.{.footer_focused}, .keys = &closing, .take = .taken, .focus = .input },
         .{ .setups = &.{.footer_focused}, .keys = &.{.tab}, .take = .taken, .focus = .effort },
@@ -7568,11 +7578,11 @@ test "every key Root hands the overview means one thing in each screen state, un
         // leaving reaches past it.
         .{ .setups = &.{.choice}, .keys = &.{.enter}, .take = .choice },
         .{ .setups = &.{.choice}, .keys = &closing, .take = .close_choice },
-        .{ .setups = &.{.choice}, .keys = &.{.ctrl_c}, .take = .edit },
+        .{ .setups = &.{.choice}, .keys = &.{ .ctrl_c, .ctrl_d }, .take = .edit },
         .{ .setups = &.{.choice}, .keys = &.{ .printable, .pasted_printable, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start }, .take = .drop },
         // While a start waits the frozen composer takes every key: the
         // footer moves no focus, and only the screen's actions act.
-        .{ .setups = &.{.frozen}, .keys = &.{.ctrl_c}, .take = .taken, .effects = &.{.exit} },
+        .{ .setups = &.{.frozen}, .keys = &.{ .ctrl_c, .ctrl_d }, .take = .taken, .effects = &.{.exit} },
         .{ .setups = &.{.frozen}, .keys = &closing, .take = .taken, .effects = &.{.clear_draft} },
         .{ .setups = &.{.frozen}, .keys = &.{ .printable, .pasted_printable, .enter, .pasted_enter, .left, .right, .tab, .shift_tab, .host_start }, .take = .taken },
     };
@@ -7587,6 +7597,7 @@ test "every key Root hands the overview means one thing in each screen state, un
                 .escape => .{ .named = .escape },
                 .ctrl_g => .{ .named = .ctrl_g },
                 .ctrl_c => .{ .named = .ctrl_c },
+                .ctrl_d => .{ .named = .ctrl_d },
                 .left, .right => .other,
                 .tab => .tab,
                 .shift_tab => .shift_tab,
