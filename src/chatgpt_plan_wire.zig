@@ -7,7 +7,8 @@
 //! random bytes, the clock, the listener, the browser and the transport. The
 //! record is `codex_credential_policy.zig`'s and its custody
 //! `codex_credentials.zig`'s, as for a Codex login; this flow adds the client
-//! id the issuer gives it. The issuer is the one Codex login uses, so its
+//! id the issuer gives it, and the policy reads such a record's account from
+//! its ID token's `sub`, since these tokens carry no ChatGPT account claim. The issuer is the one Codex login uses, so its
 //! token fields and refresh rejections are read by `codex_token_wire.zig`.
 const std = @import("std");
 const policy = @import("codex_credential_policy.zig");
@@ -232,11 +233,11 @@ pub const Scratch = struct {
 };
 
 /// Builds the record a sign-in installs from the exchange's response, after
-/// checking its ID token and granted scope. The account and expiry come from
-/// the tokens as for a Codex login, and the record keeps the issued client
-/// id. The generation is assigned at admission. On error the record is
-/// zeroed; `PlanScopeMissing` means the user signed in but has not let this
-/// app use the plan.
+/// checking its ID token and granted scope. The record keeps the issued
+/// client id, which makes its account the ID token's `sub` and its expiry the
+/// access token's (`policy.deriveClaims`). The generation is assigned at
+/// admission. On error the record is zeroed; `PlanScopeMissing` means the
+/// user signed in but has not let this app use the plan.
 pub fn loginRecord(attempt: *const Attempt, grant: *const Grant, status: u16, json: []const u8, now_seconds: i64, record: *policy.Record, scratch: *Scratch) !void {
     defer std.crypto.secureZero(u8, std.mem.asBytes(&scratch.tokens));
     codex.parseTokenResponse(status, json, &scratch.wire.json, &scratch.tokens) catch |err| {
@@ -246,8 +247,12 @@ pub fn loginRecord(attempt: *const Attempt, grant: *const Grant, status: u16, js
     errdefer std.crypto.secureZero(u8, std.mem.asBytes(record));
     try checkIdToken(scratch.tokens.id_token.slice(), grant.client_id.slice(), &attempt.nonce, now_seconds, &scratch.wire.claims);
     try requirePlanScope(json, &scratch.wire.json);
-    try codex.loginRecord(&scratch.tokens, now_seconds, record, &scratch.wire.claims);
+    record.* = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 0, .refreshed_at = now_seconds };
     try record.client_id.set(grant.client_id.slice());
+    try record.id_token.set(scratch.tokens.id_token.slice());
+    try record.access_token.set(scratch.tokens.access_token.slice());
+    try record.refresh_token.set(scratch.tokens.refresh_token.slice());
+    try policy.deriveClaims(record, &scratch.wire.claims);
 }
 
 /// The ID token must name this issuer, this client and this attempt's nonce,
@@ -392,11 +397,34 @@ fn testToken(claims: []const u8, buffer: []u8) []const u8 {
     return buffer[0 .. end + ".c2ln".len];
 }
 
+/// A compact token whose payload is `claims`, built at compile time.
+fn compactToken(comptime claims: []const u8) []const u8 {
+    comptime {
+        @setEvalBranchQuota(100_000);
+        const encoder = std.base64.url_safe_no_pad.Encoder;
+        var payload: [encoder.calcSize(claims.len)]u8 = undefined;
+        _ = encoder.encode(&payload, claims);
+        const token = "e30." ++ payload ++ ".c2ln";
+        return token;
+    }
+}
+
+/// Made-up ID token claims shaped like the issuer's: the auth object holds no
+/// account claim, and a refreshed token has no nonce.
+const plan_subject = "user-made-up-1";
+fn planClaims(comptime sub: []const u8, comptime nonce_claim: []const u8) []const u8 {
+    return "{\"iss\":\"https://auth.openai.com\",\"sub\":\"" ++ sub ++ "\",\"aud\":[\"" ++ test_client_id ++ "\"]," ++ nonce_claim ++
+        "\"auth_time\":1700000000,\"email\":\"someone@example.com\",\"email_verified\":true,\"name\":\"Some One\",\"sid\":\"sid-made-up\"," ++
+        "\"https://api.openai.com/auth\":{\"per_user_salt\":\"salt-made-up\"},\"iat\":1800000000,\"exp\":1800000001,\"jti\":\"jti-made-up\",\"at_hash\":\"hash-made-up\"}";
+}
+const signed_in_claims = planClaims(plan_subject, "\"nonce\":\"" ++ ones_nonce ++ "\",");
+const refreshed_id_token = compactToken(planClaims(plan_subject, ""));
+
 fn testSavedRecord(record: *policy.Record) !void {
     record.* = .{ .generation = 4, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 100 };
-    try record.account_id.set(policy.fixture_account_id);
+    try record.account_id.set(plan_subject);
     try record.client_id.set(test_client_id);
-    try record.id_token.set(policy.fixture_id_token);
+    try record.id_token.set(refreshed_id_token);
     try record.access_token.set(policy.fixture_access_token);
     try record.refresh_token.set("refresh-old");
 }
@@ -421,7 +449,7 @@ test "the authorization address names the first or the saved client" {
     var saved: policy.Record = undefined;
     try testSavedRecord(&saved);
     try std.testing.expectEqualStrings(
-        "https://auth.openai.com/api/accounts/authorize?client_id=" ++ test_client_id ++ "&id_token_hint=" ++ policy.fixture_id_token ++ tail,
+        "https://auth.openai.com/api/accounts/authorize?client_id=" ++ test_client_id ++ "&id_token_hint=" ++ refreshed_id_token ++ tail,
         try authorize(&testRandom(), 1455, test_host_id, &saved, &attempt, &url),
     );
     try std.testing.expectEqualStrings(test_client_id, attempt.saved_client_id.?.slice());
@@ -542,7 +570,6 @@ fn testResponse(claims: []const u8, scope_field: []const u8, buffer: []u8) ![]co
 }
 
 const granted_scope = ",\"scope\":\"openid profile email offline_access resource.invoke chatgpt.tokens.use.direct\"";
-const auth_claim = "\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"" ++ policy.fixture_account_id ++ "\"}";
 
 test "a token response becomes a record only for this issuer, client, nonce and plan" {
     var attempt: Attempt = undefined;
@@ -555,10 +582,11 @@ test "a token response becomes a record only for this issuer, client, nonce and 
     var record: policy.Record = undefined;
     var json: [2048]u8 = undefined;
     const now: i64 = 1_800_000_000;
-    const good = "{\"iss\":\"https://auth.openai.com\",\"aud\":[\"" ++ test_client_id ++ "\"],\"exp\":1800000001,\"nonce\":\"" ++ ones_nonce ++ "\",\"sub\":\"user\"," ++ auth_claim ++ "}";
+    const good = signed_in_claims;
     try loginRecord(&attempt, &grant, 200, try testResponse(good, granted_scope, &json), now, &record, scratch);
     try std.testing.expectEqualStrings(test_client_id, record.client_id.slice());
-    try std.testing.expectEqualStrings(policy.fixture_account_id, record.account_id.slice());
+    try std.testing.expectEqualStrings(plan_subject, record.account_id.slice());
+    try std.testing.expect(!record.fedramp);
     try std.testing.expectEqualStrings("rt_made_up", record.refresh_token.slice());
     try std.testing.expectEqual(@as(i64, 4_102_444_800), record.expires_at);
     try std.testing.expectEqual(now, record.refreshed_at);
@@ -571,7 +599,7 @@ test "a token response becomes a record only for this issuer, client, nonce and 
     try std.testing.expectEqualStrings(test_client_id, decoded.client_id.slice());
     try std.testing.expectEqualStrings(record.id_token.slice(), decoded.id_token.slice());
     // A single audience string and an absent scope, which grants what was asked, pass.
-    const single = "{\"iss\":\"https://auth.openai.com\",\"aud\":\"" ++ test_client_id ++ "\",\"exp\":1800000001,\"nonce\":\"" ++ ones_nonce ++ "\"," ++ auth_claim ++ "}";
+    const single = "{\"iss\":\"https://auth.openai.com\",\"aud\":\"" ++ test_client_id ++ "\",\"exp\":1800000001,\"nonce\":\"" ++ ones_nonce ++ "\",\"sub\":\"" ++ plan_subject ++ "\"}";
     try loginRecord(&attempt, &grant, 200, try testResponse(single, "", &json), now, &record, scratch);
 
     for ([_]struct { []const u8, []const u8, anyerror }{
@@ -586,7 +614,8 @@ test "a token response becomes a record only for this issuer, client, nonce and 
         .{ "{\"iss\":7}", granted_scope, error.InvalidTokenClaims },
         .{ good, ",\"scope\":\"openid profile email offline_access resource.invoke\"", error.PlanScopeMissing },
         .{ good, ",\"scope\":\"chatgpt.tokens.use.direct.extra\"", error.PlanScopeMissing },
-        .{ "{\"iss\":\"https://auth.openai.com\",\"aud\":\"" ++ test_client_id ++ "\",\"exp\":1800000001,\"nonce\":\"" ++ ones_nonce ++ "\"}", granted_scope, error.MissingAccountClaim },
+        // A ChatGPT account claim does not stand in for the subject.
+        .{ "{\"iss\":\"https://auth.openai.com\",\"aud\":\"" ++ test_client_id ++ "\",\"exp\":1800000001,\"nonce\":\"" ++ ones_nonce ++ "\",\"chatgpt_account_id\":\"acct\"}", granted_scope, error.MissingAccountClaim },
     }) |case| {
         try std.testing.expectError(case[2], loginRecord(&attempt, &grant, 200, try testResponse(case[0], case[1], &json), now, &record, scratch));
         try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&record), 0));
@@ -607,6 +636,16 @@ test "a refresh rotates the plan record's tokens and keeps its client" {
     try std.testing.expectEqualStrings("refresh-new", replacement.refresh_token.slice());
     try std.testing.expectEqualStrings(test_client_id, replacement.client_id.slice());
     try std.testing.expectEqual(@as(u64, 5), try policy.admitReplacement(&current, &replacement, 4));
+    // A rotated ID token, without a nonce, for the same subject is taken.
+    const rotated = comptime compactToken(planClaims(plan_subject, "\"amr\":[\"pwd\"],"));
+    try parseRefreshResponse(&current, 200, "{\"id_token\":\"" ++ rotated ++ "\"}", 78, &replacement, &scratch.wire);
+    try std.testing.expectEqualStrings(rotated, replacement.id_token.slice());
+    try std.testing.expectEqualStrings(plan_subject, replacement.account_id.slice());
+    try std.testing.expectEqual(@as(u64, 5), try policy.admitReplacement(&current, &replacement, 4));
+    // Another subject is another account; a Codex-shaped token names none.
+    try std.testing.expectError(error.AccountChanged, parseRefreshResponse(&current, 200, "{\"id_token\":\"" ++ comptime compactToken(planClaims("user-made-up-2", "")) ++ "\"}", 78, &replacement, &scratch.wire));
+    try std.testing.expect(std.mem.allEqual(u8, std.mem.asBytes(&replacement), 0));
+    try std.testing.expectError(error.MissingAccountClaim, parseRefreshResponse(&current, 200, "{\"id_token\":\"" ++ policy.fixture_id_token ++ "\"}", 78, &replacement, &scratch.wire));
     inline for (.{
         .{ "{\"error\":\"refresh_token_expired\"}", error.RefreshTokenExpired },
         .{ "{\"error\":{\"code\":\"refresh_token_reused\"}}", error.RefreshTokenReused },
@@ -619,6 +658,40 @@ test "a refresh rotates the plan record's tokens and keeps its client" {
         const required: policy.LoginRequired = case[1];
         try std.testing.expectEqual(@as(anyerror, case[1]), required);
     }
+}
+
+test "each record validates by its own kind's account claim" {
+    var claims: policy.ClaimScratch = undefined;
+    // A Codex record: the ChatGPT account claim, read without a client id.
+    var codex_record: policy.Record = undefined;
+    try testSavedRecord(&codex_record);
+    codex_record.client_id.wipe();
+    try codex_record.account_id.set(policy.fixture_account_id);
+    try codex_record.id_token.set(policy.fixture_id_token);
+    try policy.validateSelected(&codex_record, false, &claims);
+    // Read as a plan record, its token has no subject.
+    try codex_record.client_id.set(test_client_id);
+    try std.testing.expectError(error.MissingAccountClaim, policy.validateSelected(&codex_record, false, &claims));
+
+    // A plan record: the subject, through every check that reads the tokens.
+    var plan: policy.Record = undefined;
+    try testSavedRecord(&plan);
+    try policy.validateSelected(&plan, false, &claims);
+    try std.testing.expectEqual(policy.Selection.use, try policy.select(&plan, false, 0, &claims));
+    try policy.launchCheck(&plan, false, 0, &claims);
+    try std.testing.expectEqual(policy.LocalStatus.configured, try policy.localStatus(&plan, 0, &claims));
+    try plan.account_id.set("user-made-up-2");
+    try std.testing.expectError(error.AccountMismatch, policy.validateSelected(&plan, false, &claims));
+    try std.testing.expectError(error.AccountMismatch, policy.select(&plan, false, 0, &claims));
+    try std.testing.expectError(error.AccountMismatch, policy.launchCheck(&plan, false, 0, &claims));
+    try std.testing.expectError(error.AccountMismatch, policy.localStatus(&plan, 0, &claims));
+    try plan.account_id.set(plan_subject);
+    plan.fedramp = true;
+    try std.testing.expectError(error.AccountMismatch, policy.validateSelected(&plan, false, &claims));
+    // Read as a Codex record, the plan token names no account.
+    plan.fedramp = false;
+    plan.client_id.wipe();
+    try std.testing.expectError(error.MissingAccountClaim, policy.validateSelected(&plan, false, &claims));
 }
 
 test "a host id is a lowercase version 4 UUID URN" {

@@ -49,17 +49,7 @@ pub fn loginRecord(tokens: *const Tokens, refreshed_at: i64, record: *policy.Rec
     try record.id_token.set(tokens.id_token.slice());
     try record.access_token.set(tokens.access_token.slice());
     try record.refresh_token.set(tokens.refresh_token.slice());
-    try deriveClaims(record, claims);
-}
-
-/// A record's account, FedRAMP routing and expiry are those of its own
-/// tokens, read as `policy.validateSelected` reads them.
-fn deriveClaims(record: *policy.Record, claims: *policy.ClaimScratch) !void {
-    var account: policy.Account = undefined;
-    try policy.parseAccount(record.id_token.slice(), claims, &account);
-    try record.account_id.set(account.id.slice());
-    record.fedramp = account.fedramp;
-    record.expires_at = try policy.expiryOf(record, claims);
+    try policy.deriveClaims(record, claims);
 }
 
 pub const device_start: Request = .{
@@ -162,7 +152,8 @@ pub fn refreshRequest(current: *const policy.Record, buffer: []u8) !Request {
 
 /// Builds the replacement for a claimed record from a refresh response.
 /// Omitted rotating fields are kept; routing and expiry follow the resulting
-/// tokens. The generation is assigned at admission. On error the replacement
+/// tokens, whose account is read by the record's own kind
+/// (`policy.accountOf`), so a plan record's refresh keeps its subject. The generation is assigned at admission. On error the replacement
 /// is zeroed.
 pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *policy.Record, scratch: *Scratch) !void {
     replacement.* = current.*;
@@ -173,16 +164,16 @@ pub fn parseRefreshResponse(current: *const policy.Record, status: u16, json: []
     if (wire.id_token) |text| {
         const id = text.slice;
         var account: policy.Account = undefined;
-        try policy.parseAccount(id, &scratch.claims, &account);
+        try policy.accountOf(current, id, &scratch.claims, &account);
         if (!std.mem.eql(u8, account.id.slice(), current.account_id.slice())) return error.AccountChanged;
         const fedramp = account.fedramp;
-        try policy.parseAccount(current.id_token.slice(), &scratch.claims, &account);
+        try policy.accountOf(current, current.id_token.slice(), &scratch.claims, &account);
         if (account.fedramp != fedramp) return error.AccountChanged;
         try replacement.id_token.set(id);
     }
     if (wire.access_token) |access| try replacement.access_token.set(access.slice);
     if (wire.refresh_token) |refresh| try replacement.refresh_token.set(refresh.slice);
-    try deriveClaims(replacement, &scratch.claims);
+    try policy.deriveClaims(replacement, &scratch.claims);
     replacement.refreshed_at = refreshed_at;
     replacement.state = .ready;
 }

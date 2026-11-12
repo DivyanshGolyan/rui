@@ -141,10 +141,29 @@ pub fn validateSelected(record: *const Record, fixture: bool, scratch: *ClaimScr
             !std.mem.eql(u8, record.account_id.slice(), fixture_account_id)))
         return error.FixtureRequiresSyntheticCredential;
     var account: Account = undefined;
-    try parseAccount(record.id_token.slice(), scratch, &account);
+    try accountOf(record, record.id_token.slice(), scratch, &account);
     if (!std.mem.eql(u8, account.id.slice(), record.account_id.slice()) or
         account.fedramp != record.fedramp) return error.AccountMismatch;
     if (try expiryOf(record, scratch) != record.expires_at) return error.InvalidCredentialExpiry;
+}
+
+/// The account `id_token` names for a record of `record`'s kind. A Codex
+/// login's account is its ChatGPT account claim (`parseAccount`); a plan
+/// sign-in, the record with an issued client id, carries no such claim and is
+/// the token's subject (`parseSubject`), never FedRAMP.
+pub fn accountOf(record: *const Record, id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
+    if (record.client_id.len == 0) return parseAccount(id_token, scratch, account);
+    return parseSubject(id_token, scratch, account);
+}
+
+/// Sets a record's account, routing and expiry from its own tokens, as
+/// `validateSelected` reads them. The issued client id, if any, is set first.
+pub fn deriveClaims(record: *Record, scratch: *ClaimScratch) !void {
+    var account: Account = undefined;
+    try accountOf(record, record.id_token.slice(), scratch, &account);
+    try record.account_id.set(account.id.slice());
+    record.fedramp = account.fedramp;
+    record.expires_at = try expiryOf(record, scratch);
 }
 
 /// The expiry a record's access token carries; an opaque token has none (0).
@@ -422,6 +441,22 @@ pub fn parseAccount(id_token: []const u8, scratch: *ClaimScratch, account: *Acco
         namespace.chatgpt_account_is_fedramp orelse false
     else
         false };
+    try account.id.set(id);
+}
+
+/// A plan sign-in's account: the ID token's top-level `sub`, as the issuer's
+/// sign-in guide directs. Its other claims are checked at the exchange.
+fn parseSubject(id_token: []const u8, scratch: *ClaimScratch, account: *Account) !void {
+    const payload = try tokenPayload(id_token, &scratch.decoded);
+    defer std.crypto.secureZero(u8, payload);
+    defer std.crypto.secureZero(u8, &scratch.arena);
+    var fixed = std.heap.FixedBufferAllocator.init(&scratch.arena);
+    const parsed = std.json.parseFromSlice(struct { sub: ?json_scalar.Text = null }, fixed.allocator(), payload, .{
+        .ignore_unknown_fields = true,
+    }) catch return error.InvalidTokenClaims;
+    const id = (parsed.value.sub orelse return error.MissingAccountClaim).slice;
+    if (!safeAscii(id)) return error.InvalidAccountClaim;
+    account.* = .{ .id = .{}, .fedramp = false };
     try account.id.set(id);
 }
 
