@@ -477,7 +477,7 @@
       "absent": [
         "gpt-6.1-sol · high",
         "Effort",
-        "✓",
+        "✓ xhigh",
         "click to change",
         "▾"
       ]
@@ -2140,11 +2140,15 @@
         },
         {
           "keys": [
-            "End"
+            "End",
+            "Up"
           ]
         },
         {
-          "wait": "enter open"
+          "wait": "↑"
+        },
+        {
+          "gone": "↓"
         }
       ],
       "sizes": [

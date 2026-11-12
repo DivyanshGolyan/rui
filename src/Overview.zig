@@ -1055,8 +1055,7 @@ fn selectedListLine(self: *const Self) ?u32 {
     return null;
 }
 
-/// Each visible part prepares only what it draws, at that part's width:
-/// rows once on the left, the Footer once on the right, or both when narrow.
+/// The overview is a full-width list and footer; a sidebar draws only rows.
 fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
     self.caps.width = self.attention.vx.caps.unicode;
