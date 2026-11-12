@@ -109,6 +109,7 @@ pub noinline fn classify(decode: *Decode, codec: protocol.Codec, io: std.Io, bod
     }
     writeReport(&failure.report, &decode.code, &decode.message);
     failure.refusal = found.refusal;
+    if (codecs.effortChangeRefused(codec, &decode.classify, status, bytes)) return .effort_change_refused;
     if (status == 429) if (found.refusal) |refusal| if (transport_policy.Quota.admits(refusal)) {
         return .{ .quota = .{ .refusal = refusal, .resets_at = found.resets_at } };
     };

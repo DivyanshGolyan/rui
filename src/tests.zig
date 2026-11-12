@@ -18,7 +18,8 @@ test {
     _ = @import("Palette.zig");
     _ = @import("skill_palette_tests.zig");
     _ = @import("Composer.zig");
-    _ = @import("Transcript.zig");
+    _ = @import("DocumentView.zig");
+    _ = @import("FeedView.zig");
     _ = @import("Root.zig");
     _ = @import("Chip.zig");
     _ = @import("StatusRow.zig");
@@ -121,7 +122,6 @@ test {
     _ = @import("TerminalText.zig");
     _ = @import("SessionInput.zig");
     _ = @import("SessionSubmission.zig");
-    _ = @import("ToolFolds.zig");
     _ = @import("SessionFrontend.zig");
     _ = @import("Overview.zig");
     _ = @import("session_reads.zig");

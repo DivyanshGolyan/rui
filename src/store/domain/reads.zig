@@ -1436,10 +1436,10 @@ const approval_request = rsql.Read(.{
 
 /// The setting Session ?1 changed at position ?2, ordinal ?3.
 const session_change = rsql.Read(.{
-    .sql = "SELECT revision,field,changed_at FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
+    .sql = "SELECT revision,field,changed_at,provider_text FROM session_change WHERE session_ref=?1 AND position=?2 AND ordinal=?3",
     .Args = struct { session: []const u8, position: u64, ordinal: u64 },
-    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive },
-    .cardinality = .one,
+    .Row = struct { revision: rsql.Positive, field: session_field.SessionField, changed_at: rsql.Positive, provider_text: *?Bounded(outcome_code.max_report_bytes) },
+    .cardinality = .optional,
 });
 
 /// Compaction Operation ?1 of Session ?2, which succeeded: what its floor
@@ -1720,7 +1720,9 @@ const ItemRead = struct {
         outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
         stop: StopRead,
         approval: approval_request.Result,
-        change: session_change.Row,
+        // Text has one address, in the item: keeping another bounded copy
+        // here would widen every slot of a page's read-state union.
+        change: struct { row: session_change.Row = undefined, found: store_access.Found = undefined },
         compaction: compaction_row.Row,
     } = undefined,
 
@@ -1790,7 +1792,11 @@ const ItemRead = struct {
             },
             7 => read.state.stop.queue(a, session),
             12 => a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &read.state.approval),
-            13 => a.read(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &read.state.change),
+            13 => {
+                const change = &read.state.change;
+                change.row.provider_text = &item.value.session_changed.provider_text;
+                a.readInto(session_change, .{ .session = session, .position = read.position, .ordinal = read.ordinal }, &change.row, &change.found);
+            },
             14 => a.read(compaction_row, .{ .operation = item.value.compacted.operation, .session = session }, &read.state.compaction),
             else => unreachable,
         }
@@ -1900,7 +1906,9 @@ const ItemRead = struct {
                 item.at = row.resolved_at.get();
             },
             13 => {
-                const row = &read.state.change;
+                const change = &read.state.change;
+                if (!change.found.get()) return error.CorruptStore;
+                const row = &change.row;
                 if (row.revision.get() != item.value.session_changed.revision) return error.CorruptStore;
                 item.value.session_changed.field = row.field;
                 item.at = row.changed_at.get();

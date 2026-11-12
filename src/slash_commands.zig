@@ -140,7 +140,6 @@ const ConversationName = enum {
     effort,
     exit,
     help,
-    history,
     @"inspect-action",
     login,
     model,
@@ -165,7 +164,6 @@ pub const conversation = Commands(ConversationName, .{
     .effort = .{ .argument = .effort, .description = "this Session's effort, also the default for new ones" },
     .exit = .{ .description = "detach; Host work continues, unsent draft is lost" },
     .help = .{ .description = "keys and commands" },
-    .history = .{ .description = "older conversation" },
     .@"inspect-action" = .{ .description = "exact one-shot diagnostics", .listed = false },
     .login = .{ .description = null },
     .model = .{ .description = "this Session's model and sign-in" },
@@ -788,7 +786,7 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "effort ", "exit", "help", "history", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
+        .{ .draft = "/", .shown = &.{ "archive", "configure ", "copy ", "effort ", "exit", "help", "model", "reload-skills", "rename ", "setup ", "status", "unarchive", "upgrade" } },
         .{ .draft = "/c", .shown = &.{ "configure ", "copy " }, .first = "onfigure " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{"status"}, .first = "atus" },
@@ -1056,4 +1054,13 @@ test "Session settings slash options retain both screens membership and order" {
         try std.testing.expectEqual(case[1].len, case[0].entries.len);
         for (case[0].entries, 0..) |entry, index| try std.testing.expectEqualStrings(case[1][index], entry.word);
     }
+}
+
+test "older conversation is feed navigation, not a slash command" {
+    try std.testing.expect(conversation.parse("/history") == .unknown);
+    try std.testing.expectEqual(@as(usize, 0), conversation.suggest("/history", .{}).?.count);
+    const list = conversation.suggest("/h", .{}).?;
+    try std.testing.expectEqual(@as(usize, 1), list.count);
+    try std.testing.expectEqualStrings("help", list.shown()[0].word);
+    try std.testing.expect(conversation.parse("/details") == .unknown);
 }

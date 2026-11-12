@@ -851,7 +851,7 @@ def persistent_copy_case():
             terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
             saved = here / name
             assert saved.read_bytes() == answer.encode() and saved.stat().st_mode & 0o777 == 0o600, saved
-            terminal_step(master, "Large request", "Large done.", composer=True)
+            terminal_step(master, "Large request", "More — Ctrl-O for whole message", composer=True)
             before = len(capture.clipboard)
             terminal_step(master, "/copy", "Too large for the clipboard · /copy file", composer=True)
             assert len(capture.clipboard) == before, "an answer over the limit is never sent"
@@ -916,7 +916,7 @@ def provider_prompt(master, ready, command=None):
     return output
 
 
-def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None):
+def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, caret=None, timeout=15):
     """Write a large input in chunks while the screen is read.
 
     With `draft`, wait instead until the composer shows exactly that draft
@@ -935,9 +935,9 @@ def terminal_bulk(master, command, marker="› ", *, submit=True, draft=None, ca
     writer = threading.Thread(target=send, daemon=True)
     writer.start()
     if draft is None:
-        output = read_terminal(master, marker)
+        output = read_terminal(master, marker, timeout=timeout)
     else:
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + timeout
         frames = []
         while not capture.draft(draft, caret):
             remaining = deadline - time.monotonic()
@@ -1753,39 +1753,38 @@ def renderer_cases():
             released[0].set()
             # The next read carries the /status request.
             fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
-            os.write(tty.master, b"/history\r")
+            os.write(tty.master, b"/help\r")
             time.sleep(0.3)
             released[1].set()
-            tty.wait("Start of conversation", timeout=20)
+            tty.wait("shift+↑↓               scroll", timeout=20)
             time.sleep(1.5)
-            assert "Start of conversation" in tty.capture.completed, tty.capture.completed
+            assert "shift+↑↓               scroll" in tty.capture.completed, tty.capture.completed
             for frame in frames:
                 assert " Status · " not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: a later /history replaces a /status not yet shown", flush=True)
+        print("renderer: a later /help replaces a /status not yet shown", flush=True)
 
-        # A fresh Session's live page begins with an Admission row, which is
-        # no conversation cursor: its start is the start of the conversation.
+        # A short fresh feed clamps at its first saved row; scrolling does
+        # not add a start label or duplicate the admitted Message and reply.
         session = configure()
         marker = answer("fresh start")
         with terminal(session) as tty:
             tty.send("fresh start\r", marker)
             frames = tty.every_frame()
-            tty.send("/history\r", "Start of conversation")
-            for _ in range(3):
-                os.write(tty.master, b"\x1b[5~")
-                time.sleep(0.3)
-            time.sleep(1)
-            shown = tty.capture.completed
-            assert shown.index("Start of conversation") < shown.index("› fresh start") < shown.index(marker), shown
+            # Only the first PgUp moves a feed this short; the rest draw nothing.
+            shown = tty.send("\x1b[5~" * 3, predicate=lambda: "› fresh start" in tty.capture.completed
+                and marker in tty.capture.completed and "↓" in tty.capture.completed)
+            assert shown.count("› fresh start") == 1 and shown.count(marker) == 1, shown
+            assert shown.index("› fresh start") < shown.index(marker), shown
+            assert "Start of conversation" not in shown, shown
             for frame in frames:
-                assert "Earlier messages unavailable" not in frame, frame
+                assert "Earlier messages unavailable" not in frame and "Start of conversation" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
-        print("renderer: a fresh Session scrolls to its start", flush=True)
+        print("renderer: a fresh Session scrolls to its first row without labels or duplicate Messages", flush=True)
 
         completed = True
     finally:
@@ -2601,21 +2600,21 @@ def main(selected="all"):
             assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
-            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" in binding and permission_row(binding, "ask"), binding
+            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
             # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
             help_text = terminal_step(master, "/help", "in your shell.", composer=True)
             assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("/status", "/inspect-action", "/history", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
+            for command in ("/status", "/inspect-action", "/requests", "/result KEY", "/setup", "/configure", "/exit", "ctrl+r"):
                 assert command in help_text, help_text
-            assert "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode (the facts row shows the mode).
+            assert "/history" not in help_text and "/wait" not in help_text and "/login" not in help_text and "rui auth login codex" in help_text, help_text
+            # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
             assert "without approval" not in help_text, help_text
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command, notice in (("/wait", "Work continues while you compose."),
+            for command, notice in (("/wait", "Work continues."),
                                     ("/login", "Login uses rui auth login codex in your shell.")):
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
@@ -3139,7 +3138,9 @@ def main(selected="all"):
             endpoint.responses.append(fixture.sse_answer("editor-limit-answer", "editor-limit-reason",
                 "editor-limit-message", "limit accepted")[0])
             at_limit = "a" * (64 * 1024 - 2) + "é"
-            accepted = terminal_bulk(master, at_limit, "limit accepted")
+            # 64 KiB typed a KiB at a time is a third of the default budget on
+            # an idle machine, and has run past it on a loaded runner.
+            accepted = terminal_bulk(master, at_limit, "limit accepted", timeout=60)
             assert "limit accepted" in accepted, accepted[-1000:]
             body = json.loads(endpoint.requests[-1])
             assert next(item["content"][0]["text"] for item in reversed(body["input"])
