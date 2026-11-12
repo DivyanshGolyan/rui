@@ -61,7 +61,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 $V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--no-png] [--keep]
 ```
 
-Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). These are L2 layout captures, not physical-input proof. State `expect` markers must be present and optional `absent: ["TEXT", ...]` markers must be absent from every saved capture at every size.
+Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). Steps may include `{"mouse": {"at": "TEXT", "do": "move" | "click"}}`: the first cell of the first visible match receives an SGR motion or left press/release via `tmux send-keys -H` (1-based coordinates); a missing target fails the state. Set `expect` explicitly after mouse input. These are L2 layout captures, not physical-input proof. State `expect` markers must be present and optional `absent: ["TEXT", ...]` markers must be absent from every saved capture at every size.
 
 ## Doctor
 
