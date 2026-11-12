@@ -52,8 +52,15 @@ pub fn Text(comptime capacity: usize) type {
 }
 
 pub fn PathWith(comptime capacity: usize) type {
+    return PathKind(capacity, .absolute);
+}
+// Adapter paths preserve their existing interpretation: SQLite and TLS use
+// the Host cwd; Bash uses the Session workspace. Other sources are absolute.
+const PathRule = enum { absolute, adapter, interface };
+fn PathKind(comptime capacity: usize, comptime rule: PathRule) type {
     return struct {
         pub const kind: Kind = .path;
+        pub const path_rule = rule;
         pub const max_bytes = capacity;
         text: Text(capacity) = .{},
         /// Default routing is relative to the Host directory. For interface.dir
@@ -188,7 +195,7 @@ pub const Settings = struct {
 };
 pub const Store = union(enum) {
     sqlite: struct {
-        dir: PathWith(protocol.max_store_bytes) = .{ .anchored = true },
+        dir: PathKind(protocol.max_store_bytes, .adapter) = .{ .anchored = true },
         pub const doc = .{ .dir = "The SQLite Store directory. Default: the Host directory." };
     },
     mysql: struct {
@@ -233,12 +240,12 @@ pub fn ProviderEntry(comptime credential: provider_name.Facts.Credential) type {
     };
 }
 pub const Network = struct {
-    ca_file: ?Path = null,
+    ca_file: ?PathKind(max_ca_file_bytes, .adapter) = null,
     pub const doc = .{ .ca_file = "Trust only this PEM file; absent uses system trust. Applies to every provider." };
 };
 pub const Tools = struct {
     bash: struct {
-        path: Path = .{ .text = textDefault(Path.max_bytes, default_bash_path) },
+        path: PathKind(max_ca_file_bytes, .adapter) = .{ .text = textDefault(Path.max_bytes, default_bash_path) },
         timeout_ms: Count(u64, 1, std.math.maxInt(i64), default_bash_timeout_ms) = .{},
         pub const doc = .{ .path = "The Bash executable.", .timeout_ms = "The longest one Bash call may run." };
     } = .{},
@@ -252,7 +259,7 @@ pub const McpServer = struct {
     pub const doc = .{ .url = "Plain HTTP to a loopback literal.", .bearer_token = "Bearer-token source.", .call_timeout_ms = "The longest one tool call may run." };
 };
 pub const Interface = struct {
-    dir: PathWith(max_runtime_dir_bytes) = .{ .anchored = true },
+    dir: PathKind(max_runtime_dir_bytes, .interface) = .{ .anchored = true },
     lifetime: Choice(Lifetime, .detached) = .{},
     pub const Lifetime = enum { detached, stdin };
     pub const doc = .{ .dir = "Private interface directory. Default: the Host directory; MySQL requires an explicit directory.", .lifetime = "detached: until stopped; stdin: also stop when stdin closes." };
@@ -394,7 +401,7 @@ fn leafFor(comptime T: type, comptime value: T, comptime pattern: []const u8, co
         .path => {
             row.default = if (value.anchored) "(Host directory)" else value.slice();
             row.json_schema.max_bytes = T.max_bytes;
-            row.json_schema.format = "absolute-path";
+            row.json_schema.format = if (T.path_rule == .adapter) null else "absolute-path";
             row.json_schema.nullable = true;
             row.sample_json = "\"/tmp/host-settings\"";
             row.sample_text = "/tmp/host-settings";
@@ -707,13 +714,6 @@ fn readValue(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, 
         else => @compileError("not a Host settings kind: " ++ @typeName(T)),
     }
 }
-// These adapters already interpret relative paths: SQLite and TLS from the
-// Host cwd, Bash after entering the Session workspace. Secret/sign-in sources
-// and explicit interface directories retain their absolute-path contract.
-fn relativePathAllowed(at: []const u8) bool {
-    return std.mem.eql(u8, at, "store.sqlite.dir") or std.mem.eql(u8, at, "tools.bash.path") or std.mem.eql(u8, at, "network.caFile");
-}
-
 fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, read: *const Read) Error!void {
     switch (T.kind) {
         .text => dest.set(try string(value, at, read)) catch return refuse(read.failure, at, "must be bounded UTF-8 without NUL"),
@@ -724,8 +724,8 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
                 return;
             }
             const raw = try string(value, at, read);
-            const text = if (T.max_bytes == max_runtime_dir_bytes) std.mem.trimEnd(u8, raw, "/") else raw;
-            if (text.len == 0 or (!relativePathAllowed(at) and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
+            const text = if (T.path_rule == .interface) std.mem.trimEnd(u8, raw, "/") else raw;
+            if (text.len == 0 or (T.path_rule != .adapter and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
             dest.text.set(text) catch return refuse(read.failure, at, "path exceeds its byte bound or contains invalid text");
             dest.anchored = false;
         },
@@ -1080,7 +1080,7 @@ fn anchorValue(comptime T: type, value: *T, host_dir: []const u8) error{Settings
     }
     if (comptime isKind(T)) {
         switch (T.kind) {
-            .path => if (value.anchored and T.max_bytes != max_runtime_dir_bytes) {
+            .path => if (value.anchored and T.path_rule != .interface) {
                 try value.text.set(host_dir);
                 value.anchored = false;
             },
@@ -1464,8 +1464,8 @@ fn validateShape(comptime T: type, value: *const T, at: []const u8, failure: *st
             .path => {
                 // An anchored interface uses the platform-derived Host socket,
                 // not a literal runtime directory (whose path has a smaller bound).
-                if (T.max_bytes == max_runtime_dir_bytes and value.anchored) return;
-                if (value.text.len > T.max_bytes or value.anchored or value.slice().len == 0 or (!relativePathAllowed(at) and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
+                if (T.path_rule == .interface and value.anchored) return;
+                if (value.text.len > T.max_bytes or value.anchored or value.slice().len == 0 or (T.path_rule != .adapter and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
             },
             .url => {
                 if (value.text.len > T.max_bytes) return refuse(failure, at, "URL exceeds its byte bound");
