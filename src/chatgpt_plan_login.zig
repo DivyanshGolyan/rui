@@ -11,7 +11,6 @@
 //! record out under that owner's lock, keeping the issued client id for the
 //! next sign-in; the host id file is never touched after it is made.
 const std = @import("std");
-const builtin = @import("builtin");
 const wire = @import("chatgpt_plan_wire.zig");
 const policy = @import("codex_credential_policy.zig");
 const credentials = @import("codex_credentials.zig");
@@ -405,14 +404,6 @@ pub fn logout(io: std.Io, credential_path: []const u8, issuer: Issuer) !Logout {
     var context: Context = .{ .io = io, .issuer = issuer, .room = room };
     if (!try credentials.signOut(credential_path, &room.credentials, &context, Context.revoke)) return .not_signed_in;
     return context.outcome;
-}
-
-/// The command that opens a link in a browser here, if there is a browser to
-/// open: macOS always has one; elsewhere only a graphical session does.
-pub fn opener(environ: *const std.process.Environ.Map) ?[]const u8 {
-    if (builtin.os.tag.isDarwin()) return "open";
-    if (environ.get("DISPLAY") != null or environ.get("WAYLAND_DISPLAY") != null) return "xdg-open";
-    return null;
 }
 
 test "pasted lines are read whole, and a line that is no callback leaves the wait going" {

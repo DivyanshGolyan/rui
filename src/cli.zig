@@ -590,7 +590,7 @@ fn planLogin(init: std.process.Init, fixture_endpoint: ?[]const u8) !void {
         .host_id_path = host_id_path,
         .issuer = issuer,
         // A test's issuer is a loopback; no browser goes there.
-        .opener = if (issuer == .fixture) null else chatgpt_plan_login.opener(init.environ_map),
+        .opener = if (issuer == .fixture) null else @import("os/os.zig").linkOpener(init.environ_map),
     }, loginInterrupted, &room.record, Publish{ .path = path, .scratch = &room.work.credentials }, Publish.publish);
     if (!try finishLogin(init, .chatgpt, "Rui: Signed in to ChatGPT.\n", true)) return;
     try std.Io.File.stdout().writeStreamingAll(init.io, "A running Host that serves chatgpt uses this sign-in from its next request; one started before you signed in needs a restart to serve it.\nStart a conversation with: rui --provider chatgpt\n");
