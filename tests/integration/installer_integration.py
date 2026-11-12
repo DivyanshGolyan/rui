@@ -218,7 +218,7 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         def into(name):
             return [installed, NEXT, f"Added ~/.local/bin to your PATH in ~/{name}. Open a new terminal to use it."]
         bash = {"SHELL": "/bin/bash"}
-        darwin = sys.platform == "darwin"
+        darwin = os_semantics.terminal_bash_reads_login_files()
         cases = {
             # name: (environment, files before, report, files after)
             "opted out": ({"RUI_NO_MODIFY_PATH": "1"}, {}, advice, {}),
