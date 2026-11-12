@@ -377,7 +377,7 @@ test "a version three compaction request asks for compaction at the top, never w
         .{ .item = .compaction_trigger },
     } ++ version_three_tools), &out);
     try std.testing.expectEqualStrings(version_three_top ++ version_three_history ++ version_three_end ++
-        ",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1}]}", out.buffered());
+        ",\"tool_choice\":\"none\",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1000}]}", out.buffered());
 }
 
 test "the codec's JSON reader names each syntax error as validation did" {

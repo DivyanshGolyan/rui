@@ -1239,7 +1239,10 @@ The trigger is derived from the manifest's protocol operation, never a Conversat
 The source demonstrates this path; absence of a standalone call in that client does not prove that the subscription server rejects `/responses/compact`.
 Generic API documentation does not establish subscription endpoint availability.
 V1 depends on neither that endpoint nor automatic `context_management` support.
-Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead carries the top-level `"context_management":[{"type":"compaction","compact_threshold":1}]` after the rest of the request, so it leaves the history span unchanged; every request holds more than one token, so the provider always compacts.
+Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead ends with the top-level `"tool_choice":"none","context_management":[{"type":"compaction","compact_threshold":1000}]`, after the history span, so the span and its carry are unchanged.
+The provider refuses a threshold under 1000 tokens, and a compaction Operation runs only on a large context, so 1000 always compacts; `tool_choice` keeps the reply the provider writes while compacting from calling a function or searching the web.
+With `context_management` the provider's response is `compaction`, `message`, `compaction`, and the last compaction item alone carries the whole memory: replaying only it keeps the context.
+The rule above still expects exactly one compaction item, so a version-three compaction does not settle yet; no provider pins `openai-responses/3`, and accepting that shape is a separate decision.
 
 Require a completed response with exactly one nonempty supported compaction item for explicit compaction.
 Store the complete ordered output once on that Operation.

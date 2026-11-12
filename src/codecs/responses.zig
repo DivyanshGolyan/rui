@@ -11,7 +11,7 @@
 //! `configuration_update` and `compaction_trigger` input items: it sends
 //! each Operation's effort at the top, as version one does, and a
 //! compaction request asks for compaction with a top-level
-//! `context_management` instead of the trigger item.
+//! `context_management`, and for no tool call, instead of the trigger item.
 const std = @import("std");
 const codec_abi = @import("../codec_abi.zig");
 const json = @import("json.zig");
@@ -40,9 +40,12 @@ pub const Version = enum {
     }
 };
 
-/// How version three asks for compaction. Every request holds more than
-/// one token, so the provider compacts on every compaction request.
-const context_management = ",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1}]";
+/// How version three asks for compaction, at the end of a compaction
+/// request. The provider refuses a threshold under 1000 tokens, and a
+/// compaction Operation runs only on a large context, so 1000 always
+/// compacts. No tool choice keeps the reply the provider writes while it
+/// compacts from calling a function or searching the web.
+const compaction_request = ",\"tool_choice\":\"none\",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1000}]";
 
 /// The encoder's state between history elements: whether one was written,
 /// since the next input item then takes a comma, and under version two the
@@ -239,7 +242,7 @@ pub const Encoder = struct {
                 out.content(0, .verbatim);
                 out.literal("}}");
             } else out.literal("],\"text\":{\"verbosity\":\"low\"}"),
-            .request_end => out.literal(if (self.compact) context_management ++ "}" else "}"),
+            .request_end => out.literal(if (self.compact) compaction_request ++ "}" else "}"),
         }
     }
 
