@@ -125,17 +125,16 @@ pub const HostLaunch = union(enum) {
 
         pub fn words(self: Failure) []const u8 {
             return switch (self.kind) {
-                .setup => "start setup failed",
-                .worker => "worker unavailable",
-                .os_launch => "launch failed",
-                .child_refused => "startup refused",
-                .child_closed => "startup ended",
-                .startup_full => "startup reply full",
-                .readiness_timeout => "readiness timeout",
-                .incompatible => "Rui mismatch",
-                .store_access => "Store unreadable",
-                .store_identity => "Store differs",
-                .mysql_unavailable => "Host not reachable",
+                // The person can only retry these three, so they read alike.
+                .setup, .worker, .os_launch => "could not start",
+                .child_refused => "refused to start",
+                .child_closed => "quit on start",
+                .startup_full => "start unconfirmed",
+                .readiness_timeout => "start timed out",
+                .incompatible => "different Rui version",
+                .store_access => "can't read Store",
+                .store_identity => "not the same Store",
+                .mysql_unavailable => "can't start from here",
                 .interrupted => "start interrupted",
             };
         }
@@ -171,7 +170,12 @@ const HostObservation = union(enum) {
     unread,
     ready: struct { facts: view.Host, paused: bool = false },
     stopped,
+    /// A Host holds the Store and gave no answer: starting, stopping or lost.
     unavailable,
+    /// A Host answered in another Rui version's protocol.
+    incompatible,
+    /// The Store's location could not be read, so nothing is known.
+    unreadable,
 
     fn facts(self: HostObservation) ?view.Host {
         return switch (self) {
@@ -1486,8 +1490,13 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
                 self.host_launch = .{ .failed = .{ .kind = .worker, .err = err } };
                 return null;
             };
-            self.host_launch = if (answer.start_host.launch == .ready and answer.start_host.launch.ready == null) null else answer.start_host.launch;
-            return self.takeHostRead(answer.start_host.read);
+            const launch = answer.start_host.launch;
+            const next = try self.takeHostRead(answer.start_host.read);
+            self.host_launch = switch (launch) {
+                .ready => |warning| if (warning == null) null else launch,
+                .failed => if (self.host_observation == .ready) null else launch,
+            };
+            return next;
         },
         .host => return self.takeHostRead(answer.host),
         .list => {
@@ -1846,9 +1855,9 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
 /// The same observation feeds the notice, Session service and core counts.
 fn takeHostRead(self: *Self, read: HostRead) !?Next {
     self.host_observation = read.observation;
-    if (read.observation == .ready) if (self.host_launch) |launch| {
-        if (launch == .failed) self.host_launch = null;
-    };
+    // A ready Host outlives what the last start said: a failure lost to a
+    // competing owner, and a warning once the next read has shown it.
+    if (read.observation == .ready) self.host_launch = null;
     if (read.memory) |memory| _ = try self.event(.{ .memory = memory });
     return self.event(.{ .host = read.observation.facts() });
 }
@@ -1866,13 +1875,18 @@ const HostState = enum {
     ready,
     stopped,
     paused,
+    incompatible,
+    unreadable,
     starting,
 
     fn line(self: HostState) struct { mark: marks.Mark, words: []const u8 } {
         return switch (self) {
-            .ready => .{ .mark = .failed, .words = "Host ready" },
+            // Shown only beside a start's warning: the Host is up.
+            .ready => .{ .mark = .finished, .words = "Host ready" },
             .stopped => .{ .mark = .stopped, .words = "Host stopped" },
             .paused => .{ .mark = .stopped, .words = "Host paused" },
+            .incompatible => .{ .mark = .stopped, .words = "Host is a different Rui version" },
+            .unreadable => .{ .mark = .stopped, .words = "Host unreachable" },
             .starting => .{ .mark = .active, .words = "Host starting" },
         };
     }
@@ -1887,6 +1901,8 @@ fn hostState(self: *const Self) HostState {
         .unread => .ready,
         .ready => |ready| if (ready.paused) .paused else .ready,
         .unavailable => .paused,
+        .incompatible => .incompatible,
+        .unreadable => .unreadable,
         .stopped => .stopped,
     };
 }
@@ -1895,7 +1911,7 @@ fn hostHeld(raw: *anyopaque) bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     return switch (self.host_observation) {
         .unread, .ready => false,
-        .stopped, .unavailable => true,
+        .stopped, .unavailable, .incompatible, .unreadable => true,
     };
 }
 
@@ -1946,8 +1962,10 @@ fn hostNoticeEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) 
 
 fn drawHostNotice(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
-    const line = self.hostState().line();
-    const detail = if (!self.state.holdsHost()) self.host_launch else null;
+    const state = self.hostState();
+    const line = state.line();
+    // These two states already say why no start can help.
+    const detail = if (self.state.holdsHost() or state == .incompatible or state == .unreadable) null else self.host_launch;
     const mark = marks.marks.get(if (detail != null and detail.? == .failed) .failed else line.mark);
     const notice = if (detail) |value| value.words() else "";
     const key = if (self.hostNext()) |next| next.label() else "";
@@ -1976,19 +1994,18 @@ fn startHost(self: *Self) HostLaunch {
 }
 
 fn hostFacts(self: *Self) HostRead {
-    const status = client.hostStatus(self.init.io, self.options.store);
-    const ready: ?@FieldType(protocol_reply.HostStatus, "ready") = switch (status) {
-        .ready => |ready| ready,
-        else => null,
-    };
-    return .{
-        .observation = if (ready) |host| .{ .ready = .{
+    const observation: HostObservation = switch (client.hostStatus(self.init.io, self.options.store)) {
+        .ready => |host| .{ .ready = .{
             .facts = .{ .started_at = host.started_at, .slots = host.active_capacity, .slots_in_use = host.custody_occupied },
             .paused = host.paused,
-        } } else if (status == .unavailable) .stopped else .unavailable,
-        // The same read samples the counts line's memory.
-        .memory = self.liveMemory(if (ready) |host| host.started_at else null),
+        } },
+        .unavailable => .stopped,
+        .owned_unavailable => .unavailable,
+        .incompatible => .incompatible,
+        .access_failure => .unreadable,
     };
+    // The same read samples the counts line's memory.
+    return .{ .observation = observation, .memory = self.liveMemory(if (observation.facts()) |host| host.started_at else null) };
 }
 
 /// The counts line's memory: this TUI, the Host that started at
@@ -4038,7 +4055,7 @@ test "a failed terminal restore still prints the departure guidance" {
 
 /// Faults cross the same joined-worker boundary as a real lost connection.
 const HostRecovery = struct {
-    const Availability = enum { ready, paused, stopping, stopped };
+    const Availability = enum { ready, paused, stopping, stopped, incompatible, unreadable };
     var availability: Availability = .ready;
     var starts: usize = 0;
     var fail_start: bool = false;
@@ -4069,6 +4086,8 @@ const HostRecovery = struct {
             .ready, .paused => .{ .ready = .{ .facts = .{ .started_at = test_now_s, .slots = 4, .slots_in_use = 0 }, .paused = availability == .paused } },
             .stopped => .stopped,
             .stopping => .unavailable,
+            .incompatible => .incompatible,
+            .unreadable => .unreadable,
         } };
     }
     fn start(overview: *Self) HostLaunch {
@@ -4104,7 +4123,7 @@ test "Host line appears once in overview and chat at wide and narrow widths, nev
     };
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    for ([_]HostRecovery.Availability{ .ready, .paused, .stopping, .stopped }) |availability| for ([_]bool{ false, true }) |open| {
+    for (std.enums.values(HostRecovery.Availability)) |availability| for ([_]bool{ false, true }) |open| {
         errdefer std.debug.print("availability={s}, chat={}\n", .{ @tagName(availability), open });
         const ops = HostRecovery.operations();
         HostRecovery.dir = tmp.dir;
@@ -4138,6 +4157,8 @@ test "Host line appears once in overview and chat at wide and narrow widths, nev
                 .ready => null,
                 .paused, .stopping => "■ Host paused",
                 .stopped => "■ Host stopped · r start",
+                .incompatible => "■ Host is a different Rui version",
+                .unreadable => "■ Host unreachable",
             };
             try std.testing.expectEqual(@as(usize, @intFromBool(expected != null)), std.mem.count(u8, text, "Host "));
             if (expected) |line| try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, line));
@@ -4296,7 +4317,7 @@ test "Host recovery failed start waits for r retry and the line also accepts a c
     try std.testing.expectEqual(HostState.stopped, overview.hostState());
     var shown = try rig.shown(46, 26);
     defer shown.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "× Host stopped · startup refused · r retry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "× Host stopped · refused to start · r retry") != null);
     // r retries once, never a poll or a previous failed attempt.
     try std.testing.expect(try rig.press("r") == null);
     try std.testing.expect(try rig.settle() == null);
@@ -4530,11 +4551,11 @@ test "Host recovery renders the launch result cause without confusing failure an
     const cases = [_]Case{
         .{ .launch = .{ .ready = null }, .words = "" },
         .{ .launch = .{ .ready = .invalid_openai_base_url }, .words = "OpenAI URL invalid" },
-        .{ .launch = .{ .failed = .{ .kind = .os_launch, .err = error.HostLaunchFailed } }, .words = "launch failed", .retry = true },
-        .{ .launch = .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } }, .words = "startup refused", .retry = true },
-        .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed } }, .words = "readiness timeout", .retry = true },
-        .{ .launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } }, .words = "Store differs" },
-        .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "Rui mismatch" },
+        .{ .launch = .{ .failed = .{ .kind = .os_launch, .err = error.HostLaunchFailed } }, .words = "could not start", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .child_refused, .err = error.HostStartupFailed } }, .words = "refused to start", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed } }, .words = "start timed out", .retry = true },
+        .{ .launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } }, .words = "not the same Store" },
+        .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "different Rui version" },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });
@@ -4553,12 +4574,21 @@ test "Host recovery renders the launch result cause without confusing failure an
         try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
         try std.testing.expectEqual(after != .ready, hostHeld(overview));
         const failure = case.launch == .failed;
-        const cleared = failure and after == .ready; // A competing ready owner wins.
-        const detail = case.words.len != 0 and !cleared;
+        if (after == .ready) {
+            // A competing ready owner wins over a failure at once. A warning
+            // about the Host that did start is shown with the up mark.
+            var first = try rig.shown(140, 26);
+            defer first.deinit();
+            const text = try first.text();
+            try std.testing.expectEqual(!failure and case.words.len != 0, std.mem.indexOf(u8, text, "✓ Host ready · ") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "× Host") == null);
+        }
+        // The next read of a ready Host retires what the start said.
+        const detail = case.words.len != 0 and after != .ready;
         const next: ?HostLaunch.Next = if (after != .stopped) null else if (failure) (if (case.retry) .retry else null) else .start;
         try std.testing.expectEqual(next, overview.hostNext());
-        // Another discovery read cannot erase a still-relevant cause, or
-        // automatically retry an accepted effect.
+        // Another discovery read cannot erase the cause while the Host is
+        // still down, or automatically retry an accepted effect.
         overview.queue(.host);
         try std.testing.expect(try rig.settle() == null);
         try std.testing.expectEqual(@as(usize, 1), HostRecovery.starts);
@@ -4596,7 +4626,7 @@ test "Host recovery retains a worker failure in the same typed launch result" {
     try std.testing.expectEqual(error.SystemResources, overview.host_launch.?.failed.err);
     var shown = try rig.shown(46, 26);
     defer shown.deinit();
-    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Host stopped · worker unavailable · r retry") != null);
+    try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "Host stopped · could not start · r retry") != null);
 }
 
 test "before the first Host read the screen says nothing about the Host and holds no Session" {
