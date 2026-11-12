@@ -668,8 +668,7 @@ const Grammar = struct {
     /// compaction item that supersedes them. A compaction Operation holds
     /// no calls.
     fn supersede(self: *Grammar) !void {
-        std.debug.assert(self.call_count == 0);
-        if (self.item_count == 0) return;
+        std.debug.assert(self.call_count == 0 and self.item_count != 0);
         try self.metadata.discard();
         self.superseded += self.item_count;
         self.item_count = 0;
@@ -683,9 +682,11 @@ const Grammar = struct {
         const metadata = self.metadata;
         const kind = outputKind(item.kind);
         // In a compaction Operation the last compaction item is the new
-        // base: every item before it is superseded, so none is kept,
-        // replayed or selected as the answer.
-        if (kind == .compaction and self.operation == .compaction) try self.supersede();
+        // base: a later compaction item supersedes every item before it,
+        // the earlier compaction item included, so none is kept, replayed
+        // or selected as the answer. The first compaction item supersedes
+        // nothing, so a response with one is kept whole.
+        if (kind == .compaction and self.operation == .compaction and self.compacted) try self.supersede();
         const ordinal = self.item_count;
         const bag = &self.bag;
         bag.reset(.item);
@@ -1036,19 +1037,17 @@ pub fn recordItemForTesting(metadata: *output_format.OutputMetadataWriter, sourc
     var rejection: Rejection = .{};
     const grammar = &testing_interpret.grammar;
     var evidence: Evidence = .{ .response_id = .{ .len = 0 }, .served_model = .{ .len = 0 } };
-    // The item is judged alone, as the first of its response, and its
-    // records take `ordinal` as they are copied.
     grammar.begin(pinned, &records, operation, &rejection, testingProviderFailure(), &evidence);
+    grammar.item_count = ordinal;
     var stream = codecs.begin(pinned, switch (operation) {
         .assistant_response => .assistant_response,
         .compaction => .compaction,
     });
     try grammar.event(&stream, &testing_interpret.scratch, data, 0, 0);
-    if (grammar.item_count != 1) return error.TestUnexpectedResult;
+    if (grammar.item_count != ordinal + 1) return error.TestUnexpectedResult;
     var reader = try output_format.OutputMetadataReader.init(io, file, 1);
     while (try reader.next()) |record| {
         var moved = record;
-        if (record.tag != .usage) moved.ordinal = ordinal;
         switch (record.tag) {
             .member, .part, .name, .call_id, .arguments, .item, .pattern => moved.start = record.start - testing_item_event.len + start,
             // An action with no target names no range.
@@ -1498,22 +1497,28 @@ test "compaction rejects missing double malformed unknown and Action candidates"
     try std.testing.expectError(error.ContradictoryProviderOutput, validateTestingOperation(&tmp, renamed, 4096, .compaction));
 }
 
-test "a compaction keeps its last compaction item and what follows it, and nothing before" {
+test "a later compaction item supersedes everything before it, and a first one nothing" {
     const first = "{\"type\":\"compaction\",\"id\":\"a\",\"encrypted_content\":\"first\"}";
     const last = "{\"type\":\"compaction\",\"id\":\"b\",\"encrypted_content\":\"last\"}";
     const between = "{\"type\":\"message\",\"id\":\"m\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"unasked\"}]}";
     const after = "{\"type\":\"message\",\"id\":\"n\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"after\"}]}";
     const reasoning = "{\"type\":\"reasoning\",\"id\":\"r\",\"encrypted_content\":\"thought\",\"summary\":[]}";
     const call = "{\"type\":\"function_call\",\"id\":\"f\",\"name\":\"bash\",\"call_id\":\"c\",\"arguments\":\"{}\"}";
-    const Kept = struct { base: []const u8, items: u64, answer: u64 };
+    // The first kept item, how many are kept and the answer's length. A
+    // response with one compaction item keeps every item, as it always has.
+    const Kept = struct { first: []const u8, items: u64, answer: u64 };
     const cases = [_]struct { items: []const []const u8, terminal: bool = false, kept: anyerror!Kept }{
-        .{ .items = &.{last}, .kept = .{ .base = last, .items = 1, .answer = 0 } },
-        .{ .items = &.{ first, between, last }, .kept = .{ .base = last, .items = 1, .answer = 0 } },
-        .{ .items = &.{ first, between, last }, .terminal = true, .kept = .{ .base = last, .items = 1, .answer = 0 } },
-        .{ .items = &.{ reasoning, first, between, last }, .kept = .{ .base = last, .items = 1, .answer = 0 } },
-        .{ .items = &.{ first, last }, .kept = .{ .base = last, .items = 1, .answer = 0 } },
-        .{ .items = &.{ first, between, last, after }, .kept = .{ .base = last, .items = 2, .answer = "after".len } },
-        .{ .items = &.{ first, between, last, after }, .terminal = true, .kept = .{ .base = last, .items = 2, .answer = "after".len } },
+        .{ .items = &.{last}, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ reasoning, first }, .kept = .{ .first = reasoning, .items = 2, .answer = 0 } },
+        .{ .items = &.{ reasoning, first }, .terminal = true, .kept = .{ .first = reasoning, .items = 2, .answer = 0 } },
+        .{ .items = &.{ first, between }, .kept = .{ .first = first, .items = 2, .answer = "unasked".len } },
+        .{ .items = &.{ reasoning, first, between }, .kept = .{ .first = reasoning, .items = 3, .answer = "unasked".len } },
+        .{ .items = &.{ first, between, last }, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ first, between, last }, .terminal = true, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ reasoning, first, between, last }, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ first, last }, .kept = .{ .first = last, .items = 1, .answer = 0 } },
+        .{ .items = &.{ first, between, last, after }, .kept = .{ .first = last, .items = 2, .answer = "after".len } },
+        .{ .items = &.{ first, between, last, after }, .terminal = true, .kept = .{ .first = last, .items = 2, .answer = "after".len } },
         .{ .items = &.{between}, .kept = error.MissingCompactionItem },
         .{ .items = &.{ reasoning, between }, .kept = error.MissingCompactionItem },
         .{ .items = &.{ call, first, between, last }, .kept = error.UnsupportedProviderOutput },
@@ -1536,12 +1541,11 @@ test "a compaction keeps its last compaction item and what follows it, and nothi
         };
         const result = try validateTestingOperation(&tmp, sse.written(), 4096, .compaction);
         try std.testing.expectEqual(expected.items, result.output.item_count);
-        try std.testing.expectEqual(output_format.OutputItemKind.compaction, result.first_item.kind);
         try std.testing.expectEqual(@as(u64, 0), result.first_item.ordinal);
-        try std.testing.expectEqual(protocol.contentDigest(expected.base), result.first_item.content_digest);
+        try std.testing.expectEqual(protocol.contentDigest(expected.first), result.first_item.content_digest);
         try std.testing.expectEqual(expected.answer, result.output.answer_length);
-        // The superseded items' records are gone with their charge: what
-        // is kept charges what the last item alone does.
+        // A superseded item's records are gone with their charge: keeping
+        // the last item alone charges what that item alone does.
         if (expected.items == 1) {
             const alone = single orelse result.metadata_bytes;
             single = alone;

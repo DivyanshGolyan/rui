@@ -1246,10 +1246,11 @@ With `context_management` the provider's response is `compaction`, `message`, `c
 No provider pins `openai-responses/3` yet.
 
 Require a completed response with at least one nonempty supported compaction item for explicit compaction.
-The last compaction item is the new base, and every output item before it, an earlier compaction item included, is superseded: the response interpreter keeps no record of it, so it is never stored, replayed, selected as the answer or forwarded.
+The last compaction item is the new base.
+A later compaction item supersedes all output before it, the earlier compaction item included: the response interpreter keeps no record of it, so it is never stored, replayed, selected as the answer or forwarded.
+The first compaction item supersedes nothing, so a response with one compaction item is unchanged, whatever comes before or after it.
 Superseded items are not stored because one owner then decides what replays: the Store receives exactly one compaction item, and every later reader (the base anchor, history replay, the feed's compaction row, drop-unit accounting and the history memo) keeps reading that one item, as before.
-A response with exactly one compaction item and nothing before it is unchanged.
-Store the kept output, from that compaction item to the end of the response, once on that Operation.
+Store the kept output once on that Operation: the whole response when it holds one compaction item, else the last compaction item through the end of the response.
 The base anchor is its Operation ID and the compaction item's ordinal within that output.
 
 Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix.
