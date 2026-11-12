@@ -592,11 +592,8 @@ def tap_main(args):
 
     def feed_output(chunk):
         nonlocal capture_ok
-        raw_out.write(chunk)
-        raw_out.flush()
-        outputs.write(json.dumps({"t_ns": now_ns(), "offset": offset["out"], "n": len(chunk)}) + "\n")
-        outputs.flush()
-        offset["out"] += len(chunk)
+        timed_output(raw_out, outputs, chunk)
+        offset["out"] = raw_out.tell()
         if terminal:
             view = memoryview(chunk)
             while view:
@@ -625,6 +622,8 @@ def tap_main(args):
                 if signum == signal.SIGWINCH and terminal:
                     size = struct.unpack("HHHH", fcntl.ioctl(0, termios.TIOCGWINSZ, b"\0" * 8))
                     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", size[0], size[1], 0, 0))
+                    outputs.write(json.dumps({"t_ns": now_ns(), "resize": [size[1], size[0]]}) + "\n")
+                    outputs.flush()
                     if capture:
                         capture.resize(size[1], size[0])
                     append_jsonl(term / "tap-events.jsonl", {"t_ns": now_ns(), "event": "resize", "rows": size[0], "columns": size[1]})
@@ -1883,83 +1882,116 @@ pre{{margin:0;font:14px/1.35 'JetBrains Mono','DejaVu Sans Mono',monospace;color
 </style><div id=t><pre>{body}{cursor}</pre></div>"""
 
 
-class FrameRecording:
-    """Stream deduplicated committed frames to disk; never retain a movie in RAM."""
-    def __init__(self, out, stem):
-        self.out, self.stem, self.previous = out, stem, None
-        self.entries = []
-        self.directory = out / (stem + ".recording")
-        self.directory.mkdir(exist_ok=True)
-
-    def append(self, frame, t_ns):
-        identical = frame == self.previous
-        # Keep every commit's timestamp, even if its pixels duplicate a hold.
-        entry = {"t_ns": t_ns, "duplicate": identical}
-        if not identical:
-            name = f"{len(self.entries):06d}.html"
-            (self.directory / name).write_text(cells_render(frame)[2])
-            entry["html"] = str((self.directory / name).relative_to(self.out))
-            self.previous = frame
-        self.entries.append(entry)
-        append_jsonl(self.directory / "commits.jsonl", entry)
-
-    def finish(self, t_ns):
-        manifest = {"stem": self.stem, "frames": self.entries, "playback": recording_playback(self.entries), "end_ns": t_ns}
-        (self.directory / "recording.json").write_text(json.dumps(manifest, indent=1) + "\n")
-        return str((self.directory / "recording.json").relative_to(self.out))
+def screen_options(theme):
+    bg, fg = THEMES[theme]
+    rgb = lambda color: tuple(bytes.fromhex(color.lstrip("#")))
+    return dict(background=rgb(bg), foreground=rgb(fg),
+                color_scheme="dark" if theme == "night" else "light")
 
 
-def recording_playback(entries):
-    """Keep the latest picture in each 80 ms bucket, retaining all raw commits."""
-    frames, bucket_start = [], None
-    for entry in entries:
-        if "html" not in entry:
-            continue
-        if bucket_start is None or entry["t_ns"] - bucket_start >= 80_000_000:
-            frames.append(entry)
-            bucket_start = entry["t_ns"]
-        else:
-            frames[-1] = entry
-    return frames
+def timed_output(raw, events, data):
+    """The term tap and frame capture share one timed byte-log shape."""
+    offset = raw.tell()
+    raw.write(data)
+    raw.flush()
+    events.write(json.dumps({"t_ns": now_ns(), "offset": offset, "n": len(data)}) + "\n")
+    events.flush()
 
 
-def recording_delays(recording):
-    frames = recording["playback"]
-    return [(frame, max(.06, min(1.5, (frames[i + 1]["t_ns"] - frame["t_ns"]) / 1e9))
-             if i + 1 < len(frames) else 2.0) for i, frame in enumerate(frames)]
+def replay(log_dir, size, theme):
+    """Rebuild committed frames without sending terminal replies; first size only."""
+    sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
+    from terminal_screen import ScreenCapture
+    capture = ScreenCapture(*size, **screen_options(theme))
+    t_ns = None
+    try:
+        with open(log_dir / "output.bin", "rb") as raw, open(log_dir / "output.jsonl") as events:
+            for line in events:
+                event = json.loads(line)
+                if "resize" in event:
+                    break
+                t_ns = event["t_ns"]
+                raw.seek(event["offset"])
+                remaining = event["n"]
+                while remaining:
+                    chunk = raw.read(min(65536, remaining))
+                    if not chunk:
+                        raise FrameFailure("truncated timed output log")
+                    remaining -= len(chunk)
+                    for frame in capture.feed_frames(chunk):
+                        yield t_ns, frame
+        if t_ns is not None and not capture.synchronized:
+            capture.commit()  # Same quiescent main-screen commit as live collection.
+            yield t_ns, capture.frame
+    finally:
+        capture.free()
 
 
-def encode_recordings(out, records):
-    """Stream playback through ffmpeg's shared difference palette."""
-    for record in records:
-        if "recording" not in record["files"]:
-            continue
-        manifest_path = out / record["files"]["recording"]
-        manifest = json.loads(manifest_path.read_text())
-        timed = recording_delays(manifest)
-        if not timed:
-            raise FrameFailure(f"{manifest['stem']}: no committed recording frames")
-        concat = manifest_path.with_suffix(".concat")
-        lines = []
-        for entry, delay in timed:
-            png = out / entry["html"].replace(".html", ".png")
-            lines += ["file '" + str(png).replace("'", "'\\''") + "'", f"duration {delay:.3f}"]
-        lines.append(lines[-2])  # concat needs a final file to apply its duration.
-        concat.write_text("\n".join(lines) + "\n")
-        gif = out / (manifest["stem"] + ".gif")
-        base = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", "1", "-filter_complex_threads", "1",
-                "-f", "concat", "-safe", "0", "-i", str(concat)]
-        result = subprocess.run(base + ["-filter_complex", "format=rgb24,split[a][b];[a]palettegen=max_colors=128:stats_mode=diff[p];[b][p]paletteuse=diff_mode=rectangle:dither=bayer:bayer_scale=5",
-                                        "-fps_mode", "vfr", "-loop", "0", str(gif)], capture_output=True, text=True)
-        frame_command(result, "encode GIF")
-        record["files"]["gif"] = gif.name
-        mp4 = gif.with_suffix(".mp4")
-        result = subprocess.run(base + ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p",
-                                        "-movflags", "+faststart", str(mp4)], capture_output=True, text=True)
-        if result.returncode == 0:
-            record["files"]["mp4"] = mp4.name
-        else:
-            print("verify-rui: optional MP4: " + result.stderr.strip(), file=sys.stderr)
+def playback(timed):
+    """Deduplicate cells and retain the latest frame in each 80 ms bucket."""
+    def coalesced():
+        pending = previous = None
+        bucket_start = None
+        for t_ns, frame in timed:
+            if previous is not None and frame.cells == previous.cells:
+                continue
+            previous = frame
+            if bucket_start is None or t_ns - bucket_start >= 80_000_000:
+                if pending is not None:
+                    yield pending
+                bucket_start = t_ns
+            pending = t_ns, frame
+        if pending is None:
+            raise FrameFailure("no committed recording frames")
+        yield pending
+
+    frames = iter(coalesced())
+    t_ns, frame = next(frames)
+    for next_ns, next_frame in frames:
+        yield frame, max(.06, min(1.5, (next_ns - t_ns) / 1e9))
+        t_ns, frame = next_ns, next_frame
+    yield frame, 2.0
+
+
+def render_job(jobs, html_path, *, movie=False):
+    png = html_path.with_suffix(".png")
+    jobs.write(json.dumps({"html": str(html_path.resolve()), "png": str(png.resolve()),
+                           "scale": 1 if movie else 2, "opaque": movie}) + "\n")
+    return png
+
+
+def recording_jobs(log_dir, size, theme, directory, jobs):
+    """Materialize one playback frame at a time, plus the encoder's concat input."""
+    directory.mkdir(parents=True, exist_ok=True)
+    concat = directory / "frames.concat"
+    with open(concat, "w") as listing:
+        for index, (frame, delay) in enumerate(playback(replay(log_dir, size, theme))):
+            page = directory / f"{index:06d}.html"
+            page.write_text(cells_render(frame)[2])
+            png = render_job(jobs, page, movie=True)
+            entry = "file '" + str(png).replace("'", "'\\''") + "'\n"
+            listing.write(entry + f"duration {delay:.3f}\n")
+        listing.write(entry)  # concat needs a final file to apply its duration.
+    return concat
+
+
+def encode_recording(concat, gif):
+    """The global palette is a separate disk pass, never a buffered split graph."""
+    palette = concat.with_name("palette.png")
+    base = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-threads", "1", "-filter_complex_threads", "1",
+            "-filter_threads", "1", "-f", "concat", "-safe", "0", "-i", str(concat)]
+    for options, description in (
+        (["-vf", "palettegen=max_colors=128:stats_mode=diff", "-frames:v", "1", str(palette)], "generate palette"),
+        (["-i", str(palette), "-filter_complex", "[0:v][1:v]paletteuse=diff_mode=rectangle:dither=bayer:bayer_scale=5",
+          "-fps_mode", "vfr", "-loop", "0", str(gif)], "encode GIF"),
+    ):
+        frame_command(subprocess.run(base + options, capture_output=True, text=True), description)
+    mp4 = gif.with_suffix(".mp4")
+    result = subprocess.run(base + ["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-pix_fmt", "yuv420p",
+                                    "-movflags", "+faststart", str(mp4)], capture_output=True, text=True)
+    if result.returncode == 0:
+        return mp4
+    print("verify-rui: optional MP4: " + result.stderr.strip(), file=sys.stderr)
 
 
 def parse_sizes(value):
@@ -2184,8 +2216,8 @@ def seed_cast(run, entries):
 
 
 class FrameTerminal:
-    """Cell/recording adapter over terminal_process's owned PTY and collector."""
-    def __init__(self, run, state, size, recording=None):
+    """Cell adapter and timed output log over the owned PTY and collector."""
+    def __init__(self, run, state, size):
         # Use the working skill's observer and the shared PTY lifecycle owner,
         # not the pinned product's older helpers.
         sys.path.insert(0, str(HERE.parents[4] / "tests/integration"))
@@ -2194,19 +2226,16 @@ class FrameTerminal:
         self.run, self.state = run, state
         self.condition = threading.Condition()
         self.pressed = None
-        self.recording = recording
         self.log = run.evidence / "frames-pty" / state["name"]
         self.log.mkdir(parents=True, exist_ok=True)
         cols, rows = size
-        bg, fg = THEMES[state.get("theme", "night")]
-        rgb = lambda color: tuple(bytes.fromhex(color.lstrip("#")))
         with contextlib.ExitStack() as setup:
             self.capture = ScreenCapture(cols, rows, reply=lambda data: self.write(data, "reply"),
-                                         background=rgb(bg), foreground=rgb(fg),
-                                         color_scheme="dark" if state.get("theme", "night") == "night" else "light")
+                                         **screen_options(state.get("theme", "night")))
             setup.callback(self.capture.free)
             self.capture.listener = self._committed
             self.raw_output = setup.enter_context(open(self.log / "output.bin", "wb"))
+            self.output_events = setup.enter_context(open(self.log / "output.jsonl", "w"))
             env = run.env(**{"COLORTERM": "truecolor", **state.get("env", {})})
             argv = list(map(str, session_argv(run, state["open"])))
             # The collector may start before __enter__ returns. Keep its
@@ -2235,14 +2264,11 @@ class FrameTerminal:
         append_jsonl(self.log / "frames.jsonl", {"t_ns": t_ns, "generation": self.capture.generation,
                                                 "cursor": list(frame.cursor), "visible": frame.visible,
                                                 "size": [frame.columns, frame.lines]})
-        if self.recording is not None:
-            self.recording.append(frame, t_ns)
         self.condition.notify_all()
 
     def _feed(self, data):
         with self.condition:
-            self.raw_output.write(data)
-            self.raw_output.flush()
+            timed_output(self.raw_output, self.output_events, data)
             self.capture.feed(data)
 
     def _collected(self, error):
@@ -2296,6 +2322,8 @@ class FrameTerminal:
         with self.condition:
             generation = self.capture.generation
             fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+            self.output_events.write(json.dumps({"t_ns": now_ns(), "resize": [cols, rows]}) + "\n")
+            self.output_events.flush()
             self.capture.resize(cols, rows)
             if self.collected:
                 # An exited terminal cannot repaint; reflow its final screen.
@@ -2344,11 +2372,6 @@ class FrameTerminal:
         if emitted and repaint:
             self.wait(lambda c: c.generation > generation and c.frame.cells != frame.cells,
                       f"mouse {step['do']} at {step['at']} did not repaint")
-
-    def stop_recording(self):
-        with self.condition:
-            recording, self.recording = self.recording, None
-            return recording.finish(now_ns()) if recording is not None else None
 
     def close(self):
         # Shared disposal stops/reaps the foreground job, joins its collector,
@@ -2503,7 +2526,6 @@ def cmd_frames(args):
             state_sizes = state["sizes"]
             cols, rows = state_sizes[0]
             target = None
-            recording_file = None
             reason = None
             exiting = False
             opened = False
@@ -2511,9 +2533,7 @@ def cmd_frames(args):
             first_record = len(records)
             try:
                 seed_cast(run, state.get("cast", []))
-                recording = FrameRecording(out, f"{state['name']}@{size_name(state_sizes[0])}") if (
-                    state["name"] in selected and (getattr(args, "record", False) or state.get("record", False))) else None
-                target = FrameTerminal(run, state, state_sizes[0], recording)
+                target = FrameTerminal(run, state, state_sizes[0])
                 opened = True
                 # Initial readiness is a committed Rui frame, not elapsed wall
                 # time or a terminal query. State-specific waits own later readiness.
@@ -2537,13 +2557,9 @@ def cmd_frames(args):
                     except (Exception, SystemExit):
                         pass  # The capture error below retains the primary state failure.
             try:
-                if opened:
-                    recording_file = target.stop_recording()
                 if state["name"] in selected:
                     for index, size in enumerate(state_sizes):
                         if failure_capture and index == 0:
-                            if recording_file:
-                                failure_capture["files"]["recording"] = recording_file
                             records.append(failure_capture)
                             continue
                         try:
@@ -2559,8 +2575,6 @@ def cmd_frames(args):
                             failed = True
                             record = {"name": state["name"], "size": size_name(size), "files": {}, "status": "failed", "ok": False,
                                       "reason": reason or str(error), "sha": args.sha, "note": state.get("note", "")}
-                        if index == 0 and recording_file:
-                            record["files"]["recording"] = recording_file
                         failed = failed or not record["ok"]
                         if not record["ok"] and reason is None:
                             print(f"verify-rui: {state['name']}@{record['size']}: {record['reason']}", file=sys.stderr)
@@ -2583,7 +2597,26 @@ def cmd_frames(args):
                 if state["name"] in selected:
                     frames_index(out, records, False)
         if not args.no_png:
-            result = subprocess.run(["node", str(HERE.with_name("frames_png.js")), str(out)], capture_output=True, text=True)
+            movies = []
+            jobs_path = out / "render-jobs.jsonl"
+            states = {state["name"]: state for state in scenario["states"]}
+            with open(jobs_path, "w") as jobs:
+                for record in records:
+                    state = states[record["name"]]
+                    if "html" in record["files"]:
+                        render_job(jobs, out / record["files"]["html"])
+                    if record["size"] == size_name(state["sizes"][0]) and (
+                            getattr(args, "record", False) or state.get("record", False)):
+                        try:
+                            stem = f"{record['name']}@{record['size']}"
+                            concat = recording_jobs(run.evidence / "frames-pty" / state["name"], state["sizes"][0],
+                                                    state.get("theme", "night"), out / (stem + ".recording"), jobs)
+                            movies.append((record, concat, out / (stem + ".gif")))
+                        except Exception as error:
+                            failed = True
+                            record.update(ok=False, status="failed", reason=record["reason"] or f"recording replay failed: {error}")
+                            print(f"verify-rui: {record['name']}: recording replay failed: {error}", file=sys.stderr)
+            result = subprocess.run(["node", str(HERE.with_name("frames_png.js")), str(jobs_path)], capture_output=True, text=True)
             if result.returncode:
                 failed = True
                 print("verify-rui: PNG rendering failed: " + " ".join(result.stderr.strip().splitlines()), file=sys.stderr)
@@ -2593,9 +2626,12 @@ def cmd_frames(args):
                     record["files"]["png"] = png
                 elif "html" in record["files"]:
                     record.update(ok=False, status="failed", reason=record["reason"] or "PNG rendering failed")
-            for record in records:
+            for record, concat, gif in movies:
                 try:
-                    encode_recordings(out, [record])
+                    mp4 = encode_recording(concat, gif)
+                    record["files"]["gif"] = gif.name
+                    if mp4:
+                        record["files"]["mp4"] = mp4.name
                 except Exception as error:
                     failed = True
                     record.update(ok=False, status="failed", reason=record["reason"] or f"recording encoding failed: {error}")

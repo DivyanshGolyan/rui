@@ -283,33 +283,86 @@ class FramesTest(unittest.TestCase):
             with self.subTest(step=step), self.assertRaisesRegex(ValueError, "invalid repaint"):
                 validate(data)
 
-    def test_recording_keeps_every_timestamp_dedupes_cells_and_bounds_delays(self):
-        with tempfile.TemporaryDirectory() as temp:
-            out = Path(temp)
-            recorder = self.helper["FrameRecording"](out, "state@100x20")
-            for text, t_ns in (("first", 0), ("first", 1_000_000_000),
-                               ("second", 20_000_000_000), ("third", 20_000_000_001),
-                               ("last", 20_500_000_001)):
-                recorder.append(committed(text), t_ns)
-            path = recorder.finish(21_000_000_000)
-            manifest = json.loads((out / path).read_text())
-            self.assertEqual(len(manifest["frames"]), 5)
-            self.assertEqual(len(list((out / "state@100x20.recording").glob("*.html"))), 4)
-            self.assertEqual(manifest["frames"][1], {"t_ns": 1_000_000_000, "duplicate": True})
-            self.assertEqual([delay for _frame, delay in self.helper["recording_delays"](manifest)], [1.5, .5, 2])
-            self.assertEqual(len(self.helper["read_jsonl"](out / "state@100x20.recording/commits.jsonl")), 5)
-            record = {"name": "state", "size": "100x20", "files": {"png": "still.png", "gif": "movie.gif"},
-                      "status": "ok", "ok": True, "note": "", "reason": None}
-            self.helper["frames_index"](out, [record], True)
-            self.assertIn('src="movie.gif"', (out / "index.html").read_text())
+    def test_playback_domain(self):
+        playback = self.helper["playback"]
+        cases = [
+            ([(0, "one")], [("one", 2)]),
+            ([(0, "one"), (1_000_000_000, "one"), (20_000_000_000, "two"),
+              (20_000_000_001, "three"), (20_500_000_001, "last")],
+             [("one", 1.5), ("three", .5), ("last", 2)]),
+            ([(t, str(t)) for t in (0, 1, 79_999_999, 80_000_000, 90_000_000, 160_000_000)],
+             [("79999999", .06), ("90000000", .07), ("160000000", 2)]),
+            ([(0, "a"), (10_000_000, "b"), (20_000_000, "a"), (80_000_000, "a")], [("a", 2)]),
+        ]
+        for entries, expected in cases:
+            with self.subTest(entries=entries):
+                actual = playback((t, committed(text)) for t, text in entries)
+                self.assertEqual([(frame.text, delay) for frame, delay in actual], expected)
+        # Cursor-only changes are not a new cell picture.
+        frame = committed("same")
+        changed_cursor = frame._replace(cursor=Cursor(0, 0), visible=True)
+        self.assertEqual(list(playback(iter([(0, frame), (100_000_000, changed_cursor)]))), [(frame, 2)])
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "no committed recording frames"):
+            list(playback(iter([])))
 
-    def test_recording_playback_keeps_latest_in_each_80ms_bucket(self):
-        entries = [{"t_ns": t, "html": f"{t}.html"} for t in (0, 1, 79_999_999, 80_000_000, 90_000_000, 160_000_000)]
-        entries.insert(3, {"t_ns": 79_999_999, "duplicate": True})
-        playback = self.helper["recording_playback"](entries)
-        self.assertEqual([entry["t_ns"] for entry in playback], [79_999_999, 90_000_000, 160_000_000])
-        delays = self.helper["recording_delays"]({"playback": playback})
-        self.assertEqual([delay for _entry, delay in delays], [.06, .07, 2])
+    @unittest.skipUnless(os.environ.get("RUI_TEST_GHOSTTY_VT"), "native observer library not selected")
+    def test_replay_timed_bytes_resize_stop_and_silent_queries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            # Multiple commits in one chunk and a frame close split across chunks.
+            chunks = [b"\x1b]11;?\x1b\\\x1b[?2026hfirst\x1b[?2026l\x1b[?2026h\rsecond\x1b[?2026",
+                      b"l\x1b[?2026h\rthird \x1b[?2026l", b"\x1b[?2026h\rignored\x1b[?2026l"]
+            with open(root / "output.bin", "wb") as raw, open(root / "output.jsonl", "w") as events:
+                for i, chunk in enumerate(chunks):
+                    if i == 2:
+                        events.write(json.dumps({"t_ns": 30, "resize": [20, 4]}) + "\n")
+                    with patch("time.monotonic_ns", return_value=10 + i):
+                        self.helper["timed_output"](raw, events, chunk)
+            before = {path.name: path.read_bytes() for path in root.iterdir()}
+            frames = list(self.helper["replay"](root, (12, 3), "day"))
+            self.assertEqual([(t, frame.text.strip()) for t, frame in frames[:3]],
+                             [(10, "first"), (11, "second"), (11, "third")])
+            self.assertEqual(frames[0][1].background, self.helper["THEMES"]["day"][0].lstrip("#"))
+            self.assertTrue(all("ignored" not in frame.text for _, frame in frames))
+            self.assertEqual(before, {path.name: path.read_bytes() for path in root.iterdir()})
+            self.assertEqual(frames, list(self.helper["replay"](root, (12, 3), "day")))
+            (root / "output.bin").write_bytes(b"")
+            with self.assertRaisesRegex(self.helper["FrameFailure"], "truncated"):
+                list(self.helper["replay"](root, (12, 3), "day"))
+
+    def test_renderer_jobs_for_stills_and_movie_and_concat_durations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            jobs = io.StringIO()
+            self.helper["render_job"](jobs, root / "still.html")
+            function = self.helper["recording_jobs"]
+            timed = [(0, committed("one")), (100_000_000, committed("two"))]
+            with patch.dict(function.__globals__, {"replay": lambda *_args: iter(timed)}):
+                concat = function(root, (100, 20), "night", root / "movie", jobs)
+            entries = [json.loads(line) for line in jobs.getvalue().splitlines()]
+            self.assertEqual(entries, [
+                {"html": str(root / "still.html"), "png": str(root / "still.png"), "scale": 2, "opaque": False},
+                *[{"html": str(root / f"movie/{i:06d}.html"), "png": str(root / f"movie/{i:06d}.png"),
+                   "scale": 1, "opaque": True} for i in range(2)],
+            ])
+            self.assertIn("one", (root / "movie/000000.html").read_text())
+            self.assertEqual(concat.read_text().splitlines(), [
+                f"file '{root}/movie/000000.png'", "duration 0.100",
+                f"file '{root}/movie/000001.png'", "duration 2.000", f"file '{root}/movie/000001.png'",
+            ])
+
+    def test_encoder_uses_separate_palette_pass_and_same_concat(self):
+        with patch("subprocess.run", return_value=types.SimpleNamespace(returncode=0, stderr="")) as run:
+            self.helper["encode_recording"](Path("/tmp/frames.concat"), Path("/tmp/movie.gif"))
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(len(commands), 3)  # Palette, GIF, optional MP4.
+        self.assertIn("palettegen=max_colors=128:stats_mode=diff", commands[0])
+        self.assertIn("[0:v][1:v]paletteuse=diff_mode=rectangle:dither=bayer:bayer_scale=5", commands[1])
+        self.assertIn("/tmp/palette.png", commands[0])
+        self.assertIn("/tmp/palette.png", commands[1])
+        for command in commands:
+            self.assertEqual(command[command.index("-i") + 1], "/tmp/frames.concat")
+            self.assertNotIn("split", " ".join(command))
 
     def test_ffmpeg_retains_canvas_and_update_only_changed_rectangles(self):
         try:
@@ -321,17 +374,13 @@ class FramesTest(unittest.TestCase):
             self.skipTest("ffmpeg is required for recordings")
         with tempfile.TemporaryDirectory() as temp:
             out = Path(temp)
-            commits = []
             for i in range(2):
-                image = Image.new("RGBA", (64, 32), (18, 25, 51, 255))
-                image.putpixel((0, 0), (0, 0, 0, 0))  # Rounded-corner alpha must not force full disposal.
+                image = Image.new("RGB", (64, 32), (18, 25, 51))
                 ImageDraw.Draw(image).rectangle((10 + i * 4, 10, 12 + i * 4, 12), fill="white")
                 image.save(out / f"{i}.png")
-                commits.append({"t_ns": i * 200_000_000, "html": f"{i}.html"})
-            (out / "recording.json").write_text(json.dumps({"stem": "movie", "playback": commits}))
-            records = [{"files": {"recording": "recording.json"}}]
-            self.helper["encode_recordings"](out, records)
-            self.assertEqual(records[0]["files"]["gif"], "movie.gif")
+            concat = out / "frames.concat"
+            concat.write_text(f"file '{out}/0.png'\nduration 0.200\nfile '{out}/1.png'\nduration 2.000\nfile '{out}/1.png'\n")
+            self.helper["encode_recording"](concat, out / "movie.gif")
             with Image.open(out / "movie.gif") as movie:
                 movie.seek(1)
                 extent = movie.tile[0].extents
@@ -339,6 +388,10 @@ class FramesTest(unittest.TestCase):
                 self.assertEqual(movie.disposal_method, 1)
                 self.assertGreaterEqual(movie.info["duration"], 2000)
                 self.assertEqual(movie.convert("RGB").getpixel((15, 11)), (255, 255, 255))
+            record = {"name": "state", "size": "100x20", "files": {"png": "still.png", "gif": "movie.gif"},
+                      "status": "ok", "ok": True, "note": "", "reason": None}
+            self.helper["frames_index"](out, [record], True)
+            self.assertIn('src="movie.gif"', (out / "index.html").read_text())
 
     def test_recordings_require_ffmpeg_before_allocating_any_run(self):
         command = self.helper["cmd_frames"]
@@ -415,6 +468,16 @@ while True:
                     terminal.wait(lambda _c: False, "unreachable")
             finally:
                 terminal.close()
+            events = self.helper["read_jsonl"](terminal.log / "output.jsonl")
+            self.assertEqual([event["resize"] for event in events if "resize" in event], [[50, 10]])
+            offset = 0
+            for event in events:
+                self.assertIn("t_ns", event)
+                if "resize" not in event:
+                    self.assertEqual(event["offset"], offset)
+                    self.assertEqual(set(event), {"t_ns", "offset", "n"})
+                    offset += event["n"]
+            self.assertEqual(offset, (terminal.log / "output.bin").stat().st_size)
             with self.assertRaises(OSError):
                 os.fstat(terminal.master)
 
@@ -933,15 +996,12 @@ while True:
                                          out=str(root / "out"), no_png=True, keep=False, record=False)
 
             class Terminal:
-                def __init__(self, _run, state, size, _recording):
+                def __init__(self, _run, state, size):
                     self.state = state
                     calls.append(("open", state["name"], size, state.get("theme", "night")))
 
                 def resize(self, size):
                     calls.append(("resize", size))
-
-                def stop_recording(self):
-                    return None
 
                 def close(self):
                     calls.append(("close",))

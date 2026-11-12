@@ -357,6 +357,11 @@ class ScreenCapture:
             self.clipboard_pending = self.clipboard_pending[end + 2:]
 
     def feed(self, data):
+        for _frame in self.feed_frames(data):
+            pass
+
+    def feed_frames(self, data):
+        """Feed bytes, yielding each commit before consuming the next frame."""
         self.received_bytes += len(data)
         self.collect_clipboard(data)
         self.pending += data
@@ -392,6 +397,7 @@ class ScreenCapture:
             else:
                 self.synchronized = False
                 self.commit()
+                yield self.frame
 
     def commit(self):
         """Commit a synchronized close, or the quiescent final screen at PTY EOF."""
