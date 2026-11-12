@@ -5,6 +5,8 @@ const Self = @This();
 
 /// Borrowed children; their widgets must outlive the drawn surface.
 children: []const Child,
+/// Which edge keeps its natural rows first when the column is too short.
+priority: enum { top, bottom } = .bottom,
 
 pub const Child = struct {
     widget: vxfw.Widget,
@@ -24,10 +26,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const children = try ctx.arena.alloc(vxfw.SubSurface, self.children.len);
     var remaining = size.height;
     var fill: ?usize = null;
-    // Bottom rows keep their natural height first, even in a tiny column.
-    var i = self.children.len;
-    while (i > 0) {
-        i -= 1;
+    // Allocate natural rows in the caller's edge priority, without changing
+    // their display order or the remainder child's position.
+    for (0..self.children.len) |step| {
+        const i = if (self.priority == .bottom) self.children.len - 1 - step else step;
         const child = self.children[i];
         if (child.sizing == .fill) {
             std.debug.assert(fill == null);
@@ -81,4 +83,18 @@ test "Stack reserves natural rows before giving the remainder to one child" {
     const empty: Self = .{ .children = &.{} };
     try std.testing.expectEqual(@as(usize, 0), (try empty.widget().draw(ctx)).children.len);
     try std.testing.expectEqual(@as(u16, 0), (try stack.widget().draw(ctx.withConstraints(.{}, .{ .width = 0, .height = 1 }))).size.width);
+}
+
+test "Stack preserves the requested edge when natural rows compete" {
+    const top: vxfw.Text = .{ .text = "top" };
+    const bottom: vxfw.Text = .{ .text = "bottom" };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]@FieldType(Self, "priority"){ .top, .bottom }) |priority| for (0..3) |height| {
+        const stack: Self = .{ .priority = priority, .children = &.{ .{ .widget = top.widget() }, .{ .widget = bottom.widget() } } };
+        const surface = try stack.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 8, .height = @intCast(height) }, .cell_size = .{} });
+        try std.testing.expectEqual(height, surface.size.height);
+        try std.testing.expectEqual(@as(u16, @intFromBool(height == 2 or (height == 1 and priority == .top))), surface.children[0].surface.size.height);
+        try std.testing.expectEqual(@as(u16, @intFromBool(height == 2 or (height == 1 and priority == .bottom))), surface.children[1].surface.size.height);
+    };
 }

@@ -1094,7 +1094,7 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         if (view.showsNewSession(&self.state)) {
             self.app_new_session = .{ .state = &self.state, .caps = self.caps, .userdata = self, .on_click = appClick };
             const header = try ctx.arena.create(@import("widgets/Stack.zig"));
-            header.* = .{ .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
+            header.* = .{ .priority = .top, .children = try ctx.arena.dupe(@import("widgets/Stack.zig").Child, &.{
                 .{ .widget = self.app_new_session.widget() },
                 .{ .widget = self.app_header.widget() },
             }) };
@@ -7197,6 +7197,22 @@ test "chat omits New Session at every width and overview restores its pinned con
     try rig.overview.root.closeSession(&ctx);
     for ([_]u16{ 46, 140 }) |width| {
         var shown = try rig.shown(width, 20);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+    }
+}
+
+test "pinned New Session wins the last header row over a provider band" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        const state = &rig.overview.state;
+        const row = &state.rows.items[state.order.items[0]];
+        row.state = .{ .failed = .{ .since = test_now_s, .code = .{}, .resets_at = null } };
+        try row.state.failed.code.set("provider_http_401");
+        try std.testing.expect(view.band(state.rows.items, state.now_ms, state.login_at) != null);
+        // Narrow screens reserve four input rows; the wide list has no input.
+        var shown = try rig.shown(width, if (width == 46) 5 else 1);
         defer shown.deinit();
         try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
     }
