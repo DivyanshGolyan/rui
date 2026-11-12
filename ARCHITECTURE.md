@@ -327,6 +327,11 @@ If that covered history names no change to its Session, the token advances to th
 Otherwise the full observation carries the generation captured before its reads.
 Foreign, future, uncovered or pre-restart tokens get a full observation.
 Tokens are hints, not revisions or durable state, and the token's Session scopes the check; editing one can mislead only its caller.
+The shared change-ring recorder expands each written Session through saved `parent_ref` before publishing the generation and commit wakeup.
+This includes newly saved attachments, but never a standalone agent's starter.
+One bounded indexed read walks at most four upward edges from the at-most-four touched Sessions; a fifth distinct Session uses the ring's existing conservative all-changed fallback.
+Each ancestor keeps its own Workspace key. Failed expansion forgets coverage and applies ordinary Store fencing, never an unchanged answer.
+Activity, command observations and incremental Session listings consume this same record; Current remains uncached.
 Nothing is retained per reader and no Host thread is added.
 Each reply reserves its own shape's bound, not the global observation maximum.
 A retry becoming past due commits nothing: readers apply `WorkState.asOf`, as Session listing does.
@@ -3485,6 +3490,15 @@ Null end captures the current committed end; zero freezes empty history.
 Pages echo end/direction and return at most `limit` owned metadata rows with `more`, ordered by (position, ordinal).
 Only complete Tool Result groups share positions, using one-based call ordinals; a Session's own `approval_requested` row shares its call's position at ordinal 1; a revision's `session_changed` rows share its position, numbered from zero; other rows, including forwarded child facts, use zero.
 An `approval_requested` row (D115) follows each call whose Action was saved under an `ask` revision, whatever was decided since, and carries `session` (the Session whose Action it is), `action` (the id `permission_decision` names), `operation` and `call_ordinal`; it is dated by its Operation's settlement, which saved the Action.
+Both `call` and `approval_requested` rows carry inline `description`, `tool` and `server` (D240, wire 14).
+`description` is the saved D227 call line, at most 200 bytes, or null where no line was saved;
+`tool` is the saved name, at most the tool-name bound, or null for an oversized rejected name (its full name remains in `fields[0]`).
+`server` is the MCP server from the proposing Operation's frozen offer, null for built-ins or an unknown tool, never today's tool set.
+These fields read existing call content, settlement and frozen-offer facts; no arguments are re-parsed and no Store-format change is needed.
+The format 69 → 70 migration owns the saved wire-13 → wire-14 move on both engines. A current-format Store must already carry wire 14; opening never relabels it.
+Opening either row through `activity-content` returns the call's original arguments JSON, including original whitespace and the description field.
+A forwarded approval reads and certifies the child's canonical call and returns that same saved detail and arguments, not anything belonging to the receiving Session.
+Core built-ins do not request permission; Bash and MCP calls under `ask` do.
 That settlement stores the call's position on the Action as `approval_position` (Store format 51), and the feed seeks that column's partial index, so a page of approval requests costs the same however many calls ran without asking.
 Forwarded `approval_requested` and `turn_ended` rows have their own receiving-Session position and carry the originating child's `session`, while all remaining fields come from the child's own Action or Turn facts.
 A Session's own `turn_ended` row likewise carries its own `session`; forwarding does not alter the child's row or backfill a captured ancestor feed prefix.
@@ -3575,7 +3589,7 @@ A forward page's live call activity reads only the calls accepted after the page
 A Store test holds an opening page and a forward page to equal SQLite VM steps after 10 and 10,000 earlier rows.
 
 `POST /v1/activity-content` takes `kind:"activity_content"`, `session`, decimal-string `position` and `ordinal`, resolving the public row and provenance again.
-Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls carry field references only, and stops and contentless outcomes have no byte value.
+Admissions, applied input, assistant text, complete Tool Results and outcome content (a completed Turn's answer or a failed one's report) stream completely once under the whole-stream reader/framing/failure contract above; calls and approval requests stream their original arguments JSON, and stops and contentless outcomes have no byte value.
 Client returns owned fixed-size typed facts/cursors and synchronous borrowed content windows.
 Invalid identities/cursors do not mutate work; contradictory canonical facts fence.
 Ordinary connection capacity bounds readers, fixed metadata/scanner storage and 4-KiB windows; no worker, payload stage/cache or per-Session traversal survives return.

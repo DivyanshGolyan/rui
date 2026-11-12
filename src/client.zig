@@ -639,22 +639,25 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     const address = try std.Io.net.UnixAddress.init(socket_path);
     // A refused connect may be a live Host's full backlog. Give it a short
     // retry window inside the shared observation budget, never absence authority.
-    const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + 200 * std.time.ns_per_ms);
+    const connect_until = @min(until, std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + refused_connect_retry_ns);
     const fd = connection: {
         while (true) {
             const connected = connectRequest(.{ .io = io }, address, connect_until) catch |err| {
+                switch (err) {
+                    // A free Store lease proves a crashed Host's leftover
+                    // socket absent now; only a Store still owned earns the
+                    // retry, so leftovers never cost the window.
+                    error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
+                        if (platform.socketStoreIsUnowned(io, socket_path)) return null;
+                    },
+                    else => {},
+                }
                 if (err == error.ConnectionRefused) {
                     const remaining = connect_until - std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
                     if (remaining > 0) {
                         try std.Io.sleep(io, .fromNanoseconds(@intCast(@min(remaining, 25 * std.time.ns_per_ms))), .awake);
                         if (std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds < connect_until) continue;
                     }
-                }
-                switch (err) {
-                    error.ConnectionRefused, error.FileNotFound, error.TransferInactive => {
-                        if (platform.socketStoreIsUnowned(io, socket_path)) return null;
-                    },
-                    else => {},
                 }
                 return err;
             };
@@ -682,6 +685,10 @@ pub fn observeHostForUpgradeAtSocket(allocator: std.mem.Allocator, io: std.Io, s
     if (observed.pid != pid) return error.InvalidHostInfo;
     return observed;
 }
+
+/// How long socket discovery retries a refused connect to a Store whose lease
+/// is still held: a live Host's full backlog refuses until it accepts.
+const refused_connect_retry_ns = 200 * std.time.ns_per_ms;
 
 fn hostObservationDeadline(io: std.Io, deadline: ?i128) i128 {
     const probe_end = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + std.time.ns_per_s;
@@ -5459,10 +5466,18 @@ test "socket upgrade discovery distinguishes stale free Store from refused held 
     // A connected unreadable peer cannot be made absent by any routing hint.
     try std.testing.expectError(error.InvalidHostInfo, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
     listener.deinit(io);
+    // Held lease, nothing listening: a live Host's refusal keeps the whole
+    // retry window.
+    const refused_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     try std.testing.expectError(error.ConnectionRefused, observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - refused_at >= refused_connect_retry_ns);
     lease.release();
     held = false;
+    // A crashed Host's leftover: the free lease answers at the first refusal,
+    // before the window, so many leftovers cannot add up to a stalled upgrade.
+    const stale_at = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     try std.testing.expectEqual(@as(?HostControlObservation, null), try observeHostForUpgradeAtSocket(allocator, io, socket.slice(), null));
+    try std.testing.expect(std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - stale_at < refused_connect_retry_ns);
     // Discovery is read-only: a later lease holder, not discovery, reclaims it.
     _ = try std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false });
 }
