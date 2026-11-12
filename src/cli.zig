@@ -3991,7 +3991,7 @@ const usage_text =
     \\  rui [--store PATH] [--provider codex] [--model MODEL]
     \\    Create a fresh live terminal conversation in the current directory. Bash runs
     \\    without asking by default. Enter Message text in the terminal editor.
-    \\    Type /help in the conversation.
+    \\    Open Settings > Keys for the key list.
     \\  rui RESOURCE --help
     \\    Resources: session, request, action, host, defaults, auth, store.
     \\  rui RESOURCE COMMAND --help

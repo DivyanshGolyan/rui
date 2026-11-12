@@ -85,7 +85,9 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 ## Drive
 
-Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait` and `/inspect-action` are ordinary unknown commands. `/help` still shows names and argument shapes.
+Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait`, `/inspect-action` and `/help` are ordinary unknown commands. A typed `?` stays in the draft.
+
+For the full keys-only reference, open the overview and press End then Enter to open the pinned Settings row. Press Down six times to select the last **Keys** row (after Version), then Enter. In a wide conversation, click the pinned Settings row instead, without leaving the chat. The `keys` frame checks this at 140 and 46 columns. Check eleven strong key names with short meanings: aligned row-major pairs at 140 columns, one column at 46, including `ctrl+x` → `stop`; no title, footer, instructions, command list or stale help text. Esc returns to Settings, and another Esc returns to the original screen.
 
 | Action | Command |
 | --- | --- |

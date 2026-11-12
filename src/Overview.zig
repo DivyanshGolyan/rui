@@ -3518,7 +3518,7 @@ test "the overview asks for frames only while a spinning mark is on screen" {
     try std.testing.expect(!try Frames.after(rig, 9));
     try std.testing.expect(try Frames.after(rig, 24));
     // A panel over the list shows no marks.
-    _ = try rig.press("/help\r");
+    try showOutputPanel(rig);
     try std.testing.expect(!try Frames.after(rig, 24));
 }
 
@@ -4435,6 +4435,12 @@ test "Host recovery paused shutting down and upgrading offer no start gesture" {
 }
 
 test "Host recovery availability is independent of admission pause for the whole Session service" {
+    const Inspection = struct {
+        fn requests(_: std.process.Init, _: client.ReadContext, _: []const u8, _: []const u8, out: *std.Io.Writer, saved: *session_reads.SavedRequests) !void {
+            saved.* = .{};
+            try out.writeAll("No requests.\n");
+        }
+    };
     for ([_]HostRecovery.Availability{ .ready, .paused, .stopping, .stopped }) |availability| {
         errdefer std.debug.print("availability={s}\n", .{@tagName(availability)});
         var tmp = std.testing.tmpDir(.{});
@@ -4448,6 +4454,8 @@ test "Host recovery availability is independent of admission pause for the whole
         defer rig.close();
         const overview = rig.overview;
         overview.hooks.scratch = HostRecovery.scratch;
+        // The frontend freezes its callbacks when the Session opens.
+        overview.hooks.requests = Inspection.requests;
         try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
         const frontend = overview.app_session.?.frontend.?;
         defer {
@@ -4489,7 +4497,7 @@ test "Host recovery availability is independent of admission pause for the whole
         frontend.reader.cancel();
         frontend.reader.join() catch {};
         // A queued inspection has the same reachability boundary.
-        frontend.input.queueCommand("/help");
+        frontend.input.queueCommand("/requests");
         frontend.poll_at = std.math.maxInt(i96);
         try child.handleEvent(&ctx, .tick);
         try std.testing.expectEqual(reachable, frontend.inspection.command_running);
@@ -5159,8 +5167,8 @@ fn shownRow(rig: *const Rig, at: usize) view.Reference {
 test "Tab completes from the draft's own list, however many keys arrive before a frame" {
     const rig = try openComposer();
     defer rig.close();
-    try std.testing.expect(try rig.press("/he\t") == null);
-    try std.testing.expectEqualStrings("/help", rig.overview.composerDraft().bytes);
+    try std.testing.expect(try rig.press("/set\t") == null);
+    try std.testing.expectEqualStrings("/setup ", rig.overview.composerDraft().bytes);
     // Two Tabs in one batch: the second completes from the list the first
     // one's word calls for.
     rig.overview.composer = rig.overview.emptyComposer(rig.overview.composer.edits +% 1);
@@ -5427,7 +5435,43 @@ test "a notice keeps its own rows above the one Footer: every result line and a 
     }
 }
 
-test "/help opens only when every line it shows sits above the pinned Settings row, with or without a provider band" {
+test "Settings Keys opens from the overview and Esc returns to settings" {
+    for ([_]u16{ 46, 140 }) |width| {
+        const rig = try openListed();
+        defer rig.close();
+        const overview = rig.overview;
+        const selected = overview.state.selected;
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try overview.root.openSettings(&ctx);
+        overview.root.settings_page.select(.keys);
+        try overview.root.settings_page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+        try std.testing.expect(overview.root.settings_page.keys_open);
+        var shown = try rig.shown(width, 24);
+        defer shown.deinit();
+        const text = try shown.text();
+        try std.testing.expect(std.mem.indexOf(u8, text, "ctrl+x") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "stop") != null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "/help") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "Ctrl-X twice") == null);
+        try std.testing.expect(try rig.press("\x1b") == null);
+        try std.testing.expect(!overview.root.settings_page.keys_open);
+        try std.testing.expect(overview.root.settings_open);
+        try std.testing.expect(overview.root.session == null);
+        try std.testing.expect(try rig.press("\x1b") == null);
+        try std.testing.expect(!overview.root.settings_open);
+        try std.testing.expectEqual(selected, overview.state.selected);
+    }
+}
+
+/// Owned command output for tests of the surrounding overview surface.
+fn showOutputPanel(rig: *Rig) !void {
+    const state = &rig.overview.state;
+    try std.testing.expect(state.panel == null);
+    state.panel = .{ .output = .{ .name = .setup, .text = try state.gpa.dupe(u8, "Defaults\nStore: /s\nNotifications: off\nModel: test") } };
+}
+
+test "a command output panel stays above the pinned Settings row, with or without a provider band" {
     for ([_]bool{ false, true }) |banded| {
         const rig = try openListed();
         defer rig.close();
@@ -5438,8 +5482,8 @@ test "/help opens only when every line it shows sits above the pinned Settings r
             try row.state.failed.code.set("provider_http_401");
             try std.testing.expect(view.band(state.rows.items, state.now_ms, state.login_at) != null);
         }
-        var opened = false;
-        var refused = false;
+        var clipped = false;
+        var whole = false;
         var height: u16 = 8;
         while (height <= 40) : (height += 1) {
             // Esc closes a panel or a notice the last height left.
@@ -5447,13 +5491,7 @@ test "/help opens only when every line it shows sits above the pinned Settings r
             _ = try rig.press("\x1b");
             var sized = try rig.shown(80, height);
             sized.deinit();
-            _ = try rig.press("/help\r");
-            if (state.panel == null) {
-                refused = true;
-                try std.testing.expectEqualStrings("! Screen too small for /help", state.notice.?.text());
-                continue;
-            }
-            opened = true;
+            try showOutputPanel(rig);
             var shown = try rig.shown(80, height);
             defer shown.deinit();
             const at = view.layout(state);
@@ -5461,18 +5499,19 @@ test "/help opens only when every line it shows sits above the pinned Settings r
             try std.testing.expectEqual(@as(u16, 2), at.settings.len());
             const items = (try view.panelItems(shown.arena.allocator(), state, 80, rig.overview.caps)).?;
             try std.testing.expect(items.len <= at.list.len());
+            whole = whole or items.len == 5;
             // Each line the panel built shows in its row, none under the
-            // Settings tail, and none is left uncounted.
+            // Settings tail. A short panel counts the lines it hides.
             for (items, at.top..) |item, row| {
                 var text: std.ArrayList(u8) = .empty;
                 for (item.segments) |segment| try text.appendSlice(shown.arena.allocator(), segment.text);
                 try std.testing.expectEqualStrings(std.mem.trimEnd(u8, text.items, " "), try shown.line(@intCast(row)));
-                try std.testing.expect(std.mem.indexOf(u8, text.items, "more lines") == null);
+                clipped = clipped or std.mem.indexOf(u8, text.items, "more lines") != null;
             }
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start), "─"));
             try std.testing.expect(std.mem.startsWith(u8, try shown.line(at.settings.start + 1), "  Settings"));
         }
-        try std.testing.expect(opened and refused);
+        try std.testing.expect(clipped and whole);
     }
 }
 
@@ -5930,11 +5969,11 @@ test "a conversation's Upgrade waits for the conversation's running read, though
     const backend = overview.settingsBackend();
     for ([_]bool{ false, true }) |queued| for ([_]bool{ false, true }) |running| {
         if (!queued and !running) continue;
-        if (queued) frontend.input.queueCommand("/help");
+        if (queued) frontend.input.queueCommand("/requests");
         frontend.inspection.command_running = running;
         try std.testing.expectError(error.UpgradeUnavailable, backend.upgrade(backend.context));
         try std.testing.expect(!overview.state.upgrading());
-        if (queued) try std.testing.expectEqualStrings("/help", frontend.input.takeCommand().?);
+        if (queued) try std.testing.expectEqualStrings("/requests", frontend.input.takeCommand().?);
         frontend.inspection.command_running = false;
     };
     // A read the conversation still runs, then Upgrade before its tick.
@@ -5991,10 +6030,9 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("/");
     var all = try rig.shown(80, 24);
     defer all.deinit();
-    try all.expectLines(12, &.{
+    try all.expectLines(13, &.{
         "/archive",
         "/configure",
-        "/help",
         "/model",
         "/rename",
         "/sessions   unarchived · archived · all",
@@ -6004,13 +6042,12 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         " › /",
     });
     try std.testing.expect(std.mem.endsWith(u8, try all.line(23), "enter pick / esc close"));
-    // Eleven rows leave six commands and a count of the rest.
-    var short = try rig.shown(80, 11);
+    // Ten rows leave five commands and a count of the rest.
+    var short = try rig.shown(80, 10);
     defer short.deinit();
     try short.expectLines(0, &.{
         "/archive",
         "/configure",
-        "/help",
         "/model",
         "/rename",
         "/sessions   unarchived · archived · all",
@@ -6107,10 +6144,12 @@ test "a click on New Session, as a terminal sends it, selects the composer" {
 }
 
 test "a click on a panel's or the model picker's lines, as a terminal sends it, opens no Session: only the Sessions hear a press" {
-    for ([_][]const u8{ "/help\r", "/model " }) |typed| {
+    for ([_]bool{ false, true }) |picker| {
         const rig = try openListed();
         defer rig.close();
-        try std.testing.expect(try rig.press(typed) == null);
+        if (picker) {
+            try std.testing.expect(try rig.press("/model ") == null);
+        } else try showOutputPanel(rig);
         try std.testing.expect(rig.overview.state.listArea() != .sessions);
         const selected = rig.overview.state.selected.session;
         // Every row the list's place holds, the ones Sessions showed on
