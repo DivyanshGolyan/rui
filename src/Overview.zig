@@ -1215,6 +1215,13 @@ const Next = union(enum) { leave, open: view.Reference, open_settings };
 /// Steps the core with one event and queues the jobs it asks for. Presenting
 /// panes and leaving are the loop's to do.
 fn event(self: *Self, value: view.Event) !?Next {
+    return (try self.eventResult(value)).next;
+}
+
+const EventResult = struct { next: ?Next = null, archive_admission: view.ArchiveAdmission = .refused };
+
+/// Keep the core's synchronous admission with the jobs this exact step queued.
+fn eventResult(self: *Self, value: view.Event) !EventResult {
     const held_host = self.state.holdsHost();
     const effects = try view.step(&self.state, value);
     if (held_host and !self.state.holdsHost()) {
@@ -1248,12 +1255,15 @@ fn event(self: *Self, value: view.Event) !?Next {
             .refused => |why| refused = why,
             else => {},
         },
-        .exit => return .leave,
+        .exit => return .{ .next = .leave, .archive_admission = effects.archive_admission },
     };
-    if (refused) |why| if (next == null) return self.event(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
+    if (refused) |why| if (next == null) {
+        const settled = try self.eventResult(.{ .composed = .{ .input = .{ .composer = .{ .refused = why } }, .draft = self.composerDraft() } });
+        return .{ .next = settled.next, .archive_admission = effects.archive_admission };
+    };
     self.askSkills();
     self.sendStatuses();
-    return next;
+    return .{ .next = next, .archive_admission = effects.archive_admission };
 }
 
 /// Brings the terminal's program status records to what the core wants:
@@ -1670,12 +1680,13 @@ fn tabCompletion(context: *const anyopaque, draft: []const u8, caret: usize) ?Te
 /// An input in the opened Session's conversation, whose work shows as
 /// `kind`, stepped as the overview's own: a stop it asks for is sent at
 /// once.
-fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !void {
+fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !view.ArchiveAdmission {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .conversed = .{ .reference = self.opened, .work = kind, .input = input } });
-    std.debug.assert(next == null);
+    const result = try self.eventResult(.{ .conversed = .{ .reference = self.opened, .work = kind, .input = input } });
+    std.debug.assert(result.next == null);
     try self.dispatch(.lent);
+    return result.archive_admission;
 }
 
 /// A read the opened Session's conversation applied: the outcome it opened
@@ -3226,7 +3237,7 @@ test "while a conversation holds the terminal its stop goes first, the listing g
     // The due Host read starts before the stop is asked for.
     try overview.dispatch(.lent);
     try std.testing.expectEqual(Job.host, std.meta.activeTag(overview.job));
-    try conversed(overview, .working, .stop);
+    _ = try conversed(overview, .working, .stop);
     // The Host read already running answers first; the stop goes before
     // the page queued ahead of it.
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), overview, Lent.answered);
@@ -5251,12 +5262,12 @@ test "conversation archive and restore use the exact unlisted opened reference t
     defer rig.close();
     rig.overview.opened = "x9y8z7".*;
     const selected = rig.overview.state.selected.session;
-    try conversed(rig.overview, .idle, .{ .archive = .active });
+    _ = try conversed(rig.overview, .idle, .{ .archive = .active });
     try rig.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
     try std.testing.expectEqualStrings("x9y8z7", &Seen.now.archive_session);
     try std.testing.expect(Seen.now.archive_requested);
-    try conversed(rig.overview, .idle, .unarchive);
+    _ = try conversed(rig.overview, .idle, .unarchive);
     try rig.lend();
     try std.testing.expectEqual(@as(usize, 2), Seen.now.archives);
     try std.testing.expect(!Seen.now.archive_requested);
@@ -5450,7 +5461,7 @@ test "a conversation's Upgrade waits for the conversation's running read, though
     for (0..3) |_| try overview.appUpgrade(&ctx);
     try std.testing.expect(overview.state.upgrading() and !overview.upgrade_job.started);
     // Esc ends the run that never started, as on the overview.
-    try conversed(overview, .idle, .cancel_upgrade);
+    _ = try conversed(overview, .idle, .cancel_upgrade);
     frontend.reader.cancel();
     frontend.reader.join() catch {};
     var turns: usize = 0;
@@ -6671,7 +6682,7 @@ test "chat info Archive receives its worker answer after the ordinary ledger ent
         // Opening has settled; invoke the panel's wired typed Archive action.
         frontend.reading.opening = false;
         const backend = frontend.app_info.backend;
-        try backend.archive(backend.context);
+        _ = try backend.archive(backend.context);
         try std.testing.expectEqual(@import("chat_info.zig").SaveState.pending, backend.state(backend.context));
         try std.testing.expect(try rig.settle() == null);
         const accepted = outcome == .completed or outcome == .pending;
@@ -6679,4 +6690,68 @@ test "chat info Archive receives its worker answer after the ordinary ledger ent
         // Definite answers retire; only uncertainty remains in the ledger.
         try std.testing.expectEqual(@as(usize, @intFromBool(outcome == .unknown)), overview.state.request_count);
     }
+}
+
+test "chat info Archive backend forwards exact core ledger admission through the real Overview lender" {
+    const Files = struct {
+        var dir: std.Io.Dir = undefined;
+        var count: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            count += 1;
+            return dir.createFile(init.io, &.{'a' + count}, .{ .read = true });
+        }
+    };
+    const Held = enum { none, pending, unknown };
+    for ([_]bool{ false, true }) |full| for (std.enums.values(Held)) |held| for ([_]view.ArchiveState{ .active, .archiving, .archived }) |archive| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        Files.dir = tmp.dir;
+        Files.count = 0;
+        var ops = fake_operations;
+        ops.open = openSession;
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-5.5" }, ops, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        overview.hooks.scratch = Files.scratch;
+        try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+        defer {
+            if (overview.app_session) |left| {
+                left.frontend.?.stop();
+                overview.disposeSession(left);
+                overview.app_session = null;
+            }
+        }
+        try std.testing.expect(try rig.settle() == null);
+        const frontend = overview.app_session.?.frontend.?;
+        frontend.reading.opening = false;
+        frontend.line.archive_state = archive;
+        if (held != .none) {
+            overview.state.requests[0] = .{ .kind = .archive, .session = overview.opened, .status = if (held == .pending) .pending else .unknown };
+            overview.state.request_count = 1;
+        }
+        if (full) while (overview.state.request_count < view.max_requests) {
+            overview.state.requests[overview.state.request_count] = .{ .kind = .stop, .session = "other0".*, .status = .unknown };
+            overview.state.request_count += 1;
+        };
+        const before = overview.state.request_count;
+        const retained = overview.state.requests;
+        const backend = frontend.app_info.backend;
+        if (full or held != .none or archive != .active) {
+            try std.testing.expectEqual(view.ArchiveAdmission.refused, try backend.archive(backend.context));
+            try std.testing.expectEqual(@import("chat_info.zig").SaveState.idle, backend.state(backend.context));
+            try std.testing.expectEqual(before, overview.state.request_count);
+            try std.testing.expectEqualDeep(retained[0..before], overview.state.requests[0..before]);
+            try std.testing.expectEqual(@as(usize, 0), Seen.now.archives);
+            try std.testing.expectEqual(@as(usize, 0), overview.job_count);
+        } else {
+            try std.testing.expectEqual(view.ArchiveAdmission.admitted, try backend.archive(backend.context));
+            try std.testing.expectEqual(@import("chat_info.zig").SaveState.pending, backend.state(backend.context));
+            try std.testing.expect(try rig.settle() == null);
+            try std.testing.expectEqual(@as(usize, 1), Seen.now.archives);
+            try std.testing.expectEqual(@import("chat_info.zig").SaveState.saved, backend.state(backend.context));
+        }
+    };
 }

@@ -381,7 +381,9 @@ fn launch(self: *Self, job: *const Job, worker: Task.Run) !void {
 pub const Lender = struct {
     context: *anyopaque,
     /// Steps the overview with semantic input for this exact conversation.
-    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!void,
+    /// Returns whether this event admitted a new archive request; other inputs
+    /// return refused, without changing their own effect semantics.
+    step: *const fn (context: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) anyerror!overview_view.ArchiveAdmission,
     /// Runs the overview between the conversation's frames, without the
     /// screen or input: answers its finished job, keeps its listing going,
     /// so another Session's news still notifies, and starts its next stop
@@ -500,16 +502,12 @@ fn infoBackend(self: *Self) ChatInfo.Backend {
             frontend.info_effect = .configure;
             frontend.dirty = true;
         }
-        fn archive(raw: *anyopaque) !void {
+        fn archive(raw: *anyopaque) !overview_view.ArchiveAdmission {
             const frontend = owner(raw);
-            try frontend.infoMaySave();
-            if (frontend.line.archive_state != .active) {
-                frontend.info_effect = .saved;
-                return;
-            }
-            frontend.info_effect = .archive;
-            errdefer frontend.info_effect = .failed;
-            try frontend.perform(.archive);
+            frontend.infoMaySave() catch return .refused;
+            const admission = try frontend.archive();
+            if (admission == .admitted) frontend.info_effect = .archive;
+            return admission;
         }
         fn copy(raw: *anyopaque, _: *vxfw.EventContext) !void {
             const frontend = owner(raw);
@@ -2084,7 +2082,7 @@ fn update(self: *Self) !Updated {
             try writer.print("! Upgrade could not settle Client work: {s}. Draft and original retained; select Version in app settings to retry.", .{@errorName(err)});
             self.notice = writer.buffered();
             self.dirty = true;
-            try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
+            _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
             return .retry;
         },
         .blocked => if (self.notice == null) {
@@ -2097,7 +2095,7 @@ fn update(self: *Self) !Updated {
                     var writer = std.Io.Writer.fixed(&self.notice_buffer);
                     try writer.print("! Reattach failed: {s}. Draft and original retained; select Version in app settings or reopen with selected Rui.", .{@errorName(err)});
                     self.notice = writer.buffered();
-                    try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
+                    _ = try self.lender.step(self.lender.context, self.shownWork(), .upgrade_failed);
                 };
                 self.withdrawDecided();
             }
@@ -2438,26 +2436,37 @@ fn perform(self: *Self, action: ConversationAction) !void {
         .stop => if (self.reading.opening) {
             self.notice = "Session is opening.";
         } else try self.converse(.stop),
-        .archive => if (self.reading.opening) {
-            self.notice = "Archive is available once the Session opens.";
-        } else try self.converse(.{ .archive = self.line.archive_state }),
+        .archive => _ = try self.archive(),
     }
     self.dirty = true;
 }
 
+/// All archive surfaces use this admission result from the overview owner.
+fn archive(self: *Self) !overview_view.ArchiveAdmission {
+    if (self.reading.opening) {
+        self.notice = "Archive is available once the Session opens.";
+        return .refused;
+    }
+    return self.converseAdmission(.{ .archive = self.line.archive_state });
+}
+
 /// Steps the overview with an input here, Ctrl-X or another.
 fn converse(self: *Self, input: overview_view.ConversationInput) !void {
+    _ = try self.converseAdmission(input);
+}
+
+fn converseAdmission(self: *Self, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
     // The Upgrade's own inputs are no Host requests, so no hold refuses them.
     const host_intent = switch (input) {
         .other, .cancel_upgrade, .upgrade_failed => false,
         .stop, .archive, .unarchive => true,
     };
-    if (host_intent and self.hostHeld()) return;
+    if (host_intent and self.hostHeld()) return .refused;
     if (host_intent and self.upgradeHeld()) {
         self.notice = session_upgrade.refusal(self.upgradePhase());
-        return;
+        return .refused;
     }
-    try self.lender.step(self.lender.context, self.shownWork(), input);
+    return self.lender.step(self.lender.context, self.shownWork(), input);
 }
 
 /// The work the conversation shows now.
@@ -4259,7 +4268,9 @@ test "Ctrl-R recovers only as Ctrl-R, never with Shift hidden by its reported te
 
 /// An overview that lent the terminal and says nothing under its input.
 const quiet_overview: Lender = .{ .context = undefined, .step = struct {
-    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !void {}
+    fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+        return .refused;
+    }
 }.step, .service = struct {
     fn service(_: *anyopaque) !bool {
         return false;
@@ -4289,16 +4300,17 @@ const FakeOverview = struct {
     stops: usize = 0,
     notice: ?[]const u8 = null,
 
-    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
         const fake: *FakeOverview = @ptrCast(@alignCast(raw));
         fake.notice = null;
-        if (input != .stop) return;
+        if (input != .stop) return .refused;
         if (fake.stopping or work != .working) {
             fake.notice = "unused: Stopping";
         } else {
             fake.stops += 1;
             fake.stopping = true;
         }
+        return .refused;
     }
 
     fn service(_: *anyopaque) !bool {
@@ -4750,7 +4762,7 @@ const ArchiveOverview = struct {
     archived: ?overview_view.Reference = null,
     requested: bool = true,
 
-    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
+    fn step(raw: *anyopaque, work: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
         switch (input) {
             .other, .cancel_upgrade, .upgrade_failed => {},
@@ -4767,6 +4779,7 @@ const ArchiveOverview = struct {
             .cancel_upgrade => self.cancels += 1,
             else => return error.TestUnexpectedEffect,
         };
+        return effects.archive_admission;
     }
 
     fn line(raw: *anyopaque, work: protocol.session_work.Kind) Lender.Said {
@@ -4928,8 +4941,9 @@ test "Ctrl-X stops at once beside a typed slash archive, and Enter then archives
 
 test "conversation slash archive errors propagate and consume only the submitted line" {
     const Failed = struct {
-        fn step(_: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !void {
+        fn step(_: *anyopaque, _: protocol.session_work.Kind, input: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
             if (input == .archive or input == .unarchive) return error.TestArchiveDispatchFailed;
+            return .refused;
         }
     };
     for ([_][]const u8{ "/archive\r", "/unarchive\r" }) |command| {
@@ -8214,6 +8228,169 @@ test "chat info Archive delegates once and settles only its exact Session answer
         try std.testing.expectEqualStrings("draft", held.self.input.composition().bytes);
         try std.testing.expect(held.self.input.queuedCommand() == null);
     }
+}
+
+test "chat info archive admission refuses full and unresolved ledgers without trapping the panel" {
+    const Existing = enum { none, archive_pending, archive_unknown, restore_pending, restore_unknown };
+    for ([_]bool{ false, true }) |full| for (std.enums.values(Existing)) |existing| {
+        const held = try HeldFrontend.createWithDrafts("k7m2qx", null);
+        defer held.destroy();
+        var overview: ArchiveOverview = .{ .state = undefined };
+        try overview.state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer overview.state.deinit();
+        held.self.lender = overview.lender();
+        if (full) {
+            for (&overview.state.requests, 0..) |*request, i| {
+                var reference: overview_view.Reference = "aaaaaa".*;
+                reference[0] += @intCast(i);
+                request.* = .{ .kind = .archive, .session = reference, .status = if (i % 2 == 0) .pending else .unknown };
+            }
+            overview.state.request_count = overview_view.max_requests;
+        }
+        if (existing != .none) {
+            overview.state.requests[0] = .{
+                .kind = if (existing == .restore_pending or existing == .restore_unknown) .unarchive else .archive,
+                .session = "k7m2qx".*,
+                .status = if (existing == .archive_unknown or existing == .restore_unknown) .unknown else .pending,
+            };
+            overview.state.request_count = @max(1, overview.state.request_count);
+        }
+        const refused = full or existing != .none;
+        const before = overview.state.request_count;
+        try captureInfo(held, "Fix retry deadline");
+        try held.keys("kept draft\x1bi");
+        _ = try held.draw();
+        held.self.app_info.panel.selected = 7;
+        try held.keys("\r");
+        try std.testing.expectEqual(@as(usize, @intFromBool(!refused)), overview.archives);
+        try std.testing.expectEqual(before + @intFromBool(!refused), overview.state.request_count);
+        try std.testing.expectEqual(@as(?usize, if (refused) null else 7), held.self.app_info.pending);
+        try std.testing.expectEqual(refused, held.self.app_info.failures[7] != null);
+        try std.testing.expectEqual(@as(@TypeOf(held.self.info_effect), if (refused) .idle else .archive), held.self.info_effect);
+        // Reopening must not turn a refusal into a permanent modal hold.
+        try held.keys("\x07\x1bi");
+        _ = try held.draw();
+        if (refused) {
+            held.self.app_info.panel.selected = 6;
+            try held.keys("\r");
+            try std.testing.expect(held.self.app_info.renaming);
+            try held.keys("\x07");
+            // Once the owner has room again, the same action can be admitted.
+            overview.state.request_count = 0;
+            held.self.app_info.panel.selected = 7;
+            try held.keys("\r");
+            try std.testing.expectEqual(@as(usize, 1), overview.archives);
+            try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+        }
+        // An unrelated answer cannot settle an admitted request, even hidden.
+        try held.keys("\x07");
+        const result: overview_view.ArchiveResult = .{ .request = .{ .reference = "k7m2qx".* }, .outcome = .{ .requested = .completed } };
+        var other = result;
+        other.request.reference = "zzzzzz".*;
+        held.self.archiveAnswered(other);
+        var ctx = held.context();
+        try held.self.app_info.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(@as(?usize, 7), held.self.app_info.pending);
+        held.self.archiveAnswered(result);
+        try held.self.app_info.widget().handleEvent(&ctx, .tick);
+        try std.testing.expect(held.self.app_info.pending == null);
+        try std.testing.expect(held.self.app_info.failures[7] == null);
+        try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+    };
+}
+
+test "chat info archive owner errors propagate instead of becoming ordinary admission refusals" {
+    const Failed = struct {
+        fn step(_: *anyopaque, _: protocol.session_work.Kind, _: overview_view.ConversationInput) !overview_view.ArchiveAdmission {
+            return error.TestArchiveDispatchFailed;
+        }
+    };
+    const held = try HeldFrontend.create();
+    defer held.destroy();
+    try captureInfo(held, "Fix retry deadline");
+    try held.keys("kept draft\x1bi");
+    _ = try held.draw();
+    held.self.lender.step = Failed.step;
+    held.self.app_info.panel.selected = 7;
+    try std.testing.expectError(error.TestArchiveDispatchFailed, held.keys("\r"));
+    try std.testing.expect(held.self.app_info.pending == null);
+    try std.testing.expect(held.self.app_info.failures[7] == null);
+    try std.testing.expectEqual(.idle, held.self.info_effect);
+    try std.testing.expectEqualStrings("kept draft", held.self.input.composition().bytes);
+}
+
+test "chat info Configure and Copy admission either owns work or refuses before publishing pending" {
+    const Hold = enum { none, host, upgrade_running, upgrade_blocked, upgrade_reobserving, opening, queued_command, running_command, typed_edit, message, decision };
+    const Host = struct {
+        fn held(_: *anyopaque) bool {
+            return true;
+        }
+        fn lost(_: *anyopaque) void {
+            @panic("admission must not start Host work");
+        }
+        fn start(_: *anyopaque, _: *vxfw.EventContext) !bool {
+            return error.UnexpectedHostStart;
+        }
+        fn notice(_: *anyopaque) ?vxfw.Widget {
+            return null;
+        }
+    };
+    const edits: []const ChatInfo.Edit = &.{ .{ .effort = .low }, .{ .permission = .ask }, .{ .tools = .{} }, .{ .model = "gpt-6-luna" }, .{ .label = "Renamed" } };
+    for (std.enums.values(Hold)) |hold| for (0..edits.len + 1) |effect| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Fix retry deadline");
+        switch (hold) {
+            .none => {},
+            .host => self.app_hooks.host = .{ .context = held, .held = Host.held, .lost = Host.lost, .start = Host.start, .notice = Host.notice },
+            .upgrade_running => held.upgrade = .{ .run = .checking },
+            .upgrade_blocked => held.upgrade = .{ .after = .blocked },
+            .upgrade_reobserving => held.upgrade = .{ .after = .reobserving },
+            .opening => self.reading.opening = true,
+            .queued_command => self.input.queueCommand("/requests"),
+            .running_command => self.inspection.command_running = true,
+            .typed_edit => {
+                self.info_edit = .{ .permission = .bypass };
+                self.info_effect = .configure;
+            },
+            .message => self.submission.intent = .{ .message = self.input.submitText("original") },
+            .decision => self.submission.intent = .{ .decision = .{ .action = 10, .decision = .allow_once } },
+        }
+        defer self.app_hooks.host = null;
+        try held.keys("kept draft");
+        const before_effect = self.info_effect;
+        const before_edit = self.info_edit;
+        const before_command = self.input.queuedCommand();
+        const cursor = self.input.composition().cursor;
+        const backend = self.infoBackend();
+        var ctx = held.context();
+        const result = if (effect == edits.len) backend.copy_last_answer(backend.context, &ctx) else backend.configure(backend.context, edits[effect]);
+        if (hold != .none) {
+            try std.testing.expectError(error.Busy, result);
+            try std.testing.expectEqual(overview_view.ArchiveAdmission.refused, try backend.archive(backend.context));
+            try std.testing.expectEqual(before_effect, self.info_effect);
+            try std.testing.expectEqualDeep(before_edit, self.info_edit);
+            try std.testing.expectEqualDeep(before_command, self.input.queuedCommand());
+        } else {
+            try result;
+            try std.testing.expectEqual(ChatInfo.SaveState.pending, backend.state(backend.context));
+            if (effect == edits.len) {
+                try std.testing.expectEqualStrings("/copy", self.input.queuedCommand().?);
+                try std.testing.expect(self.info_edit == null);
+            } else {
+                try std.testing.expectEqualDeep(edits[effect], self.info_edit.?);
+                try std.testing.expect(self.input.queuedCommand() == null);
+            }
+            // A second effect cannot overwrite an already admitted intent.
+            try std.testing.expectError(error.Busy, backend.configure(backend.context, .{ .label = "Second" }));
+            try std.testing.expectError(error.Busy, backend.copy_last_answer(backend.context, &ctx));
+        }
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
+        try std.testing.expect(self.reader.thread == null);
+        try std.testing.expect(self.app_info.pending == null);
+    };
 }
 
 test "chat info typed configure completion never parses a slash line and retains definite failure" {

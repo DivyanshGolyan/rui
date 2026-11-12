@@ -733,8 +733,13 @@ pub const Binding = struct {
 /// The screen in cells.
 pub const Size = struct { width: u16 = 0, height: u16 = 0 };
 
-/// Each event brings at most two effects today; the shell runs them in order.
+/// A synchronous archive intent either admitted one new request or did not.
+/// Existing pending or uncertain requests are not a second admission.
+pub const ArchiveAdmission = enum { admitted, refused };
+
+/// Effects are run in order; admission describes only this event's attempt.
 pub const Effects = struct {
+    archive_admission: ArchiveAdmission = .refused,
     items: [3]Effect = undefined,
     len: usize = 0,
 
@@ -2406,53 +2411,62 @@ const ArchiveIntent = union(enum) {
 fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
-    switch (intent) {
-        .selected_archive => |draft| {
+    effects.archive_admission = switch (intent) {
+        .selected_archive => |draft| blk: {
             state.closePanel();
-            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, draft, effects);
+            const row = state.selectedRow() orelse {
+                state.say(.attention, no_selection, .{});
+                break :blk .refused;
+            };
+            break :blk askArchive(state, row.reference, row.state.asOf(state.now_ms), row.archive_state, draft, effects);
         },
-        .selected_restore => {
+        .selected_restore => blk: {
             state.closePanel();
-            const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
+            const row = state.selectedRow() orelse {
+                state.say(.attention, no_selection, .{});
+                break :blk .refused;
+            };
+            const admission = archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
             effects.add(.clear_draft);
+            break :blk admission;
         },
         .ask => |target| askArchive(state, target.reference, target.work, target.archive, .keep, effects),
         .restore => |ref| archiveSession(state, .{ .reference = ref, .archived = false }, effects),
-    }
+    };
 }
 
 /// Slash commands consume their submitted line; a key leaves its draft alone.
 /// A working Session archives at once too: the Host stops its work first,
 /// and `/unarchive` restores it, so nothing is asked.
-fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: ArchiveDraft, effects: *Effects) void {
+fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: ArchiveDraft, effects: *Effects) ArchiveAdmission {
     _ = work;
     if (archive == .archiving) {
         state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref});
-        return;
+        return .refused;
     }
     if (archive == .archived) {
         state.say(.quiet, "{s} is already archived. /unarchive restores it.", .{&ref});
-        return;
+        return .refused;
     }
     if (draft == .submitted) effects.add(.clear_draft);
-    archiveSession(state, .{ .reference = ref }, effects);
+    return archiveSession(state, .{ .reference = ref }, effects);
 }
 
-fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) void {
+fn archiveSession(state: *State, request: ArchiveRequest, effects: *Effects) ArchiveAdmission {
     for (state.requests[0..state.request_count]) |held| {
         if (held.kind != .archive and held.kind != .unarchive) continue;
         if (held.status != .pending and held.status != .unknown) continue;
         if (std.mem.eql(u8, &held.session.?, &request.reference)) {
             state.say(.attention, "! {s} archive request {s}; details on exit.", .{ &request.reference, if (held.status == .pending) "pending" else "unsure" });
-            return;
+            return .refused;
         }
     }
     if (state.request(if (request.archived) .archive else .unarchive, request.reference)) {
         effects.add(.{ .archive = request });
         state.say(.quiet, "{s} request pending for {s}; waiting for the Host.", .{ if (request.archived) "Archive" else "Restore", &request.reference });
+        return .admitted;
     }
+    return .refused;
 }
 
 fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) error{OutOfMemory}!void {
@@ -6861,4 +6875,68 @@ test "shared model reads respect every Upgrade hold for opening and loading retr
             try expectEffects(if (answer == .complete) &.{.open_settings} else &.{ .open_settings, .list_models }, try step(&state, .{ .clicked = .settings }));
         }
     };
+}
+
+test "archive admission reports only a new ledger request across every surface capacity duplicate and Host guard" {
+    const Held = enum { none, pending, unknown };
+    const Hold = enum { active, checking, reobserving, blocked };
+    const ref = "archiv".*;
+    for ([_]bool{ false, true }) |full| for (std.enums.values(Held)) |held| for (std.enums.values(Hold)) |hold| for ([_]ArchiveState{ .active, .archiving, .archived }) |archive| {
+        const cases = [_]struct { event: Event, restore: bool = false }{
+            .{ .event = .{ .conversed = .{ .reference = ref, .work = .working, .input = .{ .archive = archive } } } },
+            .{ .event = .{ .composed = .{ .draft = .{}, .input = .{ .composer = .{ .action = .archive } } } } },
+            .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/archive", .cursor = 8 }, .input = .{ .composer = .submit } } } },
+            .{ .event = .{ .conversed = .{ .reference = ref, .work = .working, .input = .unarchive } }, .restore = true },
+            .{ .event = .{ .composed = .{ .draft = .{ .bytes = "/unarchive", .cursor = 10 }, .input = .{ .composer = .submit } } }, .restore = true },
+        };
+        for (cases) |case| {
+            var state = try testState();
+            defer state.deinit();
+            state.archive = .all;
+            _ = try step(&state, .{ .tick = test_now_s * 1000 });
+            _ = try respond(&state, .full, testToken(1), &.{session(&ref, .{ .working = ago(1) }, .{ .archive_state = archive })});
+            if (held != .none) {
+                // Either pending archive direction blocks another intent.
+                try std.testing.expect(state.request(if (case.restore) .archive else .unarchive, ref));
+                if (held == .unknown) state.answer(0, .unknown, "01234567-89ab-4cde-8012-0123456789ab");
+            }
+            if (full) while (state.request_count < max_requests) {
+                try std.testing.expect(state.request(.stop, "other0".*));
+            };
+            if (hold != .active) {
+                _ = try step(&state, .start_upgrade);
+                if (hold != .checking) _ = try step(&state, .{ .upgrade = .{ .ended = .{ .how = .cancelled, .outcome = if (hold == .blocked) .incompatible else .unchanged } } });
+            }
+            const before = state.request_count;
+            const retained = state.requests;
+            const effects = try step(&state, case.event);
+            const admitted = hold == .active and !full and held == .none and (case.restore or archive == .active);
+            try std.testing.expectEqual(if (admitted) ArchiveAdmission.admitted else .refused, effects.archive_admission);
+            var requests: usize = 0;
+            for (effects.slice()) |effect| if (effect == .archive) {
+                requests += 1;
+                try std.testing.expectEqual(ref, effect.archive.reference);
+                try std.testing.expectEqual(!case.restore, effect.archive.archived);
+            };
+            try std.testing.expectEqual(@as(usize, @intFromBool(admitted)), requests);
+            try std.testing.expectEqual(before + @intFromBool(admitted), state.request_count);
+            try std.testing.expectEqualDeep(retained[0..before], state.requests[0..before]);
+            if (hold != .active) {
+                try std.testing.expectEqualStrings(upgrade_recovery, state.notice.?.text());
+            } else if (!case.restore and archive != .active) {
+                try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (archive == .archiving) "Stopping and archiving" else "already archived") != null);
+            } else if (held != .none) {
+                try std.testing.expect(std.mem.indexOf(u8, state.notice.?.text(), if (held == .pending) "request pending" else "request unsure") != null);
+            } else if (full) {
+                try std.testing.expectEqualStrings("! Busy; try again shortly.", state.notice.?.text());
+            }
+            // Admission belongs to this one attempt, never retained State.
+            try std.testing.expectEqual(ArchiveAdmission.refused, (try step(&state, .{ .resized = .{ .width = 46, .height = 18 } })).archive_admission);
+        }
+    };
+    var empty = try opened(&.{});
+    defer empty.deinit();
+    const refused = try press(&empty, .{}, .archive);
+    try std.testing.expectEqual(ArchiveAdmission.refused, refused.archive_admission);
+    try std.testing.expectEqual(@as(usize, 0), empty.request_count);
 }

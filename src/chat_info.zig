@@ -33,14 +33,15 @@ pub const Edit = union(enum) {
 /// Borrowed for the widget's lifetime. read fills the same inspection facts as
 /// /status. configure submits the existing Session configure request; archive
 /// and copy_last_answer delegate to the existing archive and /copy owners.
-/// All three effects remain pending until state supplies a definite answer.
+/// Only admitted effects remain pending until state supplies a definite answer.
+/// Archive refusals are values; unexpected archive-owner errors must propagate.
 /// models supplies a revisioned source: replacement or release changes its
 /// revision before retiring storage, including while the panel is hidden.
 pub const Backend = struct {
     context: *anyopaque,
     read: *const fn (*anyopaque, *status.Session) anyerror!void,
     configure: *const fn (*anyopaque, Edit) anyerror!void,
-    archive: *const fn (*anyopaque) anyerror!void,
+    archive: *const fn (*anyopaque) anyerror!view.ArchiveAdmission,
     copy_last_answer: *const fn (*anyopaque, *vxfw.EventContext) anyerror!void,
     state: *const fn (*anyopaque) SaveState,
     models: *const fn (*anyopaque) ModelChoice.Snapshot,
@@ -190,9 +191,14 @@ fn activate(raw: *anyopaque, ctx: *vxfw.EventContext, row: usize) !void {
             self.renaming = true;
         },
         7, 8 => {
-            const result = if (row == 7) self.backend.archive(self.backend.context) else self.backend.copy_last_answer(self.backend.context, ctx);
-            result catch {
-                self.failures[row] = if (row == 7) " · couldn't archive" else " · couldn't copy";
+            if (row == 7) {
+                if (try self.backend.archive(self.backend.context) == .refused) {
+                    self.failures[row] = " · couldn't archive";
+                    ctx.redraw = true;
+                    return;
+                }
+            } else self.backend.copy_last_answer(self.backend.context, ctx) catch {
+                self.failures[row] = " · couldn't copy";
                 ctx.redraw = true;
                 return;
             };
@@ -526,11 +532,12 @@ const Fixture = struct {
         };
         self.state_value = .pending;
     }
-    fn archive(raw: *anyopaque) !void {
+    fn archive(raw: *anyopaque) !view.ArchiveAdmission {
         const self: *Fixture = @ptrCast(@alignCast(raw));
-        if (self.fail_submit) return error.AccessDenied;
+        if (self.fail_submit) return .refused;
         self.archives += 1;
         self.state_value = .pending;
+        return .admitted;
     }
     fn copy(raw: *anyopaque, _: *vxfw.EventContext) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
