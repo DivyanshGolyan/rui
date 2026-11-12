@@ -160,9 +160,9 @@ pub const ActivityPage = struct {
         const Message = struct { admission: JsonString(20), key: JsonString(protocol.max_key_bytes), turn: ?JsonString(20), state: JsonEnum(@FieldType(Fact.Message, "state")), admitted_at: JsonString(20), sender: ?JsonNamedPeer, content: Ref };
         const Sent = struct { admission: JsonString(20), admitted_at: JsonString(20), target: JsonNamedPeer, content: Ref };
         const SendFailed = struct { key: JsonString(protocol.max_key_bytes), target: ?JsonNamedPeer, code: JsonString(protocol.max_code_bytes) };
-        const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref };
+        const Call = struct { operation: JsonString(20), turn: JsonString(20), call_ordinal: JsonString(20), action: ?JsonString(20), rejection: ?JsonEnum(protocol.ProposalRejection), fields: [3]Ref, description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const TurnEnded = struct { session: JsonString(protocol.session_id_bytes), turn: JsonString(20), operation: JsonString(20), ending: JsonEnum(protocol.TurnEnding), code: JsonString(protocol.max_code_bytes), content: ?Ref };
-        const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20) };
+        const ApprovalRequested = struct { session: JsonString(protocol.session_id_bytes), action: JsonString(20), operation: JsonString(20), call_ordinal: JsonString(20), description: ?JsonString(protocol.max_tool_description_bytes), tool: ?JsonString(protocol.max_tool_name_bytes), server: ?JsonString(protocol.max_tool_name_bytes) };
         const SessionChanged = struct { revision: JsonString(20), field: protocol.SessionField, provider_text: ?JsonString(protocol.max_report_bytes) = null };
         const Compacted = struct { operation: JsonString(20), dropped: JsonString(20) };
         const ModelCall = struct { model: JsonString(protocol.max_model_bytes), served_model: ?JsonString(protocol.max_model_bytes), input_tokens: ?JsonString(20), output_tokens: ?JsonString(20), cached_tokens: ?JsonString(20), latency_ms: ?JsonString(20), first_event_ms: ?JsonString(20), status: JsonString(protocol.max_code_bytes), attempts: JsonString(20) };
@@ -253,7 +253,7 @@ pub const ActivityPage = struct {
                 },
                 .approval_requested => |request| {
                     if (!protocol.validSessionId(request.session.slice())) return error.InvalidActivityPage;
-                    fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .session = request.session.value, .call_ordinal = try id(request.call_ordinal, true) } };
+                    fact.value = .{ .approval_requested = .{ .action = try id(request.action, false), .operation = try id(request.operation, false), .session = request.session.value, .call_ordinal = try id(request.call_ordinal, true), .description = if (request.description) |text| text.value else null, .tool = if (request.tool) |text| text.value else null, .server = if (request.server) |text| text.value else null } };
                 },
                 .session_changed => |change| {
                     const revision = try id(change.revision, false);
@@ -289,7 +289,7 @@ pub const ActivityPage = struct {
                     fact.value = .{ .hosted_call = call.presentation.value };
                 },
                 .call => |call| {
-                    var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined };
+                    var value: Fact.Call = .{ .position = fact.position, .operation = try id(call.operation, false), .turn = try id(call.turn, false), .call_ordinal = try id(call.call_ordinal, true), .action = if (call.action) |action| try id(action, false) else null, .rejection = if (call.rejection) |code| code.value else null, .fields = undefined, .description = if (call.description) |text| text.value else null, .tool = if (call.tool) |text| text.value else null, .server = if (call.server) |text| text.value else null };
                     if ((value.action != null) == (value.rejection != null)) return error.InvalidActivityPage;
                     for (call.fields, &value.fields) |reference, *field| {
                         const decoded = try content(reference);
@@ -3691,6 +3691,32 @@ test "approval activity accepts own and forwarded ordinals and validates child s
                 try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(writer.buffered(), .{}));
             }
         }
+    }
+}
+
+test "call and approval activity round trip saved inline description tool and server" {
+    var description: protocol.Bounded(protocol.max_tool_description_bytes) = .{};
+    try description.set("Fetch \"saved\" café");
+    var tool: protocol.Bounded(protocol.max_tool_name_bytes) = .{};
+    try tool.set("fetch_page");
+    var server: protocol.Bounded(protocol.max_tool_name_bytes) = .{};
+    try server.set("docs");
+    const field: protocol.ProposalFieldReference = .{ .length = 0, .digest = @splat(0) };
+    for ([_]protocol.ActivityItem.Value{
+        .{ .call = .{ .position = 1, .operation = 2, .turn = 1, .call_ordinal = 0, .action = 3, .rejection = null, .fields = @splat(field), .description = description, .tool = tool, .server = server } },
+        .{ .approval_requested = .{ .session = .{ .bytes = "ch11d1".*, .len = 6 }, .action = 3, .operation = 2, .call_ordinal = 0, .description = description, .tool = tool, .server = server } },
+    }) |value| {
+        var facts: protocol.ActivityFacts = .{ .end = 1, .count = 1, .work = .{ .work = .{ .state = .{ .idle = .{ .since = 1 } } }, .revision = 1 } };
+        facts.items[0] = .{ .position = 1, .at = 1, .value = value };
+        try facts.work.workspace.set("/w");
+        var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&writer, &facts);
+        const parsed = try ActivityPage.parse(writer.buffered(), .{});
+        try std.testing.expectEqualDeep(value, parsed.facts.items[0].value);
+        const missing = try std.mem.replaceOwned(u8, std.testing.allocator, writer.buffered(), ",\"server\":\"docs\"", "");
+        defer std.testing.allocator.free(missing);
+        try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(missing, .{}));
     }
 }
 

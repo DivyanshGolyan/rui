@@ -18,7 +18,7 @@ test("follow polls attached tree work after the root Turn ended and yields a for
                 work: { state: { kind: "working", since: "1" }, turn: "1", operation: "1", first_action: null },
                 items: pages === 1 ? [{ position: "1", ordinal: "0", at: "1", value: { turn_ended: { session: "r00t00", turn: "1", ending: "done", content: null } } }]
                     : pages === 2 ? []
-                    : [{ position: "2", ordinal: "0", at: "2", value: { approval_requested: { session: "ch1ld1", action: "2", operation: "2", call_ordinal: "0" } } }],
+                    : [{ position: "2", ordinal: "0", at: "2", value: { approval_requested: { session: "ch1ld1", action: "2", operation: "2", call_ordinal: "0", description: "Fetch page", tool: "fetch_page", server: "docs" } } }],
             }));
         },
     };

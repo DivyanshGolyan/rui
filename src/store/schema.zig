@@ -2548,7 +2548,12 @@ pub const MigrationNotice = struct {
 pub fn openExisting(io: std.Io, database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch, notice: ?MigrationNotice) !void {
     if (try sqlite.pragmaInt(database, "PRAGMA application_id") != application_id) return error.WrongStoreIdentity;
     const found = try sqlite.pragmaInt(database, "PRAGMA user_version");
-    if (found == schema_version) return validateCurrent(database, selector, identity_mismatch);
+    if (found == schema_version) {
+        if (!try validateCurrent(database, selector, identity_mismatch)) return;
+        // A wire-only release changes no saved facts. Use the same backed-up,
+        // atomic finalization owner, with no format step or schema number.
+        return migrate(io, database, selector, found, &.{}, identity_mismatch);
+    }
     if (found < migration_baseline or found > schema_version) return error.WrongStoreVersion;
     if (notice) |told| told.notify(told.context, .{ .begin = found });
     try migrate(io, database, selector, found, migrations[found - migration_baseline ..], identity_mismatch);
@@ -2583,11 +2588,11 @@ pub noinline fn migrate(io: std.Io, database: *c.sqlite3, selector: []const u8, 
     }
     try sqlite.exec(database, version_sql);
     try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ format_text ++ "' WHERE meta_key='format'");
-    // v0.60 shipped format 60 / wire 11. Format 61 is already a forward
-    // migration, so finalize its wire label without rewriting shipped steps
-    // or taking another format number. Unknown labels still fail validation.
-    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version' AND meta_value='11'");
-    try validateCurrent(database, selector, identity_mismatch);
+    // Finalize historical migration output and the last released label
+    // without rewriting shipped steps or taking another format number.
+    // Unknown labels still fail validation.
+    try sqlite.exec(database, "UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version' AND meta_value IN ('11','13')");
+    if (try validateCurrent(database, selector, identity_mismatch)) return error.WrongStoreVersion;
     try sqlite.exec(database, "COMMIT");
 }
 
@@ -2649,6 +2654,12 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
     if (std.c.fsync(directory.handle) != 0) return error.MigrationBackupFailed;
 }
 
+/// Wire 14 changes only replies; format-69 facts saved by the last release's
+/// wire 13 are unchanged. Only this known prior label can be finalized at open.
+pub fn priorWireLabel(value: []const u8) bool {
+    return std.mem.eql(u8, value, "13");
+}
+
 /// Refuses a Store unless its tables and indexes are exactly the ones
 /// bootstrap creates, each with the same CREATE text. SQLite keeps that text
 /// as run, and only bootstrap and `migrate` write it, so a dropped CHECK, a
@@ -2656,8 +2667,10 @@ fn writeMigrationBackup(io: std.Io, database: *c.sqlite3) !void {
 /// missing or extra index or trigger is a WrongStoreSchema. A
 /// network engine keeps no such text: MySQL's open compares its catalog's
 /// structure instead (`catalogDigest`), which sees a CHECK only by count.
-/// Its caller has read user_version as schema_version, or set it.
-fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !void {
+/// Its caller has read user_version as schema_version, or set it. Returns
+/// whether the known compatible prior wire label still needs finalization.
+fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch: ?*IdentityMismatch) !bool {
+    var relabel_wire = false;
     {
         const expected = comptime objects(.sqlite);
         const statement = try sqlite.prepare(database, "SELECT type,name,tbl_name,sql FROM sqlite_schema");
@@ -2696,7 +2709,10 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
         if (c.sqlite3_step(statement) != c.SQLITE_ROW) return error.WrongStoreVersion;
         var version: Bounded(16) = .{};
         try sqlite.readText(statement, 0, &version);
-        if (!version.eql(wire_version)) return error.WrongStoreVersion;
+        if (!version.eql(wire_version)) {
+            if (!priorWireLabel(version.slice())) return error.WrongStoreVersion;
+            relabel_wire = true;
+        }
     }
     {
         const statement = try sqlite.prepare(database, "SELECT meta_value FROM store_meta WHERE meta_key='store_id'");
@@ -2715,6 +2731,7 @@ fn validateCurrent(database: *c.sqlite3, selector: []const u8, identity_mismatch
             return error.StoreIdentityMismatch;
         }
     }
+    return relabel_wire;
 }
 
 /// Whether `text` is a Store id as store_meta holds it.

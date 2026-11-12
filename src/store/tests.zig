@@ -9859,9 +9859,9 @@ test "a list page's rows share their rounds, so eight rows take as many as one" 
         fn run(case: *store_testing.Case) !void {
             // The page; its rows' latest Turns and first-Message seeks; then the
             // stop cutoff, the queue after it, the excluded Message and its stop;
-            // then the rows themselves.
-            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, 1));
-            try std.testing.expectEqual(@as(u32, 7), try listRoundsForTesting(case, protocol.session_list_page_size));
+            // then the live-descendant fact and the rows themselves.
+            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, 1));
+            try std.testing.expectEqual(@as(u32, 8), try listRoundsForTesting(case, protocol.session_list_page_size));
         }
     }.run);
 }
@@ -10006,10 +10006,11 @@ test "a Current report takes its reads' dependency depth in rounds, not its rows
             // work's and compaction facts' latest Turn; the pending count with
             // their second stages; then the recent Messages. Idle and finished
             // work reads the queue after the cutoff in a fourth round; stopped
-            // work then the excluded Message and its stop.
-            try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(case, .idle));
-            try std.testing.expectEqual(@as(u32, 5), try reportRoundsForTesting(case, .finished));
-            try std.testing.expectEqual(@as(u32, 7), try reportRoundsForTesting(case, .stopped));
+            // work then the excluded Message and its stop. Settled work adds
+            // the indexed live-descendant fact before the final output round.
+            try std.testing.expectEqual(@as(u32, 6), try reportRoundsForTesting(case, .idle));
+            try std.testing.expectEqual(@as(u32, 6), try reportRoundsForTesting(case, .finished));
+            try std.testing.expectEqual(@as(u32, 8), try reportRoundsForTesting(case, .stopped));
             // Awaiting work ends with its Actions in the third round; its Action
             // adds the unresolved, resolved and actionable lists, and with no
             // rejected call there is no rejected list.
@@ -15110,6 +15111,93 @@ test "MCP settlement saves one decoded presentation line or the tool name" {
             }
         }
     }.run);
+}
+
+test "wire-only upgrade preserves the current Store format and saved Session facts" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            const session = try configureTestSession(&storage, "wire-only-session");
+            const answer = [_]TestingAnswerPart{.{ .encoded = "saved answer", .decoded = "saved answer" }};
+            try answerTestTurn(&storage, &tmp, session.slice(), "wire-only-answer", &answer);
+            try store_testing.exec(&storage, "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version'", .{});
+            try storage.close();
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='wire_version' AND meta_value=?1", .{protocol.wire_version}));
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM store_meta WHERE meta_key='format' AND meta_value=?1", .{std.fmt.comptimePrint("{d}", .{store_schema.schema_version})}));
+            _ = try expectOneWork(&storage, &tmp, session.slice(), "finished");
+            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM turn WHERE session_ref=?1 AND outcome_code='completed'", .{session.slice()}));
+        }
+    }.run);
+}
+
+test "call and forwarded approval rows expose saved identity description and original arguments" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const host_tool_set = membershipToolSet(&digests);
+            for ([_][]const u8{ "fetch_page", "bash", "start_agent" }) |tool| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStoreWith(case, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+                defer storage.close() catch unreachable;
+                const parent = try configureTestSession(&storage, "inline-parent");
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                var configure = try completeConfiguration("inline-child", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                configure.configuration.tools = try .of(&.{tool});
+                configure.configuration.permission_mode.state = .value;
+                try configure.configuration.permission_mode.value.set("ask");
+                const child = (try storage.configure(&configure, .{})).accepted.session;
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+                try submitTestMessage(&storage, &tmp, "inline-input", "inline-message", child.slice(), "call");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                const mcp = std.mem.eql(u8, tool, "fetch_page");
+                const bash = std.mem.eql(u8, tool, "bash");
+                const arguments = if (mcp) "{ \"rui_call_description\": \"Fetch inline\", \"url\": \"https://example.test\" }" else if (bash) "{ \"description\": \"Print inline\", \"cmd\": \"printf inline\", \"timeout_ms\": null }" else "{ \"task\": \"child task\" }";
+                const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, arguments, .{});
+                defer std.testing.allocator.free(encoded);
+                try settleCallsForTesting(&storage, &tmp, model, "inline-call", &.{.{ .item_id = "inline-item", .name = tool, .encoded_call_id = "inline-id", .decoded_call_id = "inline-id", .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments }});
+                const own = try store_core.activityPageForTesting(&storage, .{ .session = child, .kinds = .initMany(&.{ .call, .approval_requested }) });
+                const call = own.items[0].value.call;
+                try std.testing.expectEqualStrings(tool, call.tool.?.slice());
+                if (mcp or bash) {
+                    try std.testing.expect(call.description != null);
+                    try std.testing.expectEqualStrings(if (mcp) "Fetch inline" else "Print inline", call.description.?.slice());
+                }
+                if (mcp) try std.testing.expectEqualStrings("docs", call.server.?.slice()) else try std.testing.expect(call.server == null);
+                try expectActivityArguments(&storage, child, own.items[0], arguments);
+                // Core built-ins need no Permission Decision; Bash and MCP do.
+                try std.testing.expectEqual(@as(usize, if (mcp or bash) 2 else 1), own.count);
+                if (mcp or bash) {
+                    const approval = own.items[1].value.approval_requested;
+                    try std.testing.expectEqualDeep(call.description, approval.description);
+                    try std.testing.expectEqualDeep(call.tool, approval.tool);
+                    try std.testing.expectEqualDeep(call.server, approval.server);
+                    try expectActivityArguments(&storage, child, own.items[1], arguments);
+                    try std.testing.expect(try storage.deliverSessionForward((try storage.nextCoreWork()).?.forward, .{}));
+                    const forwarded = try store_core.activityPageForTesting(&storage, .{ .session = parent, .kinds = .initOne(.approval_requested) });
+                    try std.testing.expectEqual(@as(usize, 1), forwarded.count);
+                    try std.testing.expectEqualDeep(approval, forwarded.items[0].value.approval_requested);
+                    try expectActivityArguments(&storage, parent, forwarded.items[0], arguments);
+                }
+                try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+fn expectActivityArguments(storage: *Store, session: protocol.Bounded(protocol.max_session_bytes), item: protocol.ActivityItem, expected: []const u8) !void {
+    var reader: ContentReader = undefined;
+    reader.open(try storage.openActivityContent(&.{ .session = session, .position = item.position, .ordinal = item.ordinal }));
+    defer reader.close();
+    var bytes: [1024]u8 = undefined;
+    const length = try reader.read(0, &bytes);
+    try std.testing.expectEqualStrings(expected, bytes[0..length]);
 }
 
 test "saved MCP call lines survive all work reads pending, running and completed at every boundary" {

@@ -7526,15 +7526,16 @@ test "a list page of mixed work takes its deepest row's rounds, and a pass per r
             std.debug.print("{s}\n", .{bytes[0..read]});
             return err;
         };
-    // The stopped rows' seven: the page; the latest Turns and first-Message
+    // The stopped rows' eight: the page; the latest Turns and first-Message
     // seeks; the cutoff, the queue after it, the excluded Message and its
-    // stop; the rows' settings. The awaiting rows end after their Actions.
-    try std.testing.expectEqual(7, rounds);
+    // stop; the descendant fact; the rows' settings. The awaiting rows end after their Actions.
+    try std.testing.expectEqual(8, rounds);
     // A pass ends where a round queues a statement again, so a round takes
     // as many as its most repeated statement's rows: 1 for the page, 8 for
-    // the rows' first reads, 6 cutoffs, 6 queue seeks, 2 excluded seeks, 2
-    // stops, and 6 settings reads of a row with a first Message.
-    try std.testing.expectEqual(1 + 8 + 6 + 6 + 2 + 2 + 6, a.passes);
+    // the rows' first reads, 6 cutoffs, 6 queue seeks, 4 descendant seeks
+    // sharing the excluded seeks' round, 2 stops, 2 remaining descendant
+    // seeks, and 6 settings reads of a row with a first Message.
+    try std.testing.expectEqual(1 + 8 + 6 + 6 + 4 + 2 + 2 + 6, a.passes);
 }
 
 test "a Current report's step faults answer the name of the earliest round that steps the table" {

@@ -147,11 +147,17 @@ def main():
                 for field, reference, expected in zip(("name", "call_id", "arguments"), row["value"]["call"]["fields"], CALLS[i]):
                     data = expected.encode()
                     assert reference == {"bytes": str(len(data)), "sha256": digest(data).hex()}
-            caller(store, "content", calls[0]["position"], 0, ok=False)
+            for row in (calls[0], approval):
+                detail = row["value"][kind(row)]
+                assert (detail["description"], detail["tool"], detail["server"]) == ("Exit with success", "bash", None), detail
+                assert caller(store, "content", row["position"], row["ordinal"]) == CALLS[0][2].encode()
+            for row in calls[1:]:
+                detail = row["value"]["call"]
+                assert (detail["description"], detail["tool"], detail["server"]) == (None, "unknown", None), detail
             caller(store, "content", pending[0]["position"], 0, session=foreign, ok=False)
             for row in pending[:2]: assert caller(store, "content", row["position"], 0) == TEXT.encode()
             assert caller(store, "prefix", pending[0]["position"]) == TEXT.split("\n")[0].encode()
-            caller(store, "prefix", calls[0]["position"], ok=False)
+            assert caller(store, "prefix", calls[0]["position"]) == CALLS[0][2].encode()
             message(state, store, "second", SESSION, TEXT)
             queued_end, queued = history(store)
             assert queued[-1]["value"]["admission"]["state"] == "queued" and queued[-1]["value"]["admission"]["turn"] is None

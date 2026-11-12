@@ -72,6 +72,7 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     var meta_columns = try columns(Meta, conn);
     var store_id: [2 * schema.store_id_bytes]u8 = undefined;
     var seen: schema.MetaPresence = .empty;
+    var relabel_wire = false;
     while (try nextRow(conn)) {
         var meta: Meta = undefined;
         // The decoder fills fields in order. Preserve the key if its value
@@ -97,7 +98,10 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
                 if (found < schema.schema_version) return error.StoreSchemaBehind;
                 if (found > schema.schema_version) return error.StoreSchemaAhead;
             },
-            .wire_version => if (!std.mem.eql(u8, value, wire_version)) return error.WrongStoreVersion,
+            .wire_version => if (!std.mem.eql(u8, value, wire_version)) {
+                if (!schema.priorWireLabel(value)) return error.WrongStoreVersion;
+                relabel_wire = true;
+            },
             // The canonical selector is checked independently of the durable id.
             .store_selector => if (!std.mem.eql(u8, value, selector)) return error.WrongStoreIdentity,
             .store_id => {
@@ -123,12 +127,14 @@ pub fn open(conn: *wire.Connection, io: std.Io, options: Options, selector: []co
     try batch.writeAll("START TRANSACTION;");
     if (!seen.contains(.store_id)) store_id = schema.drawStoreId(io);
     try schema.writeMissingMeta(batch, seen, &store_id, selector);
+    if (relabel_wire) try batch.writeAll("UPDATE store_meta SET meta_value='" ++ wire_version ++ "' WHERE meta_key='wire_version';");
     try batch.writeAll("INSERT INTO store_owner(owner_key,epoch,commit_seq) SELECT 1,0,0 WHERE NOT EXISTS(SELECT 1 FROM store_owner WHERE owner_key=1);UPDATE store_owner SET epoch=epoch+1 WHERE owner_key=1;UPDATE action_operation SET sender_handle=NULL WHERE sender_handle IS NOT NULL;SELECT epoch,commit_seq FROM store_owner WHERE owner_key=1;COMMIT");
     try conn.sendBatch();
     try expectOk(conn); // START TRANSACTION
     for (comptime schema.metaSeed(.mysql)) |entry| {
         if (!seen.contains(entry.key)) try expectOk(conn);
     }
+    if (relabel_wire) try expectOk(conn); // known compatible wire-only label
     try expectOk(conn); // missing owner row
     const updated = try expectOkCount(conn);
     if (updated != 1) return error.OwnershipLost;
