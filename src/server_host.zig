@@ -574,9 +574,10 @@ pub const ModelLists = struct {
 // One Host-wide authentication I/O job: a launch lease, or one forced
 // refresh after a model 401. Canonical custody remains in the execution slot
 // while file locks, refresh TLS and persistence run here.
+/// The Host's one sign-in worker. It serves every served sign-in, one job
+/// at a time; each job names the sign-in it is for.
 pub const AuthWorker = struct {
     io: std.Io,
-    authentication: providers_module.Authentication,
     mutex: std.Io.Mutex = .init,
     condition: std.Io.Condition = .init,
     state: State = .idle,
@@ -586,11 +587,12 @@ pub const AuthWorker = struct {
     /// The file and claims each acquisition reads through. The worker lives
     /// in the execution Workspace, so only the pages an acquisition writes
     /// become resident; a refresh maps its own storage for the call.
-    work: providers_module.Authentication.Work = undefined,
+    work: providers_module.Work = undefined,
     stopping: bool = false,
 
-    /// A launch lease, or a forced refresh at the rejected generation.
-    const Job = union(enum) { acquire, refresh: u64 };
+    /// A launch lease from a sign-in, or a forced refresh of one at the
+    /// rejected generation.
+    const Job = union(enum) { acquire: providers_module.Authentication, refresh: providers_module.Credential.Refresh };
     /// .requested stays set while the worker runs its job outside the lock.
     const State = union(enum) { idle, requested: Job, ready, in_use, refreshed: bool, failed: anyerror };
     const Result = union(enum) { ready: *const providers_module.Lease, refreshed: bool, failed: anyerror };
@@ -603,12 +605,12 @@ pub const AuthWorker = struct {
         return self.state == .idle;
     }
 
-    pub fn request(self: *AuthWorker) void {
-        self.requestJob(.acquire);
+    pub fn request(self: *AuthWorker, source: providers_module.Authentication) void {
+        self.requestJob(.{ .acquire = source });
     }
 
-    pub fn requestRefresh(self: *AuthWorker, generation: u64) void {
-        self.requestJob(.{ .refresh = generation });
+    pub fn requestRefresh(self: *AuthWorker, refresh: providers_module.Credential.Refresh) void {
+        self.requestJob(.{ .refresh = refresh });
     }
 
     fn requestJob(self: *AuthWorker, job: Job) void {
@@ -662,8 +664,8 @@ pub const AuthWorker = struct {
             const job = self.state.requested;
             self.mutex.unlock(self.io);
             const answer: State = switch (job) {
-                .acquire => if (self.authentication.acquire(self.io, &self.work, &self.credential)) |_| .ready else |err| .{ .failed = err },
-                .refresh => |generation| if (self.authentication.refresh(self.io, generation)) |refreshed| .{ .refreshed = refreshed } else |err| .{ .failed = err },
+                .acquire => |source| if (providers_module.acquire(source, self.io, &self.work, &self.credential)) |_| .ready else |err| .{ .failed = err },
+                .refresh => |refresh| if (providers_module.refresh(refresh.source, self.io, refresh.generation)) |refreshed| .{ .refreshed = refreshed } else |err| .{ .failed = err },
             };
             self.mutex.lockUncancelable(self.io);
             self.state = answer;
@@ -1206,7 +1208,7 @@ fn appendOptionalSigned(
 /// A Transfer's connection reuse and request correlation, for tests. Only a
 /// Host serving a sign-in traces it: the managed-route journeys read it.
 pub inline fn traceTransfer(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {
-    if (host.providers.leasedSignIn() != null and host.hooks.phase_trace) writeTransferTrace(host, transfer, binding);
+    if (host.providers.anySignIn() and host.hooks.phase_trace) writeTransferTrace(host, transfer, binding);
 }
 
 noinline fn writeTransferTrace(host: *Host, transfer: *provider.Transfer, binding: store_module.AttemptBinding) void {

@@ -572,7 +572,7 @@ test "relaunch activation reading requires the pinned launch for either wire" {
                 .started_at = 1,
                 .custody_occupied = 0,
                 .paused = false,
-                .capabilities = .{ .bash = false, .providers = .{ .codex = .unserved, .openai = .unserved } },
+                .capabilities = .{ .bash = false, .providers = .{ .codex = .unserved, .openai = .unserved, .chatgpt = .unserved } },
             } } };
             switch (fault) {
                 0 => {},
@@ -632,7 +632,7 @@ test "upgrade lifecycle control cannot equate different wire profiles or instanc
     var original: client.HostControlObservation = .{
         .profile = .released_9,
         .pid = 123,
-        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .unserved, .openai = .unserved } } },
+        .facts = .{ .store = .{ .len = 0 }, .instance = @splat(1), .active_capacity = 2, .started_at = 0, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = protocol.routesAll(.unserved) } },
     };
     try original.facts.store.set("/fixture/store");
     try std.testing.expect(sameHost(original, original));

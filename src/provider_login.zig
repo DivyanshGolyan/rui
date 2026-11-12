@@ -5,6 +5,7 @@ const api_key = @import("api_key.zig");
 const auth = @import("codex_auth.zig");
 const credentials = @import("codex_credentials.zig");
 const pages = @import("os/pages.zig");
+const Provider = @import("provider_name.zig").Provider;
 
 pub fn createConfigDirectory(io: std.Io, home: []const u8) !void {
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -13,20 +14,31 @@ pub fn createConfigDirectory(io: std.Io, home: []const u8) !void {
     dir.close(io);
 }
 
-pub fn codexPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u8 {
-    if (init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE")) |path| {
+/// The variable naming a sign-in provider's credential file, as
+/// RUI_CODEX_CREDENTIAL_FILE for Codex.
+pub fn credentialVariable(comptime provider: Provider) []const u8 {
+    comptime var upper: [@tagName(provider).len]u8 = undefined;
+    inline for (@tagName(provider), &upper) |byte, *to| to.* = comptime std.ascii.toUpper(byte);
+    const final = upper;
+    return "RUI_" ++ &final ++ "_CREDENTIAL_FILE";
+}
+
+/// A sign-in provider's credential file: HOME/.config/rui/LABEL.json unless
+/// its variable (`credentialVariable`) names an absolute path.
+pub fn credentialPath(init: std.process.Init, comptime provider: Provider, buffer: []u8, create: bool) ![]const u8 {
+    if (init.environ_map.get(comptime credentialVariable(provider))) |path| {
         if (!std.fs.path.isAbsolute(path)) return error.InvalidCredentialPath;
         return path;
     }
     const home = init.environ_map.get("HOME") orelse return error.HomeRequired;
     if (!std.fs.path.isAbsolute(home)) return error.InvalidCredentialPath;
     if (create) try createConfigDirectory(init.io, home);
-    return std.fmt.bufPrint(buffer, "{s}/.config/rui/codex.json", .{home});
+    return std.fmt.bufPrint(buffer, "{s}/.config/rui/" ++ @tagName(provider) ++ ".json", .{home});
 }
 
 pub fn codex(init: std.process.Init, comptime exchange: anytype, display: anytype, cancelled: *const fn () bool, publish: *const fn () bool) !void {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try codexPath(init, &path_buffer, true);
+    const path = try credentialPath(init, .codex, &path_buffer, true);
     if (cancelled()) return error.LoginInterrupted;
     const mapped = try pages.Mapped(auth.Login).map();
     defer mapped.unmap();

@@ -7446,7 +7446,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
         try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
         try activation.store.set("/store");
         activation.default_failed = default_failed;
-        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved } } } } }, .warning = .invalid_openai_base_url };
+        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try signedIn(overview, &ctx, activation);

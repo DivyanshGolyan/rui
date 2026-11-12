@@ -44,6 +44,7 @@ def main():
                        env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         overview_frame(master, overview_title)
         opened = app_model_open(master, catalog=catalog)
+        assert any("Sign-in" in row and "Codex" in row for row in opened.splitlines()), opened
         full = assert_model_choice(opened, query="", more=True)
         filtered = model_choice_frame(master, b"luna", query="luna", more=False)
         narrow = assert_model_choice(filtered, query="luna", more=False)
@@ -118,7 +119,8 @@ def main():
         inspected = subprocess.run([str(fixture.RUI), "session", "inspect", "--store", str(store),
                                     "--session", session], env=env, capture_output=True, text=True, timeout=20)
         assert inspected.returncode == 0, inspected.stderr
-        assert json.loads(inspected.stdout)["session"]["model"] == "gpt-6-luna", inspected.stdout
+        saved_session = json.loads(inspected.stdout)["session"]
+        assert saved_session["model"] == "gpt-6-luna" and saved_session["provider"] == "codex", inspected.stdout
         host_process.wait_for(saved_model, "chat model change leaves overview default unchanged")
         panel_frame(master, lambda screen: "Copy last answer" not in screen, b"\x1b")
         os.write(master, b"\x03")

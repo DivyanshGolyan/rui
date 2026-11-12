@@ -570,13 +570,13 @@ test "typed choices share enum names with help and refuse unknown values" {
     const cases = [_]Case{
         .{ .command = .session_start, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
         .{ .command = .defaults_configure, .name = "permission-mode", .choices = &.{ "ask", "bypass" } },
-        .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai" } },
+        .{ .command = .session_start, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
         .{ .command = .session_configure, .name = "reasoning-effort", .choices = &.{ "none", "low", "medium", "high", "xhigh", "max", "default" } },
         .{ .command = .defaults_configure, .name = "notifications", .choices = &.{ "on", "off" } },
         .{ .command = .request_recover, .name = "kind", .choices = &.{ "configure", "message", "session-stop", "session-archive", "model-interruption", "permission-decision" } },
         .{ .command = .session_inspect, .name = "profile", .choices = &.{ "current", "full" } },
         .{ .command = .session_inspect, .name = "failed-response", .choices = &.{ "body", "metadata" } },
-        .{ .command = .host_serve, .name = "provider", .choices = &.{ "codex", "openai" } },
+        .{ .command = .host_serve, .name = "provider", .choices = &.{ "codex", "openai", "chatgpt" } },
     };
     for (cases) |case| {
         var spelling: [64]u8 = undefined;
