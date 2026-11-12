@@ -6218,6 +6218,24 @@ test "upgrade quiescence cancels read jobs rather than granting them mutation cu
     try std.testing.expectEqual(@as(usize, 0), rig.overview.job_count);
 }
 
+test "App overview applies command draft endings to its composer" {
+    for ([_]struct { line: []const u8, escape: bool = false }{
+        .{ .line = "/configure --permission-mode ", .escape = true },
+        .{ .line = "/nope" },
+        .{ .line = "/sessions" },
+        .{ .line = "/sessions nope" },
+    }) |case| {
+        const rig = try openListed();
+        defer rig.close();
+        _ = try rig.press(case.line);
+        var listed = try rig.shown(80, 24);
+        defer listed.deinit();
+        if (case.escape) try std.testing.expectEqual(.drawn, rig.overview.state.commands.?.seen);
+        _ = try rig.press(if (case.escape) "\x1b" else "\r");
+        try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
+    }
+}
+
 test "typing / lists the overview's commands over the Sessions, and a short screen counts the rest" {
     const rig = try openListed();
     defer rig.close();
@@ -6248,7 +6266,7 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
         "+2 more · type to narrow",
         "────────────────────────────────────────────────────────────────────────────────",
     });
-    // Typing narrows it; Esc closes it and keeps the draft.
+    // Typing narrows it; Esc closes it and consumes the command draft.
     _ = try rig.press("m");
     var narrowed = try rig.shown(80, 24);
     defer narrowed.deinit();
@@ -6256,8 +6274,8 @@ test "typing / lists the overview's commands over the Sessions, and a short scre
     _ = try rig.press("\x1b");
     var closed = try rig.shown(80, 24);
     defer closed.deinit();
-    try closed.expectLines(20, &.{ "────────────────────────────────────────────────────────────────────────────────", " › /m" });
-    try std.testing.expect(std.mem.endsWith(u8, try closed.line(23), "enter run"));
+    try closed.expectLines(20, &.{ "────────────────────────────────────────────────────────────────────────────────", " › Type a task" });
+    try std.testing.expectEqualStrings("", rig.overview.composerDraft().bytes);
 }
 
 test "the cursor sits at the composer's caret and hides while a start is pending" {

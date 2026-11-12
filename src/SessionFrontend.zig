@@ -48,6 +48,7 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const command_input = @import("command_input.zig");
 const slash_commands_shared = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -2345,6 +2346,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc closes only a list the person saw.
             if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
+                if (command_input.consumesDraft(self.input.composition().bytes, .cancelled)) self.input.clear();
                 self.dirty = true;
                 return;
             };
@@ -2594,8 +2596,8 @@ fn commandLine(self: *Self) !void {
 /// stays until the hold lifts.
 fn runLine(self: *Self) !void {
     const text = self.input.composition().bytes;
-    const takes = !self.upgradeHeld();
-    defer if (takes) self.input.clear();
+    const end: command_input.DraftEnd = if (self.upgradeHeld()) .held else .submitted;
+    defer if (command_input.consumesDraft(text, end)) self.input.clear();
     try self.slashCommand(text);
 }
 
@@ -4006,11 +4008,12 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try held.settle();
     try std.testing.expectEqualStrings("c", held.screen.commands.?.list.typed);
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
-    // Esc on `/co`, typed after the frame drew `/c`'s list, closes the list.
+    // Esc on `/co`, typed after the frame drew `/c`'s list, cancels the command.
     try stepKeys(held, "o\x07");
     try std.testing.expectEqualStrings("", try barShows(held));
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+    try std.testing.expect(held.screen.commands == null);
 }
 
 test "Tab completes from the draft's own list, however many keys arrive before a frame" {
@@ -4047,19 +4050,21 @@ test "Esc closes the command list first only when the latest frame drew it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     try held.settle();
-    // Drawn: the first Esc closes only the list, the next one acts as Esc.
-    try stepKeys(held, "/st");
+    held.self.line.read = .{ .revision = 1, .end = 1 };
+    try held.self.line.model.set("gpt-6.1-sol");
+    // The first Esc consumes a drawn command; it does not leave the chat.
+    try stepKeys(held, "/effort ");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.leaving == null);
     try std.testing.expect((try barShows(held)).len == 0);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
-    try stepKeys(held, "\x07");
-    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
-    // The latest frame drew no list, the first being closed: Esc acts at
-    // once.
-    try stepKeys(held, "\x15/st\x07");
+    try std.testing.expect(held.screen.commands == null);
+    // A command the latest frame did not list is not cancelled by Esc.
+    try stepKeys(held, "/st\x07");
+    try std.testing.expectEqualStrings("/st", held.self.input.composition().bytes);
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
 }
 
