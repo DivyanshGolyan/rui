@@ -99,7 +99,12 @@ pub fn fill(init: std.process.Init, parsed: *const cli_args.Parsed, frame: ?*con
         fixtures.chatgpt_token_endpoint = try std.fmt.allocPrint(gpa, "{s}/oauth/token", .{base});
     }
     if (parsed.get("provider-endpoint")) |endpoint| {
-        try text(settings, gpa, "providers.codex.endpoint", endpoint, failure);
+        // This development flag was checked by transport after Store selection.
+        // Stage its bounded spelling here; seal remains the admission authority.
+        // Rejecting URL syntax during fill would lose the Store diagnostic.
+        if (settings.providers.entries.codex == null) try assign(settings, gpa, "providers.codex", "{}", failure);
+        settings.providers.entries.codex.?.endpoint = .{};
+        try settings.providers.entries.codex.?.endpoint.?.text.set(endpoint);
         try assign(settings, gpa, "providers.codex.unauthenticated", "true", failure);
     }
 }
@@ -395,4 +400,24 @@ test "Host start resolves environment private file and saved credential sources"
     try private.setFilePermissions(std.testing.io, "key", .fromMode(0o644), .{});
     try assign(settings, arena.allocator(), "providers.openai.key", "null", &failure);
     try std.testing.expectError(error.InsecureCredentialFile, prepare(init, settings, .{}, &failure));
+}
+
+test "Host start retains development endpoint validation until sealing" {
+    const gpa = std.testing.allocator;
+    var environment: std.process.Environ.Map = .init(gpa);
+    defer environment.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const init = initForTest(&arena, &environment);
+    const settings = try gpa.create(hs.Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    var fixtures: providers.Fixtures = .{};
+    const parsed = try parseForTest(arena.allocator(), &.{ "--provider-endpoint", "http://remote.example/responses" });
+    try fill(init, &parsed, null, settings, &fixtures, &failure);
+    try std.testing.expectEqualStrings("http://remote.example/responses", settings.providers.entries.codex.?.endpoint.?.slice());
+    try selectStore(arena.allocator(), settings, "/tmp/store", &failure);
+    try std.testing.expectError(error.SettingsInvalid, prepare(init, settings, fixtures, &failure));
 }
