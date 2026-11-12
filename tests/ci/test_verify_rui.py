@@ -429,6 +429,56 @@ while True:
     def test_final_commit_failure_fails_state(self):
         self.assert_collector_failure_marks_state("final-commit")
 
+    @unittest.skipUnless(os.environ.get("RUI_TEST_GHOSTTY_VT"), "native observer library not selected")
+    def test_mouse_steps_send_first_matching_cell_and_exact_sgr_bytes(self):
+        import threading
+        from terminal_screen import ScreenCapture
+        steps, owner = self.helper["frame_steps"], self.helper["FrameTerminal"]
+        for action, expected in (("move", b"\x1b[<35;7;2M"),
+                                 ("click", b"\x1b[<0;7;2M\x1b[<0;7;2m")):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temp:
+                terminal = owner.__new__(owner)
+                terminal.condition = threading.Condition()
+                terminal.process = types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None, complete=False))
+                terminal.pressed = None
+                terminal.log = Path(temp)
+                terminal.capture = ScreenCapture(40, 8)
+                self.addCleanup(terminal.capture.free)
+                terminal.capture.feed("\x1b[?1003h\x1b[?1006hHeader\r\n界e\u0301   Target Target\r\nTarget".encode())
+                terminal.capture.commit()
+                writes = []
+                terminal.write = lambda data, _kind: writes.append(data)
+                steps(None, terminal, [{"mouse": {"at": "Target", "do": action}}])
+                self.assertEqual(b"".join(writes), expected)
+                self.assertTrue(all(row["at"] == [6, 1]
+                                    for row in self.helper["read_jsonl"](terminal.log / "mouse.jsonl")))
+
+    def test_mouse_absent_target_fails_without_injection(self):
+        import threading
+        owner = self.helper["FrameTerminal"]
+        terminal = owner.__new__(owner)
+        terminal.condition = threading.Condition()
+        terminal.process = types.SimpleNamespace(output=types.SimpleNamespace(check=lambda: None))
+        terminal.capture = types.SimpleNamespace(frame=committed("Other"), mouse=unittest.mock.Mock())
+        terminal.write = unittest.mock.Mock()
+        with self.assertRaisesRegex(self.helper["FrameFailure"], "mouse target absent from committed frame: 'Missing'"):
+            self.helper["frame_steps"](None, terminal, [{"mouse": {"at": "Missing", "do": "move"}}])
+        terminal.capture.mouse.assert_not_called()
+        terminal.write.assert_not_called()
+
+    def test_mouse_validation(self):
+        for value in ({"at": "Target", "do": "move"}, {"at": "Target", "do": "click"}):
+            data = self.scenario()
+            data["states"][1].update(steps=[{"mouse": value}], expect="Target")
+            self.helper["validate_scenario"](data)
+        for value in (None, {}, {"at": "", "do": "move"}, {"at": "x", "do": "drag"},
+                      {"at": "x\ny", "do": "move"}, {"at": "x\ry", "do": "move"},
+                      {"at": "x", "do": "move", "extra": 1}):
+            data = self.scenario()
+            data["states"][1].update(steps=[{"mouse": value}], expect=[])
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "mouse"):
+                self.helper["validate_scenario"](data)
+
     def test_sizes(self):
         parse = self.helper["parse_sizes"]
         self.assertEqual(parse("140x40,46x30"), [(140, 40), (46, 30)])
@@ -758,7 +808,7 @@ while True:
             self.assertIsNone(manifest["screen_library"])
             self.assertIsNone(manifest["screen_library_sha256"])
             self.assertEqual([c for c in calls if c[:2] == ["zig", "build"]],
-                             [["zig", "build", "-Doptimize=ReleaseSafe", "--summary", "all"]])
+                             [["zig", "build", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all"]])
             self.assertTrue(Path(manifest["binary"]).exists())
 
     def test_screen_dependent_commands_refuse_before_opening_terminal(self):
@@ -884,7 +934,7 @@ while True:
             self.assertEqual(self.helper["validate_scenario"](data)["states"][1]["expect"], expected)
 
     def test_validation_rejects_all_actions_after_last_wait_before_allocating(self):
-        actions = [{"keys": ["PgDn"]}, {"text": "new draft"},
+        actions = [{"mouse": {"at": "Target", "do": "move"}}, {"keys": ["PgDn"]}, {"text": "new draft"},
                    {"send": {"to": "Fix it", "text": "new message"}}, {"host": "pause"}]
         command = self.helper["cmd_frames"]
         for action in actions:

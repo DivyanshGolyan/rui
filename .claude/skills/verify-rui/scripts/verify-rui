@@ -195,7 +195,7 @@ def cmd_build(args):
     log = build / "build.log"
     started = time.monotonic()
     with open(log, "w") as handle:
-        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--summary", "all"], cwd=source,
+        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all"], cwd=source,
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
         if result.returncode == 0 and not args.no_screen:
             # The committed-screen observer's terminal emulator, for the tap.
@@ -1012,8 +1012,8 @@ EXIT_KEY = "C-c"
 KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
         "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-PgUp": b"\x1b[5;2~",
-        # Unsolicited mouse reports: Rui never enables mouse tracking (it uses ?1007
-        # alternate scroll), so a physical wheel arrives as Up/Down, not as these.
+        # Exact SGR wheel reports for L2 injection; terminal tracking determines
+        # how a physical wheel reaches Rui.
         "SGRWheelUp": b"\x1b[<64;10;10M", "SGRWheelDown": b"\x1b[<65;10;10M"}
 
 
@@ -2076,7 +2076,7 @@ def validate_scenario(data, sizes=None):
                 require(value["do"] in ("click", "move", "press", "release", "wheel-up", "wheel-down"), f"{name}: invalid mouse action")
                 at = value["at"]
                 require((isinstance(at, list) and len(at) == 2 and all(type(v) is int and v >= 0 for v in at))
-                        or (isinstance(at, str) and bool(at) and "\0" not in at and "\n" not in at),
+                        or (isinstance(at, str) and bool(at) and not any(c in at for c in "\0\n\r")),
                         f"{name}: mouse at must be text or zero-based [col, row]")
                 require(value.get("button", "left") in ("left", "right", "middle"), f"{name}: invalid mouse button")
             elif action == "exited":
