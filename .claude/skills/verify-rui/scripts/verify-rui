@@ -199,7 +199,7 @@ def cmd_build(args):
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
         if result.returncode == 0 and not args.no_screen:
             # The committed-screen observer's terminal emulator, for the tap.
-            result = subprocess.run(["zig", "build", "screen-emulator", "--prefix", str(build / "screen"), "--summary", "all"],
+            result = subprocess.run(["zig", "build", "screen-emulator", "-j2", "--prefix", str(build / "screen"), "--summary", "all"],
                                     cwd=source, env=env, stdout=handle, stderr=subprocess.STDOUT)
     if result.returncode != 0:
         die(f"zig build failed (rc={result.returncode}); see {log}")
@@ -230,6 +230,11 @@ def load_build(sha):
 def fixture_answer(text, n, answers="echo"):
     """One answer policy, shared by the echo and realistic fixture modes."""
     text = text or ""
+    if "chat info specimen" in text:
+        return """- Deadline checked before backoff.
+- Backoff stays within time left.
+- The retry draft is ready.
+"""
     if "compact rich answer" in text:
         return """## What I changed
 
@@ -1008,7 +1013,7 @@ def term_record(run, name):
 
 EXIT_KEY = "C-c"
 
-KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
+KEYS = {"M-i": b"\x1bi", "M-d": b"\x1bd", "Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
         "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-PgUp": b"\x1b[5;2~",
         # Exact SGR wheel reports for L2 injection; terminal tracking determines
@@ -1383,7 +1388,7 @@ PHYSICAL_STEPS = [
 TMUX_STEPS = [
     ("tmux-type", "In the NEW tmux window: click inside it, TYPE  hello tmux  and press  Enter.", "tmux_submit", 90),
     ("tmux-wheel", "Over the tmux window, scroll the wheel UP a few notches, then press  Control-G.", "tmux_wheel", 60),
-    ("tmux-status", "TYPE  /status  and press  Enter.", "tmux_status", 40),
+    ("tmux-info", "Press  Alt-I  to open chat info.", "tmux_info", 40),
     ("tmux-exit", "Press  Esc, then  Control-C.", "tmux_exit", 40),
 ]
 UP = (b"\x1b[A", b"\x1bOA")
@@ -1538,9 +1543,9 @@ class Grader:
         return ups >= 1 and moved and b"\x07" in data and bool(self.live(last)), {
             "arrow_up_sequences": ups, "scrolled": moved, "back_live": bool(self.live(last)), "bytes": data.hex()[:400]}
 
-    def tmux_status(self):
-        page = [f for f in self.new_frames() if "Session: demo" in f["screen"] and "Work:" in f["screen"]]
-        return bool(page) and not self.provider(), {"status_frame_gen": page[0]["gen"] if page else None,
+    def tmux_info(self):
+        page = [f for f in self.new_frames() if "Permissions" in f["screen"] and "Copy last answer" in f["screen"]]
+        return bool(page) and not self.provider(), {"info_frame_gen": page[0]["gen"] if page else None,
                                                     "provider_requests": len(self.provider())}
 
     def tmux_exit(self):
@@ -1573,7 +1578,7 @@ REHEARSAL_INPUT = {
     "esc": [b"\x1b[5~", b"\x1b"], "consent": [b"consent check", b"\r"], "read": [b"\x1b[6~"] * 4,
     "allow": [b"a", b"\r"], "deny": [b"consent check", b"\r", b"WAIT:Run Bash"] + [b"\x1b[6~"] * 4 + [b"d", b"\r"],
     "ctrl-c": [b"\x03"], "tmux-type": [b"hello tmux", b"\r"], "tmux-wheel": [b"\x1b[A"] * 3 + [b"\x07"],
-    "tmux-status": [b"/status", b"\r"], "tmux-exit": [b"\x1b", b"\x03"],
+    "tmux-info": [b"\x1bi"], "tmux-exit": [b"\x1b", b"\x03"],
 }
 
 
@@ -2032,10 +2037,13 @@ def frame_expectations(state):
     return value
 
 
-def frame_absences(state):
+def frame_absences(state, sessions=None):
     value = state.get("absent", [])
     if not isinstance(value, list) or not all(isinstance(text, str) and text and "\0" not in text for text in value):
         raise ValueError(f"{state['name']}: absent must be a list of nonempty text markers")
+    if sessions is not None:
+        return [sessions[match.group(1)] if (match := re.fullmatch(r"\{session:(.+)\}", text)) else text
+                for text in value]
     return value
 
 
@@ -2073,6 +2081,11 @@ def validate_scenario(data, sizes=None):
         require(isinstance(env, dict) and all(isinstance(k, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k)
                                              and isinstance(v, str) and "\0" not in v for k, v in env.items()), f"{name}: invalid env")
         require("note" not in state or isinstance(state["note"], str) and "\n" not in state["note"], f"{name}: note must be one line")
+        require(type(state.get("first_frame", False)) is bool, f"{name}: first_frame must be a boolean")
+        adjacent = state.get("expect_next", {})
+        require(isinstance(adjacent, dict) and all(isinstance(row, str) and row and "\n" not in row
+                and isinstance(detail, str) and detail and "\n" not in detail for row, detail in adjacent.items()),
+                f"{name}: expect_next maps row text to its following line")
         require(type(state.get("first_run", False)) is bool, f"{name}: first_run must be a boolean")
         require(not state.get("first_run") or state.get("open") == "overview", f"{name}: first_run opens overview")
         state_sizes = parse_sizes(state["sizes"]) if "sizes" in state else default_sizes
@@ -2127,6 +2140,10 @@ def validate_scenario(data, sizes=None):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
+        for text in frame_absences(state):
+            match = re.fullmatch(r"\{session:(.+)\}", text)
+            require(match is None or match.group(1) in labels,
+                    f"{name}: unknown cast label in absent: {text}")
         normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state),
                                   "absent": frame_absences(state)})
     return {**data, "sizes": override or default_sizes, "states": normalized_states}
@@ -2443,10 +2460,24 @@ def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
                   allow_exit=allow_exit)
 
 
-def frame_ready(terminal, state, allow_exit=False):
-    expected, absent = frame_expectations(state), frame_absences(state)
+def frame_row_failure(state, plain):
+    lines = plain.splitlines()
+    for row, detail in state.get("expect_next", {}).items():
+        at = next((i for i, line in enumerate(lines) if row in line), None)
+        if at is None or at + 1 >= len(lines) or detail not in lines[at + 1]:
+            return f"row {row!r} must be followed by {detail!r}"
+    return None
+
+
+def frame_ready(terminal, state, allow_exit=False, sessions=None):
+    # Transitions are asserted at the frame their last wait observed, not
+    # polled until a later frame happens to satisfy the regression oracle.
+    if state.get("first_frame", False):
+        return
+    expected, absent = frame_expectations(state), frame_absences(state, sessions)
     terminal.wait(lambda c: all(text in c.completed for text in expected)
-                  and all(text not in c.completed for text in absent),
+                  and all(text not in c.completed for text in absent)
+                  and frame_row_failure(state, c.completed) is None,
                   "state expectations: " + repr({"expect": expected, "absent": absent}),
                   allow_exit=allow_exit)
 
@@ -2461,9 +2492,11 @@ def frame_capture(run, target, out, state, size, reason):
     missing = next((text for text in frame_expectations(state) if text not in plain), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
-    unexpected = next((text for text in frame_absences(state) if text in plain), None)
+    unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if text in plain), None)
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
+    if reason is None:
+        reason = frame_row_failure(state, plain)
     (out / files["txt"]).write_text(plain)
     (out / files["ansi"]).write_text(ansi)
     (out / files["html"]).write_text(page)
@@ -2561,7 +2594,7 @@ def cmd_frames(args):
                 first_wait = state["steps"][0].get("wait") if state["steps"] else None
                 frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
                 exiting = frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
-                frame_ready(target, state, allow_exit=exiting)
+                frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
             except (Exception, SystemExit) as error:
                 reason = str(error)
                 if state["name"] in selected:
@@ -2586,7 +2619,7 @@ def cmd_frames(args):
                                 if target is None:
                                     raise FrameFailure("terminal did not launch")
                                 target.resize(size)
-                                frame_ready(target, state, allow_exit=exiting)
+                                frame_ready(target, state, allow_exit=exiting, sessions=run.meta.get("sessions", {}))
                             # The first viewport is already sized. Capture directly
                             # after its steps/wait, while a transient is still visible.
                             record = frame_capture(run, target, out, state, size, reason)

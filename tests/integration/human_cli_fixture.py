@@ -9,6 +9,7 @@ import select
 import struct
 import subprocess
 import termios
+import threading
 import time
 
 import model_fixture as fixture
@@ -188,6 +189,29 @@ def composer_line(screen, y):
     return line
 
 
+def composer_bounds(screen):
+    """The input's last two rules, measured in the rendered compose pane.
+
+    Short replies replace the footer's keys, never changing input or feed
+    geometry. Persistent state can still take rows below the chat footer.
+    Return None while no complete input is drawn.
+    """
+    rules = [index for index in range(len(screen.split("\n")))
+             if set(composer_line(screen, index)) == {"─"}]
+    return tuple(rules[-2:]) if len(rules) >= 2 else None
+
+
+def chat_footer_row(screen):
+    """The chat's one facts/keys row follows the input's lower rule.
+
+    While quiet (including a transient reply or modal info) it is the last
+    row; persistent send/recovery state below it reduces the feed capacity.
+    """
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    return bounds[1] + 1
+
+
 def composer_empty(screen, y):
     """The composer holds no draft: the cursor's row is its bare mark."""
     return composer_line(screen, y) in (" ›", " >")
@@ -247,6 +271,166 @@ def overview_frame(master, accept, keys=b"", timeout=15):
     """The first overview frame after `keys` that `accept`s, with its
     composer taking input."""
     return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_composer(screen, x, y), timeout)
+
+
+
+def panel_frame(master, accept, keys=b"", timeout=15):
+    """A committed panel frame; panel focus need not leave a composer cursor."""
+    return keyed_frame(master, keys, lambda screen, x, y: accept(screen), timeout)
+
+
+def assert_chat_info_layout(screen, *, context=None):
+    """One substituted footer below input; facts stay separate from actions."""
+    rows = screen.split("\n")
+    contents = [row.rpartition("│")[2] if "│" in row else row for row in rows]
+    footers = [index for index, row in enumerate(contents) if " · info" in row]
+    assert footers == [len(rows) - 1], ("one info footer at the bottom", screen)
+    assert "alt+i info" not in screen, ("live chat footer must be substituted", screen)
+    prompts = [index for index, row in enumerate(contents)
+               if row.strip() in ("›", ">") or row.lstrip().startswith(("› ", "> "))]
+    assert prompts and max(prompts) < footers[0], ("info footer follows input", screen)
+    actions = next(index for index, row in enumerate(contents) if "Rename" in row)
+    assert not contents[actions - 1].strip(), ("blank row before chat actions", screen)
+    assert not any(row.strip().startswith("Context") and "unknown" in row for row in contents), screen
+    if context is not None:
+        assert any(row.strip().startswith("Context") for row in contents) == context, screen
+
+
+
+def chat_info_geometry(screen):
+    """Visible natural-height body, measured independently of the feed widget."""
+    content = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    effort = next(index for index, row in enumerate(content) if row.startswith("   Effort"))
+    composer = next(index for index, row in enumerate(content) if row.rstrip() in (" ›", " >") or row.startswith((" › ", " > ")))
+    actions = [index for index, row in enumerate(content)
+               if row.strip().startswith(("Rename", "Archive", "Copy last answer"))]
+    # The body's rule and title precede Effort. One deliberate ground row
+    # follows the last action, then the input's upper rule and prompt.
+    assert actions and actions[-1] == composer - 3, screen
+    return {"top": effort - 2, "input": composer, "footer": len(content) - 1,
+            "feed": content[:effort - 2], "rows": content}
+
+
+
+def footer_click(screen, *, column=None, marker=None):
+    """An SGR mouse click in the visible Session identity/footer line."""
+    content = screen.split("\n")
+    row = chat_footer_row(screen)
+    line = content[row]
+    if marker is not None:
+        column = line.index(marker)
+    assert column is not None and 0 <= column < len(line), (column, line)
+    return f"\x1b[<0;{column + 1};{row + 1}M\x1b[<0;{column + 1};{row + 1}m".encode()
+
+
+def chat_info_open(master, timeout=15):
+    """Open ready chat info through the footer; Context is optional."""
+    screen = panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in
+                         ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer")),
+                         b"\x1bi", timeout)
+    assert_chat_info_layout(screen)
+    return screen
+
+
+def chat_info_frame(master, timeout=15):
+    """Inspect chat info, then restore chat focus for the next interaction."""
+    screen = chat_info_open(master, timeout)
+    panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b", timeout)
+    return screen
+
+
+def app_settings_open(master):
+    """Select the pinned Settings row with End, then open its panel."""
+    overview_frame(master, lambda screen: "Settings" in screen, b"\x1b[F")
+    return panel_frame(master, lambda screen: any("Rui" in row and "settings" in row
+                       for row in screen.splitlines()), b"\r")
+
+
+
+def model_choice_details(screen):
+    """Read the inline Model field and its indented, bounded visible matches."""
+    rows = [row.rpartition("│")[2] if "│" in row else row for row in screen.split("\n")]
+    field = next((index for index, row in enumerate(rows) if row.startswith("   Model")), None)
+    matches = []
+    more = None
+    if field is not None:
+        for index, row in enumerate(rows[field + 1:], field + 1):
+            hit = re.match(r"^   [✓+ ] ([A-Za-z0-9][^ ]*)", row)
+            remaining = re.fullmatch(r"   [↓v] ([1-9][0-9]*) more", row)
+            if hit:
+                matches.append((index, hit[1], row))
+            elif remaining:
+                more = int(remaining[1])
+                break
+            else:
+                break
+    value = rows[field][19:].strip() if field is not None else None
+    return {"rows": rows, "field": field, "value": value, "matches": matches, "more": more}
+
+
+def model_choice_shown(screen, query=None):
+    choice = model_choice_details(screen)
+    return bool(choice["matches"]) and (query is None or choice["value"] == query)
+
+
+def assert_model_choice(screen, *, query=None, more=None):
+    """No separate Filter row; matches follow Model at the shared indent."""
+    choice = model_choice_details(screen)
+    assert "Filter:" not in screen, screen
+    assert not any(re.match(r"^   ↑(?: |$)", row) for row in choice["rows"]), screen
+    assert model_choice_shown(screen, query), screen
+    hits = choice["matches"]
+    assert hits[0][0] == choice["field"] + 1, ("matches immediately follow inline input", screen)
+    assert [hit[0] for hit in hits] == list(range(hits[0][0], hits[0][0] + len(hits))), screen
+    assert len(hits) <= 8, ("bounded Model match list", screen)
+    if more is not None:
+        assert (choice["more"] is not None) == more, screen
+    if choice["more"] is not None:
+        assert len(hits) < 8, ("overflow count has its own bounded row", screen)
+    return choice
+
+
+def model_choice_frame(master, keys=b"", *, query=None, more=None):
+    shown = panel_frame(master, lambda screen: model_choice_shown(screen, query), keys)
+    assert_model_choice(shown, query=query, more=more)
+    return shown
+
+
+class AppModelCatalog:
+    """Hold the first catalog reply so initial-choice invalidation is ordered."""
+
+    def __init__(self, host):
+        from canonical_fixture import ReplyProxy
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.proxy = ReplyProxy(host, "/v1/model-list", lambda response: response,
+                                before_forward=self.hold)
+
+    def hold(self, _):
+        self.entered.set()
+        fixture.wait_for(self.release.is_set, "initial Model catalog release", timeout=20)
+        return True
+
+    def close(self):
+        self.release.set()
+        if self.proxy is not None:
+            proxy, self.proxy = self.proxy, None
+            proxy.close()
+
+
+def app_model_open(master, query=b"", *, catalog=None):
+    """Open settings Model; an ordered initial catalog replaces its fallback."""
+    app_settings_open(master)
+    shown = model_choice_frame(master, b"\r", query="")
+    if catalog is not None:
+        fixture.wait_for(catalog.entered.is_set, "initial Model catalog requested")
+        catalog.release.set()
+        panel_frame(master, lambda screen: not model_choice_shown(screen))
+        catalog.close()
+        shown = model_choice_frame(master, b"\r", query="")
+    if query:
+        shown = model_choice_frame(master, query, query=query.decode())
+    return shown
 
 
 def read_terminal(master, marker, timeout=15, preserve_colour=False, *, composer=False, redraw=False, initial=b"", fresh=False):

@@ -369,11 +369,12 @@ fn declinedBy(comptime T: type, err: anyerror) ?T.Declined {
 }
 
 /// Runs `T` from `input` as one entry point: enter, `run`, then finish the
-/// transaction, returning `T.Ordinary` errors and fencing on the rest. Its
-/// caller is the entry point's `Held` body, which the round budget scan
-/// finds by this call.
+/// transaction, returning `T.Ordinary` errors and fencing on the rest. A
+/// control's `faults` carry its trace, which marks when the Entry holds
+/// the Store and releases it. Its caller is the entry point's `Held` body,
+/// which the round budget scan finds by this call.
 pub fn apply(self: *Store, comptime T: type, input: T.Input, faults: Faults) !T.Result {
-    const entry = try store_core.enter(self, .none);
+    const entry = try store_core.enter(self, .fromControl(faults.control_trace));
     defer entry.release();
     var t: T = .{ .input = input };
     return entry.finishTransaction(T.Ordinary, faults, run(&entry, T, &t, faults));
