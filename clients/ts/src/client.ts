@@ -73,8 +73,8 @@ const CLOSE_GRACE_MS = 15_000;
 const READY_POLL_MS = 25;
 /** How long a refused connection waits for the child's exit before it counts as unanswered. */
 const EXIT_NOTICE_MS = 2_000;
-/** Refusals a restart cannot fix: the same frame would be refused again. */
-const RETRYABLE_START_CODES = new Set<RuiStartError["code"]>(["store_locked"]);
+/** Transient refusals during automatic restart, not initial connect. */
+const RETRYABLE_START_CODES = new Set<RuiStartError["code"]>(["store_locked", "mysql_unreachable"]);
 
 interface Exit {
 	code: number | null;
