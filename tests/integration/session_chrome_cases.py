@@ -27,6 +27,7 @@ from human_cli_fixture import (
     footer_click,
     assert_model_choice,
     composer_line,
+    conversation_text,
     keyed_frame,
     model_choice_frame,
     model_choice_shown,
@@ -425,11 +426,22 @@ def info_natural_height_case():
             chrome.frame(master, b"", lambda screen: "FEED-24" in screen and "Opening…" not in screen)
             live = chrome.frame(master, b"kept draft", lambda screen:
                                 "FEED-24" in screen and "kept draft" in screen)
-            # Wide identity sections are separate probes of the same transition;
-            # the narrow label and its explicit info hint use the same path.
-            columns = ([live.split("\n")[-2].index(marker) for marker in
-                        ("Natural height", "gpt-6-sol", "low")] if width == 140 else
-                       [live.split("\n")[-2].index(marker) for marker in ("Natural", "alt+i")])
+            # Editable words open only their shared choice at every width;
+            # the fitted model and effort, not a possibly dropped name, locate it.
+            draft_row = next(index for index in range(height)
+                             if composer_line(live, index).rstrip() == " › kept draft")
+            for field, marker in (("Model", "gpt-6-sol"), ("Effort", "low")):
+                choice = chrome.frame(master, footer_click(live, marker=marker),
+                                      lambda screen, field=field: field in conversation_text(screen)
+                                      and "✓" in conversation_text(screen))
+                assert "kept draft" in choice and "FEED-24" in choice, choice
+                assert "Copy last answer" not in choice and "Permissions" not in choice, choice
+                assert composer_line(choice, draft_row) == composer_line(live, draft_row), (live, choice)
+                live = chrome.frame(master, b"\x1b", lambda screen:
+                                    "✓" not in conversation_text(screen) and "FEED-24" in screen and "kept draft" in screen)
+            # Chat info remains available through its actual hint and Alt-I,
+            # rather than treating every identity word as the same action.
+            columns = [live.split("\n")[-2].index("alt+i")]
             opened = None
             for column in columns:
                 opened = chrome.frame(master, footer_click(live, column=column),
@@ -472,7 +484,7 @@ def info_natural_height_case():
                          "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
             chrome.leave(master, caller)
         assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
-    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; footer clicks and Alt-I share one draft-preserving transition", flush=True)
+    print("session chrome: natural-height info leaves saved feed above; Model grows/shrinks by its rows; model/effort clicks keep feed and draft; the info hint and Alt-I share one transition", flush=True)
 
 
 def approval_overflow_case():
@@ -589,12 +601,38 @@ def keys_case():
                 gesture = b"\x1b[F\r"
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
-            for index, expected in enumerate(('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave')):
-                assert expected in keys, (width, expected, keys)
-                if width == 46:
-                    assert rows(keys)[index].rstrip() == " " + expected, (index, keys)
-            if width == 140:
-                assert " enter    send              esc      back" in rows(keys)[0], keys
+            expected = (
+                ("enter", "send"), ("esc", "back"), ("⇧enter", "new line"),
+                ("tab", "next footer field"), ("⇧tab", "previous footer field"),
+                ("ctrl+x", "stop"), ("↑↓", "scroll"), ("ctrl+o", "tool output"),
+                ("ctrl+p", "earlier message"), ("ctrl+r", "retry"),
+                ("/", "skills"), ("alt+a", "archive"), ("ctrl+c", "leave"),
+            )
+            # Judge actual row-major content independently of padding. The
+            # shared KeyList aligns each column after its widest key; a longer
+            # meaning (such as previous footer field) expands the left column.
+            columns = 2 if width == 140 else 1
+            key_widths = [max(len(key) for key, _ in expected[column::columns])
+                          for column in range(columns)]
+            pane_rows = conversation_text(keys).split("\n")
+            positions = [[] for _ in range(columns)]
+            for start in range(0, len(expected), columns):
+                entries = expected[start:start + columns]
+                line = pane_rows[start // columns]
+                assert line.split() == [word for key, meaning in entries
+                                        for word in (key + " " + meaning).split()], (width, start, keys)
+                after = 0
+                for column, (key, meaning) in enumerate(entries):
+                    label = line.index(key, after)
+                    value = line.index(meaning, label + len(key))
+                    positions[column].append((label, value))
+                    assert value - label == key_widths[column] + 3, (width, key, keys)
+                    after = value + len(meaning)
+            for column in positions:
+                assert len(set(column)) == 1, (width, positions, keys)
+            assert positions[0][0][0] == 0, keys
+            used_rows = (len(expected) + columns - 1) // columns
+            assert all(not line.strip() for line in pane_rows[used_rows:]), keys
             for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
             # Enter and typing do not edit a setting or the hidden draft.
@@ -607,7 +645,7 @@ def keys_case():
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys has eleven aligned entries, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys has thirteen aligned entries including Tab and Shift+Tab, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
 
 
 def notice_case():

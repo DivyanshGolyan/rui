@@ -36,8 +36,8 @@ Ctrl+C closes the client without stopping background work; unsent draft text is 
 
 Select **Settings**, then **Version**, to check for and install a stable release. The same run is available with a conversation open; its status stays on the status row, and Esc cancels until publishing starts.
 
-Upgrade installs the latest published stable release and restarts the selected Store's Host only if it is already running and its launch is supported.
-Restart affects all Sessions in that Store and may interrupt work; no running Host means install only.
+Upgrade installs the latest published stable release and uses the same restart-all owner as `rui host restart --all` for every eligible running same-user Host.
+The check names the discovered Host count, Stores and unsupported reasons. Restart may interrupt all Sessions across those Stores; `--store` selects the client context, not the restart scope. No running Hosts means install only; absent Stores are not started.
 The panel retains your draft, selected Session and unresolved capture handles without replaying uncertain effects.
 It reports installation separately from activation, including when an application-owned or unsupported Host cannot be restarted safely.
 
