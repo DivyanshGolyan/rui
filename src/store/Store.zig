@@ -1559,11 +1559,7 @@ pub const Store = struct {
     }
 
     fn claimModelAuthRefreshHeld(self: *Store, binding: AttemptBinding) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.attempt_binding || error{AuthRefreshUnclaimed}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.attempt_binding, .{}, access.end(.{}, model_settlement_domain.claimModelAuthRefresh(&access, binding)));
+        return transition.apply(self, model_settlement_domain.ClaimAuthRefresh, .{ .binding = binding }, .{});
     }
 
     pub fn settleModelAttemptFailure(
@@ -1592,11 +1588,7 @@ pub const Store = struct {
         }
         const report = failure.report();
         std.debug.assert(report.len <= outcome_code.max_report_bytes and std.unicode.utf8ValidateSlice(report));
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.attempt_binding) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.attempt_binding, faults, access.end(faults, model_settlement_domain.settleModelAttemptFailure(&access, self.io, binding, failure, disposition, faults)));
+        return transition.apply(self, model_settlement_domain.SettleFailure, .{ .io = self.io, .binding = binding, .failure = &failure, .disposition = &disposition }, faults);
     }
 
     pub fn recoverOneExhaustedModelAttempt(
@@ -1610,13 +1602,7 @@ pub const Store = struct {
         self: *Store,
         active: ActiveOperationFilter,
     ) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var candidate: ReadAccess = .open(&entry);
-        defer candidate.deinit();
-        var access: Access(.write, error{SelectionChanged}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, .{}, access.end(.{}, model_settlement_domain.recoverOneExhaustedModelAttempt(&candidate, &access, active)));
+        return transition.apply(self, model_settlement_domain.RecoverExhausted, .{ .active = active }, .{});
     }
 
     pub fn settleModelSuccess(
