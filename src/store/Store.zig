@@ -1271,11 +1271,8 @@ pub const Store = struct {
     }
 
     fn deliverChildEndingHeld(self: *Store, turn_id: u64, captured: ?*const skills_domain.MessageCapture, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, error{}) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.deliverChildEnding(&access, turn_id, captured, faults)));
+        var ending: command_domain.DeliverChildEnding.Ending = undefined;
+        return transition.apply(self, command_domain.DeliverChildEnding, .{ .turn_id = turn_id, .captured = captured, .ending = &ending }, faults);
     }
 
     /// Positions one ancestor feed row and durably queues its next hop.
@@ -1341,11 +1338,7 @@ pub const Store = struct {
     }
 
     fn deliverAgentMessageHeld(self: *Store, binding: ActionAttemptBinding, target: []const u8, text: []const u8, captured: ?*const skills_domain.MessageCapture, faults: Faults) !AgentDelivery {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.deliverAgentMessage(&access, binding, target, text, captured, faults)));
+        return transition.apply(self, command_domain.DeliverAgentMessage, .{ .binding = binding, .target = target, .text = text, .captured = captured }, faults);
     }
 
     /// Runs the `start_agent` call `binding` names with its checked
@@ -1408,11 +1401,7 @@ pub const Store = struct {
     }
 
     fn resolveCoreCallHeld(self: *Store, binding: ActionAttemptBinding, code: ActionResolutionCode, result: []const u8, faults: Faults) !bool {
-        const entry = try enter(self, .none);
-        defer entry.release();
-        var access: Access(.write, Ordinary.action_attempt) = .open(&entry);
-        defer access.deinit();
-        return entry.finishTransaction(Ordinary.action_attempt, faults, access.end(faults, command_domain.resolveCoreCall(&access, binding, code, result, faults)));
+        return transition.apply(self, command_domain.ResolveCoreCall, .{ .binding = binding, .code = code, .result = result }, faults);
     }
 
     pub fn nextAction(self: *Store, comptime runner: tool_record.Runner) !?ReadyAction {
