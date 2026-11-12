@@ -86,7 +86,7 @@ RUI_BINARY=../../zig-out/bin/rui npm test
 ```
 
 `node scripts/pack.mjs <version> <outdir> <platform>=<executable> ...` builds the release tarballs (the compiled client and one package per platform).
-It publishes nothing; each release's `npm_publish` job in `.github/workflows/release.yml` publishes the tarballs to npm.
+It publishes nothing. `node scripts/publish.mjs <dir>` publishes them, dependencies first, skipping versions npm already has; each release runs it in the `npm_publish` job.
 
 The repository's `zig build ts-client` runs the tests against the Rui it builds.
 The real-Host feed test uses a local HTTPS provider and the `openssl` command to generate its temporary test certificate; no live provider credentials are needed.

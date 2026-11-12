@@ -230,8 +230,8 @@ jobs:
           } > notes.md
           python3 -B tests/ci/release.py publish "$VERSION" "$SHA" dist notes.md
   npm_publish:
-    # Publishes the npm tarballs after the GitHub release, platform packages first so ruicode's
-    # optional dependencies resolve. npm trusted publishing (OIDC) authenticates it: each package
+    # Publishes the npm tarballs after the GitHub release; scripts/publish.mjs reads their manifests
+    # and orders dependencies first. npm trusted publishing (OIDC) authenticates it: each package
     # trusts this repository's promote.yml, the workflow that calls this one. No token is stored.
     # A rerun skips versions npm already has.
     needs: [plan, npm, publish]
@@ -243,6 +243,10 @@ jobs:
       actions: read
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
@@ -250,7 +254,6 @@ jobs:
       - name: Publish to npm
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
           npm install -g npm@11.15.0 --no-audit --no-fund
@@ -261,12 +264,4 @@ jobs:
             echo "::warning::Artifact download failed; retrying in ${delay}s"
             sleep "$delay"
           done
-          for package in ruicode-linux-x64:rui-linux-x64 ruicode-linux-arm64:rui-linux-arm64 ruicode-darwin-arm64:rui-darwin-arm64 ruicode:rui; do
-            name=${package%%:*}
-            file="$RUNNER_TEMP/npm/${package#*:}-$VERSION.tgz"
-            if [ "$(npm view "$name@$VERSION" version 2>/dev/null || :)" = "$VERSION" ]; then
-              echo "$name@$VERSION is already on npm"
-              continue
-            fi
-            npm publish --access public --provenance "$file"
-          done
+          node clients/ts/scripts/publish.mjs "$RUNNER_TEMP/npm"
