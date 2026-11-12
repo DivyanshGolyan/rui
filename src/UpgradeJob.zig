@@ -618,6 +618,7 @@ test "how a run ends, as the status bar names it" {
         // older candidate, and nothing restarted.
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .superseded, .store = "" } }, .ended = .superseded, .outcome = .compatible },
         // The Host left cannot serve this client.
+        .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = .{ .client_incompatible = 123 }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = installed, .activation = .{ .unconfirmed = .verifying }, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         .{ .job = .{ .operation = .install, .result = .{ .installation = unchanged, .activation = .replacement_observed, .store = "" } }, .ended = .{ .incompatible = v }, .outcome = .incompatible },
         // No receipt: a cancel says so before a failure does.

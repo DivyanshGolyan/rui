@@ -7193,18 +7193,59 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                     const rig = try Rig.open(.{ .store = "/store", .workspace = "/work", .home = "", .directory = "/requests" }, fake_operations, &cancellation);
                     defer rig.close();
                     const overview = rig.overview;
-                    overview.state.upgrade.run = .{ .ended = .{
-                        .how = switch (outcome) {
-                            .unchanged => .cancelled,
-                            .compatible => .{ .upgraded = .{ .version = .{ .schema = 60, .patch = 0 }, .restarted = true } },
-                            .incompatible => .{ .incompatible = .{ .schema = 60, .patch = 0 } },
-                        },
+                    // Exercise the real joined receipt -> keepUpgrade -> departure
+                    // route, not a synthetic no-guidance incompatible outcome.
+                    var arena: std.heap.ArenaAllocator = .init(gpa);
+                    defer arena.deinit();
+                    const a = arena.allocator();
+                    const receipt: @import("Installation.zig").Receipt = .{
+                        .operation_build = try a.dupe(u8, "/published/build"),
+                        .selected_after = try a.dupe(u8, "/published/build"),
+                    };
+                    overview.upgrade_job = .{
+                        .allocator = a,
+                        .started = true,
+                        .finished = true,
+                        .operation = .install,
                         .outcome = outcome,
-                    } };
-                    if (outcome != .unchanged) overview.relaunch_build = try gpa.dupe(u8, "/published/build");
-                    overview.upgrade_guidance = guidance;
-                    const ending = upgrade_status.relaunchLine(overview.state.upgrade.run.?, &overview.relaunch_line, .unicode);
-                    overview.relaunch_line_len = ending.len;
+                        .failure = if (guidance) error.ConnectionRefused else null,
+                        .checked = .{
+                            .candidate = .{
+                                .version = .{ .schema = 60, .patch = 0 },
+                                .tag = try a.dupe(u8, "v0.60.0"),
+                                .archive_name = try a.dupe(u8, "fixture"),
+                                .archive_url = try a.dupe(u8, "fixture"),
+                                .checksum_url = try a.dupe(u8, "fixture"),
+                                .sha256 = @splat(0),
+                            },
+                            .selected = .absent,
+                            .host = .absent,
+                            .home = try a.dupe(u8, "/home"),
+                            .store = try a.dupe(u8, "/store"),
+                            .running_executable = try a.dupeSentinel(u8, "/old/rui", 0),
+                            .path = .{ .state = .selected },
+                        },
+                        .result = .{
+                            .installation = if (outcome == .unchanged) .{ .unchanged = receipt } else .{ .installed = receipt },
+                            .activation = switch (outcome) {
+                                .unchanged => .not_needed,
+                                .compatible => .{ .ready = .{ .instance = @splat(1), .pid = 42 } },
+                                .incompatible => .{ .client_incompatible = 42 },
+                            },
+                            .store = try a.dupe(u8, "/store"),
+                        },
+                    };
+                    overview.state.upgrade.run = overview.upgrade_job.status(0);
+                    try overview.keepUpgrade();
+                    try std.testing.expectEqual(guidance, overview.upgrade_guidance);
+                    var ending_buffer: [upgrade_status.max_line_bytes]u8 = undefined;
+                    const ending = upgrade_status.relaunchLine(overview.state.upgrade.run.?, &ending_buffer, .unicode);
+                    if (outcome == .incompatible) {
+                        const report = overview.upgrade_report.?.written();
+                        try std.testing.expect(std.mem.indexOf(u8, report, "This client cannot safely resume Host requests") != null);
+                        try std.testing.expect(std.mem.indexOf(u8, report, "Next: inspect") == null);
+                        try std.testing.expect(std.mem.indexOf(u8, ending, "restart rui") == null);
+                    }
                     if (drafted) {
                         @memcpy(overview.draft[0.."overview α".len], "overview α");
                         overview.composer.length = "overview α".len;
@@ -7230,6 +7271,7 @@ test "relaunch departure matrix preserves every screen and all unsent drafts" {
                     if (request) |value| {
                         defer value.deinit(gpa);
                         try std.testing.expectEqualStrings("/published/build/bin/rui", value.executable);
+                        if (outcome == .incompatible) try std.testing.expect(std.mem.indexOf(u8, value.receipt, "This client cannot safely resume Host requests") != null);
                         try std.testing.expectEqual(conversation, value.open != null);
                         var parsed = try handoff.decode(gpa, value.handoff, "/store");
                         defer parsed.deinit();

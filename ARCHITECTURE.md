@@ -1568,6 +1568,8 @@ It reopens the overview or the same conversation (`Overview.Options.open`), pres
 The new screen shows the run's ending line; scroll position resets.
 A run that installs nothing does not relaunch, even if it activates an already-selected Host build.
 An unresolved capture or recovery handle, failed save, retained cleanup path, run failure, activation recovery/owner instruction or PATH warning prevents relaunch: ordinary departure guidance remains intact, including the old-client restart instruction when needed.
+Old-client-only protocol/restart holds do not themselves prevent relaunch: a bounded protocol rejection from the exact launched Host (same peer PID, process generation, pinned executable and target version) is distinct from activation failure or uncertainty, and grants no ordinary-request readiness or invented Host facts.
+Timeouts, malformed replies, failed activation and uncertain/replacement identities still retain their recovery guidance.
 Guidance already known keeps the old screen open; resolving it later does not turn an ordinary quit into a delayed relaunch, and a later successful run cannot swallow an earlier retained report.
 If handoff preparation or process replacement fails, the ordinary departure remains; replacement failure also says the new Rui could not be started.
 Shell `rui upgrade` never replaces another terminal's client.

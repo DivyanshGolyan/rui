@@ -190,7 +190,7 @@ fn activateSelected(init: std.process.Init, allocator: std.mem.Allocator, checke
 
 pub fn compatible(result: *const Result) bool {
     return switch (result.activation) {
-        .unconfirmed, .failed, .replacement_observed => false,
+        .client_incompatible, .unconfirmed, .failed, .replacement_observed => false,
         else => true,
     };
 }
@@ -232,7 +232,7 @@ pub fn writeCheck(writer: *std.Io.Writer, checked: *const Check) !void {
 /// can still leave an unresolved or application-owned Host behind.
 pub fn hasGuidance(result: *const Result) bool {
     return switch (result.activation) {
-        .not_needed, .superseded, .already_ready, .ready => false,
+        .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
         .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
     };
 }
@@ -254,6 +254,7 @@ pub fn writeResult(writer: *std.Io.Writer, result: *const Result) !void {
         .superseded => try writer.writeAll("not attempted; a newer release is selected. No downgrade or restart occurred."),
         .already_ready => try writer.writeAll("already running the selected pinned build; no restart needed."),
         .ready => try writer.writeAll("ready; the exact launched Host instance, Store and pinned build identity were verified."),
+        .client_incompatible => try writer.writeAll("the exact launched build answered with a different protocol; use the selected Rui client."),
         .unsupported => |reason| try writer.print("not permitted ({s}); the existing Host was left running. Use its application/launch owner.", .{@tagName(reason)}),
         .replacement_observed => try writer.writeAll("not confirmed; another Host instance owns this Store. It was not paused or accepted as this launch."),
         .cancelled => try writer.writeAll("cancelled after installation; publication was not rolled back."),
@@ -324,6 +325,7 @@ test "relaunch guidance preserves every activation result for installed and unch
             .superseded => .superseded,
             .already_ready => .{ .already_ready = .{ .instance = @splat(1), .pid = 123 } },
             .ready => .{ .ready = .{ .instance = @splat(1), .pid = 123 } },
+            .client_incompatible => .{ .client_incompatible = 123 },
             .unsupported => .{ .unsupported = .application_owned },
             .replacement_observed => .replacement_observed,
             .cancelled => .cancelled,
@@ -331,7 +333,7 @@ test "relaunch guidance preserves every activation result for installed and unch
             .unconfirmed => .{ .unconfirmed = .verifying },
         };
         const expected = switch (tag) {
-            .not_needed, .superseded, .already_ready, .ready => false,
+            .not_needed, .superseded, .already_ready, .ready, .client_incompatible => false,
             .unsupported, .replacement_observed, .cancelled, .failed, .unconfirmed => true,
         };
         for ([_]bool{ false, true }) |installed| {

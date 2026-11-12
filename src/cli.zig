@@ -646,7 +646,7 @@ noinline fn runUpgrade(init: std.process.Init, args: []const []const u8) !void {
     try upgrade.writeResult(&writer, &result);
     try std.Io.File.stdout().writeStreamingAll(init.io, writer.buffered());
     switch (result.activation) {
-        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled => recordExit(.environment),
+        .failed, .unconfirmed, .replacement_observed, .unsupported, .cancelled, .client_incompatible => recordExit(.environment),
         else => {},
     }
     if (exit_status != .done) return error.Reported;
