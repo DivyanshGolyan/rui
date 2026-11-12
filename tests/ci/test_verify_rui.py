@@ -166,7 +166,7 @@ class FramesTest(unittest.TestCase):
             {"keys": ["End", "Enter"]},
             {"wait": "Rui"}, {"wait": "Notifications"},
         ])
-        self.assertEqual(state["expect"], ["Rui", "Notifications", "Sign-in", "Version"])
+        self.assertEqual(state["expect"], ["Rui", "Notifications", "Sign-in", "Version", "Keys"])
 
     def test_markdown_frames_show_the_compact_answer_at_both_sizes_and_colours(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))

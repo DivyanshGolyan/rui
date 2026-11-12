@@ -37,7 +37,8 @@
         "Rui",
         "Notifications",
         "Sign-in",
-        "Version"
+        "Version",
+        "Keys"
       ]
     },
     {
@@ -72,7 +73,8 @@
         "Rui",
         "Model",
         "✓",
-        "gpt-6.1-sol"
+        "gpt-6.1-sol",
+        "Keys"
       ],
       "absent": [
         "Filter:",
@@ -116,7 +118,8 @@
       "expect": [
         "Rui",
         "Model           sol",
-        "gpt-6.1-sol"
+        "gpt-6.1-sol",
+        "Keys"
       ],
       "absent": [
         "Filter:",
