@@ -9,6 +9,7 @@ const picker_view = @import("model_picker_view.zig");
 const catalog = @import("model_catalog.zig");
 const Editor = @import("TerminalEditor.zig");
 const keymap = @import("keymap.zig");
+const panel_editor = @import("panel_editor.zig");
 const Self = @This();
 
 /// The owner changes revision whenever it replaces or releases a list. A
@@ -39,6 +40,7 @@ query_bytes: [catalog.max_model_bytes]u8 = undefined,
 editor: Editor = .{ .buffer = &.{} },
 pasting: bool = false,
 no_match: bool = false,
+failure: ?[]const u8 = null,
 userdata: ?*anyopaque = null,
 on_pick: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
 ground: vaxis.Style = .{},
@@ -55,6 +57,7 @@ pub fn open(self: *Self, menu: ?*const picker.Menu, provider: picker.Provider, c
     self.current = current;
     self.editor = .{ .buffer = &self.query_bytes };
     self.no_match = false;
+    self.failure = null;
     self.pasting = false;
     self.scroll = 0;
     self.selected = null;
@@ -169,14 +172,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     defer if (input == .paste_end) {
         self.pasting = false;
     };
-    const outcome = self.editor.appEvent(keymap.every, input, self.pasting);
+    const outcome = panel_editor.event(&self.editor, input, self.pasting, &self.failure);
     if (outcome == .submit) {
         try self.pick(ctx);
-    } else if (outcome == .refused) {
-        // Like the other editor owners, start a clean editor when a refused
-        // line ends. Keep this field's usable filter and caret, not the
-        // rejection or partial-input state. Paste rollback stays the editor's.
-        if (outcome.refused.endsLine()) self.editor = .{ .buffer = &self.query_bytes, .length = length, .cursor = cursor };
     } else if (outcome == .append or outcome == .redraw) {
         var first: ?usize = null;
         var kept = false;
@@ -202,8 +200,11 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     self.hits = &.{};
     if (!self.validate()) return surface;
     if (size.width == 0 or size.height == 0) return surface;
-    const search = try std.fmt.allocPrint(ctx.arena, "  Filter: {s}{s}", .{ self.editor.buffer[0..self.editor.length], if (self.no_match) " · no matches" else "" });
-    paint(ctx, surface, search, 0, self.quiet);
+    const search = try std.fmt.allocPrint(ctx.arena, "  Filter: {s}", .{self.editor.buffer[0..self.editor.length]});
+    const tail = self.failure orelse if (self.no_match) " · no matches" else "";
+    const tail_width: u16 = @intCast(@min(ctx.stringWidth(tail), size.width));
+    paint(ctx, surface, search, 0, 0, size.width - tail_width, self.quiet);
+    paint(ctx, surface, tail, 0, size.width - tail_width, size.width, self.quiet);
     var indices: std.array_list.Managed(usize) = .init(ctx.arena);
     var widest: usize = 0;
     var selected_row: usize = 0;
@@ -224,18 +225,18 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, size.width);
         const style = if (self.selected == at) self.selection else self.ground;
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
-        paint(ctx, surface, line.text, @intCast(y), style);
+        paint(ctx, surface, line.text, @intCast(y), 0, size.width, style);
     }
     return surface;
 }
 
-fn paint(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, y: u16, style: vaxis.Style) void {
-    var x: u16 = 0;
+fn paint(ctx: vxfw.DrawContext, surface: vxfw.Surface, text: []const u8, y: u16, start: u16, end: u16, style: vaxis.Style) void {
+    var x = start;
     var iter = ctx.graphemeIterator(text);
     while (iter.next()) |part| {
         const bytes = part.bytes(text);
         const width = ctx.stringWidth(bytes);
-        if (width > surface.size.width - x) break;
+        if (width > end - x) break;
         if (width == 0) continue;
         surface.writeCell(x, y, .{ .char = .{ .grapheme = bytes, .width = @intCast(width) }, .style = style });
         x += @intCast(width);
@@ -403,10 +404,17 @@ fn expectFilterRecovery(failure: RejectedInput) !void {
     try std.testing.expectEqualStrings(retained, choice.editor.buffer[0..choice.editor.length]);
     try std.testing.expectEqual(cursor, choice.editor.cursor);
     try std.testing.expectEqual(@as(?keymap.Refusal, null), choice.editor.rejected);
+    for ([_]u16{ 99, 46 }) |width| {
+        const shown = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} });
+        var line: std.Io.Writer.Allocating = .init(arena.allocator());
+        for (shown.buffer[0..width]) |cell| try line.writer.writeAll(cell.char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, line.written(), "text couldn't be entered") != null);
+    }
     try press(&choice, &ctx, vaxis.Key.backspace);
     try std.testing.expectEqual(retained.len - 1, choice.editor.length);
     try choice.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = ' ', .text = " " } });
     try std.testing.expectEqual(retained.len, choice.editor.length);
+    try std.testing.expectEqual(@as(?[]const u8, null), choice.failure);
     try std.testing.expect(!choice.no_match);
     _ = try choice.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 8 }, .cell_size = .{} });
     try std.testing.expectEqual(@as(usize, 2), choice.hits.len);

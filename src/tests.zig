@@ -3,6 +3,7 @@ test {
     _ = @import("app_settings.zig");
     _ = @import("chat_info.zig");
     _ = @import("model_choice.zig");
+    _ = @import("panel_editor.zig");
     _ = @import("widgets/Split.zig");
     _ = @import("widgets/Stack.zig");
     _ = @import("widgets/Layer.zig");
