@@ -897,10 +897,11 @@ const ReadyFacts = struct { action_id: rsql.Positive, parent_operation_id: rsql.
 // Start with open Turns' frozen MCP offers, not executable Actions. Bash-only
 // offers never open their call ranges; candidate calls seek their Action by
 // parent and ordinal. CROSS JOIN keeps that bound before the Action lookup.
+// Only the current Operation can have executable Actions: continuation waits for every call to settle.
 const next_mcp_action = rsql.Read(.{
     .sql = "SELECT action.action_id,tool.server " ++
         "FROM turn active @index(turn_one_active_per_session) " ++
-        "CROSS JOIN model_operation operation @index(model_operation_turn_history) ON operation.turn_id=active.turn_id " ++
+        "CROSS JOIN model_operation operation ON operation.operation_id=active.operation_id " ++
         "CROSS JOIN tool_set_member member ON member.tool_set_id=operation.tool_set_id " ++
         "CROSS JOIN tool_record tool ON tool.tool_record_id=member.tool_record_id AND tool.owner='mcp' " ++
         "CROSS JOIN model_tool_call tool_call ON tool_call.operation_id=operation.operation_id " ++
