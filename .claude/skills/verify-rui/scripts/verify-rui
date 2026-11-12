@@ -2435,6 +2435,14 @@ def frame_steps(run, terminal, steps, exiting=False):
     return exiting
 
 
+def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
+    # The opening read resets the scroll anchor, so wait for it before releasing input.
+    terminal.wait(lambda c: "›" in c.completed and "Opening…" not in c.completed
+                  and (not first_wait or first_wait in c.completed),
+                  "initial composer ready" + (f" with {first_wait!r}" if first_wait else ""),
+                  allow_exit=allow_exit)
+
+
 def frame_ready(terminal, state, allow_exit=False):
     expected, absent = frame_expectations(state), frame_absences(state)
     terminal.wait(lambda c: all(text in c.completed for text in expected)
@@ -2551,7 +2559,7 @@ def cmd_frames(args):
                 stopped_marker = next((step["wait"] for step in state["steps"]
                                        if "The Host stopped." in step.get("wait", "")), None)
                 first_wait = state["steps"][0].get("wait") if state["steps"] else None
-                frame_wait(run, target, first_wait or "›", allow_exit=bool(stopped_marker))
+                frame_initial_ready(target, first_wait, allow_exit=bool(stopped_marker))
                 exiting = frame_steps(run, target, state["steps"], exiting=bool(stopped_marker))
                 frame_ready(target, state, allow_exit=exiting)
             except (Exception, SystemExit) as error:

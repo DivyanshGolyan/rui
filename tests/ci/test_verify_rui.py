@@ -1021,7 +1021,8 @@ while True:
                 command(args)
             self.assertEqual(err.getvalue(), "verify-rui: this build has no screen library\n")
 
-    def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None):
+    def run_frames_scenario(self, scenario, sizes=None, capture_ok=True, only=None, failing_state=None,
+                            initial_frames=("›",)):
         """Run the real loader/orchestrator with an inert OS and capture adapter."""
         command = self.helper["cmd_frames"]
         calls = []
@@ -1040,6 +1041,13 @@ while True:
                 def __init__(self, _run, state, size):
                     self.state = state
                     calls.append(("open", state["name"], size, state.get("theme", "night")))
+
+                def wait(self, predicate, _description, *, allow_exit=False):
+                    for screen in initial_frames:
+                        calls.append(("initial-frame", screen, allow_exit))
+                        if predicate(types.SimpleNamespace(completed=screen)):
+                            return
+                    raise AssertionError("initial readiness did not accept any committed frame")
 
                 def resize(self, size):
                     calls.append(("resize", size))
@@ -1070,6 +1078,26 @@ while True:
                 command(args)
             records = json.loads((root / "out/frames.json").read_text())
         return calls, records
+
+    def test_initial_readiness_waits_for_opening_read_before_driving_steps(self):
+        cases = [
+            (["› Opening…", "›"], None, False, 2),
+            (["›", "› Opening…"], None, False, 1),
+            (["Overview", "Opening…", "› Opening…", "›"], None, False, 4),
+            (["›", "› Ready Opening…", "› Ready"], "Ready", False, 3),
+            (["› Opening… The Host stopped.", "› The Host stopped."], "The Host stopped.", True, 2),
+        ]
+        for screens, first_wait, allow_exit, count in cases:
+            with self.subTest(screens=screens, first_wait=first_wait):
+                state = {"name": "initial", "open": "overview",
+                         "steps": [{"wait": first_wait}] if first_wait else []}
+                scenario = {"sizes": ["100x30"], "states": [state]}
+                calls, records = self.run_frames_scenario(scenario, initial_frames=screens)
+                self.assertEqual([call for call in calls if call[0] == "initial-frame"],
+                                 [("initial-frame", screen, allow_exit) for screen in screens[:count]])
+                self.assertEqual(calls[calls.index(("steps",)) - 1],
+                                 ("initial-frame", screens[count - 1], allow_exit))
+                self.assertTrue(records[0]["ok"])
 
     def test_frame_terminal_receives_initial_size_and_theme(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": [], "theme": "day"}]}
