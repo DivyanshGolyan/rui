@@ -18,6 +18,9 @@ on_decision: *const fn (*anyopaque, *vxfw.EventContext, Policy.Decision) anyerro
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
+/// The pointer's choice: only its background, reverse and underline apply, and the
+/// highlighted choice keeps its reverse under the pointer.
+hover_style: vaxis.Style = .{ .ul_style = .single },
 choice_row: ?u16 = null,
 choice_column: u16 = 0,
 choice_width: u16 = 0,
@@ -93,6 +96,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 /// InputArea supplies the composer only when the consent owner selects it.
 /// This is placement, not row/key policy: the request always stays above it.
+fn choiceLook(self: *const Self, highlighted: bool, target: Hover.Rect) input_choice.Look {
+    return if (highlighted) .selected else if (self.hover.contains(target)) .hovered else .plain;
+}
+
 pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
     self.choice_row = null;
@@ -129,11 +136,11 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
         const deny_column = @min(self.choice_width, " Allow once   ".len);
         targets[1] = .{ .row = self.choice_row.?, .col = self.choice_column + deny_column, .width = @min(self.choice_width - deny_column, " Deny ".len) };
         self.hover.targets = targets;
-        const marked: [2]bool = .{
-            self.consent.highlight == .allow_once or self.hover.contains(targets[0]),
-            self.consent.highlight == .deny or self.hover.contains(targets[1]),
+        const looks: [2]input_choice.Look = .{
+            self.choiceLook(self.consent.highlight == .allow_once, targets[0]),
+            self.choiceLook(self.consent.highlight == .deny, targets[1]),
         };
-        const choices = input_choice.segments(.{ "Allow once", "Deny" }, marked, self.style, self.choice_column != 0);
+        const choices = input_choice.segments(.{ "Allow once", "Deny" }, looks, self.style, self.hover_style, self.choice_column != 0);
         _ = window.child(.{ .width = size.width - self.choice_column, .y_off = self.choice_row.?, .height = 1 }).print(&choices, .{ .wrap = .none });
         if (self.consent.draw()) self.ready_pending = true;
     }
@@ -282,7 +289,7 @@ fn testPasteFocus(arrives_during_paste: bool) !void {
     }
 }
 
-test "PermissionCard hover matches choice selection without changing consent or focus" {
+test "PermissionCard hover is quieter than the choice selection and changes neither consent nor focus" {
     const Owner = struct {
         decision: ?Policy.Decision = null,
         fn decide(raw: *anyopaque, _: *vxfw.EventContext, decision: Policy.Decision) !void {
@@ -301,16 +308,27 @@ test "PermissionCard hover matches choice selection without changing consent or 
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
     consent.adopt(41);
     _ = try card.widget().draw(ctx);
-    // Both choices use their keyboard-selected look, retaining foreground.
+    // Both choices take the hover look, retaining foreground, while the other keeps its reverse.
     for ([_]Policy.Choice{ .deny, .allow_once }) |choice| {
+        card.hover_style = .{ .ul_style = .single };
         consent.highlight = if (choice == .deny) .allow_once else .deny;
         const before = consent.highlight;
         const col: u16 = if (choice == .deny) 17 else 3;
         try card.widget().handleEvent(&events, .mouse_enter);
         try card.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 3, .button = .none, .type = .motion, .mods = .{} } });
         const hovered = try card.widget().draw(ctx);
-        try std.testing.expect(hovered.readCell(col, 3).style.reverse);
+        try std.testing.expect(!hovered.readCell(col, 3).style.reverse);
+        try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.readCell(col, 3).style.ul_style);
         try std.testing.expectEqual(card.style.fg, hovered.readCell(col, 3).style.fg);
+        try std.testing.expect(hovered.readCell(if (choice == .deny) 3 else 17, 3).style.reverse);
+        card.hover_style = .{ .bg = .{ .index = 5 } };
+        const coloured = try card.widget().draw(ctx);
+        try std.testing.expectEqual(vaxis.Color{ .index = 5 }, coloured.readCell(col, 3).style.bg);
+        // The highlighted choice keeps its reverse under the pointer.
+        consent.highlight = if (choice == .deny) .deny else .allow_once;
+        const both = try card.widget().draw(ctx);
+        try std.testing.expect(both.readCell(col, 3).style.reverse);
+        consent.highlight = before;
         try std.testing.expect(card.hover.pointing);
         try std.testing.expectEqual(before, consent.highlight);
         try std.testing.expectEqual(Policy.Row.selector, consent.row);
@@ -319,6 +337,7 @@ test "PermissionCard hover matches choice selection without changing consent or 
         try card.widget().handleEvent(&events, .mouse_leave);
         const left = try card.widget().draw(ctx);
         try std.testing.expect(!left.readCell(col, 3).style.reverse);
+        try std.testing.expectEqual(card.style.bg, left.readCell(col, 3).style.bg);
         try std.testing.expect(!card.hover.pointing);
     }
     // Padding and a clipped-away choice have neither hover nor click authority.

@@ -2911,7 +2911,8 @@ App enables mouse reporting, and wheel events scroll the visible widget.
 Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
 New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
 Hover never changes keyboard selection or focus.
-Rows and fields take the selection background or monochrome reverse while preserving their foreground; chips and peer links underline and show the pointer shape.
+Under the pointer, rows and fields take the hover background, the per-channel midpoint of the selvedge and selection colours, or a monochrome underline, while preserving their foreground; reverse stays the keyboard selection's mark.
+A row that is both selected and hovered keeps the selection look; chips and peer links underline and show the pointer shape.
 Only drawn, clipped action regions take clicks, and their existing paste, consent, stale-content and availability guards still apply.
 Headings, fixed status fields and unkeyed summary aggregates remain inert.
 Rui does not enable alternate scroll mode 1007.

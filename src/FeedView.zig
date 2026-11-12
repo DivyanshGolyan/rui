@@ -19,7 +19,8 @@ tail: ?vxfw.Widget = null,
 latest_ending: ?resident.LatestEnding = null,
 retry_actionable: bool = false,
 style: vaxis.Style = .{},
-hover_style: vaxis.Style = .{ .reverse = true },
+/// The pointer's tool or Message row, quieter than the selection background an open row keeps.
+hover_style: vaxis.Style = .{ .ul_style = .single },
 hover: Hover = .{},
 colours: viewport.Colours = .{},
 method: vaxis.gwidth.Method = .unicode,
@@ -390,7 +391,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 }
 
 /// Build hover from the same clipped rows and retry decorator as hit testing.
-/// Tool rows use the list selection background; retry chips keep underline.
+/// Tool rows take the hover look unless open, where the selection background wins;
+/// retry chips keep underline.
 fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void {
     self.hover.targets = &.{};
     const handler = self.handler orelse return;
@@ -407,9 +409,11 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
         if (open_row) {
             const rect: Hover.Rect = .{ .row = @intCast(row), .width = surface.size.width };
             try targets.append(arena, rect);
-            if (self.hover.contains(rect)) for (cells) |*cell| {
+            const open = self.colour and self.window.document.toolIsOpen(position.offset);
+            if (!open and self.hover.contains(rect)) for (cells) |*cell| {
                 cell.style.bg = self.hover_style.bg;
                 cell.style.reverse = self.hover_style.reverse;
+                cell.style.ul_style = self.hover_style.ul_style;
             };
         }
         if (retry) |columns| {
@@ -837,6 +841,40 @@ test "FeedView tool rows and retry chips hover only their painted targets withou
         _ = try testFrame(&view, arena.allocator(), width, 8);
         for (view.hover.targets) |target| try std.testing.expectEqual(@as(u16, 0), @as(u16, @intCast(target.col)));
         view.retry_actionable = true;
+    }
+}
+
+test "FeedView open tool heading keeps its selection background under the pointer" {
+    const Actions = struct {
+        fn tool(_: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {}
+    };
+    const window = try testWindow();
+    defer std.testing.allocator.destroy(window);
+    const fold = @import("tool_fold.zig");
+    var tools: viewport.Sized(256, true) = .{};
+    try tools.append(fold.heading_marker ++ "$ Bash open\n" ++ fold.output_marker ++ "out\n" ++ fold.heading_marker ++ "$ Bash shut\n");
+    try tools.prepare();
+    try window.append(&.{.{ .key = .{ .position = 10 }, .text = resident.Text.fromDocument(&tools), .tight = true }});
+    var anchor: Feed = .{};
+    var unused: u8 = 0;
+    var view: Self = .{
+        .window = window,
+        .anchor = &anchor,
+        .handler = .{ .userdata = &unused, .on_click = Actions.tool, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll },
+        .colours = .{ .selection = .{ .index = 9 } },
+        .hover_style = .{ .bg = .{ .index = 2 } },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const initial = try testFrame(&view, arena.allocator(), 40, 3);
+    try std.testing.expectEqual(vaxis.Color{ .index = 9 }, initial.readCell(0, 0).style.bg);
+    try view.widget().handleEvent(&ctx, .mouse_enter);
+    for ([_]struct { row: u16, bg: vaxis.Color }{ .{ .row = 0, .bg = .{ .index = 9 } }, .{ .row = 2, .bg = .{ .index = 2 } } }) |case| {
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(case.row), .col = 1, .button = .none, .mods = .{}, .type = .motion } });
+        const hovered = try testFrame(&view, arena.allocator(), 40, 3);
+        for (0..40) |col| try std.testing.expectEqual(case.bg, hovered.readCell(@intCast(col), case.row).style.bg);
+        try std.testing.expectEqual(vaxis.Color{ .index = 9 }, hovered.readCell(0, 0).style.bg);
     }
 }
 

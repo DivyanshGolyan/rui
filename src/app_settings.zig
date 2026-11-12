@@ -161,6 +161,7 @@ fn bind(self: *Self) void {
     const caps = if (self.backend) |b| b.caps(b.context) else view.Caps{};
     self.panel.ground = widget_style.of(caps, .{ .background = .bar });
     self.panel.selection = widget_style.of(caps, .{ .background = .selection });
+    self.panel.hover_style = widget_style.of(caps, .{ .background = .hover });
     self.panel.title_style = widget_style.of(caps, .{ .background = .bar, .colour = .strong, .bold = true });
     self.panel.quiet = widget_style.of(caps, .{ .background = .bar, .colour = .quiet });
     self.panel.rule_style = widget_style.of(caps, .{ .background = .bar, .colour = .rule });
@@ -683,7 +684,8 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         var mouse: vaxis.Mouse = .{ .col = 1, .row = permissions_row, .button = .none, .type = .motion, .mods = .{} };
         try page.widget().handleEvent(&events, .{ .mouse = mouse });
         var surface = try page.widget().draw(draw_ctx);
-        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, 2).style.bg);
         try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
         try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
         try page.widget().handleEvent(&events, .mouse_leave);
@@ -703,7 +705,7 @@ test "App settings mouse hover and click use the same field choices as Enter" {
         try page.widget().handleEvent(&events, .mouse_enter);
         try page.widget().handleEvent(&events, .{ .mouse = mouse });
         surface = try page.widget().draw(draw_ctx);
-        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, choice_row).style.bg);
+        try std.testing.expectEqual(page.panel.hover_style.bg, surface.children[0].surface.readCell(1, choice_row).style.bg);
         try std.testing.expectEqual(selected, page.panel.choice.?.selected);
         mouse.button = .left;
         mouse.type = .press;

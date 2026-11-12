@@ -20,6 +20,8 @@ on_activate: ?*const fn (*anyopaque, *vxfw.EventContext, usize) anyerror!void = 
 on_pick: ?*const fn (*anyopaque, *vxfw.EventContext, usize, usize) anyerror!void = null,
 ground: vaxis.Style = .{},
 selection: vaxis.Style = .{ .reverse = true },
+/// The pointer's field, choice or action, quieter than the selection, which wins where both apply.
+hover_style: vaxis.Style = .{ .ul_style = .single },
 title_style: vaxis.Style = .{ .bold = true },
 quiet: vaxis.Style = .{},
 rule_style: vaxis.Style = .{},
@@ -139,7 +141,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (self.fields, 0..) |field, index| {
         if (self.visible(self.rowOf(index), size.height)) |row| {
             const selected = self.choice == null and self.selected == index;
-            const style = if (selected or self.hover.contains(.{ .row = row, .width = size.width })) self.selection else self.ground;
+            const style = self.look(selected, .{ .row = row, .width = size.width });
             fillRow(surface, row, style);
             _ = paintTo(ctx, surface, field.label, 3, row, style, @min(19, size.width));
             const end = paint(ctx, surface, field.value, 19, row, style);
@@ -147,6 +149,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
                 var quiet = self.quiet;
                 quiet.bg = style.bg;
                 quiet.reverse = style.reverse;
+                quiet.ul_style = style.ul_style;
                 _ = paint(ctx, surface, tail, end, row, quiet);
             }
             try targets.append(.{ .row = row, .start = 0, .end = size.width, .index = index });
@@ -154,7 +157,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         if (self.choice) |choice| if (choice.field == index) {
             for (choice.labels, 0..) |label, at| {
                 const row = self.visible(index + 1 + at, size.height) orelse continue;
-                const style = if (at == choice.selected or self.hover.contains(.{ .row = row, .width = size.width })) self.selection else self.ground;
+                const style = self.look(at == choice.selected, .{ .row = row, .width = size.width });
                 fillRow(surface, row, style);
                 _ = paint(ctx, surface, if (choice.current == at) "✓" else " ", 5, row, style);
                 _ = paint(ctx, surface, label, 7, row, style);
@@ -166,10 +169,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         var col: u16 = @min(3, size.width);
         for (self.actions, 0..) |action, at| {
             const start = col;
-            const style = if (self.choice == null and self.selected == self.fields.len + at) self.selection else self.ground;
-            col = paint(ctx, surface, action, col, row, style);
-            if (self.hover.contains(.{ .row = row, .col = start, .width = col - start })) {
-                _ = paint(ctx, surface, action, start, row, self.selection);
+            const selected = self.choice == null and self.selected == self.fields.len + at;
+            col = paint(ctx, surface, action, col, row, if (selected) self.selection else self.ground);
+            if (!selected and self.hover.contains(.{ .row = row, .col = start, .width = col - start })) {
+                _ = paint(ctx, surface, action, start, row, self.hover_style);
             }
             if (col > start) try targets.append(.{ .row = row, .start = start, .end = col, .index = self.fields.len + at });
             col = @intCast(@min(@as(u32, col) + 5, size.width));
@@ -180,6 +183,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (targets.items, hover_targets) |target, *rect| rect.* = .{ .row = target.row, .col = target.start, .width = target.end - target.start };
     self.hover.targets = hover_targets;
     return surface;
+}
+
+/// Selection wins over hover; hover wins over the panel ground.
+fn look(self: *const Self, selected: bool, rect: Hover.Rect) vaxis.Style {
+    if (selected) return self.selection;
+    return if (self.hover.contains(rect)) self.hover_style else self.ground;
 }
 
 fn visible(self: *const Self, logical: usize, height: u16) ?u16 {
@@ -338,7 +347,7 @@ test "Panel inline choices open pick cancel and scroll in the same field" {
 
 test "Panel hover highlights fields choices and actions without changing keyboard state" {
     var fixture: Fixture = .{};
-    var panel: Self = .{ .title = "Settings", .fields = &.{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" } }, .actions = &.{ "Rename", "Archive" }, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .userdata = &fixture, .on_activate = Fixture.activateRow, .on_pick = Fixture.pickRow };
+    var panel: Self = .{ .title = "Settings", .fields = &.{ .{ .label = "One", .value = "1" }, .{ .label = "Two", .value = "2" } }, .actions = &.{ "Rename", "Archive" }, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 5 } }, .userdata = &fixture, .on_activate = Fixture.activateRow, .on_pick = Fixture.pickRow };
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 10 }, .cell_size = .{} };
@@ -348,7 +357,8 @@ test "Panel hover highlights fields choices and actions without changing keyboar
     for ([_]struct { row: i16, col: i16 }{ .{ .row = 3, .col = 39 }, .{ .row = 4, .col = 14 } }) |point| {
         try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = point.col, .row = point.row, .button = .none, .type = .motion, .mods = .{} } });
         const surface = try panel.widget().draw(ctx);
-        try std.testing.expectEqual(panel.selection.bg, surface.readCell(@intCast(point.col), @intCast(point.row)).style.bg);
+        try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(@intCast(point.col), @intCast(point.row)).style.bg);
+        try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 2).style.bg);
         try std.testing.expectEqual(@as(usize, 0), panel.selected);
         try std.testing.expectEqual(@as(?usize, null), fixture.activated);
         try std.testing.expect(panel.hover.pointing);
@@ -359,9 +369,13 @@ test "Panel hover highlights fields choices and actions without changing keyboar
     panel.openChoice(&.{ "First", "Second" }, 0);
     _ = try panel.widget().draw(ctx);
     try panel.widget().handleEvent(&events, .mouse_enter);
+    try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 3, .button = .none, .type = .motion, .mods = .{} } });
+    surface = try panel.widget().draw(ctx);
+    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
     try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .none, .type = .motion, .mods = .{} } });
     surface = try panel.widget().draw(ctx);
-    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 4).style.bg);
+    try std.testing.expectEqual(panel.hover_style.bg, surface.readCell(39, 4).style.bg);
+    try std.testing.expectEqual(panel.selection.bg, surface.readCell(39, 3).style.bg);
     try std.testing.expectEqual(@as(usize, 0), panel.choice.?.selected);
     try std.testing.expectEqual(@as(?usize, null), fixture.picked);
     try panel.widget().handleEvent(&events, .{ .mouse = .{ .col = 39, .row = 4, .button = .left, .type = .press, .mods = .{} } });

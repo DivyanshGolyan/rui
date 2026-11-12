@@ -368,7 +368,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         self.task.mutex.unlock(self.init.?.io);
     } else code = self.code;
     const line: []const vaxis.Cell.Segment = switch (self.state.stage) {
-        .choice => try ctx.arena.dupe(vaxis.Cell.Segment, &choice_row.segments(.{ "ChatGPT", "API key" }, .{ self.state.selected != .openai, self.state.selected == .openai }, self.style, true)),
+        .choice => try ctx.arena.dupe(vaxis.Cell.Segment, &choice_row.segments(.{ "ChatGPT", "API key" }, .{ if (self.state.selected != .openai) .selected else .plain, if (self.state.selected == .openai) .selected else .plain }, self.style, .{}, true)),
         .codex_waiting => if (code.len == 0) &.{.{ .text = "  Connecting to ChatGPT", .style = self.style }} else line: {
             const segments = try ctx.arena.alloc(vaxis.Cell.Segment, 3);
             segments[0] = .{ .text = "  ", .style = self.style };
