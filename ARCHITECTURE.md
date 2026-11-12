@@ -2346,6 +2346,10 @@ It captures canonical cwd before starting/attaching the selected Host (default A
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
+When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · r start`; `r` on an empty draft, or a click on the line, starts it through the same launch owner.
+A Host that ended without being asked to stop (a crash or a kill) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap) or by its launcher closing stdin is not, nor while an Upgrade holds the Host.
+The stopping Host leaves a stop record beside its Store lease, which every Host start removes; an unreadable record counts as a stop someone asked for.
+At most one automatic start runs per overview: a failed start or a second crash leaves the line to `r`, with no retry or backoff.
 
 The overview refreshes about once a second with `session list` `since`, keeping its rows and replacing those reported changed.
 `/sessions unarchived`, `/sessions archived`, and `/sessions all` choose the server-side archive filter.
