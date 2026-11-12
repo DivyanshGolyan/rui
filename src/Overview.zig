@@ -6982,7 +6982,7 @@ test "chat omits New Session at every width and overview restores its pinned con
         const child: vxfw.Text = .{ .text = "Chat transcript" };
         fn open(overview: *Self, ctx: *vxfw.EventContext) !void {
             overview.state.conversing = overview.opened;
-            try overview.root.openSession(ctx, child.widget());
+            try overview.root.openSession(ctx, child.widget(), null);
         }
     };
     const rig = try openListed();
