@@ -8,7 +8,7 @@
 - `status-refresh`: a second `/status` during or after work shows the current `Work` state, not stale text.
 - `tool-output`: Ctrl-O or a click on a tool heading opens its saved output under it, at most 20 rows then `… N more lines`; the same key or click closes it.
 - `scroll-page`: PgUp/PgDn move by pages through one continuous feed; repeated PgUp stops at the first saved row, with no start label.
-- `scroll-wheel`: the physical wheel scrolls. Rui enables alternate scroll (`?1007h`) when the terminal reports it reset, so the terminal sends arrow keys. Rui does not enable mouse tracking.
+- `scroll-wheel`: the physical wheel scrolls the visible widget through App's mouse reporting. Rui does not enable alternate scroll (`?1007h`).
 - `return-live`: Esc, End (empty draft) and Ctrl-G return to the latest messages with the draft unchanged.
 
 ## How to get to it (user POV)
@@ -26,7 +26,7 @@ Preconditions:
 - **Refresh during work.** Send `slow please` and Enter, then `/status` while it streams. The `Work` section names the running state. After the answer, the open page must not keep `Working` once `Working…` is gone (a known 968d909 defect, C1); a fresh `/status` shows the completed work.
 - **Settings.** On `/status`, `Down` moves `›` to `Permissions`, then over the Session's fixed `Model`, `Store` and `Instructions` to New Sessions' `Model`; `Shift-Down` and PgDn still scroll. Enter on `Permissions` puts `/configure --permission-mode ` in the draft with `bypass` and `ask` listed; Down, Enter runs it and the page comes back with `ask · Bash asks first` and `›` on `Permissions`. Enter on `Name` puts `/configure --label` and the current name in the draft.
 - **Page.** Run `$V send "$RUN" s1 --keys PgUp` repeatedly until the first Message of the Session is on screen and another PgUp changes nothing. Then `PgDn` until the composer is live.
-- **Wheel path (L1–L3 only).** Rui scrolls the wheel through alternate scroll (`?1007h`), so a terminal turns the wheel into `Up`/`Down`. `--keys Up` therefore stands in for the wheel, except on `/status`, where `Up` and `Down` move `›`. `--keys SGRWheelUp` sends an unsolicited mouse report, which Rui ignores by design. Both are byte replay, not hardware.
+- **Wheel path (L1–L3 only).** `--keys SGRWheelUp` and `--keys SGRWheelDown` inject SGR wheel reports at cell 10,10. App routes them to the visible widget under that cell. `Up`/`Down` are keyboard input, not wheel proof; on `/status` they move `›`. All are byte replay, not hardware.
 - **Draft survives.** Type `keep me`, PgUp, then Ctrl-G. The caret row is still `› keep me` and the provider count is unchanged.
 - **Proof.** Snapshots per step, plus `frames.jsonl` gens and times.
 

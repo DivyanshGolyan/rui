@@ -668,6 +668,52 @@ test "App settings Sign-in row opens the shared sign-in screen on Enter" {
     try std.testing.expectEqualStrings(" · settings busy", page.failures.get(.sign_in).?);
 }
 
+test "App settings mouse hover and click use the same field choices as Enter" {
+    for ([_]protocol.PermissionMode{ .ask, .bypass }) |initial| {
+        var fixture: Fixture = .{ .values = .{ .permission_mode = initial } };
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 60, .height = 12 }, .cell_size = .{} };
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try page.refresh();
+        _ = try page.widget().draw(draw_ctx);
+        try page.widget().handleEvent(&events, .mouse_enter);
+        const permissions_row = 2 + @backingInt(Row.permissions);
+        var mouse: vaxis.Mouse = .{ .col = 1, .row = permissions_row, .button = .none, .type = .motion, .mods = .{} };
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        var surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
+        try std.testing.expectEqual(@as(?preferences.Edit, null), fixture.last_edit);
+        try page.widget().handleEvent(&events, .mouse_leave);
+        surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.ground.bg, surface.children[0].surface.readCell(1, permissions_row).style.bg);
+        mouse.button = .left;
+        mouse.type = .press;
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(@as(usize, @backingInt(Row.permissions)), page.panel.choice.?.field);
+        const selected = page.panel.choice.?.selected;
+        const next: protocol.PermissionMode = if (initial == .ask) .bypass else .ask;
+        const choice_row: u16 = permissions_row + 1 + @as(u16, if (next == .bypass) 0 else 1);
+        _ = try page.widget().draw(draw_ctx);
+        mouse.row = @intCast(choice_row);
+        mouse.button = .none;
+        mouse.type = .motion;
+        try page.widget().handleEvent(&events, .mouse_enter);
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        surface = try page.widget().draw(draw_ctx);
+        try std.testing.expectEqual(page.panel.selection.bg, surface.children[0].surface.readCell(1, choice_row).style.bg);
+        try std.testing.expectEqual(selected, page.panel.choice.?.selected);
+        mouse.button = .left;
+        mouse.type = .press;
+        try page.widget().handleEvent(&events, .{ .mouse = mouse });
+        try std.testing.expectEqual(next, fixture.last_edit.?.permission_mode.set);
+        try std.testing.expect(!page.hasChoice());
+        try page.widget().handleEvent(&events, .mouse_leave);
+    }
+}
+
 test "App settings Keys is last and opens by Enter or click without a backend" {
     try std.testing.expectEqual(row_count - 1, @as(usize, @backingInt(Row.keys)));
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);

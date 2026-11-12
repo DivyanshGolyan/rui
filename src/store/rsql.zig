@@ -425,8 +425,10 @@ pub fn Read(comptime spec: ReadSpec) type {
         // `.one` and `.at_most` decode in place. `Access.readEach` refuses
         // an `.each` Row over 1 KiB unless its visitor owns the decoded row, and
         // `Access.read` a big `.optional`.
-        if (fillsInPlace(spec.Row) and spec.cardinality != .optional)
-            @compileError("rsql: a Row that points into its caller's memory is read .optional, with Access.readInto: " ++ spec.sql);
+        // An `.each` Row may point there too: its visitor owns the decoded
+        // row (`Access.eachVisitorError`), so the pointers are the visitor's.
+        if (fillsInPlace(spec.Row) and spec.cardinality != .optional and spec.cardinality != .each)
+            @compileError("rsql: a Row that points into its caller's memory is read .optional, with Access.readInto, or .each into its visitor's decoded row: " ++ spec.sql);
     }
     return struct {
         pub const kind: StatementKind = .read;

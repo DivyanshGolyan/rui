@@ -6,6 +6,7 @@ const vxfw = vaxis.vxfw;
 const Consent = @import("ActionConsent.zig");
 const Policy = @import("session_consent.zig");
 const input_choice = @import("choice_row.zig");
+const Hover = @import("widgets/Hover.zig");
 const Self = @This();
 
 consent: *Consent,
@@ -21,6 +22,7 @@ choice_row: ?u16 = null,
 choice_column: u16 = 0,
 choice_width: u16 = 0,
 ready_pending: bool = false,
+hover: Hover = .{},
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -28,6 +30,7 @@ pub fn widget(self: *Self) vxfw.Widget {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.hover.handleEvent(ctx, input);
     const action: Consent.Input = switch (input) {
         .tick => {
             if (self.ready_pending) {
@@ -62,15 +65,9 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
             return;
         },
         .mouse => |mouse| mouse: {
-            const choice: ?Policy.Choice = hit: {
-                const row = self.choice_row orelse break :hit null;
-                if (mouse.row != row or mouse.col < self.choice_column) break :hit null;
-                const col = @as(u16, @intCast(mouse.col)) - self.choice_column;
-                if (col >= self.choice_width) break :hit null;
-                if (col < " Allow once ".len) break :hit .allow_once;
-                if (col >= " Allow once   ".len and col < " Allow once    Deny ".len) break :hit .deny;
-                break :hit null;
-            };
+            const choice: ?Policy.Choice = for (self.hover.targets, 0..) |rect, index| {
+                if (rect.contains(mouse.col, mouse.row)) break if (index == 0) .allow_once else .deny;
+            } else null;
             if (mouse.button == .left) switch (mouse.type) {
                 .press => break :mouse .{ .press = choice },
                 .release => break :mouse .{ .release = choice },
@@ -99,6 +96,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
     const size = ctx.max.size();
     self.choice_row = null;
+    self.hover.targets = &.{};
     if (size.width == 0 or size.height == 0) return .empty(self.widget());
     const draft = if (composer) |widget_| try widget_.draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = @min(size.height, @import("draft_layout.zig").cap(size.height) + 2) })) else null;
     // Reserve the input before the request: a choice survives even at 1×1.
@@ -126,7 +124,16 @@ pub fn drawInput(self: *Self, ctx: vxfw.DrawContext, composer: ?vxfw.Widget) std
             surface.writeCell(@intCast(col), size.height - 1, cell);
         };
         self.choice_row = size.height - 1 - rule;
-        const choices = input_choice.segments(.{ "Allow once", "Deny" }, @intFromBool(self.consent.highlight == .deny), self.style, self.choice_column != 0);
+        const targets = try ctx.arena.alloc(Hover.Rect, 2);
+        targets[0] = .{ .row = self.choice_row.?, .col = self.choice_column, .width = @min(self.choice_width, " Allow once ".len) };
+        const deny_column = @min(self.choice_width, " Allow once   ".len);
+        targets[1] = .{ .row = self.choice_row.?, .col = self.choice_column + deny_column, .width = @min(self.choice_width - deny_column, " Deny ".len) };
+        self.hover.targets = targets;
+        const marked: [2]bool = .{
+            self.consent.highlight == .allow_once or self.hover.contains(targets[0]),
+            self.consent.highlight == .deny or self.hover.contains(targets[1]),
+        };
+        const choices = input_choice.segments(.{ "Allow once", "Deny" }, marked, self.style, self.choice_column != 0);
         _ = window.child(.{ .width = size.width - self.choice_column, .y_off = self.choice_row.?, .height = 1 }).print(&choices, .{ .wrap = .none });
         if (self.consent.draw()) self.ready_pending = true;
     }
@@ -273,4 +280,54 @@ fn testPasteFocus(arrives_during_paste: bool) !void {
         try std.testing.expectEqual(null, owner.decision);
         try root.widget().captureEvent(&events, .paste_end);
     }
+}
+
+test "PermissionCard hover matches choice selection without changing consent or focus" {
+    const Owner = struct {
+        decision: ?Policy.Decision = null,
+        fn decide(raw: *anyopaque, _: *vxfw.EventContext, decision: Policy.Decision) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.decision = decision;
+        }
+    };
+    var owner: Owner = .{};
+    var consent: Consent = .{};
+    const text: vxfw.Text = .{ .text = "Run tests" };
+    const pasting = false;
+    var card: Self = .{ .consent = &consent, .pasting = &pasting, .description = "Run", .body = text.widget(), .userdata = &owner, .on_decision = Owner.decide, .style = .{ .fg = .{ .index = 2 } } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 5 }, .cell_size = .{} };
+    consent.adopt(41);
+    _ = try card.widget().draw(ctx);
+    // Both choices use their keyboard-selected look, retaining foreground.
+    for ([_]Policy.Choice{ .deny, .allow_once }) |choice| {
+        consent.highlight = if (choice == .deny) .allow_once else .deny;
+        const before = consent.highlight;
+        const col: u16 = if (choice == .deny) 17 else 3;
+        try card.widget().handleEvent(&events, .mouse_enter);
+        try card.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 3, .button = .none, .type = .motion, .mods = .{} } });
+        const hovered = try card.widget().draw(ctx);
+        try std.testing.expect(hovered.readCell(col, 3).style.reverse);
+        try std.testing.expectEqual(card.style.fg, hovered.readCell(col, 3).style.fg);
+        try std.testing.expect(card.hover.pointing);
+        try std.testing.expectEqual(before, consent.highlight);
+        try std.testing.expectEqual(Policy.Row.selector, consent.row);
+        try std.testing.expectEqual(null, owner.decision);
+        for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
+        try card.widget().handleEvent(&events, .mouse_leave);
+        const left = try card.widget().draw(ctx);
+        try std.testing.expect(!left.readCell(col, 3).style.reverse);
+        try std.testing.expect(!card.hover.pointing);
+    }
+    // Padding and a clipped-away choice have neither hover nor click authority.
+    try card.widget().handleEvent(&events, .{ .mouse = .{ .col = 14, .row = 3, .button = .none, .type = .motion, .mods = .{} } });
+    try std.testing.expect(!card.hover.pointing);
+    _ = try card.widget().draw(ctx.withConstraints(.{}, .{ .width = 1, .height = 1 }));
+    try card.widget().handleEvent(&events, .{ .mouse = .{ .col = 17, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
+    try std.testing.expect(!card.hover.pointing);
+    _ = try card.widget().draw(ctx);
+    for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try card.widget().handleEvent(&events, .{ .mouse = .{ .col = 17, .row = 3, .button = .left, .type = kind, .mods = .{} } });
+    try std.testing.expectEqual(@as(?Policy.Decision, .{ .action = 41, .choice = .deny }), owner.decision);
 }

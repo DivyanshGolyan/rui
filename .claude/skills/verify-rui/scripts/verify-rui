@@ -26,6 +26,7 @@ import sys
 import tarfile
 import threading
 import time
+import unicodedata
 
 CACHE = pathlib.Path(os.environ.get("VERIFY_RUI_CACHE", pathlib.Path.home() / ".cache/verify-rui"))
 SCRATCH_PARENT = pathlib.Path("/private/tmp" if sys.platform == "darwin" else "/tmp")  # short paths: Unix socket limits
@@ -194,7 +195,7 @@ def cmd_build(args):
     log = build / "build.log"
     started = time.monotonic()
     with open(log, "w") as handle:
-        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--summary", "all"], cwd=source,
+        result = subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "-j2", "--summary", "all"], cwd=source,
                                 env=env, stdout=handle, stderr=subprocess.STDOUT)
         if result.returncode == 0 and not args.no_screen:
             # The committed-screen observer's terminal emulator, for the tap.
@@ -1011,8 +1012,8 @@ EXIT_KEY = "C-c"
 KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
         "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-PgUp": b"\x1b[5;2~",
-        # Unsolicited mouse reports: Rui never enables mouse tracking (it uses ?1007
-        # alternate scroll), so a physical wheel arrives as Up/Down, not as these.
+        # Exact SGR wheel reports for L2 injection; terminal tracking determines
+        # how a physical wheel reaches Rui.
         "SGRWheelUp": b"\x1b[<64;10;10M", "SGRWheelDown": b"\x1b[<65;10;10M"}
 
 
@@ -1932,7 +1933,7 @@ def frame_expectations(state):
     else:
         steps = state["steps"]
         last_wait = next((index for index in range(len(steps) - 1, -1, -1) if "wait" in steps[index]), None)
-        if last_wait is not None and any(set(step) & {"text", "keys", "send", "host"} for step in steps[last_wait + 1:]):
+        if last_wait is not None and any(set(step) & {"text", "keys", "mouse", "send", "host"} for step in steps[last_wait + 1:]):
             raise ValueError(f"{state['name']}: an action follows the last wait; set expect explicitly")
         value = steps[last_wait]["wait"] if last_wait is not None else []
     if isinstance(value, str):
@@ -2009,7 +2010,7 @@ def validate_scenario(data, sizes=None):
         for step in steps:
             require(isinstance(step, dict), f"{name}: step must be an object")
             actions = set(step) - {"timeout"}
-            require(len(actions) == 1 and actions <= {"text", "keys", "wait", "gone", "sleep", "send", "host"}, f"{name}: unknown or ambiguous step {step}")
+            require(len(actions) == 1 and actions <= {"text", "keys", "mouse", "wait", "gone", "sleep", "send", "host"}, f"{name}: unknown or ambiguous step {step}")
             action = next(iter(actions))
             value = step[action]
             require("timeout" not in step or action in ("wait", "gone") and duration(step["timeout"]), f"{name}: invalid timeout")
@@ -2017,6 +2018,11 @@ def validate_scenario(data, sizes=None):
                 require(isinstance(value, str) and "\0" not in value, f"{name}: {action} must be text")
             elif action == "keys":
                 require(isinstance(value, list) and bool(value) and all(isinstance(k, str) and k in KEYS for k in value), f"{name}: unknown key")
+            elif action == "mouse":
+                require(isinstance(value, dict) and set(value) == {"at", "do"}
+                        and isinstance(value["at"], str) and bool(value["at"])
+                        and not any(c in value["at"] for c in "\0\n\r")
+                        and value["do"] in ("move", "click"), f"{name}: invalid mouse step")
             elif action == "sleep":
                 require(duration(value), f"{name}: invalid sleep")
             elif action == "host":
@@ -2147,6 +2153,23 @@ def frame_steps(run, target, steps, exiting=False):
                 frame_command(run.tmux("send-keys", "-H", "-t", target, *[f"{b:02x}" for b in raw], check=False), "send keys")
                 # Let a lone Escape expire before any following key can become Alt-key input.
                 time.sleep(0.35 if key == "Esc" else 0.08)
+        elif "mouse" in step:
+            mouse = step["mouse"]
+            screen = frame_pane(run, target)
+            for y, line in enumerate(screen.splitlines(), 1):
+                index = line.find(mouse["at"])
+                if index >= 0:
+                    # tmux's plain capture retains wide and combining characters.
+                    x = 1 + sum(0 if unicodedata.combining(c) else
+                                2 if unicodedata.east_asian_width(c) in ("W", "F") else 1
+                                for c in line[:index])
+                    break
+            else:
+                raise FrameFailure(f"mouse target absent: {mouse['at']}")
+            raw = (f"\x1b[<35;{x};{y}M" if mouse["do"] == "move" else
+                   f"\x1b[<0;{x};{y}M\x1b[<0;{x};{y}m").encode()
+            frame_command(run.tmux("send-keys", "-H", "-t", target, *[f"{b:02x}" for b in raw], check=False), "send mouse")
+            time.sleep(0.15)  # Let the injected event draw before the capture.
         elif "wait" in step or "gone" in step:
             action = "wait" if "wait" in step else "gone"
             frame_wait(run, target, step[action], action == "gone", step.get("timeout", 20), exiting)

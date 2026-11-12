@@ -3,14 +3,14 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
-/// Borrows labels through drawing. The caller places the row and decides
-/// whether its narrow layout has room for the prompt.
-pub fn segments(labels: [2][]const u8, selected: usize, style: vaxis.Style, prompt: bool) [8]vaxis.Cell.Segment {
-    std.debug.assert(selected < labels.len);
+/// Borrows labels through drawing. The caller places the row, decides
+/// whether its narrow layout has room for the prompt, and says which labels
+/// are marked: the selected one, and one under the pointer where it hovers.
+pub fn segments(labels: [2][]const u8, marked: [2]bool, style: vaxis.Style, prompt: bool) [8]vaxis.Cell.Segment {
     var first = style;
     var second = style;
-    first.reverse = selected == 0;
-    second.reverse = selected == 1;
+    first.reverse = marked[0];
+    second.reverse = marked[1];
     return .{
         .{ .text = if (prompt) " ›" else "", .style = style },
         .{ .text = " ", .style = first },
@@ -23,16 +23,16 @@ pub fn segments(labels: [2][]const u8, selected: usize, style: vaxis.Style, prom
     };
 }
 
-test "Choice row preserves the approval labels and marks only the selected padded label" {
+test "Choice row preserves the approval labels and reverses only the marked padded labels" {
     for ([_]bool{ false, true }) |prompt| {
-        for (0..2) |selected| {
+        for ([_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } }) |marked| {
             for ([_]vaxis.Style{ .{}, .{ .fg = .{ .rgb = .{ 20, 40, 60 } }, .bg = .{ .rgb = .{ 80, 100, 120 } } } }) |style| {
-                const row = segments(.{ "Allow once", "Deny" }, selected, style, prompt);
+                const row = segments(.{ "Allow once", "Deny" }, marked, style, prompt);
                 var bytes: [64]u8 = undefined;
                 var writer = std.Io.Writer.fixed(&bytes);
                 for (row, 0..) |segment, index| {
                     try writer.writeAll(segment.text);
-                    const highlighted = if (index >= 1 and index <= 3) selected == 0 else if (index >= 5) selected == 1 else false;
+                    const highlighted = if (index >= 1 and index <= 3) marked[0] else if (index >= 5) marked[1] else false;
                     try std.testing.expectEqual(highlighted, segment.style.reverse);
                     try std.testing.expectEqual(style.fg, segment.style.fg);
                     try std.testing.expectEqual(style.bg, segment.style.bg);

@@ -1,17 +1,24 @@
-"""Only the SQLite engine and its own tests reach the SQLite C binding.
+"""Only the SQLite engine and its own tests reach the SQLite C binding, and
+src/store/domain reaches neither the engine nor the Queue.
 
 Access and the Store run rounds through `engine.Engine`, so a second engine
 can sit behind it without touching them. A Store file outside `ALLOWED`
 that names a `sqlite3_` function or type, the binding `sqlite.c`, or the C
-module `@import("sqlite")` reaches past the engine. Comments and strings
-are inert. The list only shrinks: a listed file that no longer names the
-binding must leave it.
+module `@import("sqlite")` reaches past the engine.
+
+Outside test blocks, a domain file that imports the engine, the Queue or the
+binding, or reaches them through the Store (`.engine`, `.queue()`, and the
+Store's `enter`, `fence` and `followCommit`), counts against `DOMAIN_REACH`.
+
+Comments and strings are inert. Both lists only shrink: an entry above what
+the tree holds must be lowered or removed.
 """
 from pathlib import Path
-import re
 import shutil
 import tempfile
 import unittest
+
+from caller_errors import lex, production
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,13 +37,32 @@ ALLOWED = {
     "rsql.zig",
 }
 
-# Zig tokens; comments and multiline string lines are dropped, strings stay
-# whole so `@import("sqlite")` is recognizable and their contents are inert.
-TOKEN = re.compile(r'//[^\n]*|\\\\[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|@?[A-Za-z_][A-Za-z_0-9]*|[^\s]')
+DOMAIN = "src/store/domain"
+DOMAIN_RULE = "src/store/domain reaches the engine or the Queue only through the transition runner"
+DOMAIN_IMPORTS = ('"../engine.zig"', '"../queue.zig"', '"../sqlite.zig"')
+STORE_REACH = ("enter", "fence", "followCommit")
+
+# Shrink-only: occurrences per (domain file, reach) today.
+DOMAIN_REACH = {
+    ("action.zig", '@import("../sqlite.zig")'): 1,
+    ("command.zig", '@import("../sqlite.zig")'): 1,
+    ("content.zig", ".queue()"): 2,
+    ("content.zig", "Store.enter"): 2,
+    ("content.zig", "Store.fence"): 1,
+    ("historical.zig", ".queue()"): 9,
+    ("historical.zig", "Store.enter"): 9,
+    ("historical.zig", "Store.fence"): 8,
+    ("model_admission.zig", ".engine"): 1,
+    ("model_admission.zig", "Store.followCommit"): 2,
+    ("model_settlement.zig", ".engine"): 1,
+    ("model_settlement.zig", ".queue()"): 1,
+    ("model_settlement.zig", "Store.enter"): 1,
+    ("reads.zig", "Store.fence"): 4,
+}
 
 
 def binding_sites(source):
-    tokens = [m.group() for m in TOKEN.finditer(source) if not m.group().startswith(("//", "\\\\"))]
+    tokens = [token.text for token in lex(source)]
     sites = 0
     for i, token in enumerate(tokens):
         if token.startswith("sqlite3_"):
@@ -56,6 +82,43 @@ def violations(root=ROOT):
                 if count and name not in ALLOWED]
     messages += [f"{STORE}/{name} no longer names the SQLite binding; remove it from ALLOWED"
                  for name in sorted(ALLOWED) if not found.get(name)]
+    return messages
+
+
+def domain_reaches(source):
+    """Reaches outside test blocks, counted by the label a violation names."""
+    tokens = [token.text for token in production(lex(source))]
+    store = {tokens[i - 1] for i in range(1, len(tokens) - 4)
+             if tokens[i:i + 5] == ["=", "@import", "(", '"../Store.zig"', ")"]}
+    found = {}
+    for i, token in enumerate(tokens):
+        name = tokens[i + 1] if i + 1 < len(tokens) else ""
+        if token == "@import" and name == "(" and (tokens[i + 2] in DOMAIN_IMPORTS or tokens[i + 2].startswith('"../engine/')):
+            label = f"@import({tokens[i + 2]})"
+        elif token == "." and name == "engine":
+            label = ".engine"
+        elif token == "." and tokens[i + 1:i + 4] == ["queue", "(", ")"]:
+            label = ".queue()"
+        elif token == "." and name in STORE_REACH and tokens[i - 1] in store:
+            label = f"Store.{name}"
+        else:
+            continue
+        found[label] = found.get(label, 0) + 1
+    return found
+
+
+def domain_violations(root=ROOT, allowed=None):
+    allowed = DOMAIN_REACH if allowed is None else allowed
+    found = {(path.name, label): count for path in sorted((root / DOMAIN).glob("*.zig"))
+             for label, count in domain_reaches(path.read_text()).items()}
+    messages = []
+    for (name, label) in sorted(set(found) | set(allowed)):
+        count, listed = found.get((name, label), 0), allowed.get((name, label), 0)
+        if count > listed:
+            messages.append(f"{DOMAIN}/{name} reaches through {label} {count} times, {listed} allowed; {DOMAIN_RULE}")
+        elif count < listed:
+            messages.append(f"{DOMAIN}/{name} reaches through {label} {count} times, {listed} allowed; "
+                            "lower its DOMAIN_REACH entry")
     return messages
 
 
@@ -86,6 +149,46 @@ class StoreEngineBoundaryTest(unittest.TestCase):
             shutil.copytree(ROOT / STORE, root / STORE)
             (root / STORE / "rsql.zig").write_text("const std = @import(\"std\");\n")
             self.assertEqual(violations(root), [f"{STORE}/rsql.zig no longer names the SQLite binding; remove it from ALLOWED"])
+
+
+class DomainReachTest(unittest.TestCase):
+    def test_domain_reaches_match_the_shrink_only_allowlist(self):
+        self.assertEqual(domain_violations(), [])
+
+    def test_scan_reads_imports_and_reaches_but_not_tests_comments_strings_or_own_queues(self):
+        source = ('const store_core = @import("../Store.zig");\nconst core = @import("../Store.zig");\n'
+                  'const q = @import("../queue.zig");\nconst e = @import("../engine/Sqlite.zig");\n'
+                  'fn f() void {\n    _ = a.store.engine.batches();\n    const g = a.store.engine;\n'
+                  '    self.queue().run(x, .{});\n    _ = store_core.enter(self, .none);\n'
+                  '    return core.fence(self.store, err);\n    store_core.followCommit(s, null);\n}\n')
+        self.assertEqual(domain_reaches(source), {'@import("../queue.zig")': 1, '@import("../engine/Sqlite.zig")': 1,
+                                                  ".engine": 2, ".queue()": 1, "Store.enter": 1, "Store.fence": 1,
+                                                  "Store.followCommit": 1})
+        inert = ('const store_core = @import("../Store.zig");\n// a.store.engine.batches()\n'
+                 'const s = "self.queue()";\nfn f() void {\n    read.queue(a);\n    _ = store_core.Faults;\n'
+                 '    _ = store_core.readUnixMilliseconds(io);\n    _ = other.enter(x);\n}\n'
+                 'test "fixture" {\n    _ = a.store.engine.batches();\n}\n')
+        self.assertEqual(domain_reaches(inert), {})
+
+    def test_a_new_reach_fails_naming_file_reach_and_rule(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / DOMAIN, root / DOMAIN)
+            turn = root / DOMAIN / "turn.zig"
+            turn.write_text(turn.read_text() + "\nfn batches(x: anytype) bool {\n    return x.store.engine.batches();\n}\n")
+            self.assertEqual(domain_violations(root), [f"{DOMAIN}/turn.zig reaches through .engine 1 times, 0 allowed; {DOMAIN_RULE}"])
+            self.assertEqual(domain_violations(root, DOMAIN_REACH | {("turn.zig", ".engine"): 1}), [])
+
+    def test_a_reach_that_drops_fails_until_its_entry_is_lowered(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            shutil.copytree(ROOT / DOMAIN, root / DOMAIN)
+            path = root / DOMAIN / "model_settlement.zig"
+            path.write_text(path.read_text().replace("std.debug.assert(a.store.engine.inWriteTransaction());", ""))
+            self.assertEqual(domain_violations(root), [f"{DOMAIN}/model_settlement.zig reaches through .engine 0 times, "
+                                                       "1 allowed; lower its DOMAIN_REACH entry"])
+            lowered = {key: count for key, count in DOMAIN_REACH.items() if key != ("model_settlement.zig", ".engine")}
+            self.assertEqual(domain_violations(root, lowered), [])
 
 
 if __name__ == "__main__":
