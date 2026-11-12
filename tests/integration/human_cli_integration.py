@@ -73,7 +73,7 @@ from terminal_process import close_pty, answers_to, open_pty, spawn, terminal_pr
 import model_fixture as fixture
 import codex_fixture
 import os_semantics
-from human_cli_fixture import ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
+from human_cli_fixture import chat_info_geometry, model_choice_frame, model_choice_shown, chat_info_frame, chat_info_open, panel_frame, ALLOW, CAPTURE_NOTICE, CHOICE, highlighted, _captures, action_ready, admit, await_screen, chat_content_row, command_frame, composer_ready, chat_footer_row, conversation_text, current_screen, draining, drop_spent_readiness, keyed_frame, next_frame, overview_frame, overview_title, pick_deny, read_terminal, return_to_live, run, settle_screen, shown, terminal_capture, terminal_exit, terminal_gate, terminal_step
 
 
 def terminal_safe_json(text):
@@ -95,18 +95,14 @@ def json_strings(value):
             yield from json_strings(item)
 
 
-# The bypass default is explained only where /status reports it.
-BYPASS_STATUS = "bypass · Bash and MCP run without asking"
-
-
 def permission_row(frame, mode):
-    """The exact /status row, unwrapped from a narrow page."""
-    value = BYPASS_STATUS if mode == "bypass" else f"{mode} · Bash and MCP ask first"
-    return f" Permissions {value} Tools " in " ".join(frame.split())
+    """The chat info Permissions field, unwrapped from a narrow panel."""
+    value = "run without asking" if mode == "bypass" else "ask first"
+    return f"Permissions {value} Tools" in " ".join(frame.split())
 
 
 def home_path(home, path):
-    """`path` as /status shows it: from `~` under HOME."""
+    """`path` as chat info shows it: from `~` under HOME."""
     text, home = str(path), str(home)
     if len(home) > 1 and (text == home or text.startswith(home + "/")):
         text = "~" + text[len(home):]
@@ -114,12 +110,12 @@ def home_path(home, path):
 
 
 def folder_row(home, path):
-    """The /status Folder row for `path`."""
+    """An unclipped, home-relative Folder row for short visible paths."""
     return "Folder          " + home_path(home, path)
 
 
 def status_row(page, label, following):
-    """A /status row's value and note, words single-spaced: the text from
+    """A chat info row's value and note, words single-spaced: the text from
     `label`'s row up to the next row, `following`."""
     flat = " ".join(page.split())
     return flat.split(f" {label} ", 1)[1].split(f" {following} ", 1)[0]
@@ -513,15 +509,10 @@ def discard_terminal(master):
     forget_terminal(master)
 
 
-def status_frame(master, session, command="/status", timeout=15):
-    """The /status page for exactly `session` (escaped as /status shows it)."""
-    escaped = session.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\t", "\\t")
-    def page(frame):
-        rows = conversation_text(frame).split("\n")
-        # App draws the page from the first feed row, with no browsing heading.
-        return (rows[0].startswith(" Status · ")
-            and (rows[0] == " Status · " + escaped or rows[0].endswith(" · " + escaped)) and " Work" in rows)
-    return command_frame(master, command, page, timeout)
+def info_frame(master, session, timeout=15):
+    """Read the panel on the already selected chat; keep CLI identity explicit."""
+    assert session
+    return chat_info_frame(master, timeout)
 
 
 def saved_default(master, command, line):
@@ -530,16 +521,6 @@ def saved_default(master, command, line):
     changed is what tells its reply from the last one."""
     return command_frame(master, command, lambda frame: "Saved defaults for future Sessions" in conversation_text(frame) and shown(line, conversation_text(frame)))
 
-
-def configured_frame(master, command):
-    """The frame whose status row reports this Configure's success. Run over
-    the /status page, the change leaves the page shown with its reply as a
-    notice; Esc then returns to the conversation, so a later /status page is
-    the one that request reads, not the page already shown."""
-    frame = command_frame(master, command, lambda frame: "Configured." in conversation_text(frame).split("\n"))
-    if conversation_text(frame).startswith(" Status · "):
-        command_frame(master, "\x1b", lambda frame: not conversation_text(frame).startswith(" Status · "), end="")
-    return frame
 
 
 def leave_overview(master, timeout=15):
@@ -884,7 +865,8 @@ def persistent_copy_case():
             def sent(command):
                 before = len(capture.clipboard)
                 frame = terminal_step(master, command, "Sent to clipboard", composer=True)
-                assert "Sent to clipboard" in frame.split("\n"), frame
+                assert frame.split("\n")[chat_footer_row(frame)].endswith("Sent to clipboard"), frame
+                assert frame.count("Sent to clipboard") == 1, frame
                 assert len(capture.clipboard) == before + 1, capture.clipboard
                 return capture.clipboard[-1]
 
@@ -892,6 +874,13 @@ def persistent_copy_case():
                 return "\x1b]52;c;" + base64.b64encode(text.encode()).decode() + "\x1b\\"
 
             assert sent("/copy") == osc52(answer)
+            # The chat info action uses the same last-answer clipboard owner.
+            copied = len(capture.clipboard)
+            chat_info_open(master)
+            panel_frame(master, lambda frame: len(capture.clipboard) == copied + 1,
+                        b"\x1b[B" * 6 + b"\r")
+            assert capture.clipboard[-1] == osc52(answer), capture.clipboard
+            panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
             assert sent("/copy code") == osc52("print('é')")
             name = f"rui-{session}-answer.md"
             terminal_step(master, "/copy file", f"Saved to ./{name}", composer=True)
@@ -1463,8 +1452,8 @@ def renderer_cases():
 
     def joined(tty):
         # A final answer frame is not proof that its reader has joined.
-        tty.send("/status\r", " Status · ")
-        tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
+        tty.send("\x1bi", "Copy last answer")
+        tty.send("\x1b", predicate=lambda: tty.capture.draft("", 2))
 
     try:
         # One read can replace a valid Message frame with the final reply.
@@ -1719,9 +1708,9 @@ def renderer_cases():
                 assert effect.exists() == (decision == "allow"), decision
                 requests = len(endpoint.requests)
                 tty.send("\x7f", predicate=lambda: tty.capture.draft("", 2))
-                tty.send("/status\r", " Status · ")
+                tty.send("\x1bi", "Copy last answer")
                 assert len(endpoint.requests) == requests, endpoint.requests
-                tty.send("\x07", predicate=lambda: tty.capture.draft("", 2))
+                tty.send("\x1b", predicate=lambda: tty.capture.draft("", 2))
                 assert CHOICE not in tty.capture.completed, tty.capture.completed
                 tty.caller.send_signal(signal.SIGINT)
                 tty.finish()
@@ -1758,48 +1747,47 @@ def renderer_cases():
             dispose_all(lambda: os.close(ready_read), lambda: os.close(ready_write))
         print("renderer: a card decides only the request it drew", flush=True)
 
-        # A /status not yet shown yields to a later page request: the page
-        # asked for last is the one that stays on screen, even when the read
-        # that would show /status is already in flight.
+        # Chat info is its own Layer, independent of an Activity read in flight.
+        # Closing it and opening Settings > Keys must not let a delayed read reopen it.
         session = configure()
-        marker = answer("status yields")
+        marker = answer("info yields")
         holding = threading.Event()
         held = [threading.Event(), threading.Event()]
         released = [threading.Event(), threading.Event()]
-        reads = []
-        def hold_two(_):
-            if holding.is_set() and len(reads) < 2:
-                index = len(reads)
-                reads.append(index)
-                held[index].set()
-                released[index].wait(10)
+        def hold_info_read(_):
+            if holding.is_set():
+                for ready, resume in zip(held, released):
+                    if not ready.is_set():
+                        ready.set()
+                        resume.wait(10)
+                        break
             return True
-        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_two)
+        proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_info_read)
         with terminal(session, columns=140) as tty:
-            tty.send("status yields\r", marker)
-            frames = tty.every_frame()
+            tty.send("info yields\r", marker)
             holding.set()
             fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=10)
-            os.write(tty.master, b"/status\r")
-            time.sleep(0.3)
+            tty.send("\x1bi", "Copy last answer")
             released[0].set()
-            # The next read carries the /status request.
-            fixture.wait_for(tty.draining(held[1].is_set), "/status Activity page", timeout=10)
+            # The next Activity read carries the info inspection request.
+            fixture.wait_for(tty.draining(held[1].is_set), "info Activity page", timeout=10)
+            tty.send("\x1b", predicate=lambda: "Copy last answer" not in tty.capture.completed)
             row, line = next((index, line) for index, line in enumerate(tty.capture.completed.split("\n")) if "Settings" in line)
             col = line.index("Settings") + 1
             tty.send(f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m", "Notifications")
             keys = tty.send("\x1b[B" * 6 + "\r", "earlier message")
             assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
+            frames = tty.every_frame()
             released[1].set()
             time.sleep(1.5)
             assert "earlier message" in tty.capture.completed, tty.capture.completed
             for frame in frames:
-                assert " Status · " not in frame, frame
+                assert " · info" not in frame and "Copy last answer" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: Settings > Keys covers a /status not yet shown", flush=True)
+        print("renderer: delayed info inspection cannot cover Settings > Keys after the panel closes", flush=True)
 
         # A short fresh feed clamps at its first saved row; scrolling does
         # not add a start label or duplicate the admitted Message and reply.
@@ -2262,7 +2250,7 @@ def main(selected="all"):
             "--", session], env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
-            assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
+            assert "Copy last answer" in chat_info_frame(master)
             terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         saved.unlink()
@@ -2272,7 +2260,7 @@ def main(selected="all"):
             env={**os.environ, "HOME": str(preferences_home)},
         ) as (entered, master):
             assert "Session:" not in read_terminal(master, "› ")
-            assert f" Status · {session}" in terminal_step(master, "/status", " Status · ", composer=True)
+            assert "Copy last answer" in chat_info_frame(master)
             terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         fallback.unlink()
@@ -2445,7 +2433,7 @@ def main(selected="all"):
                 assert "Permission:" not in welcome, welcome
                 assert "Bash runs without" not in welcome, ("bypass is quiet", welcome)
                 assert "Bash commands can run without asking you" not in welcome, welcome
-                status = status_frame(master, warning_ref)
+                status = info_frame(master, warning_ref)
                 assert permission_row(status, mode), status
                 assert fixture.command("session", "inspect", "--store", store, "--session", warning_ref)["session"]["permission_mode"] == mode
                 assert mode == "bypass" or "without asking" not in status, status
@@ -2614,25 +2602,33 @@ def main(selected="all"):
             greeting = read_terminal(master, "› ")
             assert all(noise not in greeting for noise in ("Session:", "Workspace:", "Provider:", "Model:", "Permission:", "Store:", queued)), greeting
             assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
-            binding = terminal_step(master, "/status", " Status · ", composer=True)
-            assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
-            assert "gpt-6-sol · Codex" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
+            binding = chat_info_frame(master)
+            bound_session = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
+            assert bound_session["workspace"] == str(workspace.resolve()) and bound_session["provider"] == "codex", bound_session
+            # A long read-only Folder keeps its basename rather than clipping
+            # the right-hand path suffix; the canonical inspection above is full.
+            folder = next(row.split("Folder", 1)[1].strip() for row in binding.split("\n")
+                          if row.strip().startswith("Folder"))
+            assert folder.endswith(workspace.resolve().name), binding
+            assert folder.startswith(("…/", "~/", "/")), binding
+            assert "gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
             # The wide layout exposes the pinned Settings row without
-            # leaving this conversation or replacing its /status page.
+            # leaving this conversation or changing its draft.
             terminal_capture(master).resize(140, 50)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 140, 0, 0))
-            wide = keyed_frame(master, b"", lambda screen, x, y: "Settings" in screen and f"Status · {session}" in screen)
+            wide = keyed_frame(master, b"", lambda screen, x, y: "Settings" in screen and "first answer" in screen)
             row, line = next((index, line) for index, line in enumerate(wide.split("\n")) if "Settings" in line)
             col = line.index("Settings") + 1
             gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
-            keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            app_settings = keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            assert any("Sign-in" in row and "Codex" in row for row in app_settings.splitlines()), app_settings
             keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
             for expected in ('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
                 assert expected in keys, (expected, keys)
             assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
             settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
-            keyed_frame(master, b"\x1b", lambda screen, x, y: f"Status · {session}" in screen and "Rui · settings" not in screen)
+            keyed_frame(master, b"\x1b", lambda screen, x, y: "first answer" in screen and "Rui · settings" not in screen)
             terminal_capture(master).resize(80, 50)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 80, 0, 0))
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
@@ -2645,7 +2641,7 @@ def main(selected="all"):
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
-            terminal_step(master, "/status", "ask · Bash and MCP ask first", composer=True)
+            chat_info_frame(master)
             assert not credential.exists(), "unsupported in-session login created credentials"
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
             saved_default(master, "/setup --model gpt-5.5", "Model: gpt-5.5")
@@ -2662,7 +2658,7 @@ def main(selected="all"):
                     assert "a model ID is 1–256 printable non-space ASCII bytes" in rejected, rejected
                     assert "active Session unchanged" not in rejected, rejected
                 assert interactive_saved.read_bytes() == cleared_preferences
-            terminal_step(master, "/status", "ask · Bash and MCP ask first", composer=True)
+            chat_info_frame(master)
             active = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
             assert active["model"] == "gpt-6-sol" and active["permission_mode"] == "ask", active
             terminal_step(master, "/setup --model gpt-6-luna", "Saved defaults for future Sessions", composer=True)
@@ -2679,18 +2675,27 @@ def main(selected="all"):
             terminal_step(master, '/setup --store "unfinished', "Usage: /setup", composer=True)
             assert defaults(preferences_home)["store"] == str(quoted_store.resolve())
             terminal_step(master, f'/setup --store "{store}"', "Saved defaults for future Sessions", composer=True)
-            terminal_step(master, "/status", "ask · Bash and MCP ask first", composer=True)
+            chat_info_frame(master)
             assert fixture.command("session", "inspect", "--store", store,
                 "--session", session)["session"]["model"] == "gpt-6-sol"
-            terminal_step(master, "/configure --session human/other", "Usage: /configure", composer=True)
-            terminal_step(master, "/configure --instructions -", "Set instructions separately", composer=True)
-            terminal_step(master, "/configure --output-schema -", "Set instructions separately", composer=True)
-            terminal_step(master, "/status", f" Status · {session}", composer=True)
-            configured = configured_frame(master, '/configure --model "gpt-6-sol"')
-            assert "Configured." in configured and "request:" not in configured, configured
+            # Removed commands cannot configure or inspect through a second path.
+            before_configure = fixture.command("session", "inspect", "--store", store, "--session", session)["session"]
+            for command in ("/status", "/configure --model gpt-5.5", "/model"):
+                terminal_step(master, command, "Unknown command", composer=True)
+            assert fixture.command("session", "inspect", "--store", store, "--session", session)["session"] == before_configure
+            chat_info_open(master)
+            model_choice_frame(master, b"\x1b[B\x1b[B\x1b[B\r", query="")
+            model_choice_frame(master, b"gpt-6-sol", query="gpt-6-sol", more=False)
+            configured = panel_frame(master, lambda frame: not model_choice_shown(frame) and "saving" not in frame, b"\r")
+            assert "gpt-6-sol" in configured and "request:" not in configured, configured
+            # The natural body leaves the previous /setup result in the feed.
+            # A typed Configure adds no CLI receipt to the info body itself.
+            geometry = chat_info_geometry(configured)
+            configured_body = "\n".join(geometry["rows"][geometry["top"]:geometry["input"] - 1])
             for receipt in ("Store:", "Session:", "key:", "admitted:", "replayed:"):
-                assert receipt not in configured, configured
-            terminal_step(master, "/status", f" Status · {session}", composer=True)
+                assert receipt not in configured_body, configured
+            panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b")
+            chat_info_frame(master)
             assert "Detached. Host work continues." in terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
         finally:
@@ -2968,7 +2973,9 @@ def main(selected="all"):
         invalid_name = "human/name\n\x1b[2J\u202e"
         rejected_name = invoke(home, "session", "configure", "--store", store, "--session", invalid_name, expect=2)
         assert not rejected_name.stdout and "[invalid_session_reference]" in rejected_name.stderr, rejected_name
-        control_workspace = workspace / "name\n\x1b[2J\u202e"
+        # Keep hostile bytes visible after home shortening; long absolute
+        # folders otherwise elide whole leading components.
+        control_workspace = home / "name\n\x1b[2J\u202e"
         control_workspace.mkdir()
         escaped_workspace = str(control_workspace).replace("\n", "\\n").replace("\x1b", "\\x1b").replace("\u202e", "\\u202e")
         control_session = create_session(home, "--store", store,
@@ -2985,8 +2992,8 @@ def main(selected="all"):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting, greeting
             assert "\x1b[2J" not in greeting and "\u202e" not in greeting, greeting
-            status = terminal_step(master, "/status", " Status · ", composer=True)
-            assert f" Status · {control_session}" in status and shown(folder_row(home, escaped_workspace) + "\n", status), status
+            status = chat_info_frame(master)
+            assert shown(folder_row(home, escaped_workspace) + "\n", status), status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
             farewell = terminal_step(master, "\x03", "Resume: ")
             assert entered.wait(timeout=5) == 0
@@ -3005,8 +3012,8 @@ def main(selected="all"):
                  "PATH": str(resume_bin) + os.pathsep + os.environ["PATH"]},
         ) as (entered, master):
             read_terminal(master, "› ")
-            resumed = terminal_step(master, "/status", " Status · ", composer=True)
-            assert f" Status · {control_session}" in resumed and shown(folder_row(home, escaped_workspace) + "\n", resumed), resumed
+            resumed = chat_info_frame(master)
+            assert shown(folder_row(home, escaped_workspace) + "\n", resumed), resumed
             terminal_step(master, "\x03", "Resume: ")
             assert entered.wait(timeout=5) == 0
             defaults(home, "--store", store)
@@ -3030,7 +3037,7 @@ def main(selected="all"):
                 "--", unsafe_session], env={**os.environ, "HOME": str(home)},
             ) as (entered, master):
                 read_terminal(master, "› ")
-                status = terminal_step(master, "/status", " Status · ", composer=True)
+                status = chat_info_frame(master)
                 assert "\x1b[2J" not in status and "\u202e" not in status, status
                 assert "Detached." in terminal_step(master, "\x03", "Detached.")
                 assert entered.wait(timeout=5) == 0
@@ -3044,8 +3051,8 @@ def main(selected="all"):
         ) as (entered, master):
             greeting = read_terminal(master, "› ")
             assert "Session:" not in greeting and "\nsafe result" in conversation_text(greeting), greeting
-            status = terminal_step(master, "/status", " Status · ", composer=True)
-            assert f" Status · {unsafe_session}" in status, status
+            status = chat_info_frame(master)
+            assert "Copy last answer" in status, status
             assert "\x1b[2J" not in status and "\u202e" not in status, status
             assert "Detached." in terminal_step(master, "\x03", "Detached.")
             assert entered.wait(timeout=5) == 0
@@ -3239,6 +3246,9 @@ def main(selected="all"):
         proxy = None
         try:
             read_terminal(master, "› ")
+            # Cache actual Session facts before the Host is deliberately lost;
+            # the stopped-Host modal probes edit those already-known facts.
+            chat_info_frame(master)
             before = set(json.loads(run(home, "request", "list")))
             def hold_observation(response):
                 observation_held.set()
@@ -3273,6 +3283,18 @@ def main(selected="all"):
             assert "× Host stopped · " in stopped, stopped
             assert "TruncatedResponse" not in stopped and "Not confirmed" not in stopped and "rui host start" not in stopped, stopped
             assert entered.poll() is None, "the Host's stop ended the TUI"
+            # With the chat draft empty, Host recovery's `r` must still defer
+            # to the modal editor. No Configure is submitted by these probes.
+            chat_info_open(master)
+            panel_frame(master, lambda frame: any(row.strip() == "r" for row in frame.split("\n")),
+                        b"\x1b[B\x1b[B\x1b[B\x1b[B\r\x01\x0br")
+            panel_frame(master, lambda frame: "Copy last answer" in frame
+                        and not any(row.strip() == "r" for row in frame.split("\n")), b"\x1b")
+            model_choice_frame(master, b"\x1b[A\r", query="")
+            model_choice_frame(master, b"r", query="r")
+            panel_frame(master, lambda frame: not model_choice_shown(frame) and "Copy last answer" in frame, b"\x1b")
+            restored = panel_frame(master, lambda frame: "Copy last answer" not in frame and " · r retry" in frame, b"\x1b")
+            assert "Host starting" not in restored, restored
             assert proxy.mutations == [("/v1/message", original)], "a lost observation retransmitted the Message"
             os.write(master, b"\x03")
             lost, errors = terminal_exit(entered, master)

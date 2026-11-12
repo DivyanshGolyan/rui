@@ -1,5 +1,5 @@
 //! Shared input stack. The composer's lower rule and identity/keys line form
-//! the chat footer; the bottom state slot stays below it, blank while idle.
+//! the chat footer; persistent state takes space only while present.
 //! The floating palette belongs to the content above this area.
 const std = @import("std");
 const vaxis = @import("vaxis");
@@ -14,7 +14,7 @@ const status_lines = @import("slash_commands.zig").short_result_lines;
 composer: Composer,
 permission: ?*PermissionCard = null,
 facts: vxfw.Widget = empty.widget(),
-status: vxfw.Widget = empty.widget(),
+status: ?vxfw.Widget = empty.widget(),
 /// Where the facts row sits: under the composer, or last, under the status.
 facts_at: enum { top, bottom } = .top,
 
@@ -30,7 +30,10 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     // short result has, while the content keeps a row.
     const facts_rows: u16 = @min(1, size.height - 1);
     const status_room: u16 = @min(status_lines, size.height -| 1 -| facts_rows);
-    const status = if (status_room == 0) null else try self.status.draw(ctx.withConstraints(.{ .width = size.width, .height = 1 }, .{ .width = size.width, .height = status_room }));
+    const status = if (status_room == 0) null else if (self.status) |shown| status: {
+        const drawn = try shown.draw(ctx.withConstraints(.{ .width = size.width }, .{ .width = size.width, .height = status_room }));
+        break :status if (drawn.size.height == 0) null else drawn;
+    } else null;
     const footer_rows = facts_rows + if (status) |drawn| @min(drawn.size.height, status_room) else 0;
     const children = try ctx.arena.alloc(vxfw.SubSurface, 1 + facts_rows + @intFromBool(status != null));
     // A draft grows to a third of the screen at most, between its two rules.
@@ -67,7 +70,6 @@ test "InputArea keeps facts below the composer when a notice replaces the status
         const idle = try input.widget().draw(ctx);
         try std.testing.expectEqual(@as(u16, 5), idle.size.height);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
-        try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
         try std.testing.expectEqualStrings("n", idle.children[1].surface.readCell(0, 0).char.grapheme);
         try std.testing.expectEqualStrings("e", idle.children[2].surface.readCell(0, 0).char.grapheme);
         // A command's two-line result takes two rows; the composer moves up.
@@ -228,7 +230,7 @@ test "InputArea approval has one document title above a choice between composer 
     }
 }
 
-test "InputArea chat keeps a two-row footer above the unchanged bottom state slot" {
+test "InputArea has no empty status row below the footer" {
     var bytes: [16]u8 = undefined;
     const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes };
     const footer: @import("widgets/Footer.zig") = .{ .left = "Chat · model", .right = "ctrl+x stop" };
@@ -240,11 +242,10 @@ test "InputArea chat keeps a two-row footer above the unchanged bottom state slo
         const ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = size.width, .height = size.height }, .cell_size = .{} };
 
         const idle = try input.widget().draw(ctx);
-        try std.testing.expectEqual(@as(u16, 5), idle.size.height);
-        try std.testing.expectEqual(@as(usize, 3), idle.children.len);
+        try std.testing.expectEqual(@as(u16, 4), idle.size.height);
+        try std.testing.expectEqual(@as(usize, 2), idle.children.len);
         try std.testing.expectEqualStrings("─", idle.children[0].surface.readCell(0, 2).char.grapheme);
         try std.testing.expectEqual(@as(i17, 3), idle.children[1].origin.row);
-        try std.testing.expectEqual(@as(i17, 4), idle.children[2].origin.row);
 
         notice.text = "Copied 12 lines";
         const noticed = try input.widget().draw(ctx);
@@ -269,4 +270,20 @@ test "InputArea puts the facts row last, under the status's rows, when asked" {
     try std.testing.expectEqual(@as(i17, 3), drawn.children[2].origin.row);
     try std.testing.expectEqual(@as(i17, 5), drawn.children[1].origin.row);
     try std.testing.expectEqualStrings("f", drawn.children[1].surface.readCell(0, 0).char.grapheme);
+}
+
+test "InputArea a modal footer replaces status without retaining an extra bottom row" {
+    var bytes = "kept draft".*;
+    const editor: @import("TerminalEditor.zig") = .{ .buffer = &bytes, .length = bytes.len, .cursor = bytes.len };
+    const footer: vxfw.Text = .{ .text = "Fix retry deadline · info    esc close", .softwrap = false, .width_basis = .parent };
+    var input: Self = .{ .composer = .{ .editor = &editor }, .facts = footer.widget(), .status = null };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_]u16{ 46, 99, 140 }) |width| {
+        const drawn = try input.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 30 }, .cell_size = .{} });
+        try std.testing.expectEqual(@as(u16, 4), drawn.size.height);
+        try std.testing.expectEqual(@as(usize, 2), drawn.children.len);
+        try std.testing.expectEqual(@as(i17, 3), drawn.children[1].origin.row);
+        try std.testing.expectEqual(@as(u16, 1), drawn.children[1].surface.size.height);
+    }
 }

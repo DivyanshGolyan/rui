@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Switch a model's sign-in and save it through the plain terminal."""
+"""Save a model for each sign-in through the app settings Model field."""
 import json
 import os
 import shutil
@@ -9,7 +9,7 @@ import threading
 import codex_fixture
 import host_process
 import model_fixture as fixture
-from human_cli_fixture import overview_frame, overview_title, terminal_exit
+from human_cli_fixture import AppModelCatalog, app_model_open, model_choice_frame, model_choice_shown, panel_frame, overview_frame, overview_title, terminal_exit
 from terminal_process import close_pty, open_pty, spawn
 
 
@@ -28,6 +28,7 @@ def main():
     thread = threading.Thread(target=endpoint.serve_forever)
     thread.start()
     host = caller = None
+    catalog = None
     master = slave = None
     completed = False
     try:
@@ -51,36 +52,40 @@ def main():
             value = json.loads(result.stdout)
             return value["provider"] == provider and value["model"] == "gpt-6-luna"
 
-        master, slave = open_pty(columns=80, rows=24)
-        caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
-                       env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
-        overview_frame(master, overview_title)
-        for initial, target, provider in (("Codex", "API key", "openai"),
-                                          ("API key", "Codex", "codex")):
-            def row_has(screen, sign_in):
-                return any("gpt-6-luna" in row and "‹" in row and f"[{sign_in}]" in row
-                           for row in screen.splitlines())
-
-            shown = overview_frame(master, lambda screen, initial=initial: row_has(screen, initial), b"/model gpt-6-luna")
-            assert "/model gpt-6-luna" in shown, shown
-            switched = overview_frame(master, lambda screen, target=target: row_has(screen, target), b"\t")
-            assert "/model gpt-6-luna" in switched, switched
-            selected = overview_frame(master, lambda screen:
-                                      "gpt-6-luna" in screen and "/model" not in screen, b"\r")
-            assert "enter start" in selected, selected
-            host_process.wait_for(lambda provider=provider: saved(provider), f"{target} model default saved")
-
-        os.write(master, b"\x03")
-        _, errors = terminal_exit(caller, master)
-        assert caller.returncode == 0, errors
+        # Isolate provider-fixed Model persistence from the Sign-in journey,
+        # whose first-run choices are covered by human_cli_integration.
+        for sign_in, provider in (("API key", "openai"), ("Codex", "codex")):
+            changed = subprocess.run(
+                [str(fixture.RUI), "defaults", "configure", "--store", str(store),
+                 "--provider", provider, "--model", "gpt-5.5"],
+                env=env, capture_output=True, text=True, timeout=20, check=False)
+            assert changed.returncode == 0, changed.stderr
+            master, slave = open_pty(columns=80, rows=24)
+            catalog = AppModelCatalog(host)
+            caller = spawn([str(fixture.RUI), "--store", str(store)], cwd=state,
+                           env=env, stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            overview_frame(master, overview_title)
+            app_model_open(master, b"gpt-6-luna", catalog=catalog)
+            selected = panel_frame(master, lambda screen: not model_choice_shown(screen) and "saving" not in screen
+                                   and any("Model" in row and "gpt-6-luna" in row for row in screen.splitlines()), b"\r")
+            assert any("Sign-in" in row and sign_in in row for row in selected.splitlines()), selected
+            host_process.wait_for(lambda provider=provider: saved(provider), f"{sign_in} model default saved")
+            os.write(master, b"\x03")
+            _, errors = terminal_exit(caller, master)
+            assert caller.returncode == 0, errors
+            caller = None
+            close_pty(master)
+            close_pty(slave)
+            master = slave = None
         assert endpoint.requests == [], endpoint.requests
         completed = True
-        print("model picker: Tab switches both sign-ins and one Enter saves each default", flush=True)
+        print("model picker: Model field saves each configured sign-in without switching provider", flush=True)
     finally:
         host_process.dispose_all(
             lambda: host_process.stop_process(caller, timeout=5) if caller else None,
             lambda: close_pty(master) if master is not None else None,
             lambda: close_pty(slave) if slave is not None else None,
+            lambda: catalog.close() if catalog else None,
             lambda: fixture.stop_host(host) if host else None,
             endpoint.shutdown, endpoint.server_close, lambda: thread.join(timeout=5),
         )

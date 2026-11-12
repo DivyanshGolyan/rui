@@ -11,12 +11,11 @@ const ConsentPolicy = @import("session_consent.zig");
 pub const Action = enum {
     page_up,
     page_down,
-    /// Up and Down: the shown list's highlight, the /status page's row,
-    /// else a line of scrolling.
+    /// Up and Down: the shown list's highlight, else a line of scrolling.
     previous,
     next,
     /// Shift-Up and Shift-Down: the shown list's highlight, else a line of
-    /// scrolling, also on the /status page.
+    /// scrolling.
     scroll_up,
     scroll_down,
     /// On an empty or recalled draft, the Message sent before the one it
@@ -69,6 +68,27 @@ pub const keys: keymap.Keymap(Action) = .init(.{
 
 /// One input as the conversation's table classifies it.
 pub const Selection = keymap.Selection(Action);
+
+/// Modal fields own navigation and editing, never Session-wide custody or work.
+pub fn panelAction(selected: Selection) ?Action {
+    if (selected != .action) return null;
+    return switch (selected.action) {
+        .detach, .recover, .stop, .archive => selected.action,
+        else => null,
+    };
+}
+
+test "chat info leaves Session-wide actions with the conversation owner" {
+    for (std.enums.values(Action)) |action| {
+        const expected: ?Action = switch (action) {
+            .detach, .recover, .stop, .archive => action,
+            else => null,
+        };
+        try std.testing.expectEqual(expected, panelAction(.{ .action = action }));
+    }
+    try std.testing.expectEqual(@as(?Action, null), panelAction(.none));
+    try std.testing.expectEqual(@as(?Action, null), panelAction(.enter));
+}
 
 /// Whether an input clears the overview's notice: every input but Ctrl-X
 /// and Alt-A, which step the overview themselves once the Session opens.

@@ -509,11 +509,11 @@ test "Tab puts in the list's first word at the draft's end and adds a tab anywhe
         }
     };
     const cases = [_]struct { typed: []const u8, shown: []const u8 }{
-        .{ .typed = "/st\t", .shown = "/status" },
-        .{ .typed = "/st\x1b[D\x1b[D\t", .shown = "/status" },
+        .{ .typed = "/ef\t", .shown = "/effort " },
+        .{ .typed = "/ef\x1b[D\x1b[D\t", .shown = "/effort " },
         .{ .typed = "/cop\t", .shown = "/copy " },
-        .{ .typed = "/c\t", .shown = "/configure " },
-        .{ .typed = "/c\t\t", .shown = "/configure --permission-mode " },
+        .{ .typed = "/s\t", .shown = "/setup " },
+        .{ .typed = "/s\t\t", .shown = "/setup --model " },
         .{ .typed = "/zz\t", .shown = "/zz" },
         .{ .typed = "/copy \t", .shown = "/copy code" },
         .{ .typed = "/rename \t", .shown = "/rename \t" },
