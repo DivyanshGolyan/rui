@@ -568,7 +568,7 @@ fn showSubmissionFailure(self: *Self) !void {
     var output = file.writerStreaming(self.init.io, &buffer);
     try reads.writeSubmission(self.submission.view(), if (self.heldFailure()) |failure| failure.page else null, &output.interface);
     try output.flush();
-    try self.screen.showFile(self.init.io, file, false);
+    try self.screen.showFile(self.init.io, file, .details);
     self.dirty = true;
 }
 
@@ -804,7 +804,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                 // keeps the terminal paste flag until its actual end arrives.
                 const blurred = self.input.appEvent(conversation_keys, .focus_out, self.app_hooks.root.pasting, false);
                 if (blurred == .editor and blurred.editor == .refused) self.notice = refusedNotice(blurred.editor.refused);
-                try self.screen.showFile(self.init.io, self.files.action, true);
+                try self.screen.showFile(self.init.io, self.files.action, .action);
                 self.action_summary = self.reading.prepared_summary;
                 self.reading.prepared_action = null;
                 self.reading.phase = .activity;
@@ -2566,7 +2566,7 @@ const OpenRequest = struct { target: reads.Target, asked: reader_policy.Asked };
 fn pagePlace(self: *const Self) reader_policy.Place {
     return switch (self.screen.view) {
         .feed => .feed,
-        .inspection, .action, .message => .elsewhere,
+        .inspection, .details, .action, .message => .elsewhere,
     };
 }
 
@@ -3291,7 +3291,7 @@ fn showInspection(self: *Self) !void {
         self.notice = slash_commands_shared.no_output;
         return;
     }
-    try self.screen.showFile(self.init.io, self.files.inspection, false);
+    try self.screen.showFile(self.init.io, self.files.inspection, .inspection);
     if (self.inspection.kind == .requests) self.saved_requests = self.job.result.requests;
     // The page heading already says how to return.
     self.notice = null;
@@ -4100,7 +4100,7 @@ test "the /requests page lists its rows over an empty draft, and Enter or Tab ta
     const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
     defer page.close(std.testing.io);
     try page.writePositionalAll(std.testing.io, "Rui: Local recovery handles (not Host work status):\n", 0);
-    try held.screen.showFile(std.testing.io, page, false);
+    try held.screen.showFile(std.testing.io, page, .inspection);
     self.inspection.kind = .requests;
     self.dirty = true;
     try held.settle();
@@ -4176,7 +4176,7 @@ test "a pending decision, or a Message that carries one, has no /recover row, an
         const page = try held.tmp.dir.createFile(std.testing.io, "page", .{ .read = true });
         defer page.close(std.testing.io);
         try page.writePositionalAll(std.testing.io, "Rui: Local recovery handles (not Host work status):\n", 0);
-        try held.screen.showFile(std.testing.io, page, false);
+        try held.screen.showFile(std.testing.io, page, .inspection);
         self.inspection.kind = .requests;
         self.dirty = true;
         try held.settle();
@@ -6099,7 +6099,7 @@ test "App Session info opens while commands wait and refused originals keep thei
     defer self.files.details.close(std.testing.io);
     try self.chrome.status.key.on_click(self.chrome.status.key.userdata, &fixture.ctx);
     try std.testing.expect(self.input.queuedCommand() == null);
-    try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+    try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
     try std.testing.expectEqual(Submission.State.not_started, self.submission.view().?.state);
 }
 
@@ -8678,13 +8678,120 @@ test "repair details rewrite from byte zero on first repeated and changed held f
                 try std.testing.expectEqualStrings(expected, bytes);
                 try std.testing.expectEqualStrings(expected, self.screen.browsing.text());
                 try std.testing.expect(std.mem.indexOfScalar(u8, bytes, 0) == null);
-                try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+                try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
                 try std.testing.expect(self.screen.preview_complete);
                 try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
                 try std.testing.expectEqual(cursor, self.input.composition().cursor);
                 try std.testing.expectEqualStrings("original message", try self.input.message(original));
             }
         }
+    }
+}
+
+test "repair details own their page identity and one Escape returns without inheriting request rows" {
+    const Prior = enum { initial, requests_page, command_read, copy_read };
+    const Original = enum { unconfirmed_message, rejected_message, unsaved_message, decision };
+    const Entry = enum { owner, alt_d, details_control };
+    const original_key = "01234567-89ab-4cde-8012-0123456789ab";
+    for (std.enums.values(Prior)) |prior| for (std.enums.values(Original)) |original| {
+        for ([_]bool{ false, true }) |saved| for ([_][]const u8{ "", "kept draft" }) |draft| {
+            const held = try HeldFrontend.create();
+            defer held.destroy();
+            const self = &held.self;
+            self.files.details = try held.tmp.dir.createFile(std.testing.io, "repair-details", .{ .read = true });
+            defer self.files.details.close(std.testing.io);
+            const requests = try held.tmp.dir.createFile(std.testing.io, "requests", .{ .read = true });
+            defer requests.close(std.testing.io);
+            try requests.writePositionalAll(std.testing.io, "Local recovery handles\n", 0);
+            const message = self.input.submitText("exact original");
+            self.submission.intent = if (original == .decision)
+                .{ .decision = .{ .action = 7, .decision = .deny } }
+            else
+                .{ .message = message };
+            self.submission.key = original_key.*;
+            self.submission.state = switch (original) {
+                .unconfirmed_message, .decision => .unconfirmed,
+                .rejected_message => .rejected,
+                .unsaved_message => .not_started,
+            };
+            self.submission.last_error = error.RequestBindingMismatch;
+            if (saved) self.saved_requests.offer(.{ .nanoseconds = 1 }, "09:00", "22222222-89ab-4cde-8012-0123456789ab");
+            self.inspection.kind = switch (prior) {
+                .initial, .requests_page => .requests,
+                .command_read => .command,
+                .copy_read => .{ .copy = .answer },
+            };
+            const read_kind = self.inspection.kind;
+            if (draft.len != 0) try held.keys(draft);
+            const cursor = self.input.composition().cursor;
+            for (std.enums.values(Entry)) |entry| for ([_][]const u8{ "\x1b", "\x07" }) |close| {
+                errdefer std.debug.print("repair close prior={s} original={s} saved={} draft={s} entry={s} key={x}\n", .{ @tagName(prior), @tagName(original), saved, draft, @tagName(entry), close[0] });
+                if (prior == .requests_page) {
+                    try self.screen.showFile(std.testing.io, requests, .inspection);
+                    _ = try held.draw();
+                    // A real requests page still owns its recovery palette.
+                    if (draft.len == 0 and (saved or original == .unconfirmed_message))
+                        try std.testing.expect(self.requestList() != null);
+                }
+                switch (entry) {
+                    .owner => try self.showSubmissionFailure(),
+                    .alt_d => try held.keys("\x1bd"),
+                    .details_control => {
+                        var ctx = held.context();
+                        try chromeClick(.details)(self, &ctx);
+                    },
+                }
+                // The current reader's operation is not the presented page.
+                try std.testing.expectEqualDeep(read_kind, self.inspection.kind);
+                try std.testing.expect(self.requestList() == null);
+                _ = try held.draw();
+                try std.testing.expect(self.screen.commands == null);
+                try held.keys(close);
+                try std.testing.expectEqual(Screen.ViewKind.feed, self.screen.view);
+                try std.testing.expect(self.leaving == null and held.left == null);
+                try std.testing.expectEqualStrings(draft, self.input.composition().bytes);
+                try std.testing.expectEqual(cursor, self.input.composition().cursor);
+                try std.testing.expectEqualStrings(original_key, &self.submission.key);
+                try std.testing.expectEqualStrings("exact original", try self.input.message(message));
+                try std.testing.expect(self.submission.intent != null and self.submission.retry == null);
+                try std.testing.expect(self.input.queuedCommand() == null);
+            };
+        };
+    };
+}
+
+test "repair details keep explicit command cancellation and return to the adopted Action" {
+    for ([_]bool{ false, true }) |action| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        self.files.details = try held.tmp.dir.createFile(std.testing.io, "repair-details", .{ .read = true });
+        defer self.files.details.close(std.testing.io);
+        const action_file = if (action) try held.adopt(2) else null;
+        defer if (action_file) |file| file.close(std.testing.io);
+        self.submission.intent = .{ .message = self.input.submitText("exact original") };
+        self.submission.state = .unconfirmed;
+        self.submission.key = "01234567-89ab-4cde-8012-0123456789ab".*;
+        try self.showSubmissionFailure();
+        if (!action) {
+            // A visible command still owns the first Escape. An adopted
+            // Action intentionally hides command choices instead.
+            try held.keys("/ef");
+            _ = try held.draw();
+            try std.testing.expectEqual(.drawn, self.screen.commands.?.seen);
+            try held.keys("\x1b");
+            try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
+            try std.testing.expectEqualStrings("", self.input.composition().bytes);
+        }
+        _ = try held.draw();
+        try std.testing.expect(self.screen.commands == null);
+        const consent = self.screen.consent;
+        try held.keys("\x1b");
+        try std.testing.expectEqual(if (action) Screen.ViewKind.action else Screen.ViewKind.feed, self.screen.view);
+        try std.testing.expectEqualDeep(consent, self.screen.consent);
+        try std.testing.expect(self.leaving == null and held.left == null);
+        try std.testing.expectEqualStrings("exact original", try self.input.message(self.submission.intent.?.message));
+        try std.testing.expect(self.submission.retry == null and self.input.queuedCommand() == null);
     }
 }
 
@@ -8718,7 +8825,7 @@ test "chat info repair details never overwrite the active reader staging file" {
     }
     try test_poll.waitUntil(std.testing.io, test_poll.after(std.testing.io, .fromSeconds(2)), &Staging.ready, test_poll.isSet);
     try self.showSubmissionFailure();
-    try std.testing.expectEqual(Screen.ViewKind.inspection, self.screen.view);
+    try std.testing.expectEqual(Screen.ViewKind.details, self.screen.view);
     try std.testing.expect(std.mem.indexOf(u8, self.screen.browsing.text(), "Original reserved request: KKK") != null);
     var bytes: [128]u8 = undefined;
     const count = try self.files.inspection.readPositionalAll(std.testing.io, &bytes, 0);
