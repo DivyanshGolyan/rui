@@ -723,6 +723,16 @@ class TerminalScreen:
                          and shown(footer, screen))
         return frame
 
+    def leave_empty_chat(self, case, session):
+        """Acknowledge each modal/editor transition before the next Escape."""
+        self.send("\x1b")
+        self.until(lambda: "Copy last answer" not in self.capture.completed,
+                   "chat info closed before clearing the proven unsent draft")
+        self.send("\x05\x15")  # End, kill to start: the chat editor's own keys.
+        self.draft("", 2)
+        self.send("\x1b")
+        return self.empty_overview(case, session)
+
     def ignored_overview_input(self, text, *markers):
         self.overview(ready=False)
         # End and Enter open Settings after every ignored byte. Observing that
@@ -1175,8 +1185,7 @@ def conversation_case(root, binary, releases, artifacts):
             screen.save(artifacts, "conversation-returned")
             # The draft/caret survived above. Clear it deliberately only now,
             # so Esc can leave; stored empty identity must outlive its row.
-            screen.send("\x1b\x01\x0b\x1b")
-            screen.empty_overview(c, session)
+            screen.leave_empty_chat(c, session)
             screen.save(artifacts, "conversation-left-empty-hidden")
         after = c.json("session", "inspect", "--store", c.store, "--session", session)
         assert after["session"] == before["session"], "Upgrade submitted work or changed the open Session"

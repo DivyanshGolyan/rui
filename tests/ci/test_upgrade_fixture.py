@@ -115,5 +115,21 @@ class UpgradeEmptyChatTest(unittest.TestCase):
                 self.hidden(frame, listing={"sessions": sessions})
 
 
+    def test_leave_empty_chat_acknowledges_modal_and_editor_before_escape(self):
+        events = Mock()
+        self.screen.capture = SimpleNamespace(completed="chat footer")
+        self.screen.send = Mock()
+        self.screen.until = Mock(side_effect=lambda predicate, description: self.assertTrue(predicate()))
+        self.screen.draft = Mock()
+        self.screen.empty_overview = Mock(return_value="hidden empty")
+        for name in ("send", "until", "draft", "empty_overview"):
+            events.attach_mock(getattr(self.screen, name), name)
+        self.assertEqual("hidden empty", self.screen.leave_empty_chat(self.case, self.session))
+        self.assertEqual(events.mock_calls[0], call.send("\x1b"))
+        self.assertEqual(events.mock_calls[1][0], "until")
+        self.assertEqual(events.mock_calls[2:], [call.send("\x05\x15"), call.draft("", 2),
+                                               call.send("\x1b"), call.empty_overview(self.case, self.session)])
+
+
 if __name__ == "__main__":
     unittest.main()
