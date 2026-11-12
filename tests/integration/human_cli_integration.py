@@ -2558,7 +2558,7 @@ def main(selected="all"):
             assert "\n› first input" in conversation_text(greeting) and "\nfirst answer" in conversation_text(greeting), greeting
             binding = terminal_step(master, "/status", " Status · ", composer=True)
             assert f" Status · {session}" in binding and shown(folder_row(preferences_home, workspace.resolve()), binding), binding
-            assert "gpt-6-sol · ChatGPT" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
+            assert "gpt-6-sol · Codex" in binding and " · gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
             # The wide layout exposes the pinned Settings row without
             # leaving this conversation or replacing its /status page.
             terminal_capture(master).resize(140, 50)

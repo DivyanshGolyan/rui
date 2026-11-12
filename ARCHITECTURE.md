@@ -1097,6 +1097,7 @@ Accept completed items in provider output order, not token-delta arrival order.
 Require successful `response.completed` before settlement.
 The managed route can send an empty `response.completed.output` after completed stream items; this does not discard those items, while any nonempty terminal output must match all of them in order, kind, ID and exact raw item bytes, including unknown open fields and JSON spelling.
 The one exception is reasoning and compaction items: the provider encrypts their content afresh for `response.completed`, so they agree by order, kind and ID, and the streamed copy is kept.
+A superseded compaction prefix has no kept record, so its entries in a nonempty list are counted but not compared.
 Failed, incomplete, disconnected or contradictory streams cannot publish a successful candidate.
 Keep response ID, provider request correlation when supplied, terminal status, usage and reported model evidence with the producing Operation/execution; none is a replay input item.
 
@@ -1256,11 +1257,15 @@ V1 depends on neither that endpoint nor automatic `context_management` support.
 Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead ends with the top-level `"tool_choice":"none","context_management":[{"type":"compaction","compact_threshold":1000}]`, after the history span, so the span and its carry are unchanged.
 The provider refuses a threshold under 1000 tokens, and a compaction Operation runs only on a large context, so 1000 always compacts; `tool_choice` keeps the reply the provider writes while compacting from calling a function or searching the web.
 With `context_management` the provider's response is `compaction`, `message`, `compaction`, and the last compaction item alone carries the whole memory: replaying only it keeps the context.
-The rule above still expects exactly one compaction item, so a version-three compaction does not settle yet; only `chatgpt` pins `openai-responses/3`, so a ChatGPT plan Session's compaction fails until accepting that shape, a separate decision, lands.
+Only `chatgpt` pins `openai-responses/3`, so a ChatGPT plan Session's `compaction`, `message`, `compaction` response settles on its last compaction item: a later compaction item supersedes everything before it, as the rule below states.
 
-Require a completed response with exactly one nonempty supported compaction item for explicit compaction.
-Store the complete ordered output once on that Operation.
-The base anchor is its Operation ID and the compaction item's ordinal within that canonical output.
+Require a completed response with at least one nonempty supported compaction item for explicit compaction.
+The last compaction item is the new base.
+A later compaction item supersedes all output before it, the earlier compaction item included: the response interpreter keeps no record of it, so it is never stored, replayed, selected as the answer or forwarded.
+The first compaction item supersedes nothing, so a response with one compaction item is unchanged, whatever comes before or after it.
+Superseded items are not stored because one owner then decides what replays: the Store receives exactly one compaction item, and every later reader (the base anchor, history replay, the feed's compaction row, drop-unit accounting and the history memo) keeps reading that one item, as before.
+Store the kept output once on that Operation: the whole response when it holds one compaction item, else the last compaction item through the end of the response.
+The base anchor is its Operation ID and the compaction item's ordinal within that output.
 
 Derive the replacement recipe from the covered original host User/System Instruction inputs in their original order, then the slice from that item through the end of the same output, then the complete later suffix.
 Retained host inputs are existing canonical references recovered through the source recipe, including earlier bases; never copies or a newly stored request body.
@@ -1275,7 +1280,7 @@ Result acceptance determines when the new base becomes available, not what it co
 Pending messages and later instruction updates remain outside that frontier and appear once in subsequent context.
 
 Keep call/result pairs intact when selecting the frontier.
-Missing/duplicate compaction, unknown compaction variants, truncated output and unresolved/failed compaction cannot advance it.
+Missing compaction, unknown compaction variants, truncated output and unresolved/failed compaction cannot advance it.
 If a supported assistant-response protocol later enables automatic compaction, its base must likewise be a slice of that producing Operation, retaining every item after the anchor; it cannot invent a separate compaction result or drop later calls.
 That route needs its own capability evidence before enablement.
 Do not copy another client's message truncation, local-summary or model-fallback policy.
@@ -1738,7 +1743,7 @@ A sealed body shorter than its recorded length, or one that fails to map, stays 
 To interpret a response, the shell maps the sealed capture read-only, frames its SSE lines and writes each event's data to charged event-data scratch, which it maps read-only once at the capture's length, which decoded data never exceeds, so each event reaches the codec whole as one slice of that map, however large; a failure to map it fails the response `response_data_failed`, as a failed write does.
 The codec answers each event with one value, in scratch the shell lends and the codec writes before it reads: an event it ignores, a stream's end, an added item's identity, an accepted output item, the completed response or the provider's failure, or the reason it rejects the event; an output item and the completed response name cursors from which the shell asks for their bag members and parts one at a time, each a range of the event.
 The codec's stream state is a small value the shell stores between events.
-The shell keeps every rule across items and events: it decodes and hashes what the codec names, keeps the answer selection and the call and compaction counts, records metadata and evidence, compares the completed output list with the item records it wrote, mapped read-only, and maps each reason to its rejection.
+The shell keeps every rule across items and events: it decodes and hashes what the codec names, keeps the answer selection, the call count and the compaction base (dropping a superseded prefix), records metadata and evidence, compares the completed output list with the item records it wrote, mapped read-only, and maps each reason to its rejection.
 An execution receives its admitted Operation/Attempt binding, one-shot permit, immutable input readers and local cancellation control; it cannot choose another descriptor or read current Session settings to replace saved inputs.
 Keep the permit distinct from the read access needed for validation or permission preview.
 The reserved execution owner retains this binding before fallible post-commit preparation begins; preparation, authentication and launch failures remain attributable to that Attempt under its failure or canonical-shutdown rule.
