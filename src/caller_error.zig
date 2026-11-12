@@ -57,6 +57,7 @@ pub const Code = enum {
     upgrade_ineligible,
     upgrade_release_invalid,
     upgrade_preparation_failed,
+    upgrade_download_failed,
     host_stopping,
     mysql_host_unavailable,
     store_path_malformed,
@@ -249,7 +250,8 @@ fn mapped(err: anyerror) ?Code {
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
-        error.InvalidReleaseVersion, error.InvalidReleaseChecksum, error.DuplicateReleaseChecksum, error.MissingReleaseChecksum, error.MissingOrDuplicateReleaseAsset, error.NotStableRelease, error.UnpinnedReleaseAsset, error.InvalidReleaseEndpoint, error.UnsupportedReleasePlatform => .upgrade_release_invalid,
+        error.InvalidReleaseVersion, error.InvalidReleaseChecksum, error.DuplicateReleaseChecksum, error.MissingReleaseChecksum, error.InvalidReleaseEndpoint, error.UnsupportedReleasePlatform => .upgrade_release_invalid,
+        error.ReleaseDownloadFailed => .upgrade_download_failed,
         error.InvalidManagedBuild, error.InvalidReleaseExecutable, error.ReleaseArchiveTooLarge, error.ReleaseChecksumMismatch, error.ReleaseExecutableVersionMismatch, error.UnsafeReleaseArchive, error.UpgradeChildFailed => .upgrade_preparation_failed,
         error.HostStopping => .host_stopping,
         error.MysqlHostUnavailable => .mysql_host_unavailable,
@@ -411,7 +413,8 @@ pub fn facts(code: Code) Facts {
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
         .host_identity_unconfirmed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host's exact process/build identity could not be verified.", .next = "Inspect this Store with its owning client. Do not pause a guessed or replacement Host." },
         .upgrade_ineligible => .{ .act = .operate, .input = null, .accepted = .none, .says = "This installation is not eligible for automatic release upgrade.", .next = "Use the standalone release installer for a managed source build, or the application/package owner for an unmanaged binary." },
-        .upgrade_release_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "Published stable release metadata or platform assets could not be validated.", .next = "Check the published release and supported platform; no installation or Host was changed." },
+        .upgrade_release_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "Published stable release tag or platform checksums could not be validated.", .next = "Check the published release and supported platform; no installation or Host was changed." },
+        .upgrade_download_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui could not download release information or the archive from GitHub.", .next = "Check network access, then retry; nothing was changed." },
         .upgrade_preparation_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Release preparation or validation failed.", .next = "Check network access, disk space and the published archive. The selected build and Host were not changed before publication." },
         .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
         .host_incompatible => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host serving this Store runs a different Rui version that does not speak this rui's protocol.", .next = "Pause it with the Rui version that started it, then start it again with rui host start --store PATH." },
@@ -828,4 +831,10 @@ test "saved request wire mismatch has an explicit recovery diagnostic" {
     try writeLine(&out, .request_wire_incompatible, .{ .resource = "request", .operation = "recover" });
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "different Rui wire version; it was not sent") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "do not resubmit it with a new key") != null);
+}
+
+test "release download failures have their own caller code" {
+    try std.testing.expectEqual(Code.upgrade_download_failed, of(error.ReleaseDownloadFailed));
+    try std.testing.expectEqual(Code.upgrade_preparation_failed, of(error.UpgradeChildFailed));
+    try std.testing.expectEqual(Code.upgrade_release_invalid, of(error.InvalidReleaseEndpoint));
 }

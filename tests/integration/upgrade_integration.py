@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Native, offline Upgrade evidence: python3 upgrade_integration.py REAL_RUI [terminal|startup].
 
-Release metadata, target version and archives may be synthetic. Only the
+Release redirects, target version and archives may be synthetic. Only the
 *selected old version* fixture is a --version-only script; every started Host
 and every install target is the supplied real native executable. Retained-build paths, not invented
 Host versions, exercise replacement of an already-running native Host.
@@ -62,7 +62,8 @@ class Releases:
         self.gates = {}
         self.status = {}
         self.errors = []
-        self.metadata_change = None
+        self.latest_location = None
+        self.sums_name = None
         owner = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -73,15 +74,26 @@ class Releases:
                     if self.path in owner.gates:
                         owner.gates[self.path].hold()
                     status = owner.status.get(self.path, 200)
-                    if self.path == "/latest":
-                        body = json.dumps(owner.metadata()).encode()
+                    location = None
+                    if self.path == "/releases/latest":
+                        status = owner.status.get(self.path, 302)
+                        location = owner.latest_location if owner.latest_location is not None else owner.origin + "/releases/redirect"
+                        body = b""
+                    elif self.path == "/releases/redirect":
+                        status = owner.status.get(self.path, 302)
+                        location = owner.origin + f"/releases/tag/v{owner.version}"
+                        body = b""
+                    elif self.path == f"/releases/tag/v{owner.version}":
+                        body = b"fixture release page; HTML is not release metadata"
                     elif self.path == owner.sums_path:
-                        body = f"{owner.digest}  {owner.name}\n".encode()
+                        body = f"{owner.digest}  {owner.sums_name or owner.name}\n".encode()
                     elif self.path == owner.archive_path:
                         body = owner.archive
                     else:
-                        status, body = 404, b"unexpected fixture endpoint"
+                        status, body = owner.status.get(self.path, 404), b"unexpected fixture endpoint"
                     self.send_response(status)
+                    if location:
+                        self.send_header("Location", location)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
@@ -120,14 +132,6 @@ class Releases:
             archive.addfile(entry, io.BytesIO(notices))
         return output.getvalue()
 
-    def metadata(self):
-        value = {"tag_name": f"v{self.version}", "draft": False, "prerelease": False,
-                 "assets": [{"name": self.name, "browser_download_url": self.origin + self.archive_path},
-                            {"name": "SHA256SUMS", "browser_download_url": self.origin + self.sums_path}]}
-        if self.metadata_change:
-            self.metadata_change(value)
-        return value
-
     def gate_archive(self):
         gate = self.gates[self.archive_path] = Gate()
         return gate
@@ -153,7 +157,7 @@ class Case:
         self.releases = releases
         self.env = {**os.environ, "HOME": str(self.home),
                     "PATH": f"{self.home}/.local/bin:{os.environ['PATH']}",
-                    "RUI_TEST_UPGRADE_API_URL": releases.origin + "/latest",
+                    "RUI_TEST_UPGRADE_RELEASES_URL": releases.origin + "/releases",
                     "RUI_UPGRADE_FIXTURE_PRIVATE": "isolated-private-launch-value"}
         self.link = self.home / ".local/bin/rui"
         self.hosts = []
@@ -257,7 +261,8 @@ def case(root, binary, releases, name):
         def reset_publication():
             releases.gates.clear()
             releases.status.clear()
-            releases.metadata_change = None
+            releases.latest_location = None
+            releases.sums_name = None
         dispose_all(value.close, reset_publication)
 
 
@@ -295,7 +300,7 @@ def discovery_cases(root, binary, releases):
         assert f"Latest published stable: {releases.version}" in output, output
         assert "Selected managed release: 0.1.0" in output, output
         assert "No Host was running" in output
-        assert releases.requests[start:] == ["/latest", releases.sums_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path]
         c.assert_unchanged()
         c.assert_no_host()
         for args in (("--bogus",), ("unexpected-message",), ("--check", "--check")):
@@ -341,20 +346,33 @@ def discovery_cases(root, binary, releases):
         assert c.link.resolve() == released / "bin/rui"
         c.assert_no_host()
 
-    variants = {
-        "draft": lambda m: m.update(draft=True),
-        "prerelease": lambda m: m.update(prerelease=True),
-        "malformed-version": lambda m: m.update(tag_name="v0.056.4"),
-        "missing-assets": lambda m: m.update(assets=[]),
-        "unpinned-assets": lambda m: m["assets"][0].update(browser_download_url=releases.origin + "/latest/archive"),
-    }
-    for name, change in variants.items():
+    variants = ("malformed-version", "missing-redirect", "missing-archive-checksum", "unpinned-final-origin")
+    for name in variants:
         with case(root, binary, releases, name) as c:
             c.old_selection()
-            releases.metadata_change = change
-            result = subprocess.run([str(binary), "upgrade", "--check", "--store", str(c.store)],
-                                    env=c.env, capture_output=True, text=True, timeout=15)
-            assert result.returncode != 0, (name, result.stdout, result.stderr)
+            if name == "malformed-version":
+                releases.latest_location = releases.origin + "/releases/tag/v0.056.4"
+                releases.status["/releases/tag/v0.056.4"] = 200
+            elif name == "missing-redirect":
+                releases.status["/releases/latest"] = 200
+            elif name == "missing-archive-checksum":
+                releases.sums_name = "another-archive.tar.gz"
+            else:
+                releases.latest_location = releases.origin + "/not-the-repository/releases/tag/v0.56.4"
+                releases.status["/not-the-repository/releases/tag/v0.56.4"] = 200
+            result = c.upgrade("--check", expect=6)
+            assert "upgrade_release_invalid" in result, (name, result)
+            c.assert_unchanged()
+            c.assert_no_host()
+
+    for path, checking in (("/releases/latest", True), (releases.sums_path, True), (releases.archive_path, False)):
+        with case(root, binary, releases, "download-403-" + ("latest" if path.endswith("latest") else "sums" if checking else "archive")) as c:
+            c.old_selection()
+            releases.status[path] = 403
+            output = c.upgrade(*(["--check"] if checking else []), expect=6)
+            assert "upgrade_download_failed" in output, output
+            assert "curl: (22)" in output and "403" in output, output
+            assert "upgrade_preparation_failed" not in output, output
             c.assert_unchanged()
             c.assert_no_host()
 
@@ -363,9 +381,10 @@ def discovery_cases(root, binary, releases):
         # Bound local connection refusal; no DNS, external host or provider.
         with socket.socket() as reserved:
             reserved.bind(("127.0.0.1", 0))
-            c.env["RUI_TEST_UPGRADE_API_URL"] = f"http://127.0.0.1:{reserved.getsockname()[1]}/latest"
+            c.env["RUI_TEST_UPGRADE_RELEASES_URL"] = f"http://127.0.0.1:{reserved.getsockname()[1]}/releases"
             child = c.spawn_upgrade()
-            c.finish_upgrade(child, success=False)
+            output = c.finish_upgrade(child, success=False)
+            assert "upgrade_download_failed" in output and "curl: (7)" in output, output
         c.assert_unchanged()
         c.assert_no_host()
 
@@ -393,12 +412,12 @@ def install_cases(root, binary, releases):
         gate = releases.gate_archive()
         start = len(releases.requests)
         child = c.spawn_upgrade()
-        wait_for(gate.entered.is_set, "pinned archive after metadata resolution")
-        releases.metadata_change = lambda m: m.update(tag_name="v0.999.0")
+        wait_for(gate.entered.is_set, "pinned archive after release resolution")
+        releases.latest_location = releases.origin + "/releases/tag/v0.999.0"
         gate.release.set()
         output = c.finish_upgrade(child)
         assert "Installed Rui" in output, output
-        assert releases.requests[start:] == ["/latest", releases.sums_path, releases.archive_path]
+        assert releases.requests[start:] == ["/releases/latest", "/releases/redirect", f"/releases/tag/v{releases.version}", releases.sums_path, releases.archive_path]
         assert subprocess.check_output([str(c.link), "--version"], env=c.env, text=True).startswith("rui " + releases.version)
         c.assert_no_host()
 
@@ -849,6 +868,32 @@ def escape_after_publication(root, binary, releases, artifacts):
             assert (c.home / ".config/rui/codex.json").read_bytes() == credential
 
 
+def terminal_download_failure(root, binary, releases, artifacts):
+    """The visible settings field, status line and restored report share the cause."""
+    with case(root, binary, releases, "terminal-download-failure") as c:
+        c.old_selection()
+        host, previous = c.start_host()
+        _, credential = terminal_setup(c)
+        releases.status["/releases/latest"] = 403
+        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
+            screen = TerminalScreen(master, process)
+            screen.contains("›")
+            screen.start_upgrade()
+            screen.contains(" · couldn't reach GitHub")
+            assert os_semantics.process_executable(process.pid) == binary, "failed check replaced the client"
+            assert screen.entries == 1 and screen.restorations == 0, "failed check relaunched"
+            screen.save(artifacts, "download-failure-settings")
+            screen.close_settings()
+            screen.contains("Couldn't reach GitHub; nothing changed")
+            receipt = exit_on_sigint(screen, process, "restored curl download failure report")
+            assert b"curl: (22)" in receipt and b"403" in receipt, receipt.decode()
+            assert b"could not download release information" in receipt, receipt.decode()
+            assert screen.entries == screen.restorations == 1, "failed check relaunched on departure"
+            c.assert_unchanged()
+            assert host.poll() is None and c.status()["instance"] == previous["instance"]
+            assert (c.home / ".config/rui/codex.json").read_bytes() == credential
+
+
 def terminal_cancellation_guidance(root, binary, releases, artifacts):
     """A previous run's retained cancellation report prevents even a later
     successful installation from replacing this TUI or relaunching on quit."""
@@ -1002,16 +1047,16 @@ def signal_during_check(root, binary, releases, artifacts):
         c.old_selection()
         host, previous = c.start_host()
         _, credential = terminal_setup(c)
-        gate = releases.gates["/latest"] = Gate()
+        gate = releases.gates["/releases/latest"] = Gate()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
             screen.contains("›")
             screen.start_upgrade()
-            screen.until(gate.entered.is_set, "metadata check held before terminal signal")
+            screen.until(gate.entered.is_set, "release check held before terminal signal")
             screen.contains("checking for updates")
             screen.save(artifacts, "signal-during-check")
             exit_on_sigint(screen, process, "terminal exit during held upgrade check")
-            assert not gate.release.is_set(), "terminal required metadata peer release before exiting"
+            assert not gate.release.is_set(), "terminal required release peer release before exiting"
             c.assert_unchanged()
             assert host.poll() is None and c.status()["instance"] == previous["instance"]
             assert (c.home / ".config/rui/codex.json").read_bytes() == credential
@@ -1191,7 +1236,7 @@ def main():
                 suite(root, binary, releases)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)
         if selection in ("all", "terminal"):
-            for suite in (terminal_cases, conversation_case, escape_after_publication,
+            for suite in (terminal_download_failure, terminal_cases, conversation_case, escape_after_publication,
                           terminal_cancellation_guidance, terminal_path_guidance):
                 suite(root, binary, releases, artifacts)
                 print(f"upgrade native: {suite.__name__} passed", flush=True)

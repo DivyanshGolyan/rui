@@ -1599,7 +1599,8 @@ Divyansh chose in-place TUI restart on 2026-11-12, superseding manual restart af
 Esc cancels the check as it cancels an install still preparing, and so does leaving rui.
 The Upgrade worker says where the whole run stands (checking, installing and its step, cancelling, ended) each time that changes, and the overview stores that one value (`session_upgrade.Upgrade`), which both screens read: Host requests wait, Esc is the run's and another Version-row activation is a no-op by it alone.
 A conversation keeps only that its own reading of the Session predates a run: when the old client continues after a run that does not relaunch, it says `Reading this Session again after the Upgrade…` and holds its Host requests until that read settles, then shows the run's ending.
-One pure core, `upgrade_status`, turns that value into the status bar's line for both screens.
+One pure core, `upgrade_status`, turns that value into the Version field and status bar's line for both screens.
+`UpgradeJob.ending` alone derives the small failure reason from the run error: a download failure says "couldn't reach GitHub" even while settings hides the status bar. The restored shell report retains curl's last stderr line.
 Divyansh chose this on 2026-11-09 (TUI rework plan, "/upgrade without a page"), replacing the `UpgradePanel` page and its Install step.
 It retains the draft, selected Session and unresolved capture handles through handoff and never replays indeterminate effects.
 Restart can interrupt work in every Session in that Store, not other Stores.
@@ -1637,7 +1638,9 @@ Target configuration, exact-stop support, the current launch helper and private 
 When departure guidance prevents relaunch, a terminal client that cannot speak the new Host's protocol retains its draft and unresolved handles in a local recovery hold rather than reattaching or resending work.
 
 `src/Installation.zig` is the sole final publication owner; source and release shell installers invoke the same staged native helper.
-A `release_candidate` pins validated immutable release identity, assets and digest before download.
+A `release_candidate` follows the HTTPS redirect chain from `https://ruicode.com/releases/latest` and reads curl's effective URL, requiring the exact `https://github.com/DivyanshGolyan/rui/releases/tag/v` prefix and a canonical stable version.
+It derives pinned SHA256SUMS and archive URLs on `https://ruicode.com/releases/download/vX.Y.Z/`, without GitHub's rate-limited JSON API. The archive must appear exactly once in SHA256SUMS; that membership and digest pin the candidate before archive download.
+A nonzero curl exit is a distinct download failure, not release validation or preparation failure; nothing has been published.
 The native bootstrap can download pinned SHA256SUMS and archive assets for historical v0.56.4 using the current native publication owner, without executing its old uncooperative installer.
 A permanent prefix-scoped lock serializes participating writers, with final managed eligibility and numeric release-order checks under the lock.
 External historical installers do not participate and have no new serialization or no-downgrade guarantee.
