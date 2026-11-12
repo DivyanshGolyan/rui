@@ -102,8 +102,15 @@ test "the status row shows what needs the person with its key clickable, and the
     var release = press;
     release.type = .release;
     for ([_]vxfw.Widget{ row.key.widget(), row.stop.widget() }) |target| {
+        try target.handleEvent(&ctx, .mouse_enter);
+        const hovered = try target.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
+        try std.testing.expectEqual(.single, hovered.readCell(0, 0).style.ul_style);
+        try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
         try target.handleEvent(&ctx, .{ .mouse = press });
         try target.handleEvent(&ctx, .{ .mouse = release });
+        try target.handleEvent(&ctx, .mouse_leave);
+        const left = try target.draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 1 }, .cell_size = .{} });
+        try std.testing.expectEqual(.off, left.readCell(0, 0).style.ul_style);
     }
     try std.testing.expectEqual(@as(usize, 1), actions.retried);
     try std.testing.expectEqual(@as(usize, 1), actions.stopped);

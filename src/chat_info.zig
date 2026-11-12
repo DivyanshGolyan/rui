@@ -972,3 +972,44 @@ test "Chat info Rename recovers refused input without reopening its field" {
         try std.testing.expectEqual(@as(?[]const u8, null), page.failures[6]);
     }
 }
+
+test "Chat info hover follows editable fields and action click regions without changing selection" {
+    for ([_]u16{ 46, 99 }) |width| {
+        var fixture: Fixture = .{};
+        fixture.init();
+        var page: Self = .{ .backend = fixture.backend() };
+        page.refresh();
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 12 }, .cell_size = .{} };
+        _ = try page.widget().draw(draw_ctx);
+        var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        try page.widget().handleEvent(&events, .mouse_enter);
+        for (0..page.fields.len) |index| {
+            const selectable = index != 3 and index != 5;
+            const mouse: vaxis.Mouse = .{ .col = @intCast(width - 1), .row = @intCast(2 + index), .button = .none, .type = .motion, .mods = .{} };
+            try page.widget().handleEvent(&events, .{ .mouse = mouse });
+            const drawn = try page.widget().draw(draw_ctx);
+            try std.testing.expectEqual(selectable, page.panel.hover.pointing);
+            try std.testing.expectEqual(if (selectable) page.panel.selection else page.panel.ground, drawn.children[0].surface.readCell(width - 1, @intCast(2 + index)).style);
+            try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
+            try std.testing.expectEqual(@as(?Edit, null), fixture.edit);
+        }
+        for ([_]u16{ 3, 14, 26 }) |col| {
+            try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(col), .row = 9, .button = .none, .type = .motion, .mods = .{} } });
+            const drawn = try page.widget().draw(draw_ctx);
+            try std.testing.expectEqual(page.panel.selection, drawn.children[0].surface.readCell(col, 9).style);
+            try std.testing.expect(page.panel.hover.pointing);
+            try std.testing.expectEqual(@as(usize, 0), page.panel.selected);
+        }
+        try page.widget().handleEvent(&events, .mouse_leave);
+        try std.testing.expect(!page.panel.hover.pointing);
+        for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+        // The same Permissions region opens the same inline choices as Enter.
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 3, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqual(@as(usize, 1), page.panel.choice.?.field);
+        _ = try page.widget().draw(draw_ctx);
+        try page.widget().handleEvent(&events, .{ .mouse = .{ .col = @intCast(width - 1), .row = 4, .button = .left, .type = .press, .mods = .{} } });
+        try std.testing.expectEqual(@as(@FieldType(status.Session, "permission"), .bypass), fixture.edit.?.permission);
+    }
+}
