@@ -185,6 +185,54 @@ pub const StoreLease = struct {
         try reclaimStaleSocket(self.io, self.paths.socket.slice());
     }
 
+    /// Publish the Store routing hint under its lease before binding: a crash
+    /// after bind must leave enough information to observe that same lease.
+    pub fn listen(self: *StoreLease, options: std.Io.net.UnixAddress.ListenOptions) !std.Io.net.Server {
+        const address = try std.Io.net.UnixAddress.init(self.paths.socket.slice());
+        if (self.hasStoreHint()) try self.publishStoreHint();
+        // Binding may leave a socket even if listen fails. Keep its hint;
+        // an orphan hint without a socket is not enumerated, and is replaced
+        // by the next lease holder rather than becoming liveness state.
+        return address.listen(self.io, options);
+    }
+
+    /// Retire the routing hint only after the socket is gone. Failed cleanup
+    /// retains both so discovery can prove staleness after the lease retires.
+    pub fn retireSocket(self: *StoreLease) !void {
+        std.Io.Dir.deleteFileAbsolute(self.io, self.paths.socket.slice()) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        if (self.hasStoreHint()) try self.removeStoreHint();
+    }
+
+    fn hasStoreHint(self: *const StoreLease) bool {
+        return self.paths.kind == .sqlite and self.runtime_dir == null;
+    }
+
+    fn publishStoreHint(self: *StoreLease) !void {
+        var buffer: [max_socket_path_bytes + 1]u8 = undefined;
+        const path = try storeHintPath(self.paths.socket.slice(), &buffer);
+        var directory = try std.Io.Dir.openDirAbsolute(self.io, std.fs.path.dirname(path).?, .{});
+        defer directory.close(self.io);
+        try validatePrivateDirectory(directory, self.io);
+        var atomic = try directory.createFileAtomic(self.io, std.fs.path.basename(path), .{
+            .permissions = .fromMode(0o600),
+            .replace = true,
+        });
+        defer atomic.deinit(self.io);
+        try atomic.file.writeStreamingAll(self.io, self.paths.store.slice());
+        try atomic.replace(self.io);
+    }
+
+    fn removeStoreHint(self: *StoreLease) !void {
+        var buffer: [max_socket_path_bytes + 1]u8 = undefined;
+        std.Io.Dir.deleteFileAbsolute(self.io, try storeHintPath(self.paths.socket.slice(), &buffer)) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+    }
+
     /// Records that someone asked this Host to stop, beside its lease, so a
     /// client that finds the lease free can tell that stop from a crash
     /// (`lastStop`). No fsync: a record lost to power loss reads as a crash,
@@ -420,6 +468,87 @@ fn pathsFromOpenStore(store_dir: std.Io.Dir, io: std.Io) !Paths {
 fn validateCanonicalPath(canonical: []const u8) !void {
     if (canonical.len > protocol.max_store_bytes) return error.StorePathTooLong;
     if (!std.unicode.utf8ValidateSlice(canonical)) return error.InvalidStorePath;
+}
+
+/// Caller owns every path and the returned slice. Discovery never creates the
+/// runtime directory, follows directory-entry symlinks or reclaims stale sockets.
+pub fn listHostSockets(allocator: std.mem.Allocator, io: std.Io) ![][]u8 {
+    var buffer: [max_runtime_directory_bytes]u8 = undefined;
+    return listHostSocketsIn(allocator, io, try runtimeDirectory(&buffer));
+}
+
+fn listHostSocketsIn(allocator: std.mem.Allocator, io: std.Io, runtime: []const u8) ![][]u8 {
+    var directory = std.Io.Dir.cwd().openDir(io, runtime, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return allocator.alloc([]u8, 0),
+        else => return err,
+    };
+    defer directory.close(io);
+    try validatePrivateDirectory(directory, io);
+    var paths: std.array_list.Managed([]u8) = .init(allocator);
+    errdefer {
+        for (paths.items) |path| allocator.free(path);
+        paths.deinit();
+    }
+    var entries = directory.iterate();
+    while (try entries.next(io)) |entry| {
+        if (entry.kind != .unix_domain_socket or !std.mem.endsWith(u8, entry.name, socket_suffix)) continue;
+        const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ runtime, entry.name });
+        errdefer allocator.free(path);
+        try paths.append(path);
+    }
+    // Stable receipts without changing the sequential activation semantics.
+    std.mem.sort([]u8, paths.items, {}, struct {
+        fn less(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+    return paths.toOwnedSlice();
+}
+
+/// Read-only absence proof for an unreachable standard SQLite socket. A hint
+/// names the lease to observe; it never records or substitutes for ownership.
+/// Missing, foreign, malformed or inaccessible hints grant no authority.
+/// Call only after connection failed, never for a connected unreadable peer.
+pub fn socketStoreIsUnowned(io: std.Io, socket_path: []const u8) bool {
+    return socketStoreIsUnownedChecked(io, socket_path) catch false;
+}
+
+fn socketStoreIsUnownedChecked(io: std.Io, socket_path: []const u8) !bool {
+    var runtime_buffer: [max_runtime_directory_bytes]u8 = undefined;
+    const runtime = try runtimeDirectory(&runtime_buffer);
+    if (!std.mem.eql(u8, std.fs.path.dirname(socket_path) orelse return false, runtime)) return false;
+    var directory = try std.Io.Dir.openDirAbsolute(io, runtime, .{ .follow_symlinks = false });
+    defer directory.close(io);
+    try validatePrivateDirectory(directory, io);
+    var directory_stat: c.struct_stat = undefined;
+    if (c.fstat(directory.handle, &directory_stat) != 0 or directory_stat.st_uid != c.geteuid()) return false;
+    var hint_buffer: [max_socket_path_bytes + 1]u8 = undefined;
+    const hint_path = try storeHintPath(socket_path, &hint_buffer);
+    const fd = try std.posix.openat(directory.handle, std.fs.path.basename(hint_path), .{
+        .ACCMODE = .RDONLY,
+        .NONBLOCK = true,
+        .NOFOLLOW = true,
+        .CLOEXEC = true,
+    }, 0);
+    const hint: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer hint.close(io);
+    var stat: c.struct_stat = undefined;
+    if (c.fstat(fd, &stat) != 0 or stat.st_uid != c.geteuid() or stat.st_mode & 0o7777 != 0o600) return false;
+    if ((try hint.stat(io)).kind != .file) return false;
+    var bytes: [protocol.max_store_bytes + 1]u8 = undefined;
+    const count = try hint.readPositionalAll(io, &bytes, 0);
+    if (count == 0 or count > protocol.max_store_bytes) return false;
+    const store = bytes[0..count];
+    if (!std.fs.path.isAbsolute(store) or std.mem.indexOfScalar(u8, store, 0) != null) return false;
+    try validateCanonicalPath(store);
+    var socket_buffer: [max_socket_path_bytes]u8 = undefined;
+    if (!std.mem.eql(u8, socket_path, try socketPathForCanonical(store, &socket_buffer))) return false;
+    return StoreLease.observe(io, store) == .unowned;
+}
+
+fn storeHintPath(socket_path: []const u8, buffer: []u8) ![]const u8 {
+    if (!std.mem.endsWith(u8, socket_path, socket_suffix)) return error.InvalidSocketPath;
+    return std.fmt.bufPrint(buffer, "{s}.store", .{socket_path[0 .. socket_path.len - socket_suffix.len]});
 }
 
 fn runtimeDirectory(buffer: []u8) ![]const u8 {
@@ -992,4 +1121,90 @@ test "Store target paths refuse invalid runtime hints without SQLite fallback" {
         try std.testing.expect(selected == .mysql);
         try std.testing.expectError(error.InvalidStorePath, selected.paths(std.testing.io));
     }
+}
+
+test "Host socket enumeration ignores non sockets wrong suffix and missing runtime" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = try @import("socket_fixture.zig").Directory.init();
+    defer tmp.cleanup();
+    const regular = try tmp.dir.createFile(io, "regular.sock", .{});
+    regular.close(io);
+    try tmp.dir.createDir(io, "directory.sock", .default_dir);
+    var socket_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    const address = try tmp.address("found.sock", &socket_buffer);
+    var listener = try address.listen(io, .{});
+    defer listener.deinit(io);
+    try tmp.dir.symLink(io, "found.sock", "linked.sock", .{});
+    var other_buffer: [@import("socket_fixture.zig").max_path_bytes]u8 = undefined;
+    var other = try (try tmp.address("wrong.other", &other_buffer)).listen(io, .{});
+    defer other.deinit(io);
+    const paths = try listHostSocketsIn(allocator, io, tmp.root[0..tmp.root_len]);
+    defer {
+        for (paths) |path| allocator.free(path);
+        allocator.free(paths);
+    }
+    try std.testing.expectEqual(@as(usize, 1), paths.len);
+    try std.testing.expectEqualStrings(address.path, paths[0]);
+    const missing = try std.fmt.allocPrint(allocator, "{s}/missing", .{tmp.root[0..tmp.root_len]});
+    defer allocator.free(missing);
+    const empty = try listHostSocketsIn(allocator, io, missing);
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}
+
+test "Host socket Store hint proves absence only with trusted mapping and free lease" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const parent = buffer[0..try tmp.dir.realPath(io, &buffer)];
+    var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root = try std.fmt.bufPrint(&store_buffer, "{s}/store", .{parent});
+    var lease = try StoreLease.acquire(io, root);
+    var held = true;
+    defer if (held) lease.release();
+    try lease.prepareForServing(false);
+    const socket = lease.paths.socket;
+    defer std.Io.Dir.deleteFileAbsolute(io, socket.slice()) catch {};
+    var hint_buffer: [max_socket_path_bytes + 1]u8 = undefined;
+    const hint_path = try storeHintPath(socket.slice(), &hint_buffer);
+    defer std.Io.Dir.deleteFileAbsolute(io, hint_path) catch {};
+    var listener = try lease.listen(.{});
+    listener.deinit(io); // Refused socket, but the Store lock is still held.
+    try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
+    const hint = try std.Io.Dir.openFileAbsolute(io, hint_path, .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), (try hint.stat(io)).permissions.toMode() & 0o777);
+    hint.close(io);
+    lease.release();
+    held = false;
+    try std.testing.expect(socketStoreIsUnowned(io, socket.slice()));
+    // A readable-by-others hint, symlink, oversized, empty or mismatched
+    // Store cannot vouch for this socket, even with a free lock.
+    const writable = try std.Io.Dir.openFileAbsolute(io, hint_path, .{ .mode = .read_write });
+    try writable.setPermissions(io, .fromMode(0o644));
+    try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
+    try writable.setPermissions(io, .fromMode(0o600));
+    writable.close(io);
+    try std.Io.Dir.deleteFileAbsolute(io, hint_path);
+    try std.Io.Dir.symLinkAbsolute(io, root, hint_path, .{});
+    try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
+    try std.Io.Dir.deleteFileAbsolute(io, hint_path);
+    try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
+    const oversized: [protocol.max_store_bytes + 1]u8 = @splat('a');
+    for ([_][]const u8{ "", "/tmp/a-different-store", &oversized }) |invalid| {
+        const changed = try std.Io.Dir.createFileAbsolute(io, hint_path, .{ .permissions = .fromMode(0o600) });
+        try changed.writeStreamingAll(io, invalid);
+        changed.close(io);
+        try std.testing.expect(!socketStoreIsUnowned(io, socket.slice()));
+    }
+    // Republish from the real owner and prove clean retirement removes both.
+    lease = try StoreLease.acquire(io, root);
+    held = true;
+    try lease.prepareForServing(false);
+    listener = try lease.listen(.{});
+    listener.deinit(io);
+    try lease.retireSocket();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.openFileAbsolute(io, hint_path, .{}));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, socket.slice(), .{ .follow_symlinks = false }));
 }

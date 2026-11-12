@@ -199,7 +199,7 @@ pub const ActivityPage = struct {
                 return result;
             }
         };
-        const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Work = struct { read_version: JsonString(protocol.SinceToken.max_bytes), state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
@@ -349,6 +349,8 @@ pub const ActivityPage = struct {
         }
         // An operation belongs to its Turn; an Action to the active one.
         if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
+        if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
+        facts.read_version = protocol.SinceToken.parse(wire.work.read_version.slice()) catch return error.InvalidActivityPage;
         facts.revision = try id(wire.work.revision, false);
         // The permission prompt shows this Workspace, so it keeps Current's rule.
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
@@ -436,20 +438,33 @@ test "a model list reply reads as what the Host writes" {
 /// Read-only Host information profiles; neither profile grants ordinary requests.
 pub const HostInfoProfile = enum {
     current,
+    released_13,
     released_9,
+
+    /// Historical facts permit control through the observed executable, not ordinary readiness.
+    pub fn historical(self: HostInfoProfile) bool {
+        return self != .current;
+    }
 
     pub fn wire(self: HostInfoProfile) []const u8 {
         return switch (self) {
             .current => protocol.wire_version,
+            .released_13 => "13",
             .released_9 => "9",
         };
     }
 
-    /// The providers this profile's Host reports: version 9 knew only
-    /// Codex and OpenAI, and serves no other.
+    /// Providers are decoded at this boundary, not inferred by consumers.
+    /// Current wire 14 requires every route; wire 13 spans both released shapes.
     fn Providers(comptime self: HostInfoProfile) type {
         return switch (self) {
             .current => protocol.Routes,
+            // Freeze released shapes independently of future current-provider additions.
+            .released_13 => struct {
+                codex: protocol.Route,
+                openai: protocol.Route,
+                chatgpt: protocol.Route = .unserved,
+            },
             .released_9 => struct { codex: protocol.Route, openai: protocol.Route },
         };
     }
@@ -634,14 +649,91 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
 }
 
+test "Host information accepts both wire-13 shapes and requires complete current facts" {
+    // Both released wire-13 shapes are complete historical control facts.
+    const historical_wire = comptime HostInfoProfile.released_13.wire();
+    const previous = "{\"version\":\"" ++ historical_wire ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
+    const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, previous, "\"openai\":\"unserved\"", "\"openai\":\"unserved\",\"chatgpt\":\"unserved\"");
+    defer std.testing.allocator.free(historical_full);
+    const historical_version = "\"version\":\"" ++ historical_wire ++ "\"";
+    const current = try std.mem.replaceOwned(u8, std.testing.allocator, historical_full, historical_version, "\"version\":\"" ++ protocol.wire_version ++ "\"");
+    defer std.testing.allocator.free(current);
+    const facts = try parseHostInfoForProfile(previous, "/one", .released_13);
+    try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.providers.codex);
+    try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.openai);
+    try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.chatgpt);
+    try std.testing.expectEqualDeep(facts, (try parseHostInfo(current, "/one")).ready);
+    try std.testing.expectEqualDeep(facts, try parseHostInfoForProfile(historical_full, "/one", .released_13));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(historical_full, "/one"));
+    const missing = try std.mem.replaceOwned(u8, std.testing.allocator, previous, historical_version, "\"version\":\"" ++ protocol.wire_version ++ "\"");
+    defer std.testing.allocator.free(missing);
+    try std.testing.expectError(error.MissingField, parseHostInfo(missing, "/one"));
+
+    // Every explicit current or historical route is retained; only wire 13 defaults ChatGPT.
+    inline for (@typeInfo(protocol.Routes).@"struct".field_names) |provider| {
+        for (std.meta.tags(protocol.Route)) |route| {
+            const before = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(@field(facts.capabilities.providers, provider)) });
+            defer std.testing.allocator.free(before);
+            const after = try std.fmt.allocPrint(std.testing.allocator, "\"{s}\":\"{s}\"", .{ provider, @tagName(route) });
+            defer std.testing.allocator.free(after);
+            const body = try std.mem.replaceOwned(u8, std.testing.allocator, current, before, after);
+            defer std.testing.allocator.free(body);
+            var expected = facts;
+            @field(expected.capabilities.providers, provider) = route;
+            try std.testing.expectEqualDeep(expected, (try parseHostInfo(body, "/one")).ready);
+            const historical = try std.mem.replaceOwned(u8, std.testing.allocator, body, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_version);
+            defer std.testing.allocator.free(historical);
+            try std.testing.expectEqualDeep(expected, try parseHostInfoForProfile(historical, "/one", .released_13));
+        }
+    }
+    const samples = [_]struct { body: []const u8, profile: HostInfoProfile }{
+        .{ .body = previous, .profile = .released_13 },
+        .{ .body = historical_full, .profile = .released_13 },
+        .{ .body = current, .profile = .current },
+    };
+    for (samples) |sample| {
+        const body = sample.body;
+        for ([_]struct { from: []const u8, to: []const u8, failure: anyerror }{
+            .{ .from = "\"codex\":\"endpoint\",", .to = "", .failure = error.MissingField },
+            .{ .from = ",\"openai\":\"unserved\"", .to = "", .failure = error.MissingField },
+            .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":null", .failure = error.UnexpectedToken },
+            .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unknown\"", .failure = error.InvalidEnumTag },
+            .{ .from = "\"codex\":\"endpoint\"", .to = "\"codex\":\"endpoint\",\"codex\":\"unserved\"", .failure = error.DuplicateField },
+            .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unserved\",\"openai\":\"unserved\"", .failure = error.DuplicateField },
+            .{ .from = "\"openai\":\"unserved\"", .to = "\"openai\":\"unserved\",\"unknown\":\"unserved\"", .failure = error.UnknownField },
+        }) |case| {
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, body, case.from, case.to);
+            defer std.testing.allocator.free(bad);
+            try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", sample.profile));
+        }
+    }
+    for ([_]struct { value: []const u8, failure: anyerror }{
+        .{ .value = "\"unknown\"", .failure = error.InvalidEnumTag },
+        .{ .value = "null", .failure = error.UnexpectedToken },
+        .{ .value = "false", .failure = error.UnexpectedToken },
+        .{ .value = "{}", .failure = error.UnexpectedToken },
+        .{ .value = "[]", .failure = error.UnexpectedToken },
+        .{ .value = "\"unserved\",\"chatgpt\":\"unserved\"", .failure = error.DuplicateField },
+    }) |case| {
+        const field = try std.fmt.allocPrint(std.testing.allocator, "\"chatgpt\":{s}", .{case.value});
+        defer std.testing.allocator.free(field);
+        for (samples[1..]) |sample| {
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, sample.body, "\"chatgpt\":\"unserved\"", field);
+            defer std.testing.allocator.free(bad);
+            try std.testing.expectError(case.failure, parseHostInfoForProfile(bad, "/one", sample.profile));
+        }
+    }
+}
+
 test "upgrade Host information profiles retain the entire strict shape" {
     const legacy_wire = comptime HostInfoProfile.released_9.wire();
     const legacy_field = "\"version\":\"" ++ legacy_wire ++ "\"";
     const old = "{" ++ legacy_field ++ ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
     try std.testing.expectEqualStrings(protocol.wire_version, HostInfoProfile.current.wire());
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
-    // Version 9 names only Codex and OpenAI; the current shape adds ChatGPT,
-    // so neither profile reads the other's reply.
+    try std.testing.expectEqualStrings("13", HostInfoProfile.released_13.wire());
+    // Provider additions do not relax wire identity: neither profile reads
+    // the other's reply, even when the provider fields happen to match.
     try std.testing.expectError(error.MissingField, parseHostInfo(old, "/one"));
     const versioned = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
     defer std.testing.allocator.free(versioned);
@@ -649,8 +741,21 @@ test "upgrade Host information profiles retain the entire strict shape" {
     defer std.testing.allocator.free(current);
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(versioned, "/one", .released_9));
     try std.testing.expectError(error.UnknownField, parseHostInfoForProfile(current, "/one", .released_9));
-    inline for (std.meta.tags(HostInfoProfile)) |profile| {
-        const body = if (profile == .released_9) old else current;
+    const historical_field = "\"version\":\"" ++ comptime HostInfoProfile.released_13.wire() ++ "\"";
+    const historical = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, historical_field);
+    defer std.testing.allocator.free(historical);
+    const historical_full = try std.mem.replaceOwned(u8, std.testing.allocator, current, "\"version\":\"" ++ protocol.wire_version ++ "\"", historical_field);
+    defer std.testing.allocator.free(historical_full);
+    const samples = [_]struct { body: []const u8, profile: HostInfoProfile, historical: bool }{
+        .{ .body = current, .profile = .current, .historical = false },
+        .{ .body = historical, .profile = .released_13, .historical = true },
+        .{ .body = historical_full, .profile = .released_13, .historical = true },
+        .{ .body = old, .profile = .released_9, .historical = true },
+    };
+    for (samples) |sample| {
+        const profile = sample.profile;
+        const body = sample.body;
+        try std.testing.expectEqual(sample.historical, profile.historical());
         const facts = try parseHostInfoForProfile(body, "/one", profile);
         try std.testing.expect(facts.store.eql("/one"));
         try std.testing.expectEqual(@as(usize, 17), facts.active_capacity);
@@ -686,8 +791,9 @@ test "upgrade Host information profiles retain the entire strict shape" {
     for ([_][]const u8{ "8", protocol.next_wire_version, "09", "unknown", "" }) |wire| {
         const version = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{wire});
         defer std.testing.allocator.free(version);
-        inline for (std.meta.tags(HostInfoProfile)) |profile| {
-            const body = if (profile == .released_9) old else current;
+        for (samples) |sample| {
+            const profile = sample.profile;
+            const body = sample.body;
             const field = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{profile.wire()});
             defer std.testing.allocator.free(field);
             const bad = try std.mem.replaceOwned(u8, std.testing.allocator, body, field, version);
@@ -1314,6 +1420,7 @@ pub const SessionListPage = struct {
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !JsonRow {
             const Wire = struct {
+                read_version: JsonString(protocol.SinceToken.max_bytes),
                 archive_state: JsonEnum(protocol.SessionArchiveState),
                 reference: JsonString(protocol.max_session_bytes),
                 parent: ?JsonString(protocol.session_id_bytes),
@@ -1340,6 +1447,7 @@ pub const SessionListPage = struct {
             if (wire.parent) |parent| if (!protocol.validSessionId(parent.slice()) or parent.eql(wire.reference.slice())) return error.InvalidCharacter;
             if (wire.label) |label| if (!protocol.validLabel(label.slice())) return error.InvalidCharacter;
             var row: Row = .{
+                .read_version = try protocol.SinceToken.parse(wire.read_version.slice()),
                 .archive_state = wire.archive_state.value,
                 .reference = wire.reference.value,
                 .parent = if (wire.parent) |parent| parent.value else null,
@@ -2076,7 +2184,7 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         .ordinal = std.math.maxInt(i64) - 1,
         .presentation = .{ .description = maximum.value.value.description, .code = .infrastructure_shutdown, .publication_position = std.math.maxInt(i64) },
     };
-    facts.work = .{ .work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2 }, .revision = std.math.maxInt(i64) };
+    facts.work = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .work = .{ .state = .{ .approval = .{ .since = std.math.maxInt(i64) } }, .turn = std.math.maxInt(i64), .operation = std.math.maxInt(i64) - 1, .first_action = std.math.maxInt(i64) - 2 }, .revision = std.math.maxInt(i64) };
     // An absolute Workspace whose other bytes escape to their widest JSON form.
     @memset(facts.work.workspace.bytes[0..protocol.max_workspace_bytes], 0x01);
     facts.work.workspace.bytes[0] = '/';
@@ -2093,6 +2201,45 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         try std.testing.expectEqual(@as(usize, 200), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
         try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
+    }
+}
+
+test "activity page preserves the canonical row preview with its work" {
+    var facts: protocol.ActivityFacts = .{ .end = 4, .work = .{
+        .revision = 1,
+        .work = .{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1, .operation = 1 },
+        .last_line = .{ .position = 4, .text = .{} },
+    } };
+    try facts.work.workspace.set("/work");
+    try facts.work.last_line.?.text.?.set("New completed answer");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for ([_]bool{ true, false }) |has_text| {
+        if (!has_text) facts.work.last_line.?.text = null;
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        try std.testing.expectEqualDeep(facts.work, parsed.facts.work);
+        const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), "\"position\":\"4\"", "\"position\":\"0\"");
+        defer std.testing.allocator.free(malformed);
+        try std.testing.expectError(error.InvalidResponse, ActivityPage.parse(malformed, .{}));
+        // Like work, the preview is live, not bounded by historical end.
+        facts.end = 1;
+    }
+}
+
+test "activity page requires a canonical read version" {
+    var facts: protocol.ActivityFacts = .{ .end = 0, .work = .{ .revision = 1 } };
+    try facts.work.workspace.set("/work");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    var out = std.Io.Writer.fixed(&buffer);
+    try activity_reply.writePage(&out, &facts);
+    for ([_][2][]const u8{
+        .{ "\"read_version\":\"00000000000000000000000000000000.0\",", "" },
+        .{ "\"read_version\":\"00000000000000000000000000000000.0\"", "\"read_version\":\"bad\"" },
+    }) |case| {
+        const malformed = try std.mem.replaceOwned(u8, std.testing.allocator, out.buffered(), case[0], case[1]);
+        defer std.testing.allocator.free(malformed);
+        try std.testing.expectError(error.InvalidActivityPage, ActivityPage.parse(malformed, .{}));
     }
 }
 
@@ -2635,11 +2782,11 @@ test "canonical failure classifier bounds deep wide and escaped maximum replies"
 /// A full page's facts after its rows, up to `next`.
 const testing_list_facts = "],\"delta\":\"full\",\"since\":\"abababababababababababababababab.42\",\"next\":";
 /// A list row's facts after its settings, for a Session no one has messaged.
-const testing_row_facts = ",\"archive_state\":\"active\"" ++ testing_row_details;
+const testing_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\"" ++ testing_row_details;
 const testing_row_details = ",\"parent\":null,\"label\":null,\"created_at\":\"1\",\"revision\":\"1\",\"end\":\"0\",\"first_message\":null,\"last_line\":null," ++
     "\"work\":{\"state\":{\"kind\":\"idle\",\"since\":\"1\"},\"turn\":null,\"operation\":null,\"first_action\":null},\"peers\":{\"from_person_at\":null}";
 /// The same for a Session a person started, now working.
-const testing_started_row_facts = ",\"archive_state\":\"active\",\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
+const testing_started_row_facts = ",\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"parent\":null,\"label\":\"Review PR 412\",\"created_at\":\"1792925000\",\"revision\":\"1\",\"end\":\"9\"," ++
     "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":null,\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ @as([64]u8, @splat('a')) ++ "\"}}," ++
     "\"last_line\":null,\"work\":{\"state\":{\"kind\":\"working\",\"since\":\"1792925300\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null},\"peers\":{\"from_person_at\":\"1792925001\"}";
 
@@ -2650,7 +2797,7 @@ test "Session list facts own complete rows and render semantic output after scra
     const file = try tmp.dir.createFile(io, "page", .{ .read = true });
     defer file.close(io);
     const digest = @as([64]u8, @splat('a'));
-    const facts = "\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
+    const facts = "\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\",\"created_at\":\"1792925000\",\"revision\":\"3\",\"end\":\"9\"," ++
         "\"first_message\":{\"position\":\"1\",\"admission\":\"4\",\"admitted_at\":\"1792925001\",\"sender\":{\"session\":\"p33rs1\"},\"content\":{\"bytes\":\"5\",\"sha256\":\"" ++ digest ++ "\"}}," ++
         "\"last_line\":{\"position\":\"8\",\"text\":\"Saved preview\"},\"work\":{\"state\":{\"kind\":\"bash\",\"since\":\"1792925300\",\"call\":\"0\",\"description\":\"Run the tests\",\"running\":\"1\",\"approvals\":\"0\"},\"turn\":\"2\",\"operation\":\"6\",\"first_action\":null}," ++
         "\"peers\":{\"from_person_at\":\"1792925200\"}";
@@ -2677,8 +2824,8 @@ test "Session list facts own complete rows and render semantic output after scra
     var output: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&output);
     try page.writeJson(&writer);
-    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"archive_state\":\"active\",\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
-        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
+    try std.testing.expectEqualStrings("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"reference\":\"k7m2qx\",\"workspace\":\"/w\\nµ\",\"provider\":\"codex\",\"model\":\"m\\\"\",\"tools\":[\"bash\"],\"permission_mode\":\"ask\"," ++
+        "\"parent\":\"p33rs1\",\"label\":\"Review PR\"" ++ facts["\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"parent\":\"p33rs1\",\"label\":\"Review \\u0050R\"".len..] ++ "}" ++ testing_list_facts ++ "null}", writer.buffered());
     var exhausted = std.Io.Writer.fixed(&.{});
     try std.testing.expectError(error.WriteFailed, page.writeJson(&exhausted));
 }
@@ -2815,6 +2962,8 @@ test "Session list facts reject malformed metadata and consequential ambiguity" 
         try std.testing.expectEqual(@as(?protocol.Peer, null), page.rows[0].first_message.?.sender);
     }
     for ([_][2][]const u8{
+        .{ "\"read_version\":\"00000000000000000000000000000000.0\",", "" },
+        .{ "\"read_version\":\"00000000000000000000000000000000.0\"", "\"read_version\":\"bad\"" },
         .{ ",\"archive_state\":\"active\"", "" },
         .{ "\"archive_state\":\"active\"", "\"archive_state\":null" },
         .{ "\"archive_state\":\"active\"", "\"archive_state\":\"unknown\"" },
@@ -2862,7 +3011,7 @@ fn testingListPage(buffer: []u8, references: []const []const u8, facts: []const 
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     for (references, 0..) |reference, index| {
         if (index != 0) try writer.writeAll(",");
-        try writer.print("{{\"archive_state\":\"active\",\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
+        try writer.print("{{\"read_version\":\"00000000000000000000000000000000.0\",\"archive_state\":\"active\",\"reference\":\"{s}\",\"workspace\":\"/w\",\"provider\":\"codex\",\"model\":\"m\",\"tools\":[],\"permission_mode\":\"ask\"", .{reference});
         try writer.writeAll(testing_row_details ++ "}");
     }
     try writer.writeAll(facts);
@@ -3025,7 +3174,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try writer.writeAll("{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"session_list\",\"sessions\":[");
     // Every row escapes every byte of its longest texts.
     const largest = std.math.maxInt(i64);
-    var maximal: protocol.SessionRow = .{ .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
+    var maximal: protocol.SessionRow = .{ .read_version = .{ .instance = @splat(0xab), .generation = std.math.maxInt(u64) }, .archive_state = .archiving, .provider = .codex, .tools = try .of(&.{"bash"}), .permission_mode = .bypass, .label = .{}, .created_at = largest, .revision = largest, .end = largest };
     maximal.parent = .{};
     try maximal.parent.?.set("zzzzzz");
     try maximal.workspace.set(&workspace);
@@ -3058,6 +3207,7 @@ test "Session list facts attain eight maximum escaped rows and bind the continua
     try std.testing.expectEqual(@as(u64, 19), page.next.?.after);
     try std.testing.expectEqual(@as(u64, 23), page.next.?.ceiling);
     for (page.rows[0..8], 0..) |*row, index| {
+        try std.testing.expectEqualDeep(maximal.read_version, row.read_version);
         try std.testing.expectEqual(@as(u8, @intCast('0' + index)), row.reference.bytes[0]);
         try std.testing.expectEqual(protocol.session_id_bytes, row.reference.len);
         try std.testing.expectEqualStrings(&workspace, row.workspace.slice());

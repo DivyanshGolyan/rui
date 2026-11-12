@@ -271,7 +271,8 @@ def main(network, ci):
     colliding = launch(frame(dict(base, mcpServers=[mcp_entry("docs", docs), mcp_entry("clash", clash)])))
     line = colliding.stdout.readline()
     refused = json.loads(line)["rui_start_error"]
-    assert colliding.wait(timeout=20) != 0
+    assert colliding.wait(timeout=20) == 1
+    assert not output(colliding)[1], "a tool-name refusal printed a second diagnostic"
     assert refused["code"] == "tool_name_collision", refused
     assert "bash" in refused["message"] and "clash" in refused["message"], refused
     docs.shutdown()

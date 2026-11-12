@@ -21,6 +21,7 @@ const store = @import("store.zig");
 const session_report_reply = @import("session_report_reply.zig");
 const activity_reply = @import("activity_reply.zig");
 const launch_frame = @import("launch_frame.zig");
+const start_report = @import("start_report.zig");
 const core_tools = @import("core_tools.zig");
 const Hole = protocol.Hole;
 const Value = std.json.Value;
@@ -696,7 +697,7 @@ pub const Document = struct {
         try provider.object.put(d.arena, "kind", try d.object(.{ .@"const" = Value{ .string = "openai_key" } }));
         try d.schemas.put(d.arena, "LaunchFrame", frame);
         try d.schemas.put(d.arena, "StartError", try d.wireSchema(struct {
-            rui_start_error: struct { code: launch_frame.StartError, message: []const u8 },
+            rui_start_error: struct { code: start_report.StartError, message: []const u8 },
         }));
     }
 
@@ -1264,7 +1265,7 @@ test "every launch Wire field parses and conforms to its component schema" {
     const bytes = try std.json.Stringify.valueAlloc(allocator, wire, .{});
     var frame: launch_frame.Frame = .{};
     defer frame.deinit();
-    var refusal: launch_frame.Refusal = undefined;
+    var refusal: start_report.Failure = undefined;
     try launch_frame.parse(std.testing.allocator, bytes, &frame, &refusal);
     const json = try std.json.parseFromSliceLeaky(Value, allocator, bytes, .{});
     try std.testing.expectEqual(@typeInfo(launch_frame.Wire).@"struct".field_names.len, json.object.count());
@@ -1299,7 +1300,7 @@ test "every launch Wire field parses and conforms to its component schema" {
         try std.testing.expect(!conforms(document.schemas, schema, invalid_json));
         try std.testing.expectError(error.LaunchFrameInvalid, launch_frame.parse(std.testing.allocator, text, &minimal_frame, &refusal));
     }
-    inline for (std.meta.tags(launch_frame.StartError)) |code| {
+    inline for (std.meta.tags(start_report.StartError)) |code| {
         const line = try std.json.Stringify.valueAlloc(allocator, .{ .rui_start_error = .{ .code = code, .message = "refused" } }, .{});
         const error_json = try std.json.parseFromSliceLeaky(Value, allocator, line, .{});
         try std.testing.expect(conforms(document.schemas, document.schemas.get("StartError").?, error_json));

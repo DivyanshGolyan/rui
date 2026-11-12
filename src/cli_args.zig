@@ -50,6 +50,7 @@ pub const Command = enum {
     host_start,
     host_pause,
     host_status,
+    host_restart,
     host_serve,
     defaults_inspect,
     defaults_configure,
@@ -91,6 +92,7 @@ pub const Command = enum {
             .host_start => .{ .resource = .host, .name = "start", .description = std.fmt.comptimePrint("Explicitly start or connect to a managed Host. A new Host gets --active-capacity N, default {d}; an already-running Host keeps its original settings, including capacity, as rui host status reports, and stderr says so when --active-capacity differs.", .{product_defaults.active_capacity}), .options = destination ++ &[_]Option{value("active-capacity", "N")} },
             .host_pause => .{ .resource = .host, .name = "pause", .description = std.fmt.comptimePrint("Shut down the Host, interrupting all work in this Store. Saved work resumes when a Host starts again, including on the next rui; to end a Session's work for good, use rui session stop. Waits up to {d} seconds for the Host to release the Store and reports retirement confirmed or unconfirmed. Retry lost acknowledgment with the original --instance only.", .{product_defaults.host_shutdown_seconds}), .options = destination ++ &[_]Option{value("instance", "HEX")} },
             .host_status => .{ .resource = .host, .name = "status", .description = "Read protected Host readiness and capabilities without starting it.", .options = destination },
+            .host_restart => .{ .resource = .host, .name = "restart", .description = "Restart every eligible running Host of this user on the selected installed build, one at a time. Saved work resumes; unsupported Hosts are left running with a reason. Requires --all.", .options = &.{flag("all")}, .requires = &.{&.{"all"}} },
             .host_serve => serve_grammar.definition,
             .defaults_inspect => .{ .resource = .defaults, .name = "inspect", .description = "Read future-Session defaults without writing preferences or changing Sessions." },
             .defaults_configure => .{ .resource = .defaults, .name = "configure", .description = "Save explicit future-Session defaults and the notification choice. Existing Sessions are unchanged. --store sets the global default Store for commands without --store (saved requests keep their recorded Store), and stderr names it. --clear-model removes only the saved model. --notifications on|off chooses whether an open overview or conversation sends a desktop notification, while its terminal is out of focus, when a Session finishes, fails or needs approval; on by default. --permission-mode ask|bypass saves how new Sessions approve Bash commands; an explicit Session flag wins. --reasoning-effort sets the effort new Sessions start at when their model offers it, as /effort LEVEL in a conversation does; default uses the client product choice.", .options = destination ++ binding ++ &[_]Option{ flag("clear-model"), notifications, settingOption("reasoning_effort"), settingOption("permission_mode") }, .conflicts = &.{.{ .code = .model_excludes_clear_model, .a = "model", .b = "clear-model" }}, .requires = &.{&.{ "store", "store-hex", "provider", "model", "clear-model", "notifications", "reasoning-effort", "permission-mode" }} },
@@ -113,7 +115,7 @@ pub const compaction_policy =
 
 /// Shared by `session configure`, `session start` and the interactive /configure.
 pub const label_help =
-    \\--label TEXT names, renames or titles the Session, shown in lists and /status: one line of at most 100 bytes. --label "" clears it.
+    \\--label TEXT names, renames or titles the Session, shown in lists and chat info: one line of at most 100 bytes. --label "" clears it.
     \\A Label is display text only; it never addresses or selects a Session.
     \\
 ;
@@ -784,4 +786,11 @@ test "tool help lists every built-in including skill in name order" {
         try command.definition().help(&help.writer);
         try std.testing.expect(std.mem.indexOf(u8, help.written(), "--tools bash,find_tools,message_agent,read_transcript,skill,start_agent,web_search|none") != null);
     }
+}
+
+test "Host restart requires all and refuses Store selection" {
+    try expectValidation(.host_restart, &.{ "--all", "--store", "/s" }, error.UnknownArgument);
+    try expectValidation(.host_restart, &.{ "--all", "--store-hex", "2f73" }, error.UnknownArgument);
+    try std.testing.expectEqualStrings("all", (try expectMissing(.host_restart, &.{})).?);
+    try std.testing.expect(try expectMissing(.host_restart, &.{"--all"}) == null);
 }

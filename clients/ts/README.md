@@ -43,6 +43,8 @@ Shell commands the agent runs execute as your user; Rui is not a sandbox.
 
 The child lives as long as its stdin stays open, so it stops when your process ends.
 If it exits on its own, the client restarts it, waiting 0.5 s and doubling up to 30 s, and sends calls in flight again once the new Host is ready.
+Automatic restarts retry `store_locked` and `mysql_unreachable`; calls waiting on a failed attempt receive `RuiUnavailableError`.
+Initial connect still rejects `mysql_unreachable` immediately.
 
 Errors:
 
