@@ -85,12 +85,17 @@ pub fn closeSession(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn capture(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    // The sign-in row owns input even if the list had focus before it opened.
-    // In particular, key bytes must never reach a hidden task composer or the
-    // settings page beneath it. Route paste boundaries with those same bytes.
+    // The sign-in row owns keys and the mouse even if the list had focus
+    // before it opened, so no click navigates behind it and key bytes never
+    // reach a hidden task composer or the settings page beneath it. Route
+    // paste boundaries with those same bytes. Esc is the way out.
     if (self.sign_in_open) switch (input) {
         .key_press, .paste_start, .paste_end, .invalid_key => {
             try self.sign_in_page.widget().handleEvent(ctx, input);
+            ctx.consumeEvent();
+            return;
+        },
+        .mouse => {
             ctx.consumeEvent();
             return;
         },
@@ -677,4 +682,25 @@ test "Sign-in input stays with the row over settings and a previously focused li
     try std.testing.expect(root.settings_open);
     try root.widget().captureEvent(&ctx, .{ .key_press = .{ .codepoint = 'c', .mods = .{ .ctrl = true } } });
     try std.testing.expect(ctx.quit);
+}
+
+test "Sign-in takes every click at each stage, over settings or not, and changes nothing" {
+    const empty: vxfw.Text = .{ .text = "" };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const Stage = @import("sign_in.zig").Stage;
+    for ([_]bool{ false, true }) |settings_open| for (std.enums.values(Stage)) |stage| {
+        var root: Self = .{ .overview = empty.widget(), .list = empty.widget(), .compose = empty.widget(), .settings_open = settings_open, .sign_in_open = true };
+        root.sign_in_page.state.stage = stage;
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty, .phase = .capturing };
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+            ctx.consume_event = false;
+            try root.widget().captureEvent(&ctx, .{ .mouse = .{ .col = 4, .row = 3, .button = .left, .type = kind, .mods = .{} } });
+            try std.testing.expect(ctx.consume_event);
+        }
+        try std.testing.expect(root.sign_in_open);
+        try std.testing.expectEqual(settings_open, root.settings_open);
+        try std.testing.expectEqual(stage, root.sign_in_page.state.stage);
+        try std.testing.expectEqual(@as(usize, 0), ctx.cmds.items.len);
+    };
 }
