@@ -886,7 +886,7 @@ def persistent_copy_case():
             retain_failure_state("copy failure state", state)
 
 
-def provider_prompt(master, ready=None):
+def provider_prompt(master):
     # First run is now a committed app frame, not a canonical line prompt.
     return await_screen(master, "[ChatGPT]")
 
@@ -2245,19 +2245,15 @@ def main(selected="all"):
         assert not (no_tty_home / ".local/share/rui/store").exists(), "non-TTY invocation changed the Store"
         before_missing = set(json.loads(run(preferences_home, "request", "list")))
         master, slave = open_pty()
-        ready_read, ready_write = os.pipe()
         try:
             deferred = spawn([str(fixture.RUI)], cwd=workspace,
-                env={**os.environ, "HOME": str(preferences_home),
-                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                env={**os.environ, "HOME": str(preferences_home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
         except BaseException:
-            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
-        finally:
-            dispose_all(lambda: os.close(ready_write))
         try:
-            offered = provider_prompt(master, ready_read)
+            offered = provider_prompt(master)
             assert "[ChatGPT]" in offered and "API key" in offered, offered
             os.write(master, b"\x03")
             terminal_exit(deferred, master)
@@ -2265,7 +2261,7 @@ def main(selected="all"):
             assert set(json.loads(run(preferences_home, "request", "list"))) == before_missing
         finally:
             dispose_all(lambda: stop_process(deferred, timeout=5),
-                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         explicit_home = state / "explicit-home"
         explicit_config = explicit_home / ".config/rui"
         explicit_config.mkdir(parents=True, mode=0o700)
@@ -2273,20 +2269,16 @@ def main(selected="all"):
         malformed.write_text("version=9\n")
         malformed.chmod(0o600)
         master, slave = open_pty()
-        ready_read, ready_write = os.pipe()
         try:
             explicit = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
-                env={**os.environ, "HOME": str(explicit_home),
-                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                env={**os.environ, "HOME": str(explicit_home)},
+                stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
-        finally:
-            dispose_all(lambda: os.close(ready_write))
         try:
-            assert "[ChatGPT]" in provider_prompt(master, ready_read)
+            assert "[ChatGPT]" in provider_prompt(master)
             # Another client installs a fixture credential while this caller
             # waits for a choice. Its explicit selectors must still bypass the
             # malformed prospective defaults when it rechecks readiness.
@@ -2299,25 +2291,21 @@ def main(selected="all"):
             assert explicit.wait(timeout=5) == 0
         finally:
             dispose_all(lambda: stop_process(explicit, timeout=5),
-                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         # A renewal-due opaque credential arrives while the prompt is open. It
         # remains usable for creation.
         (explicit_config / "codex.json").unlink()
         master, slave = open_pty()
-        ready_read, ready_write = os.pipe()
         try:
             expiring = spawn([str(fixture.RUI), "--store", str(store),
                 "--provider", "codex", "--model", "gpt-6-luna"], cwd=workspace,
-                env={**os.environ, "HOME": str(explicit_home),
-                    "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                env={**os.environ, "HOME": str(explicit_home)},
+                stdin=slave, stdout=slave, stderr=slave)
         except BaseException:
-            dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+            dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
             raise
-        finally:
-            dispose_all(lambda: os.close(ready_write))
         try:
-            assert "[ChatGPT]" in provider_prompt(master, ready_read)
+            assert "[ChatGPT]" in provider_prompt(master)
             credential_file = explicit_config / "codex.json"
             codex_fixture.credentials(credential_file, access="synthetic-opaque-access")
             renewed_at = int(time.time()) - 8 * 24 * 60 * 60 - 1
@@ -2330,7 +2318,7 @@ def main(selected="all"):
             assert malformed.read_text() == "version=9\n"
         finally:
             dispose_all(lambda: stop_process(expiring, timeout=5),
-                        lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                        lambda: close_pty(master), lambda: close_pty(slave))
         longer_store = state / "another-longer-store-selector"
         other_host = fixture.start_host(longer_store, url)
         try:
@@ -2340,19 +2328,15 @@ def main(selected="all"):
                 defaults(changing_home, "--store", before,
                     "--provider", "codex", "--model", "gpt-6-luna")
                 master, slave = open_pty()
-                ready_read, ready_write = os.pipe()
                 try:
                     changing = spawn([str(fixture.RUI)], cwd=workspace,
-                        env={**os.environ, "HOME": str(changing_home),
-                            "RUI_TEST_ACTION_READY_FD": str(ready_write)},
-                        pass_fds=(ready_write,), stdin=slave, stdout=slave, stderr=slave)
+                        env={**os.environ, "HOME": str(changing_home)},
+                        stdin=slave, stdout=slave, stderr=slave)
                 except BaseException:
-                    dispose_all(lambda: close_pty(master), lambda: close_pty(slave), lambda: os.close(ready_read))
+                    dispose_all(lambda: close_pty(master), lambda: close_pty(slave))
                     raise
-                finally:
-                    dispose_all(lambda: os.close(ready_write))
                 try:
-                    assert "[ChatGPT]" in provider_prompt(master, ready_read)
+                    assert "[ChatGPT]" in provider_prompt(master)
                     defaults(changing_home, "--store", after)
                     codex_fixture.credentials(changing_home / ".config/rui/codex.json")
                     welcome = overview_frame(master, overview_title, keys=b"\r")
@@ -2362,7 +2346,7 @@ def main(selected="all"):
                     assert changing.wait(timeout=5) == 0
                 finally:
                     dispose_all(lambda: stop_process(changing, timeout=5),
-                                lambda: os.close(ready_read), lambda: close_pty(master), lambda: close_pty(slave))
+                                lambda: close_pty(master), lambda: close_pty(slave))
         finally:
             fixture.stop_host(other_host)
         codex_fixture.credentials(credential)

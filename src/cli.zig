@@ -1578,8 +1578,6 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
 /// The sign-in worker reuses selection and Host startup whole, including
 /// refreshed saved selectors. Startup diagnostics belong to the input row.
 fn activateOverview(init: std.process.Init, intent: new_session_selection.Intent) !@import("SignIn.zig").Activation {
-    if (!stderr.tryAcquire()) return error.HostReadinessUnconfirmed;
-    defer stderr.release();
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     try prepareOverview(init, .{ .store = intent.store, .provider = intent.provider, .model = intent.model }, entry);
@@ -1678,17 +1676,13 @@ fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provi
 
 /// How the terminal names each built-in provider.
 const ProviderPresentation = struct {
-    /// The guided choice's key.
-    key: u8,
     name: []const u8,
-    /// The guided choice when the provider is not ready.
-    sign_in: []const u8,
 };
 
 fn providerPresentation(provider: protocol.Provider) ProviderPresentation {
     return switch (provider) {
-        .codex => .{ .key = 'c', .name = "Codex", .sign_in = "Codex login" },
-        .openai => .{ .key = 'o', .name = "OpenAI", .sign_in = "OpenAI API key" },
+        .codex => .{ .name = "Codex" },
+        .openai => .{ .name = "OpenAI" },
     };
 }
 
@@ -4742,4 +4736,28 @@ test "archive mutation presentation preserves requested intent and pending settl
         try presentMutationReply(&human, reply, .human);
         try std.testing.expect(std.mem.endsWith(u8, human.buffered(), if (archived) "archived: true; completion: pending\n" else "archived: false; completion: completed\n"));
     }
+}
+
+test "Sign-in activation does not borrow the terminal diagnostic channel" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var home_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_bytes[0..try tmp.dir.realPath(io, &home_bytes)];
+    var store_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const store = try std.fmt.bufPrint(&store_bytes, "{s}/store", .{home});
+    var environment: std.process.Environ.Map = .init(std.testing.allocator);
+    defer environment.deinit();
+    try environment.put("HOME", home);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const argv = [_][*:0]const u8{"rui"};
+    const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+    // No credential is ready. Whether another optional writer owns stderr
+    // cannot change that outcome into an unconfirmed Host launch.
+    try std.testing.expect(stderr.tryAcquire());
+    defer stderr.release();
+    try std.testing.expectError(error.HostModelUnavailable, activateOverview(init, .{ .store = store, .provider = "codex", .model = product_defaults.recommended_model }));
+    try std.testing.expect(!stderr.tryAcquire()); // The caller still owns it.
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "store", .{}));
 }
