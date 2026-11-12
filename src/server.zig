@@ -89,7 +89,10 @@ const StopSignals = struct {
     /// Intake's wake socket while it is open, else -1.
     var wake: std.atomic.Value(std.posix.fd_t) = .init(-1);
     /// Handlers between reading `wake` and finishing their write; `detach`
-    /// waits for none before intake may close the socket.
+    /// waits for none before intake may close the socket. With `wake`, a
+    /// store-buffering handshake: both sides store, then load the other's
+    /// value, all seq_cst, so either `detach` sees the handler in flight or
+    /// the handler sees -1.
     var writing: std.atomic.Value(u32) = .init(0);
 
     previous: [signals.len]std.posix.Sigaction,
@@ -114,33 +117,40 @@ const StopSignals = struct {
     }
 
     fn handle(_: std.posix.SIG) callconv(.c) void {
-        asked.store(true, .release);
-        _ = writing.fetchAdd(1, .acq_rel);
-        defer _ = writing.fetchSub(1, .acq_rel);
-        const fd = wake.load(.acquire);
+        asked.store(true, .seq_cst);
+        _ = writing.fetchAdd(1, .seq_cst);
+        defer _ = writing.fetchSub(1, .seq_cst);
+        const fd = wake.load(.seq_cst);
         if (fd < 0) return;
         const saved = std.c._errno().*;
-        // Coalesced hint: a full nonblocking socket is already readable.
-        _ = std.c.write(fd, "x", 1);
+        hint(fd);
         std.c._errno().* = saved;
     }
 
-    fn attach(fd: std.posix.fd_t) void {
-        wake.store(fd, .release);
-        // An ask that arrived before this wake socket existed.
-        if (asked.load(.acquire)) _ = std.c.write(fd, "x", 1);
+    /// Coalesced: a full nonblocking socket is already readable. Never raises
+    /// SIGPIPE: MSG_NOSIGNAL on Linux, SO_NOSIGPIPE set by `Intake.init` on
+    /// Darwin.
+    fn hint(fd: std.posix.fd_t) void {
+        _ = std.c.send(fd, "x", 1, socket_os.send_flags);
     }
 
+    fn attach(fd: std.posix.fd_t) void {
+        wake.store(fd, .seq_cst);
+        // An ask that arrived before this wake socket existed.
+        if (asked.load(.seq_cst)) hint(fd);
+    }
+
+    /// After it returns no handler holds the socket, so it may be closed.
     fn detach() void {
-        wake.store(-1, .release);
+        wake.store(-1, .seq_cst);
         // A handler writes one byte and returns; it never waits.
-        while (writing.load(.acquire) != 0) std.atomic.spinLoopHint();
+        while (writing.load(.seq_cst) != 0) std.atomic.spinLoopHint();
     }
 
     /// Applies a pending ask on intake's loop. A repeated ask while the Host
     /// is already stopping changes nothing (`Host.stopAsked`).
     fn apply(host: *Host) void {
-        if (asked.swap(false, .acq_rel)) _ = host.stopAsked();
+        if (asked.swap(false, .seq_cst)) _ = host.stopAsked();
     }
 };
 
@@ -583,7 +593,10 @@ const Intake = struct {
             _ = std.c.close(self.wake[0]);
             _ = std.c.close(self.wake[1]);
         }
-        for (self.wake) |fd| try setNonblocking(fd);
+        for (self.wake) |fd| {
+            try setNonblocking(fd);
+            if (!socket_os.suppressSigpipe(fd)) return error.SocketFlagsFailed;
+        }
         errdefer self.stopWorkers();
         for (&self.workers, &self.threads) |*worker, *thread| {
             worker.* = .{ .owner = self };
@@ -5028,5 +5041,54 @@ test "the Host's stop signals reach its handler until serve restores the previou
     inline for (StopSignals.signals) |signal| {
         try std.posix.raise(signal);
         try std.testing.expect(!StopSignals.asked.load(.acquire));
+    }
+}
+
+test "a stop signal handler racing detach never writes to the closed or a reused wake socket" {
+    const Hammer = struct {
+        calls: std.atomic.Value(u64) = .init(0),
+        stop: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            while (!self.stop.load(.acquire)) {
+                StopSignals.handle(std.posix.SIG.INT);
+                _ = self.calls.fetchAdd(1, .release);
+            }
+        }
+
+        fn advance(self: *@This(), count: u64) void {
+            const target = self.calls.load(.acquire) + count;
+            while (self.calls.load(.acquire) < target) std.atomic.spinLoopHint();
+        }
+    };
+    var hammers: [3]Hammer = @splat(.{});
+    var threads: [hammers.len]std.Thread = undefined;
+    for (&hammers, &threads) |*hammer, *thread| thread.* = try std.Thread.spawn(.{}, Hammer.run, .{hammer});
+    defer {
+        for (&hammers) |*hammer| hammer.stop.store(true, .release);
+        for (threads) |thread| thread.join();
+        StopSignals.asked.store(false, .seq_cst);
+    }
+    var bytes: [256]u8 = undefined;
+    for (0..20000) |round| {
+        errdefer std.debug.print("round {d}\n", .{round});
+        var wake: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &wake));
+        for (wake) |fd| try setNonblocking(fd);
+        StopSignals.attach(wake[1]);
+        for (&hammers) |*hammer| hammer.advance(1);
+        StopSignals.detach();
+        // Closing the peer first would turn a late write into EPIPE.
+        _ = std.c.close(wake[0]);
+        _ = std.c.close(wake[1]);
+        // The lowest free numbers: a late handler's write would land here.
+        var reused: [2]std.posix.fd_t = undefined;
+        try std.testing.expectEqual(@as(c_int, 0), std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &reused));
+        defer for (reused) |fd| {
+            _ = std.c.close(fd);
+        };
+        for (reused) |fd| try setNonblocking(fd);
+        for (&hammers) |*hammer| hammer.advance(1);
+        for (reused) |fd| try std.testing.expect(std.c.read(fd, &bytes, bytes.len) < 0);
     }
 }
