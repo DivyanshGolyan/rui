@@ -2441,10 +2441,15 @@ def frame_steps(run, terminal, steps, exiting=False):
 
 
 def frame_initial_ready(terminal, first_wait=None, allow_exit=False):
-    # The opening read resets the scroll anchor, so wait for it before releasing input.
-    terminal.wait(lambda c: "›" in c.completed and "Opening…" not in c.completed
+    # Chat/sign-in and old baseline images have a prompt. The editorless
+    # overview instead commits its pinned actions and bottom footer. Keep
+    # both paths so current recipes can still capture the unfixed baseline.
+    # The opening read resets the scroll anchor before input is released.
+    terminal.wait(lambda c: ("›" in c.completed or all(text in c.completed for text in
+                              ("+ New Session", "Settings", "enter open")))
+                  and "Opening…" not in c.completed
                   and (not first_wait or first_wait in c.completed),
-                  "initial composer ready" + (f" with {first_wait!r}" if first_wait else ""),
+                  "initial screen ready" + (f" with {first_wait!r}" if first_wait else ""),
                   allow_exit=allow_exit)
 
 

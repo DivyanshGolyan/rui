@@ -203,12 +203,6 @@ def composer_ready(screen, x, y):
     return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
 
 
-def overview_composer(screen, x, y):
-    """Input is accepted at the overview's composer: the cursor is on its row."""
-    line = composer_line(screen, y)
-    return x >= 3 and any(line == " " + mark or line.startswith(" " + mark + " ") for mark in ("›", ">"))
-
-
 def keyed_frame(master, keys, accept, timeout=15):
     """Write `keys`; return the first committed frame after them that
     `accept`s, given the frame and its cursor. With no keys, the frame shown
@@ -241,13 +235,23 @@ def keyed_frame(master, keys, accept, timeout=15):
 
 def overview_title(frame):
     """The overview's list and pinned Settings row, without a title band."""
-    return "  + New Session" in frame and "  Settings" in frame
+    return "  + New Session" in frame and "  Settings" in frame and "Type a task" not in frame
 
 
 def overview_frame(master, accept, keys=b"", timeout=15):
-    """The first overview frame after `keys` that `accept`s, with its
-    composer taking input."""
-    return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_composer(screen, x, y), timeout)
+    """The first committed list frame after `keys` that `accept`s.
+
+    Overview has no editor or cursor-readiness condition; its pinned rows
+    and bottom action footer identify the screen instead.
+    """
+    return keyed_frame(master, keys, lambda screen, x, y: accept(screen) and overview_title(screen)
+                       and "enter open" in screen, timeout)
+
+
+def open_new_chat(master, timeout=15):
+    """Open the pinned New Session row, then wait for its focused editor."""
+    return keyed_frame(master, b"\x1b[H\r", lambda screen, x, y: "Type a task" in screen
+                       and composer_ready(screen, x, y), timeout)
 
 
 

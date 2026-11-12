@@ -677,6 +677,31 @@ class TerminalScreen:
     def send(self, text):
         os.write(self.master, text.encode())
 
+    def overview(self, *, ready=True):
+        frame = wait_for(self.observe, "terminal overview list and footer", timeout=15,
+                         ready=lambda screen: all(shown(marker, screen) for marker in
+                                                  ("+ New Session", "Settings"))
+                         and (not ready or shown("enter open", screen))
+                         and "Notifications" not in screen)
+        assert "Type a task" not in frame, ("overview has an editor", frame)
+        assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", frame), ("overview has a composer", frame)
+        return frame
+
+    def ignored_overview_input(self, text, *markers):
+        self.overview(ready=False)
+        # End and Enter open Settings after every ignored byte. Observing that
+        # panel and returning orders the check after input consumption, even
+        # when ignored input itself causes no repaint.
+        self.send(text + "\x1b[F\r")
+        self.contains("Notifications")
+        self.close_settings()
+        # The roundtrip acknowledges input; a held Host need not advertise
+        # Enter on the returned list.
+        frame = self.overview(ready=False)
+        for marker in markers:
+            assert marker not in frame, ("overview retained ignored input", marker, frame)
+        assert "Unknown command" not in frame, ("overview interpreted a slash command", frame)
+
     def start_upgrade(self):
         # Settings stays reachable in the split list while a conversation is open.
         frame = self.contains("Settings")
@@ -699,7 +724,8 @@ class TerminalScreen:
 
     def close_settings(self):
         self.send("\x1b")
-        self.contains("›")
+        self.until(lambda: "Notifications" not in self.capture.completed,
+                   "Settings closed without requiring an overview editor")
 
     def save(self, destination, name):
         if destination is not None:
@@ -980,7 +1006,7 @@ def exit_on_sigint(screen, process, description):
 def terminal_cases(root, binary, releases, artifacts):
     """Settings > Version on the overview reports progress; Esc cancels
     while preparing; a fresh TUI's Upgrade replaces both Host and TUI,
-    retaining the overview draft. An up-to-date run does not relaunch again."""
+    retaining the editor-free overview. An up-to-date run does not relaunch again."""
     with case(root, binary, releases, "terminal-overview") as c:
         c.old_selection()
         old_host, previous = c.start_host()
@@ -994,7 +1020,7 @@ def terminal_cases(root, binary, releases, artifacts):
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(published)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "terminal installation archive gate")
             screen.contains("preparing Upgrade")
@@ -1015,24 +1041,22 @@ def terminal_cases(root, binary, releases, artifacts):
         # fresh launch has no retained guidance to suppress this installation.
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.contains(" · publishing")
             screen.close_settings()
             screen.contains("Publishing; cancelling no longer rolls back")
-            # Local editing remains available while the Host is held. Seed
-            # bytes and a non-tail caret before the old image leaves.
-            # Esc closes Settings once publication can no longer cancel.
-            screen.send("\x01\x0boverview α draft\x01\x1b[C\x1b[C\x1b[C")
-            screen.draft("overview α draft", 5)
+            # Printable, slash and pasted bytes cannot seed an overview draft,
+            # including while publication holds the Host.
+            screen.ignored_overview_input("overview α ignored/x\x1b[200~overview β paste\x1b[201~",
+                                          "overview α ignored", "overview β paste")
             published.unlink()
             proof_relaunched(c, screen, process)
             proof_ready(c, previous, old_host)
             assert not shown(f"│ {session} · gpt-6-luna", screen.observe()), "overview reopened as a conversation"
-            screen.draft("overview α draft", 5)
+            screen.overview()
             screen.save(artifacts, "overview-installed")
-            screen.send("X")
-            screen.draft("oveXrview α draft", 6)
+            screen.ignored_overview_input("/x\x1b[200~returned γ paste\x1b[201~", "returned γ paste")
             screen.save(artifacts, "overview-returned")
             # The selected build is now current: the second run installs
             # nothing. Its terminal retirement below is a completed witness
@@ -1042,8 +1066,7 @@ def terminal_cases(root, binary, releases, artifacts):
             screen.close_settings()
             screen.contains(f"Rui is up to date ({releases.version})")
             assert os_semantics.process_executable(process.pid) == c.link.resolve()
-            screen.send("\x01\x0bunchanged draft")
-            screen.draft("unchanged draft", 17)
+            screen.ignored_overview_input("unchanged δ ignored", "unchanged δ ignored")
             screen.save(artifacts, "overview-unchanged")
             exit_on_sigint(screen, process, "overview exit after unchanged Upgrade")
             assert screen.entries == screen.restorations == 2, "unchanged Upgrade relaunched the TUI"
@@ -1132,7 +1155,7 @@ def escape_after_publication(root, binary, releases, artifacts):
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.until(lambda: c.link.resolve() != c.original, "publication before terminal Escape")
             installed = c.link.resolve()
@@ -1157,7 +1180,7 @@ def terminal_download_failure(root, binary, releases, artifacts):
         releases.status["/releases/latest"] = 403
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.contains(" · couldn't reach GitHub")
             assert os_semantics.process_executable(process.pid) == binary, "failed check replaced the client"
@@ -1184,7 +1207,7 @@ def terminal_cancellation_guidance(root, binary, releases, artifacts):
         gate = releases.gate_archive()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "archive held before cancellation guidance")
             screen.send("\x1b")
@@ -1215,14 +1238,13 @@ def terminal_path_guidance(root, binary, releases, artifacts):
         c.env["PATH"] = f"{shadow.parent}:{c.env['PATH']}"
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.contains(f" · upgraded to {releases.version}")
             screen.close_settings()
             screen.contains(f"Upgraded to {releases.version}")
             proof_ready(c, previous, old_host)
-            screen.send("\x01\x0bguidance draft")
-            screen.draft("guidance draft", 16)
+            screen.ignored_overview_input("guidance ε ignored", "guidance ε ignored")
             assert os_semantics.process_executable(process.pid) == binary
             assert screen.entries == 1 and screen.restorations == 0
             screen.save(artifacts, "path-guidance-installed")
@@ -1272,13 +1294,21 @@ def startup_cases(root, binary, releases, artifacts):
             try:
                 with terminal_process(arguments, env=c.env, cwd=c.root) as (process, master):
                     screen = TerminalScreen(master, process)
-                    screen.contains(f"│ {session} · gpt-6-luna" if screen_kind == "resume" else session)
+                    if screen_kind == "resume":
+                        screen.contains(f"│ {session} · gpt-6-luna")
+                    else:
+                        screen.overview()
+                        screen.contains(session)
                     screen.start_upgrade()
                     screen.contains(" · publishing")
                     screen.close_settings()
                     screen.contains("Publishing; cancelling no longer rolls back")
-                    screen.send("\x01\x0bstartup α draft\x01\x1b[C\x1b[C\x1b[C")
-                    screen.draft("startup α draft", 5)
+                    if screen_kind == "resume":
+                        screen.send("\x01\x0bstartup α draft\x01\x1b[C\x1b[C\x1b[C")
+                        screen.draft("startup α draft", 5)
+                    else:
+                        screen.ignored_overview_input("/xstartup α ignored\x1b[200~startup β paste\x1b[201~",
+                                                      "startup α ignored", "startup β paste")
                     assert c.link.resolve() != c.original and published.exists()
                     assert old_host.poll() is None and c.status()["instance"] == previous["instance"]
                     # Mutate only after the old TUI has entered successfully.
@@ -1293,12 +1323,17 @@ def startup_cases(root, binary, releases, artifacts):
                     published.unlink()
                     proof_relaunched(c, screen, process)
                     proof_ready(c, previous, old_host)
-                    screen.contains(f"│ {session} · gpt-6-luna" if screen_kind == "resume" else session)
-                    if screen_kind == "overview":
+                    if screen_kind == "resume":
+                        screen.contains(f"│ {session} · gpt-6-luna")
+                        screen.draft("startup α draft", 5)
+                        screen.send("X")
+                        screen.draft("staXrtup α draft", 6)
+                    else:
+                        screen.overview()
+                        screen.contains(session)
                         assert not shown(f"│ {session} · gpt-6-luna", screen.observe()), "overview opened a conversation"
-                    screen.draft("startup α draft", 5)
-                    screen.send("X")
-                    screen.draft("staXrtup α draft", 6)
+                        screen.ignored_overview_input("/xreturned γ ignored\x1b[200~returned δ paste\x1b[201~",
+                                                      "returned γ ignored", "returned δ paste")
                     screen.save(artifacts, name)
                     assert "No locally ready provider for a new Session" not in screen.capture.plain
                     assert "private setup defaults unreadable" not in screen.capture.plain
@@ -1330,7 +1365,7 @@ def signal_during_check(root, binary, releases, artifacts):
         gate = releases.gates["/releases/latest"] = Gate()
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.until(gate.entered.is_set, "release check held before terminal signal")
             screen.contains("checking for updates")
@@ -1352,7 +1387,7 @@ def signal_after_publication(root, binary, releases, artifacts):
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(gate)
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains("›")
+            screen.overview()
             screen.start_upgrade()
             screen.until(lambda: c.link.resolve() != c.original, "publication before SIGINT")
             installed = c.link.resolve()
@@ -1400,7 +1435,7 @@ def cancel_selected_version_check(root, binary, releases, artifacts):
         with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
             try:
                 screen = TerminalScreen(master, process)
-                screen.contains("›")
+                screen.overview()
                 screen.start_upgrade()
 
                 def child_started():
@@ -1455,7 +1490,7 @@ def terminal_cleanup_dual_failure(root, binary, releases, artifacts):
         try:
             with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root) as (process, master):
                 screen = TerminalScreen(master, process)
-                screen.contains("›")
+                screen.overview()
                 screen.start_upgrade()
                 screen.until(gate.entered.is_set, "real archive request after stage creation")
                 stages = list(parent.glob("install.*"))

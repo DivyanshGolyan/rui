@@ -93,6 +93,32 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual([step["first_history"] for step in navigation["wheel-alt-scroll"]["middle"]], [81, 82])
 
 
+class OverviewTests(unittest.TestCase):
+    def test_expired_escape_requires_list_without_an_editor(self):
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from scenarios import escaped_overview
+
+        class Terminal:
+            def __init__(self, frame):
+                self.completed = frame
+                self.screen = self
+
+            def wait(self, predicate, *, label):
+                assert predicate(), label
+
+        frame = "  + New Session\n  ○ a1b2c3\n  Settings\nenter open"
+        escaped_overview(Terminal(frame), "a1b2c3")
+        for marker in ("+ New Session", "○ a1b2c3", "Settings", "enter open"):
+            with self.subTest(missing=marker), self.assertRaisesRegex(AssertionError, "overview after expired standalone Esc"):
+                escaped_overview(Terminal(frame.replace(marker, "missing")), "a1b2c3")
+        for editor, failure in (("Type a task", "overview has an editor"),
+                                (" › ab", "overview has a composer"),
+                                (" > ab", "overview has a composer"),
+                                ("sidebar │ › ab", "overview has a composer")):
+            with self.subTest(editor=editor), self.assertRaisesRegex(AssertionError, failure):
+                escaped_overview(Terminal(frame + "\n" + editor), "a1b2c3")
+
+
 class ExitTests(unittest.TestCase):
     def test_leave_sends_ctrl_c_then_checks_restoration(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):

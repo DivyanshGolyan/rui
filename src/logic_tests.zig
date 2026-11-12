@@ -419,7 +419,7 @@ test "overview benchmark: merging a 10,000-row listing, and building a 200x60 fr
         list.rows = .{ .userdata = &state, .count = @intCast(overview_view.listLength(&state)), .rowFn = Source.row };
         list.selected = if (overview_view.selectedLine(&state)) |at| @intCast(at) else null;
         _ = try list.widget().draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 53 }, .cell_size = .{} });
-        const footer: @import("widgets/Footer.zig") = .{ .left = try overview_view.footerLeft(frame.allocator(), &state, 200, .{}), .right = overview_view.footerRight(&state, .{}) };
+        const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = overview_view.footerRight(&state) };
         _ = try footer.widget().draw(.{ .arena = frame.allocator(), .min = .{}, .max = .{ .width = 200, .height = 1 }, .cell_size = .{} });
         render_ns[run] = nanosecondsNow() - render_start;
         render_allocations = @max(render_allocations, counting.count);

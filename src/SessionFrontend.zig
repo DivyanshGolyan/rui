@@ -426,7 +426,7 @@ pub fn begin(self: *Self, init: std.process.Init, store: []const u8, session: []
     self.app_input = .{ .composer = .{ .editor = &self.input.editors[self.input.active] } };
     self.app_document = .{ .document = &screen.browsing, .colour = self.colour, .handler = .{ .userdata = self, .on_open = appOpen, .on_notice = appNotice, .on_scroll = appDragScroll } };
     self.app_body = .{ .shown = self.app_content.widget() };
-    self.app_screen = .{ .content = &self.app_body, .input = &self.app_input, .content_gutter = true, .userdata = self, .on_event = appEvent };
+    self.app_screen = .{ .content = &self.app_body, .input = self.app_input.widget(), .content_gutter = true, .userdata = self, .on_event = appEvent };
 }
 
 /// The shell owns Host availability; the Session only reads it and forwards
@@ -526,7 +526,9 @@ fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
 /// Only the current Session read owns footer facts; an unread line must
 /// not borrow a permission from the independently refreshed info panel.
 fn footerFacts(self: *const Self) ?@import("session_line.zig").Facts {
-    return self.line.facts(&self.hint, self.session);
+    var facts = self.line.facts(&self.hint, self.session) orelse return null;
+    facts.home = self.home;
+    return facts;
 }
 
 fn infoBackend(self: *Self) ChatInfo.Backend {
@@ -1079,6 +1081,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_input.composer.style = normal;
     self.app_input.composer.quiet = quiet;
     self.app_input.composer.method = self.app_caps.width;
+    self.app_input.composer.placeholder = if (self.line.read != null and self.line.folder != null) "Type a task" else "";
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
@@ -1138,7 +1141,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const held = self.heldOriginal();
     const send = session_chrome.send(session_notice.status(self.reading.opening, self.app_consent.request != null, held), self.reading.opening or (held != null and held.?.state == .submitting));
     const list_visible = self.app_hooks.root.listVisible();
-    chrome.place(&self.app_screen, .{
+    chrome.place(&self.app_screen, &self.app_input, .{
         .list_visible = list_visible,
         .choice = if (!self.app_info.standaloneOpen()) .closed else if (self.app_info.hasChoice()) .pick else .retry,
         .browsing = browsing,
@@ -1211,7 +1214,7 @@ test "App Session retains the draft across a permission card arriving during pas
             return error.UnexpectedOpen;
         }
     };
-    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.screen.feed.at_end = true;
@@ -1457,7 +1460,7 @@ test "App Session leaves from a permission card on Ctrl-C or Ctrl-D and keeps th
             }
         };
         Hooks.left = null;
-        var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+        var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
         const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         self.reading.opening = false;
         self.screen.feed.at_end = true;
@@ -1525,7 +1528,7 @@ test "App Session link click leaves for the peer only where Esc would leave" {
     };
     Hooks.opened = null;
     Hooks.left = null;
-    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+    var root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
     const widget_ = self.attach(.{ .root = &root, .context = self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
     self.reading.opening = false;
     self.screen.feed.at_end = true;
@@ -3441,7 +3444,7 @@ const HeldFrontend = struct {
     tmp: std.testing.TmpDir,
     directory: [std.Io.Dir.max_path_bytes]u8 = undefined,
     interrupted: client.Cancellation = .{},
-    root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() },
+    root: Root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() },
     arena: std.heap.ArenaAllocator,
     /// What the frontend asked of its lender, in order.
     left: ?Outcome = null,
@@ -5796,7 +5799,7 @@ const ChromeFixture = struct {
             }
         }.line;
         fixture.self.begin(init_, "unused", "k7m2qx", "unused", .{ .scratch = page, .action = page, .inspection = page, .details = page, .actions = .{ page, page } }, undefined, undefined, undefined, fixture.screen, &fixture.interrupted, lender);
-        fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget(), .compose = empty_app_text.widget() };
+        fixture.root = .{ .overview = empty_app_text.widget(), .list = empty_app_text.widget() };
         fixture.widget = fixture.self.attach(.{ .root = &fixture.root, .context = fixture.self, .leave = Hooks.leave, .copy = Hooks.copy, .on_open = Hooks.open }, .{ .depth = .none });
         fixture.self.reading.opening = false;
         fixture.screen.feed.at_end = true;
@@ -9634,4 +9637,50 @@ test "chat standalone accepted departure ends presentation before handing back a
         defer saved.deinit(std.testing.allocator);
         try std.testing.expectEqualStrings("kept draft", saved.snapshot.bytes);
     };
+}
+
+test "empty chat footer folder comes from current line with frontend home" {
+    var self: Self = undefined;
+    self.home = "/home/u";
+    self.session = "ref";
+    self.hint = .absent;
+    self.line = .{ .read = .{ .revision = 1, .end = 0 } };
+    try self.line.model.set("gpt-6.1-sol");
+    self.line.effort = .low;
+    self.line.folder = .{};
+    try self.line.folder.?.set("/home/u/code/rui");
+    for ([_]usize{ 46, 140 }) |width| {
+        var buffer: [session_chrome.facts_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings("gpt-6.1-sol · low · ~/code/rui", session_chrome.factsRow(&buffer, self.footerFacts(), "ref", null, width, .unicode));
+    }
+    self.line.folder = null;
+    try std.testing.expect(self.footerFacts().?.folder == null);
+    self.line.read = null;
+    try std.testing.expect(self.footerFacts() == null);
+}
+
+test "empty chat composer placeholder follows current no-message facts" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    fixture.self.line.read = .{ .revision = 1, .end = 0 };
+    fixture.self.line.folder = .{};
+    try fixture.self.line.folder.?.set("/work");
+    for ([_]u16{ 46, 140 }) |width| {
+        const ctx: vxfw.DrawContext = .{ .arena = fixture.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} };
+        _ = try fixture.widget.draw(ctx);
+        try std.testing.expectEqualStrings("Type a task", fixture.self.app_input.composer.placeholder);
+        const composer = try fixture.self.app_input.composer.widget().draw(ctx.withConstraints(.{}, .{ .width = width, .height = 3 }));
+        var text: std.ArrayList(u8) = .empty;
+        for (0..width) |col| try text.appendSlice(fixture.arena.allocator(), composer.readCell(col, 1).char.grapheme);
+        try std.testing.expect(std.mem.indexOf(u8, text.items, "Type a task") != null);
+        fixture.self.line.folder = null;
+        _ = try fixture.widget.draw(ctx);
+        try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);
+        fixture.self.line.folder = .{};
+        try fixture.self.line.folder.?.set("/work");
+    }
+    fixture.self.line.read = null;
+    _ = try fixture.draw();
+    try std.testing.expectEqualStrings("", fixture.self.app_input.composer.placeholder);
 }

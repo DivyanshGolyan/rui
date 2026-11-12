@@ -1099,6 +1099,36 @@ while True:
                                  ("initial-frame", screens[count - 1], allow_exit))
                 self.assertTrue(records[0]["ok"])
 
+    def test_initial_readiness_accepts_editorless_list_and_legacy_prompt(self):
+        listed = "  + New Session\n  Settings\nenter open"
+        self.assertNotIn("Type a task", listed)
+        def accepts_list(predicate, _description, **_kwargs):
+            self.assertTrue(predicate(types.SimpleNamespace(completed=listed)),
+                            "committed overview list must not require an editor")
+        self.helper["frame_initial_ready"](types.SimpleNamespace(wait=accepts_list))
+        cases = [
+            ([listed], None, 1),
+            ([listed.replace("+ New Session", ""), listed], None, 2),
+            ([listed.replace("Settings", ""), listed], None, 2),
+            ([listed.replace("enter open", ""), listed], None, 2),
+            ([listed + " Opening…", listed], None, 2),
+            ([listed, listed + " Ready"], "Ready", 2),
+            # Before captures use the old image with the same new recipes.
+            ([" › Type a task"], None, 1),
+            ([" › ChatGPT    API key"], None, 1),
+        ]
+        for screens, first_wait, count in cases:
+            with self.subTest(screens=screens, first_wait=first_wait):
+                state = {"name": "initial-list", "open": "overview",
+                         "steps": [{"wait": first_wait}] if first_wait else []}
+                calls, records = self.run_frames_scenario({"sizes": ["100x30"], "states": [state]},
+                                                         initial_frames=screens)
+                self.assertEqual([call for call in calls if call[0] == "initial-frame"],
+                                 [("initial-frame", screen, False) for screen in screens[:count]])
+                self.assertEqual(calls[calls.index(("steps",)) - 1],
+                                 ("initial-frame", screens[count - 1], False))
+                self.assertTrue(records[0]["ok"])
+
     def test_frame_terminal_receives_initial_size_and_theme(self):
         scenario = {"sizes": ["100x30"], "states": [{"name": "empty", "open": "overview", "steps": [], "theme": "day"}]}
         calls, _records = self.run_frames_scenario(scenario)

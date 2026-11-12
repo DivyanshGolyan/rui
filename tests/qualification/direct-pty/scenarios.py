@@ -134,6 +134,16 @@ def leave(tty):
     tty.finish()
 
 
+def escaped_overview(tty, session):
+    """A standalone Esc returns to the list, never to another editor."""
+    tty.wait(lambda: all(marker in tty.screen.completed for marker in
+                         ("+ New Session", f"○ {session}", "Settings", "enter open")),
+             label="overview after expired standalone Esc")
+    assert "Type a task" not in tty.screen.completed, ("overview has an editor", tty.screen.completed)
+    assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", tty.screen.completed), \
+        ("overview has a composer", tty.screen.completed)
+
+
 def editor(fixture, row):
     fixture.answer("TD4 exact answer")
     tty = fixture.terminal()
@@ -142,9 +152,7 @@ def editor(fixture, row):
         # The expired standalone Esc leaves the chat, saving its draft. The
         # fixture creates exactly one Session, so Enter must reopen that row.
         # If Esc merged with a later byte, this overview observation must fail.
-        tty.marker("+ New Session")
-        tty.marker(f"○ {fixture.session}")
-        tty.marker("enter open")
+        escaped_overview(tty, fixture.session)
         tty.send(b"\r")
         tty.marker(f"‹ {fixture.session} · ")
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))

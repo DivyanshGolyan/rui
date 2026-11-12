@@ -30,7 +30,7 @@ DEVICE_ANSWER = b"\x1b[?62;22c"
 
 class TerminalProcessTest(unittest.TestCase):
     def test_composer_oracles_follow_the_caret_pane(self):
-        from human_cli_fixture import composer_empty, composer_ready, overview_composer
+        from human_cli_fixture import composer_empty, composer_ready
 
         for prefix in (" ", "list text│ ", "中       │ "):
             for text, caret in (("café", 6), ("x │ y", 7)):
@@ -45,7 +45,6 @@ class TerminalProcessTest(unittest.TestCase):
                     self.assertFalse(capture.draft(text, caret - 1))
                     self.assertFalse(capture.draft("wrong", caret))
                     self.assertTrue(composer_ready(capture.completed, cursor.x, cursor.y))
-                    self.assertTrue(overview_composer(capture.completed, cursor.x, cursor.y))
                     self.assertFalse(composer_empty(capture.completed, cursor.y))
                     capture.feed(("\x1b[?2026h\r\x1b[2K" + prefix + "› \x1b[?2026l").encode())
                     self.assertTrue(capture.draft("", 2))
@@ -56,6 +55,20 @@ class TerminalProcessTest(unittest.TestCase):
         from human_cli_fixture import conversation_text
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
+
+    def test_overview_oracle_requires_list_footer_without_editor(self):
+        from human_cli_fixture import overview_frame
+
+        with patch("human_cli_fixture.keyed_frame") as keyed:
+            overview_frame(17, lambda screen: "Settings" in screen)
+        predicate = keyed.call_args.args[2]
+        listed = "  + New Session\n  Settings\nenter open"
+        # A list accepts keys with no editor cursor, including a cursor
+        # position that could not be an input row.
+        self.assertTrue(predicate(listed, 0, 0))
+        self.assertFalse(predicate(listed.replace("enter open", ""), 0, 0))
+        self.assertFalse(predicate(listed + "\n › Type a task", 3, 3))
+        self.assertFalse(predicate(" › Type a task\ngpt-6-luna", 3, 0))
 
     def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):
         replies = []
