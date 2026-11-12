@@ -4238,7 +4238,8 @@ An untruncated stream is complete in the result and names no file.
 
 MCP answers are bounded by the existing 4 MiB per-call answer buffer.
 Their resolution keeps the first 10,000 rendered bytes, cut at a UTF-8 boundary, and the omitted-byte suffix; fitting answers keep their complete existing bytes and create no retained file.
-When bytes are omitted, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+When bytes are omitted and the Operation's frozen offer includes Bash, stream the whole rendered answer once to optional scratch and append `Full output: PATH`, or `Full output was not retained.` if retention is unavailable.
+Without Bash in that frozen offer, keep the omitted-byte suffix but retain no full answer and append no path or retention hint (D242); later Session settings do not change this choice.
 MCP uses the Host's same retained-output queue, scratch budget, file capacity, eviction and cleanup as Bash, with no fsync or durable retention index.
 Scratch loss never changes the call's outcome; partial failed captures are not advertised and keep their charge until confirmed removal.
 The Store saves exactly this model-facing resolution, not the full scratch answer; saved results and history rendering are never rewritten when scratch disappears.
