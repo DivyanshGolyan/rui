@@ -1532,14 +1532,16 @@ const call_details = rsql.Read(.{
         "JOIN model_tool_call c ON c.operation_id=op.operation_id JOIN content name ON name.content_id=c.name_content_id " ++
         "WHERE op.operation_id=?1 AND op.session_ref=?2 AND c.call_ordinal=?3",
     .Args = struct { operation: u64, session: []const u8, ordinal: u64 },
-    .Row = struct { resolved_at: rsql.Positive, description: ?Bounded(tool_presentation.max_description_bytes), tool: ?Bounded(@import("../../tool_name.zig").max_bytes), server: ?Bounded(@import("../../tool_record.zig").max_server_bytes) },
-    .cardinality = .one,
+    // Text has one address, in the output item, not a second bounded copy
+    // in every slot of the page's read-state union.
+    .Row = struct { resolved_at: rsql.Positive, description: *?Bounded(tool_presentation.max_description_bytes), tool: *?Bounded(@import("../../tool_name.zig").max_bytes), server: *?Bounded(@import("../../tool_record.zig").max_server_bytes) },
+    .cardinality = .optional,
 });
 
 /// Inline bytes retain the Proposal's admission-certified name identity.
 fn checkCallDetails(details: *const call_details.Row, metadata: *const activity_read.ProposalMetadata) error{CorruptStore}!void {
     const field = metadata.fields[@backingInt(tool_proposal.Field.name)];
-    if (details.tool) |*tool| {
+    if (details.tool.*) |*tool| {
         if (tool.slice().len != field.length or !std.mem.eql(u8, &content_string.digest(tool.slice()), &field.digest)) return error.CorruptStore;
     } else if (field.length <= @import("../../tool_name.zig").max_bytes) return error.CorruptStore;
 }
@@ -1798,13 +1800,13 @@ const ItemRead = struct {
         first: struct { missing: missing_assistant_entry.Result, row: activity_item.Result },
         message: struct { read: MessageRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined, entry: PublicContentRead },
         content: struct { read: PublicContentRead, presentation: PresentationRead = undefined, answer: answer_entry.Result = null },
-        call: struct { proposal: ProposalRead, resolved: call_details.Row = undefined },
+        call: struct { proposal: ProposalRead, resolved: call_details.Row = undefined, found: store_access.Found = undefined },
         hosted: HostedRead,
         sent: struct { read: SentRead, metadata: content_metadata.Row = undefined, label: LabelRead = undefined },
         failure: struct { read: FailureRead, label: LabelRead = undefined },
         outcome: struct { read: OutcomeRead, metadata: content_metadata.Row = undefined },
         stop: StopRead,
-        approval: struct { row: approval_request.Result = null, metadata: activity_read.ProposalMetadata = undefined, proposal: ProposalRead = undefined, details: call_details.Row = undefined },
+        approval: struct { row: approval_request.Result = null, metadata: activity_read.ProposalMetadata = undefined, proposal: ProposalRead = undefined, details: call_details.Row = undefined, found: store_access.Found = undefined },
         // Text has one address, in the item: keeping another bounded copy
         // here would widen every slot of a page's read-state union.
         change: struct { row: session_change.Row = undefined, found: store_access.Found = undefined },
@@ -1854,7 +1856,12 @@ const ItemRead = struct {
             },
             4 => {
                 const call = &read.state.call;
-                if (read.round == 1) readProposal(a, session, &call.proposal) else a.read(call_details, .{ .operation = item.value.call.operation, .session = session, .ordinal = item.value.call.call_ordinal }, &call.resolved);
+                if (read.round == 1) readProposal(a, session, &call.proposal) else {
+                    call.resolved.description = &item.value.call.description;
+                    call.resolved.tool = &item.value.call.tool;
+                    call.resolved.server = &item.value.call.server;
+                    a.readInto(call_details, .{ .operation = item.value.call.operation, .session = session, .ordinal = item.value.call.call_ordinal }, &call.resolved, &call.found);
+                }
             },
             10 => read.state.hosted.queue(a, session),
             8 => {
@@ -1879,7 +1886,13 @@ const ItemRead = struct {
             7 => read.state.stop.queue(a, session),
             12 => {
                 const approval = &read.state.approval;
-                if (read.round == 1) a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &approval.row) else if (read.round == 2) readProposal(a, item.value.approval_requested.session.slice(), &approval.proposal) else a.read(call_details, .{ .operation = item.value.approval_requested.operation, .session = item.value.approval_requested.session.slice(), .ordinal = item.value.approval_requested.call_ordinal }, &approval.details);
+                if (read.round == 1) a.read(approval_request, .{ .action = item.value.approval_requested.action, .session = session }, &approval.row) else if (read.round == 2) readProposal(a, item.value.approval_requested.session.slice(), &approval.proposal) else {
+                    const request = &item.value.approval_requested;
+                    approval.details.description = &request.description;
+                    approval.details.tool = &request.tool;
+                    approval.details.server = &request.server;
+                    a.readInto(call_details, .{ .operation = request.operation, .session = request.session.slice(), .ordinal = request.call_ordinal }, &approval.details, &approval.found);
+                }
             },
             13 => {
                 const change = &read.state.change;
@@ -1889,7 +1902,7 @@ const ItemRead = struct {
             14 => a.read(compaction_row, .{ .operation = item.value.compacted.operation, .session = session }, &read.state.compaction),
             15 => {
                 const call = &read.state.model_call;
-                call.decoded = a.store.reportScratch(model_call_row.Row);
+                call.decoded = &a.store.reportScratch(ActivityItemReads).model_call;
                 readRow(a, model_call_row, .{ .operation = call.operation, .session = session }, call);
             },
             else => unreachable,
@@ -1953,11 +1966,9 @@ const ItemRead = struct {
                     read.exposes(call.proposal.arguments_content_id, &call.proposal.arguments);
                     return;
                 }
+                if (!call.found.get()) return error.CorruptStore;
                 try checkCallDetails(&call.resolved, &item.value.call);
                 item.at = call.resolved.resolved_at.get();
-                item.value.call.description = call.resolved.description;
-                item.value.call.tool = call.resolved.tool;
-                item.value.call.server = call.resolved.server;
             },
             10 => {
                 try read.state.hosted.found();
@@ -2018,10 +2029,8 @@ const ItemRead = struct {
                     read.exposes(approval.proposal.arguments_content_id, &approval.proposal.arguments);
                     return;
                 }
+                if (!approval.found.get()) return error.CorruptStore;
                 try checkCallDetails(&approval.details, &approval.metadata);
-                request.description = approval.details.description;
-                request.tool = approval.details.tool;
-                request.server = approval.details.server;
             },
             13 => {
                 const change = &read.state.change;
@@ -2122,15 +2131,26 @@ const ItemRead = struct {
 /// Content an Activity item exposes: its row and public metadata.
 const Located = struct { id: i64, metadata: ContentMetadata };
 
+/// One Activity read's bounded state in the existing Store-owned report
+/// workspace. The decoder's transient row is disjoint from all retained item
+/// states: each model-call visitor consumes it before the next overwrites it.
+/// No buffer borrows this storage after readItems returns; Entry.release ends
+/// its custody. The Store's existing scratch-size assertion bounds this type.
+const ActivityItemReads = struct {
+    items: [activity_read.ActivityPage.items]ItemRead = undefined,
+    model_call: model_call_row.Row = undefined,
+};
+
 /// Reads the items at `at` through `end` into `items`, each round shared
 /// by every item (`ItemRead`), with an Activity page's call presentations
 /// (`calls`) in the rounds after its call read. Round 1 also runs what the
-/// caller queued before it. `max` bounds the items, so a lone item's read
-/// keeps a page's state out of its frame; `located`, when given, receives
-/// the content the first item exposes. Not inlined, so this state takes
-/// no slot in its caller's frame.
+/// caller queued before it. `max` bounds the caller's items; `located`,
+/// when given, receives the content the first item exposes. Page state lives
+/// in Store-owned scratch, including for a lone item's read; only the used
+/// slots are initialized. Keep the remaining round state off caller frames.
 noinline fn readItems(comptime max: usize, a: *ReadAccess, session: []const u8, end: u64, at: []const ItemAt, items: []activity_facts.Item, calls: ?*CallRows, located: ?*?Located) !void {
-    var reads: [max]ItemRead = undefined;
+    std.debug.assert(at.len <= max and max <= activity_read.ActivityPage.items);
+    const reads = &a.store.reportScratch(ActivityItemReads).items;
     for (at, items, reads[0..at.len]) |place, *item, *read| read.* = .{ .position = place.position, .ordinal = place.ordinal, .item = item };
     var round: u8 = 0;
     while (true) : (round += 1) {
@@ -2178,7 +2198,9 @@ pub const ActivityTool = struct {
     presentation: tool_presentation.ToolPresentation,
 };
 
-pub fn activityTool(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ActivityTool {
+// Keep the read state out of Queue.run: after this returns, releasing the
+// queue may drain a writer and must not retain these bounded read buffers.
+pub noinline fn activityTool(a: *ReadAccess, request: *const activity_read.ReadActivityContent) !ActivityTool {
     var metadata: activity_read.ProposalMetadata = undefined;
     var presentation: tool_presentation.ToolPresentation = undefined;
     const operation, const ordinal = if (request.ordinal == 0) call: {

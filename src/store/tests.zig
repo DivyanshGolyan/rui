@@ -15625,6 +15625,107 @@ fn expectActivityArguments(storage: *Store, session: protocol.Bounded(protocol.m
     try std.testing.expectEqualStrings(expected, bytes[0..length]);
 }
 
+test "Activity full page keeps call approval and model decoder scratch disjoint" {
+    try store_testing.forEachEngine(struct {
+        fn run(engine: *store_testing.Case) !void {
+            var digests: [membership_records.len][32]u8 = undefined;
+            const host_tool_set = membershipToolSet(&digests);
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStoreWith(engine, &storage, &tmp, std.testing.io, .{ .host_tool_set = &host_tool_set });
+            defer storage.close() catch unreachable;
+            var workspace: [protocol.max_workspace_bytes]u8 = undefined;
+            var configure = try completeConfiguration("scratch-config", "", try canonicalCwd(std.testing.io, &workspace), "model-a");
+            configure.configuration.tools = try .of(&.{ "bash", "fetch_page" });
+            configure.configuration.permission_mode.state = .value;
+            try configure.configuration.permission_mode.value.set("ask");
+            const session = (try storage.configure(&configure, .{})).accepted.session;
+            try submitTestMessage(&storage, &tmp, "scratch-first", "scratch-first-message", session.slice(), "first");
+            try answerTestTurn(&storage, &tmp, session.slice(), "scratch-answer", &.{.{ .encoded = "done", .decoded = "done" }});
+            try submitTestMessage(&storage, &tmp, "scratch-next", "scratch-next-message", session.slice(), "next");
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+            defer arena.deinit();
+            const allocator = arena.allocator();
+            var calls: [protocol.ActivityPage.items / 2]TestingCall = undefined;
+            var descriptions: [calls.len][]const u8 = undefined;
+            for (&calls, &descriptions, 0..) |*call, *description, i| {
+                const bytes = try allocator.alloc(u8, 1 + i * @as(usize, if (i % 2 == 0) 28 else 12));
+                @memset(bytes, @as(u8, @intCast('a' + i)));
+                description.* = bytes;
+                const mcp = i % 2 == 0;
+                const arguments = try std.fmt.allocPrint(allocator, "{{\"{s}\":\"{s}\",\"cmd\":\"true\"}}", .{ if (mcp) "rui_call_description" else "description", bytes });
+                const encoded = try std.json.Stringify.valueAlloc(allocator, arguments, .{});
+                const id = try std.fmt.allocPrint(allocator, "scratch-{d}", .{i});
+                call.* = .{ .item_id = id, .name = if (mcp) "fetch_page" else "bash", .encoded_call_id = id, .decoded_call_id = id, .encoded_arguments = encoded[1 .. encoded.len - 1], .decoded_arguments = arguments };
+            }
+            try settleCallsForTesting(&storage, &tmp, model, "scratch-calls", &calls);
+            var request: protocol.ActivityPage = .{ .session = session, .kinds = .initMany(&.{ .call, .approval_requested }) };
+            const full = try store_core.activityPageForTesting(&storage, request);
+            try std.testing.expectEqual(@as(usize, protocol.ActivityPage.items), full.count);
+            try std.testing.expect(!full.more);
+            for (full.items[0..full.count]) |item| try check(&storage, session, item, &calls, &descriptions);
+            // Two distinct model rows decode beside retained call/approval state.
+            // Repeat in reverse to exercise reused slots and optional text fields.
+            request.kinds.insert(.model_call);
+            inline for (.{ .forward, .backward }) |direction| {
+                request.direction = direction;
+                request.position = 0;
+                request.ordinal = null;
+                var count: usize = 0;
+                var models: usize = 0;
+                var answered = false;
+                var proposed = false;
+                while (true) {
+                    const page = try store_core.activityPageForTesting(&storage, request);
+                    for (page.items[0..page.count]) |item| {
+                        count += 1;
+                        if (item.value == .model_call) {
+                            const decoded = item.value.model_call;
+                            try std.testing.expectEqualStrings("model-a", decoded.model.slice());
+                            try std.testing.expectEqual(@as(u64, 1), decoded.attempts);
+                            if (std.mem.eql(u8, decoded.status.slice(), "answer")) {
+                                try std.testing.expect(!answered);
+                                answered = true;
+                            } else {
+                                try std.testing.expectEqualStrings("tool_proposals", decoded.status.slice());
+                                try std.testing.expect(!proposed);
+                                proposed = true;
+                            }
+                            models += 1;
+                        } else try check(&storage, session, item, &calls, &descriptions);
+                    }
+                    if (!page.more) break;
+                    const edge = page.items[page.count - 1];
+                    request.position = edge.position;
+                    request.ordinal = edge.ordinal;
+                }
+                try std.testing.expectEqual(@as(usize, calls.len * 2 + 2), count);
+                try std.testing.expectEqual(@as(usize, 2), models);
+            }
+            try std.testing.expect(!storage.isFenced());
+        }
+
+        fn check(storage: *Store, session: protocol.Bounded(protocol.max_session_bytes), item: protocol.ActivityItem, calls: []const TestingCall, descriptions: []const []const u8) !void {
+            const ordinal = switch (item.value) {
+                .call => |call| call.call_ordinal,
+                .approval_requested => |approval| approval.call_ordinal,
+                else => return error.UnexpectedActivityKind,
+            };
+            const description, const tool, const server = switch (item.value) {
+                .call => |call| .{ call.description, call.tool, call.server },
+                .approval_requested => |approval| .{ approval.description, approval.tool, approval.server },
+                else => unreachable,
+            };
+            try std.testing.expectEqualStrings(descriptions[ordinal], description.?.slice());
+            try std.testing.expectEqualStrings(calls[ordinal].name, tool.?.slice());
+            if (ordinal % 2 == 0) try std.testing.expectEqualStrings("docs", server.?.slice()) else try std.testing.expect(server == null);
+            try expectActivityArguments(storage, session, item, calls[ordinal].decoded_arguments);
+        }
+    }.run);
+}
+
 test "saved MCP call lines survive all work reads pending, running and completed at every boundary" {
     try store_testing.forEachEngine(struct {
         fn run(engine: *store_testing.Case) !void {
