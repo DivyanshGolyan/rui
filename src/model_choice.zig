@@ -47,6 +47,7 @@ userdata: ?*anyopaque = null,
 on_pick: ?*const fn (*anyopaque, *vxfw.EventContext, []const u8) anyerror!void = null,
 ground: vaxis.Style = .{},
 selection: vaxis.Style = .{ .reverse = true },
+hover_style: vaxis.Style = .{ .ul_style = .single },
 quiet: vaxis.Style = .{ .dim = true },
 /// The most recent frame's model indices, borrowed from its draw arena.
 hits: []const usize = &.{},
@@ -264,7 +265,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     for (shown, 0..) |at, y| {
         const entry = self.menu.entries[at];
         const line = try picker_view.modelLine(ctx.arena, entry, self.row(entry).?, widest, size.width -| 3);
-        const style = if (self.selected == at or self.hover.contains(targets[y])) self.selection else self.ground;
+        const style = if (self.selected == at) self.selection else if (self.hover.contains(targets[y])) self.hover_style else self.ground;
         for (0..size.width) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = style });
         paint(ctx, surface, line.text, @intCast(y), @min(3, size.width), size.width, style);
     }
@@ -626,7 +627,7 @@ test "Model choice hover and click follow full-width Panel matches without selec
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
         defer arena.deinit();
         var fixture: Fixture = .{};
-        var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } } };
+        var choice: Self = .{ .userdata = &fixture, .on_pick = Fixture.pickModel, .ground = .{ .bg = .{ .index = 1 } }, .selection = .{ .bg = .{ .index = 2 } }, .hover_style = .{ .bg = .{ .index = 3 } } };
         choice.open(&menu, .codex, "model-0");
         var panel: Panel = .{ .title = "Title", .fields = &.{.{ .label = "Model", .value = "model-0" }} };
         const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 8 }, .cell_size = .{} };
@@ -642,7 +643,7 @@ test "Model choice hover and click follow full-width Panel matches without selec
             try panel.widget().handleEvent(&events, .{ .mouse = mouse });
             const surface = try panel.widget().draw(draw_ctx);
             const child = surface.children[surface.children.len - 1].surface;
-            try std.testing.expectEqual(choice.selection, child.readCell(width - 1, 1).style);
+            try std.testing.expectEqual(choice.hover_style, child.readCell(width - 1, 1).style);
             try std.testing.expectEqual(@as(?usize, 0), choice.selected);
             try std.testing.expectEqual(@as(usize, 0), panel.selected);
             try std.testing.expectEqual(@as(?[]const u8, null), fixture.picked);

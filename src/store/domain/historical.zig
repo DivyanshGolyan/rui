@@ -162,6 +162,17 @@ pub const HistoricalView = struct {
     active: bool = true,
     readers: usize = 0,
     tool_group_initialized: bool = false,
+    /// The history round an admission's commit read ahead for this view
+    /// (`Start`), until the first entry read claims or drops it. While
+    /// one is held, `tool_group_source_cursor` is the cursor it scanned
+    /// from and `tool_group_scan_after` the position it read after.
+    read_ahead: enum(u8) {
+        none,
+        /// Read, and the caller has named no cursor yet.
+        unclaimed,
+        /// Read from the cursor the caller then resumed at.
+        resumed,
+    } = .none,
     tool_group_scan_after: u64 = 0,
     tool_group_source_cursor: u64 = 0,
     next_tool_group: ?HistoricalEntry = null,
@@ -470,7 +481,22 @@ pub const HistoricalView = struct {
     /// admission position, is above the cursor and is scanned.
     pub fn resumeToolGroups(self: *HistoricalView, cursor: u64) void {
         std.debug.assert(self.active and self.outputs_validated and !self.tool_group_initialized);
+        if (self.read_ahead == .unclaimed) {
+            if (self.tool_group_source_cursor == cursor) {
+                self.read_ahead = .resumed;
+                return;
+            }
+            dropReadAhead(self);
+        }
         self.tool_group_source_cursor = cursor;
+    }
+
+    /// What the next request of this view's Session can resume its
+    /// history read from (`Resume`), for a caller that remembers it.
+    /// `coverage` must have run.
+    pub fn resumeKeys(self: *const HistoricalView) Keys {
+        std.debug.assert(self.active and self.output_frontier != null);
+        return keysOf(self);
     }
 
     /// A tool-results entry activates one canonical group. Consume it fully
@@ -709,7 +735,7 @@ fn readToolsHeld(self: *Store, view: *HistoricalView, walk: Page.ToolWalk, ordin
 fn toolsFrom(a: *ReadAccess, view: *HistoricalView, walk: Page.ToolWalk, ordinal: u64) !void {
     const page = view.page.?;
     var tools: Page.Tools = undefined;
-    page.queueTools(a, view, &tools, walk, ordinal);
+    page.queueTools(a, view, keysOf(view), &tools, walk, ordinal);
     store_access.runAs(a, error.CorruptStore) catch |err| {
         page.tools_walk = .{};
         return err;
@@ -808,7 +834,7 @@ const historical_settings = rsql.Read(.{
         output_schema_digest: ?[32]u8,
         output_schema_private: ?bool,
     },
-    .cardinality = .optional,
+    .cardinality = .each,
 });
 
 /// One round reads whether the binding is current, the settings, the
@@ -821,7 +847,7 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
     var read: SettingsRead = .init(view, out);
     read.queue(a);
     try store_access.runNamed(a, .{.{ model_settlement_domain.attempt_standing, error.OperationReadFailed }}, error.CorruptStore);
-    return read.settle(a.store);
+    return read.settle();
 }
 
 /// Where an admission starts the request of the Attempt it admits: the
@@ -829,6 +855,16 @@ fn settingsOf(a: *ReadAccess, view: *HistoricalView, out: *HistoricalSettings) !
 pub const Start = struct {
     view: *HistoricalView,
     settings: *HistoricalSettings,
+    /// Where the caller remembers each Session's history resuming, if it
+    /// does: the admitted Session's first history round then rides the
+    /// commit too.
+    remembered: ?Remembered = null,
+
+    pub const Remembered = struct {
+        context: *anyopaque,
+        /// What `context` remembers of the Session `session` names.
+        of: *const fn (context: *anyopaque, session: []const u8) ?Resume,
+    };
 
     /// Opens the view for `binding` with its page; false when there is no
     /// memory for one, and the view is then not open.
@@ -836,6 +872,58 @@ pub const Start = struct {
         start.view.* = .{ .store = store, .binding = binding };
         start.view.allocatePage() catch return false;
         return true;
+    }
+};
+
+/// Where a request's history read starts, as its caller remembers it from
+/// the Session's last request: the position its first round reads after,
+/// the tool-group cursor it scans from, the keys that request's view had,
+/// and the tools the request ends with. A hint, never trusted: the round
+/// read from it is kept only when the view's own boundary gives the same
+/// keys and its caller then reads from the same place, so a stale one
+/// costs the round it would have saved and never a wrong entry.
+pub const Resume = struct {
+    after_position: u64,
+    group_cursor: u64,
+    keys: Keys,
+    tool_set: u64,
+    tools: HistoricalView.ToolsAhead,
+};
+
+/// The first history round, read ahead from a `Resume`.
+const ReadAhead = struct {
+    from: Resume,
+    groups: GroupRead = undefined,
+    batch: BatchRead = undefined,
+
+    fn queue(ahead: *ReadAhead, a: anytype, view: *HistoricalView, admission_position: u64) void {
+        const from = &ahead.from;
+        view.tool_group_source_cursor = from.group_cursor;
+        ahead.groups.queue(a, view, from.keys);
+        const walk: ?Page.ToolWalk = switch (from.tools) {
+            .none => null,
+            .declared => .{ .set = from.tool_set, .position = admission_position },
+            .all => .{ .set = from.tool_set, .position = 0 },
+        };
+        ahead.batch.queue(a, view, from.keys, walk, from.after_position);
+    }
+
+    /// After the round, and after the view's boundary was kept: the view
+    /// holds the round as one of its own, unclaimed, or nothing of it.
+    fn settle(ahead: *const ReadAhead, view: *HistoricalView) void {
+        view.read_ahead = .unclaimed;
+        const from = &ahead.from;
+        const kept = std.meta.eql(from.keys, keysOf(view)) and kept: {
+            ahead.groups.finish(view) catch break :kept false;
+            ahead.batch.finish(view, from.after_position) catch break :kept false;
+            break :kept true;
+        };
+        if (!kept) {
+            // A wrong anchor's tools are not this view's.
+            ahead.batch.discard(view);
+            return dropReadAhead(view);
+        }
+        view.tool_group_scan_after = from.after_position;
     }
 };
 
@@ -847,13 +935,31 @@ pub const SettingsRead = struct {
     view: *HistoricalView,
     out: *HistoricalSettings,
     standing: model_settlement_domain.attempt_standing.Result = undefined,
-    found: store_access.Found = undefined,
+    /// The settings' row, which decodes into the page's row and is kept
+    /// (`keep`) as it is stepped: later reads of the round decode there.
+    decoded: *historical_settings.Row = undefined,
+    count: reads_domain.RowCount = .{},
     first: bool,
     boundary: reads_domain.First(output_boundary.Row) = .{},
     sources: OutputSources,
+    /// The first history round, where this round reads it too.
+    ahead: ?ReadAhead = null,
+    /// The Operation's admission position, where `ahead` is set.
+    admission_position: u64 = 0,
 
     pub fn init(view: *HistoricalView, out: *HistoricalSettings) SettingsRead {
         return .{ .view = view, .out = out, .first = view.output_frontier == null, .sources = .{ .view = view } };
+    }
+
+    /// Reads the first history round with the settings, from where
+    /// `start`'s caller remembers `session` resuming, if it does. The
+    /// Operation was admitted at `admission_position`.
+    pub fn readAhead(read: *SettingsRead, start: Start, session: []const u8, admission_position: u64) void {
+        std.debug.assert(read.first);
+        const remembered = start.remembered orelse return;
+        const from = remembered.of(remembered.context, session) orelse return;
+        read.ahead = .{ .from = from };
+        read.admission_position = admission_position;
     }
 
     pub fn queue(read: *SettingsRead, a: anytype) void {
@@ -862,12 +968,16 @@ pub const SettingsRead = struct {
         row.model = &read.out.model;
         row.session_ref = &read.out.session;
         row.workspace = &read.out.workspace;
+        read.decoded = row;
         model_settlement_domain.queueAttemptKind(a, view.binding, &read.standing);
-        a.readInto(historical_settings, .{ .operation = view.binding.operation_id }, row, &read.found);
+        // Ahead of every other read that decodes into the page's row: this
+        // row fills the settings through the pointers set above.
+        reads_domain.readRow(a, historical_settings, .{ .operation = view.binding.operation_id }, read);
         if (read.first) {
             a.readEach(output_boundary, .{ .operation = view.binding.operation_id }, 1, &read.boundary);
             a.readEach(first_output_sources, .{ .operation = view.binding.operation_id }, output_source_page, &read.sources);
         }
+        if (read.ahead) |*ahead| ahead.queue(a, view, read.admission_position);
     }
 
     /// This round as the reads an admission's commit carries.
@@ -884,24 +994,20 @@ pub const SettingsRead = struct {
     /// owner's own `settings` round then answers as it always did.
     fn followSettle(context: *anyopaque) void {
         const read: *SettingsRead = @ptrCast(@alignCast(context));
-        read.settle(read.view.store) catch return;
+        read.settle() catch return;
         read.view.settled = read.out;
     }
 
-    pub fn settle(read: *SettingsRead, store: *Store) !void {
+    pub fn visit(read: *SettingsRead, row: *const historical_settings.Row) bool {
+        return reads_domain.visitRow(read, row);
+    }
+
+    /// The settings' row, as its read steps it.
+    pub fn keep(read: *SettingsRead, row: *const historical_settings.Row) error{CorruptStore}!void {
         const view = read.view;
         const out = read.out;
         const page = view.page.?;
-        const row = page.decoded(historical_settings.Row);
-        const first = read.first;
-        const boundary = &read.boundary;
-        const sources = &read.sources;
-        _ = try model_settlement_domain.attemptKindOf(read.standing, view.binding);
-        if (!read.found.get() or !row.catalogs_consistent) return error.CorruptStore;
-        if (first) {
-            try sources.finish();
-            try keepOutputBoundary(view, &(boundary.row orelse return error.CorruptStore));
-        }
+        if (!row.catalogs_consistent) return error.CorruptStore;
         page.keep(.batch, row.instructions_content_id, &row.instructions_bytes);
         if (row.member_count > tool_defs.max_tools or row.provider_count > row.member_count) return error.CorruptStore;
         view.tool_set_id = row.tool_set_id.get();
@@ -919,13 +1025,13 @@ pub const SettingsRead = struct {
             };
             break :schema try viewContent(view, id.get(), &output_schema, false);
         } else null;
-        out.store = store.selector;
+        out.store = view.store.selector;
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
         hash.update("rui/session-affinity/v1");
         var length: [8]u8 = undefined;
-        std.mem.writeInt(u64, &length, store.selector.len, .big);
+        std.mem.writeInt(u64, &length, view.store.selector.len, .big);
         hash.update(&length);
-        hash.update(store.selector.slice());
+        hash.update(view.store.selector.slice());
         std.mem.writeInt(u64, &length, out.session.len, .big);
         hash.update(&length);
         hash.update(out.session.slice());
@@ -946,6 +1052,17 @@ pub const SettingsRead = struct {
         out.codec = std.meta.stringToEnum(provider_name.Codec, row.codec.slice()) orelse return error.CorruptStore;
         if (!row.plain_codec) return error.CorruptStore;
         out.session_affinity = hash.finalResult()[0..16].*;
+    }
+
+    pub fn settle(read: *SettingsRead) !void {
+        const view = read.view;
+        _ = try model_settlement_domain.attemptKindOf(read.standing, view.binding);
+        if (!try read.count.found()) return error.CorruptStore;
+        if (read.first) {
+            try read.sources.finish();
+            try keepOutputBoundary(view, &(read.boundary.row orelse return error.CorruptStore));
+        }
+        if (read.ahead) |*ahead| ahead.settle(view);
     }
 };
 
@@ -1261,6 +1378,12 @@ fn checkOutputsStep(a: *ReadAccess, view: *HistoricalView) !bool {
 /// group or its output check.
 fn entryAfter(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
     std.debug.assert(view.outputs_validated);
+    if (view.read_ahead != .none) {
+        // The round an admission read ahead is this read's only when it
+        // scanned from this view's cursor and read after this position.
+        const from_cursor = view.read_ahead == .resumed or view.tool_group_source_cursor == 0;
+        if (from_cursor and view.tool_group_scan_after == after_position) view.read_ahead = .none else dropReadAhead(view);
+    }
     var scan_tool_groups = !view.tool_group_initialized;
     if (view.tool_group_initialized and after_position < view.tool_group_scan_after) {
         view.entries_end = 0;
@@ -1358,9 +1481,34 @@ const historical_entries = rsql.Read(.{
 /// The first position whose Operation's declarations the request still
 /// carries: the base's compaction item, or past the drop floor when that
 /// is deeper. Earlier Operations' tools are folded or dropped.
-fn declarationAnchor(view: *const HistoricalView) u64 {
-    const anchor = view.anchor orelse 0;
-    return if (view.floor.position == 0) anchor else @max(anchor, view.floor.position + 1);
+fn declarationAnchor(keys: Keys) u64 {
+    const anchor = keys.anchor orelse 0;
+    return if (keys.floor == 0) anchor else @max(anchor, keys.floor + 1);
+}
+
+/// What a history round's statements are keyed by beside their Operation:
+/// the view's floor and the Session's first Message, its selected base
+/// and that base's anchor. `keepOutputBoundary` decides them.
+pub const Keys = struct {
+    floor: u64 = 0,
+    first_message: u64 = 0,
+    base: u64 = 0,
+    anchor: ?u64 = null,
+};
+
+fn keysOf(view: *const HistoricalView) Keys {
+    return .{ .floor = view.floor.position, .first_message = view.floor.first_message, .base = view.selected_base, .anchor = view.anchor };
+}
+
+/// The claim on a read-ahead history round ends: the view holds none of
+/// it, and scans from the start unless its caller resumed elsewhere.
+fn dropReadAhead(view: *HistoricalView) void {
+    if (view.read_ahead == .unclaimed) view.tool_group_source_cursor = 0;
+    view.read_ahead = .none;
+    view.group_scan = .{};
+    view.entries_end = 0;
+    view.entries_done_after = null;
+    GroupRead.discard(view);
 }
 
 /// The function tools `set` declares at the Operation boundary at
@@ -1452,7 +1600,7 @@ const BatchRead = struct {
     };
 
     /// Queues the round's reads. `read` stays where it is until `finish`.
-    fn queue(read: *BatchRead, a: *ReadAccess, view: *HistoricalView, after_position: u64) void {
+    fn queue(read: *BatchRead, a: anytype, view: *HistoricalView, keys: Keys, walk: ?Page.ToolWalk, after_position: u64) void {
         const page = view.page.?;
         view.entries_next = 0;
         view.entries_end = 0;
@@ -1466,17 +1614,16 @@ const BatchRead = struct {
         a.readEach(historical_entries, .{
             .operation = operation,
             .after = after_position,
-            .floor = view.floor.position,
-            .first_message = view.floor.first_message,
-            .base = view.selected_base,
-            .anchor = declarationAnchor(view),
+            .floor = keys.floor,
+            .first_message = keys.first_message,
+            .base = keys.base,
+            .anchor = declarationAnchor(keys),
         }, HistoricalView.entry_batch, &read.entries);
         read.items = .{ .view = view, .decoded = page.decoded(page_items.Row) };
-        a.readEach(page_items, .{ .operation = operation, .after = after_position, .floor = view.floor.position, .base = view.selected_base }, HistoricalView.entry_batch, &read.items);
-        page.queueParts(a, view, &read.parts, after_position + 1, 0);
-        const walk = view.aheadWalk();
+        a.readEach(page_items, .{ .operation = operation, .after = after_position, .floor = keys.floor, .base = keys.base }, HistoricalView.entry_batch, &read.items);
+        page.queueParts(a, view, keys, &read.parts, after_position + 1, 0);
         read.ahead = if (walk) |wanted| !page.toolsReach(wanted, 0) else false;
-        if (read.ahead) page.queueTools(a, view, &read.tools, walk.?, 0);
+        if (read.ahead) page.queueTools(a, view, keys, &read.tools, walk.?, 0);
     }
 
     /// The round failed: the page holds nothing of it.
@@ -1503,7 +1650,7 @@ const BatchRead = struct {
 fn nextOrdinaryHistoricalEntry(a: *ReadAccess, view: *HistoricalView, after_position: u64) !?*const HistoricalEntry {
     if (!needsBatch(view, after_position)) return bufferedEntry(view, after_position);
     var read: BatchRead = undefined;
-    read.queue(a, view, after_position);
+    read.queue(a, view, keysOf(view), view.aheadWalk(), after_position);
     store_access.runNamed(a, BatchRead.corrupt, error.HistoricalEntryReadFailed) catch |err| {
         read.discard(view);
         return err;
@@ -1923,17 +2070,17 @@ const Page = struct {
 
     /// Queues the parts read from part `part` of the item at `first`;
     /// `parts_complete` follows its round.
-    fn queueParts(page: *Page, a: *ReadAccess, view: *HistoricalView, visitor: *Parts, first: u64, part: u64) void {
+    fn queueParts(page: *Page, a: anytype, view: *HistoricalView, keys: Keys, visitor: *Parts, first: u64, part: u64) void {
         page.parts_next = 0;
         page.parts_end = 0;
         page.parts_complete = false;
         visitor.* = .{ .view = view, .decoded = page.decoded(page_parts.Row) };
-        a.readEach(page_parts, .{ .operation = view.binding.operation_id, .first = first, .part = part, .floor = view.floor.position, .base = view.selected_base }, part_batch, visitor);
+        a.readEach(page_parts, .{ .operation = view.binding.operation_id, .first = first, .part = part, .floor = keys.floor, .base = keys.base }, part_batch, visitor);
     }
 
     /// Queues the read of `walk`'s members from `ordinal`;
     /// `tools_complete` follows its round.
-    fn queueTools(page: *Page, a: *ReadAccess, view: *HistoricalView, visitor: *Tools, walk: ToolWalk, ordinal: u64) void {
+    fn queueTools(page: *Page, a: anytype, view: *HistoricalView, keys: Keys, visitor: *Tools, walk: ToolWalk, ordinal: u64) void {
         // A reader that borrows the page's bytes keeps them where they are.
         if (view.inline_readers == 0) page.held.count = 0;
         page.tools_end = 0;
@@ -1949,7 +2096,7 @@ const Page = struct {
                 .set = walk.set,
                 .ordinal = ordinal,
                 .position = walk.position,
-                .anchor = declarationAnchor(view),
+                .anchor = declarationAnchor(keys),
             }, tool_batch, visitor);
     }
 
@@ -2212,7 +2359,7 @@ const GroupRead = struct {
     };
 
     /// Queues the round's reads. `read` stays where it is until `finish`.
-    fn queue(read: *GroupRead, a: *ReadAccess, view: *HistoricalView) void {
+    fn queue(read: *GroupRead, a: anytype, view: *HistoricalView, keys: Keys) void {
         const page = view.page.?;
         const scan = &view.group_scan;
         page.groups_end = 0;
@@ -2223,8 +2370,8 @@ const GroupRead = struct {
         read.sources = .{ .view = view };
         read.calls = .{ .view = view, .decoded = page.decoded(GroupCallRow) };
         a.read(group_bounds, .{ .operation = operation }, &read.bounds);
-        a.readEach(group_sources, .{ .operation = operation, .from = from, .floor = view.floor.position }, Page.group_batch, &read.sources);
-        a.readEach(group_calls, .{ .operation = operation, .from = from, .floor = view.floor.position, .call = scan.calls }, Page.call_batch, &read.calls);
+        a.readEach(group_sources, .{ .operation = operation, .from = from, .floor = keys.floor }, Page.group_batch, &read.sources);
+        a.readEach(group_calls, .{ .operation = operation, .from = from, .floor = keys.floor, .call = scan.calls }, Page.call_batch, &read.calls);
     }
 
     /// The round failed: the page holds no group of it.
@@ -2278,10 +2425,10 @@ fn readNextHistoricalToolGroup(a: *ReadAccess, view: *HistoricalView, after_posi
     const scan = &view.group_scan;
     if (page.groups_next == page.groups_end and !scan.done) {
         var groups: GroupRead = undefined;
-        groups.queue(a, view);
+        groups.queue(a, view, keysOf(view));
         var read: BatchRead = undefined;
         const rides = needsBatch(view, after_position);
-        if (rides) read.queue(a, view, after_position);
+        if (rides) read.queue(a, view, keysOf(view), view.aheadWalk(), after_position);
         store_access.runNamed(a, BatchRead.corrupt ++ GroupRead.corrupt, error.HistoricalEntryReadFailed) catch |err| {
             GroupRead.discard(view);
             if (rides) read.discard(view);
@@ -2380,7 +2527,7 @@ fn partsFrom(a: *ReadAccess, view: *HistoricalView) !void {
     const cursor = &view.output_parts.?;
     const page = view.page.?;
     var parts: Page.Parts = undefined;
-    page.queueParts(a, view, &parts, cursor.position, cursor.next);
+    page.queueParts(a, view, keysOf(view), &parts, cursor.position, cursor.next);
     try store_access.runAs(a, error.HistoricalEntryReadFailed);
     page.parts_complete = parts.past or page.parts_end < Page.part_batch;
 }

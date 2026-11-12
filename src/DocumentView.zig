@@ -19,6 +19,8 @@ size: vxfw.Size = .{},
 method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
 style: vaxis.Style = .{},
+/// The pointer's row or continuation, quieter than the selection background an open tool row keeps.
+hover_style: vaxis.Style = .{ .ul_style = .single },
 hover: Hover = .{},
 colours: viewport.Colours = .{},
 /// Report the rows below this viewport without prescribing input.
@@ -150,21 +152,24 @@ fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void
             if (!action_at(handler.userdata, position)) continue;
             const rect: Hover.Rect = .{ .row = @intCast(row), .width = surface.size.width };
             try targets.append(arena, rect);
-            if (self.hover.contains(rect)) for (surface.buffer[row * surface.size.width ..][0..surface.size.width]) |*cell| {
-                cell.style.bg = self.colours.selection;
-                cell.style.reverse = self.colours.selection == .default;
-            };
+            const open = self.colour and self.document.toolIsOpen(position.offset);
+            if (!open and self.hover.contains(rect)) self.hovering(surface.buffer[row * surface.size.width ..][0..surface.size.width]);
         }
     };
     if (handler.on_click != null and self.continuation() != null) {
         const rect: Hover.Rect = .{ .row = self.drawn.height, .width = surface.size.width };
         try targets.append(arena, rect);
-        if (self.hover.contains(rect)) for (surface.buffer[@as(usize, self.drawn.height) * surface.size.width ..]) |*cell| {
-            cell.style.bg = self.colours.selection;
-            cell.style.reverse = self.colours.selection == .default;
-        };
+        if (self.hover.contains(rect)) self.hovering(surface.buffer[@as(usize, self.drawn.height) * surface.size.width ..]);
     }
     self.hover.targets = targets.items;
+}
+
+fn hovering(self: *const Self, cells: []vaxis.Cell) void {
+    for (cells) |*cell| {
+        cell.style.bg = self.hover_style.bg;
+        cell.style.reverse = self.hover_style.reverse;
+        cell.style.ul_style = self.hover_style.ul_style;
+    }
 }
 
 /// One mouse event in this widget's coordinates.
@@ -798,6 +803,7 @@ test "DocumentView peer links and continuation hover only painted actionable spa
     h.document.top = .{};
     h.transcript.more = true;
     h.transcript.colours.selection = .{ .index = 2 };
+    h.transcript.hover_style = .{ .bg = .{ .index = 5 } };
     _ = try h.frame();
     try std.testing.expectEqual(@as(usize, 2), h.transcript.hover.targets.len);
     try std.testing.expectEqual(Hover.Rect{ .row = 0, .col = 4, .width = 4 }, h.transcript.hover.targets[0]);
@@ -811,7 +817,7 @@ test "DocumentView peer links and continuation hover only painted actionable spa
     try std.testing.expectEqual(vaxis.Mouse.Shape.default, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
     try h.send(.motion, 3, 2);
     const continuation_hover = try h.frame();
-    for (0..24) |col| try std.testing.expectEqual(h.transcript.colours.selection, continuation_hover.readCell(col, 2).style.bg);
+    for (0..24) |col| try std.testing.expectEqual(h.transcript.hover_style.bg, continuation_hover.readCell(col, 2).style.bg);
     try std.testing.expect(h.transcript.selection == null and h.clicks.items.len == 0);
     const next = h.transcript.continuation().?;
     try h.send(.press, 3, 2);
