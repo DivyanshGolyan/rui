@@ -378,7 +378,11 @@ def pages_case():
                          and "text couldn't be entered" not in screen)
             assert json.loads(run(chrome.home, "session", "inspect", "--store", chrome.store,
                                   "--session", session))["session"]["label"] == "Recovered rename"
-            returned = chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER") and composing(screen, "kept draft"))
+            # Feed and draft facts can already be visible behind natural-height
+            # info. Wait for its close, not a tick before lone Esc is decoded.
+            returned = chrome.frame(master, b"\x1b", lambda screen:
+                                    latest(screen, "SEED-ANSWER") and composing(screen, "kept draft")
+                                    and "Copy last answer" not in screen and "esc close" not in screen)
             assert "Copy last answer" not in returned and not model_choice_shown(returned), returned
             assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
             chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
@@ -388,7 +392,10 @@ def pages_case():
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
             working = chat_info_open(master)
             assert rows(working)[-1].endswith("esc close"), working
-            returned = chrome.frame(master, b"\x1b", lambda screen: "⠹ Held call · " in screen and marker(screen) is None)
+            returned = chrome.frame(master, b"\x1b", lambda screen:
+                                    "⠹ Held call · " in screen and marker(screen) is None
+                                    and rows(screen)[FOOTER].endswith("ctrl+x stop")
+                                    and "esc close" not in screen)
             assert rows(returned)[FOOTER].endswith("ctrl+x stop"), returned
             (chrome.workspace / "release").write_text("")
             chrome.frame(master, b"", lambda screen: latest(screen, "PAGES-DONE"), timeout=30)
@@ -594,7 +601,9 @@ def keys_case():
             settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
             assert "earlier message" not in settings, settings
             if width == 140:
-                chrome.frame(master, b"\x1b", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, ""))
+                chrome.frame(master, b"\x1b", lambda screen:
+                             latest(screen, "KEYS-ANSWER") and composing(screen, "")
+                             and "Rui · settings" not in screen)
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
