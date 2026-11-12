@@ -215,15 +215,15 @@ pub const CoreWork = union(enum) {
 /// A stopped Turn keeps the causal stop fact even when an ordinary stop
 /// discharges its parent's obligation. Archive suppression belongs to the
 /// ending record, so restoring the parent never replays old work.
-pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id) AS stopped," ++
-    "(e.suppress_message=1 OR EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.turn_id AND st.parent_caused=1)) AS quiet";
+pub const ending_stop_sql = "EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.source_id) AS stopped," ++
+    "(e.suppress_message=1 OR EXISTS(SELECT 1 FROM session_stop st WHERE st.selected_turn_id=e.source_id AND st.parent_caused=1)) AS quiet";
 
 /// The oldest owed ending.
 const owed_ending = rsql.Read(.{
-    .sql = "SELECT e.turn_id,t.session_ref,child.parent_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
-        "FROM session_ending_owed e @index(session_ending_open) JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref " ++
+    .sql = "SELECT e.source_id AS turn_id,t.session_ref,child.parent_ref,t.outcome_code,t.outcome_content_id,c.byte_length,c.digest," ++ ending_stop_sql ++ " " ++
+        "FROM session_forward e @index(session_forward_message) JOIN turn t ON t.turn_id=e.source_id JOIN session child ON child.session_ref=t.session_ref " ++
         "LEFT JOIN content c ON c.content_id=t.outcome_content_id " ++
-        "WHERE e.delivered=0 ORDER BY e.turn_id LIMIT 1",
+        "WHERE e.message_delivered=0 ORDER BY e.source_id LIMIT 1",
     .Args = struct {},
     .Row = struct {
         turn_id: rsql.Positive,

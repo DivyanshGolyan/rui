@@ -8634,7 +8634,8 @@ test "schema 66 migration freezes actual effort emission and prior admitted fall
         const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
         var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&path_buffer, "{s}/effort-65.sqlite3", .{root});
-        const previous = 65; // The format-66 effort snapshot migration starts here.
+        // These cases exercise the schema 65 -> 66 effort migration.
+        const previous: u32 = 65;
         {
             const raw = try openRaw(path);
             defer _ = c.sqlite3_close(raw);
@@ -8687,7 +8688,8 @@ test "the previous Store format preserves change rows and admits bounded effort 
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var path_buffer: [platform.max_database_path_bytes]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buffer, "{s}/previous.sqlite3", .{root});
-    const previous = 65; // T2b upgrades format 65 to 66 before unit 16's format 67.
+    // Exercise the schema 65 -> 66 effort migration before later steps.
+    const previous: u32 = 65;
     {
         const raw = try openRaw(path);
         defer _ = c.sqlite3_close(raw);

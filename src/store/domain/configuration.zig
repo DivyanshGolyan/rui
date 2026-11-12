@@ -261,11 +261,7 @@ pub fn configurationBeforeWorkspace(
     };
     // The codec cannot encode a boundary back to unspecified effort.
     if (requested.reasoning_effort.state == .explicit_null and retained_effort != null) return .unsupported_reasoning_effort;
-    if (effort) |value| {
-        if (!model_capability.supportsReasoningEffort(selected_facts, model, value)) return .unsupported_reasoning_effort;
-    } else if (model_catalog.find(selected_facts, model)) |known| {
-        if (known.efforts.count() != 0) return .unsupported_reasoning_effort;
-    }
+    if (!model_capability.supportsReasoningEffort(selected_facts, model, effort)) return .unsupported_reasoning_effort;
     return null;
 }
 

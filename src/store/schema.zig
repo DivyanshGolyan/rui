@@ -20,7 +20,7 @@ const retry_allowance_open_sql = model_admission_domain.retry_allowance_open_sql
 const retry_exhausted_sql = model_admission_domain.retry_exhausted_sql;
 
 pub const application_id: u32 = 0x4c544631; // LTF1
-pub const schema_version: u32 = 67;
+pub const schema_version: u32 = 68;
 
 pub const IdentityMismatch = struct {
     saved_selector: Bounded(store_path.max_bytes) = .{},
@@ -53,7 +53,8 @@ pub const bootstrap_digests = [_]struct { schema_version: u32, digest: u64 }{
     .{ .schema_version = 64, .digest = 0xba89834313d6181f },
     .{ .schema_version = 65, .digest = 0x78987c40a911dee5 },
     .{ .schema_version = 66, .digest = 0x7eb536169708902e },
-    .{ .schema_version = 67, .digest = 0xbe172063cd31e25b },
+    .{ .schema_version = 67, .digest = 0xfe425e8cc64247f5 },
+    .{ .schema_version = 68, .digest = 0x7bec7f8f004abc7c },
 };
 comptime {
     for (bootstrap_digests[1..], bootstrap_digests[0 .. bootstrap_digests.len - 1]) |row, previous| {
@@ -494,9 +495,32 @@ pub const migrations = [_]Migration{
             "UPDATE store_meta SET meta_value='13' WHERE meta_key='wire_version' AND meta_value='12'",
         },
     },
-    // Schema 67 (D219): final-attempt timings stay absent on old Operations.
+    // Schema 67 (D39, D180): the first ending hop is the sole owed fact.
     .{
         .from = 66,
+        .sqlite = &.{
+            "ALTER TABLE session_forward RENAME TO session_forward_before_67",
+            "CREATE TABLE session_forward(\n forward_id INTEGER PRIMARY KEY NOT NULL CHECK(forward_id>0),\n target_ref TEXT NOT NULL REFERENCES session(session_ref),\n child_ref TEXT NOT NULL REFERENCES session(session_ref),\n kind INTEGER NOT NULL CHECK(kind BETWEEN 1 AND 2),\n source_id INTEGER NOT NULL CHECK(source_id>0),\n position INTEGER CHECK(position IS NULL OR position>0),\n ordinal INTEGER NOT NULL CHECK(ordinal=0),\n delivered_at INTEGER CHECK(delivered_at IS NULL OR delivered_at>0),\n message_delivered INTEGER CHECK(message_delivered IS NULL OR message_delivered IN (0,1)),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1)),\n UNIQUE(target_ref,kind,source_id),\n CHECK((position IS NULL)=(delivered_at IS NULL)),\n CHECK(target_ref<>child_ref)\n) STRICT",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT f.forward_id,f.target_ref,f.child_ref,f.kind,f.source_id,f.position,f.ordinal,f.delivered_at,e.delivered,COALESCE(e.suppress_message,0) FROM session_forward_before_67 f JOIN session child ON child.session_ref=f.child_ref LEFT JOIN session_ending_owed e ON f.kind=2 AND e.turn_id=f.source_id AND f.target_ref=child.parent_ref",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT COALESCE((SELECT max(forward_id) FROM session_forward_before_67),0)+ROW_NUMBER() OVER(ORDER BY e.turn_id),child.parent_ref,t.session_ref,2,e.turn_id,NULL,0,NULL,e.delivered,e.suppress_message FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM session_forward_before_67 f WHERE f.target_ref=child.parent_ref AND f.kind=2 AND f.source_id=e.turn_id)",
+            "DROP TABLE session_forward_before_67",
+            "DROP TABLE session_ending_owed",
+            "CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)",
+            "CREATE INDEX session_forward_open ON session_forward(forward_id) WHERE position IS NULL",
+            "CREATE INDEX session_forward_feed ON session_forward(target_ref,position)",
+        },
+        .mysql = &.{
+            "ALTER TABLE session_forward ADD COLUMN message_delivered TINYINT AFTER delivered_at, ADD COLUMN suppress_message TINYINT NOT NULL DEFAULT 0 AFTER message_delivered",
+            "ALTER TABLE session_forward ADD CHECK(message_delivered IS NULL OR message_delivered IN (0,1)), ADD CHECK(suppress_message IN (0,1))",
+            "UPDATE session_forward f JOIN session child ON child.session_ref=f.child_ref JOIN session_ending_owed e ON f.kind=2 AND e.turn_id=f.source_id AND f.target_ref=child.parent_ref SET f.message_delivered=e.delivered,f.suppress_message=e.suppress_message",
+            "INSERT INTO session_forward(forward_id,target_ref,child_ref,kind,source_id,position,ordinal,delivered_at,message_delivered,suppress_message) SELECT COALESCE((SELECT max(forward_id) FROM session_forward),0)+ROW_NUMBER() OVER(ORDER BY e.turn_id),child.parent_ref,t.session_ref,2,e.turn_id,NULL,0,NULL,e.delivered,e.suppress_message FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref IS NOT NULL AND NOT EXISTS(SELECT 1 FROM session_forward f WHERE f.target_ref=child.parent_ref AND f.kind=2 AND f.source_id=e.turn_id)",
+            "DROP TABLE session_ending_owed",
+            "CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)",
+        },
+    },
+    // Schema 68 (D219): final-attempt timings stay absent on old Operations.
+    .{
+        .from = 67,
         .sqlite = &.{
             "ALTER TABLE model_operation ADD COLUMN latency_ms INTEGER CHECK(latency_ms IS NULL OR latency_ms>=0)",
             "ALTER TABLE model_operation ADD COLUMN first_event_ms INTEGER CHECK(first_event_ms IS NULL OR first_event_ms>=0)",
@@ -1198,26 +1222,9 @@ pub const tables = [_]Table{
         .without_rowid = true,
     },
     .{
-        // An attached child's Turn ended, and its parent is owed a Message
-        // saying how (D39, D139); the Host delivers it, which marks the row
-        // delivered (the Store never deletes, D202). Host work, not a
-        // Session's state: no reader of a Session reads it.
-        .name = "session_ending_owed",
-        .columns = &.{
-            .{ .name = "turn_id", .type = .int, .check = "turn_id>0" },
-            .{ .name = "delivered", .type = .int, .check = "delivered BETWEEN 0 AND 1" },
-            // Archive-caused suppression outlives a later parent restore.
-            .{ .name = "suppress_message", .type = .flag, .default = "0" },
-        },
-        .primary_key = &.{"turn_id"},
-        .foreign_keys = &.{
-            references("turn_id", "turn", &.{"turn_id"}),
-        },
-        .without_rowid = true,
-    },
-    .{
         // Owed ancestor feed work claims no position until delivery. Like
         // session_stop_owed, enqueueing it does not change a Session head.
+        // The first ending hop also owes the parent a Message (D39).
         .name = "session_forward",
         .columns = &.{
             .{ .name = "forward_id", .type = .int, .check = "forward_id>0" },
@@ -1228,6 +1235,10 @@ pub const tables = [_]Table{
             .{ .name = "position", .type = .int, .nullable = true, .check = "position IS NULL OR position>0" },
             .{ .name = "ordinal", .type = .int, .check = "ordinal=0" },
             .{ .name = "delivered_at", .type = .int, .nullable = true, .check = "delivered_at IS NULL OR delivered_at>0" },
+            // Null on approvals/later hops, false while owed, true once settled.
+            .{ .name = "message_delivered", .type = .flag, .nullable = true },
+            // Archive suppression survives restoring the parent.
+            .{ .name = "suppress_message", .type = .flag, .default = "0" },
         },
         .primary_key = &.{"forward_id"},
         .uniques = &.{&.{ "target_ref", "kind", "source_id" }},
@@ -1580,8 +1591,8 @@ pub const indexes = [_]Index{
     .{ .name = "session_parent", .table = "session", .columns = &.{"parent_ref"}, .where = "parent_ref IS NOT NULL" },
     // The Host's next owed stop, skipping settled rows.
     .{ .name = "session_stop_open", .table = "session_stop_owed", .columns = &.{ "settled", "child_ref" } },
-    // The Host's next owed ending, among the delivered ones.
-    .{ .name = "session_ending_open", .table = "session_ending_owed", .columns = &.{ "delivered", "turn_id" } },
+    // The Host's next owed ending, skipping settled and feed-only rows.
+    .{ .name = "session_forward_message", .table = "session_forward", .columns = &.{ "message_delivered", "source_id" } },
     .{ .name = "session_forward_open", .table = "session_forward", .columns = &.{"forward_id"}, .where = "position IS NULL" },
     .{ .name = "session_forward_feed", .table = "session_forward", .columns = &.{ "target_ref", "position" } },
     .{ .name = "action_operation_session_order", .table = "action_operation", .columns = &.{ "session_ref", "action_id" } },
@@ -2816,7 +2827,18 @@ test "schema 57 migration creates the canonical archive objects on SQLite and My
                     matched += 1;
                     break;
                 }
-            } else return error.NoncanonicalMigrationObject;
+            } else {
+                const retired = [_][]const u8{
+                    "CREATE TABLE session_ending_owed(\n turn_id INTEGER PRIMARY KEY NOT NULL REFERENCES turn(turn_id) CHECK(turn_id>0),\n delivered INTEGER NOT NULL CHECK(delivered BETWEEN 0 AND 1),\n suppress_message INTEGER NOT NULL DEFAULT 0 CHECK(suppress_message IN (0,1))\n) STRICT, WITHOUT ROWID",
+                    "CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)",
+                };
+                for (retired) |object| {
+                    if (dialect == .sqlite and std.mem.eql(u8, object, statement)) {
+                        matched += 1;
+                        break;
+                    }
+                } else return error.NoncanonicalMigrationObject;
+            }
         }
         try std.testing.expectEqual(@as(usize, if (dialect == .sqlite) 11 else 2), matched);
     }
@@ -2901,6 +2923,7 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
     try sqlite.exec(database, "UPDATE session_stop SET position=NULL WHERE command_key='rui.core/stop0'");
     try sqlite.exec(database, "CREATE TEMP TABLE original_stops AS SELECT * FROM session_stop");
     try sqlite.exec(database, "CREATE TEMP TABLE original_commands AS SELECT * FROM core_command");
+    try sqlite.exec(database, "UPDATE session SET parent_ref='rhvzwc' WHERE session_ref IN ('d8mv7p','brhkcj')");
     try sqlite.exec(database, "INSERT INTO session_ending_owed(turn_id,delivered) VALUES(1,0),(2,1)");
     try sqlite.exec(database, "CREATE TEMP TABLE original_endings AS SELECT * FROM session_ending_owed");
     try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, "UPDATE core_command SET kind=6 WHERE command_key='fixture-stop'"));
@@ -2928,10 +2951,10 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         try std.testing.expectEqual(@as(c_int, @intFromBool(each.parent_caused)), c.sqlite3_column_int(provenance, 0));
     }
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT parent_caused FROM session_stop WHERE command_key='fixture-stop'"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_endings EXCEPT SELECT turn_id,delivered FROM session_ending_owed)"));
-    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT turn_id,delivered FROM session_ending_owed EXCEPT SELECT * FROM original_endings)"));
-    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_ending_owed WHERE suppress_message=0"));
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='session_ending_open' AND sql='CREATE INDEX session_ending_open ON session_ending_owed(delivered,turn_id)'"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT * FROM original_endings EXCEPT SELECT source_id,message_delivered FROM session_forward WHERE message_delivered IS NOT NULL)"));
+    try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM (SELECT source_id,message_delivered FROM session_forward WHERE message_delivered IS NOT NULL EXCEPT SELECT * FROM original_endings)"));
+    try std.testing.expectEqual(@as(u32, 2), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_forward WHERE suppress_message=0"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM sqlite_schema WHERE name='session_forward_message' AND sql='CREATE INDEX session_forward_message ON session_forward(message_delivered,source_id)'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive_command"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT count(*) FROM pragma_foreign_key_check"));
@@ -2941,9 +2964,9 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "UPDATE session_stop SET parent_caused=-1 WHERE command_key='fixture-stop'",
         "UPDATE session_stop SET parent_caused=2 WHERE command_key='fixture-stop'",
         "UPDATE session_stop SET parent_caused=NULL WHERE command_key='fixture-stop'",
-        "UPDATE session_ending_owed SET suppress_message=-1 WHERE turn_id=1",
-        "UPDATE session_ending_owed SET suppress_message=2 WHERE turn_id=1",
-        "UPDATE session_ending_owed SET suppress_message=NULL WHERE turn_id=1",
+        "UPDATE session_forward SET suppress_message=-1 WHERE source_id=1",
+        "UPDATE session_forward SET suppress_message=2 WHERE source_id=1",
+        "UPDATE session_forward SET suppress_message=NULL WHERE source_id=1",
         "UPDATE core_command SET kind=0 WHERE command_key='archive-request'",
         "UPDATE core_command SET kind=7 WHERE command_key='archive-request'",
         "UPDATE core_command SET command_key='fixture-stop' WHERE command_key='archive-request'",
@@ -2965,14 +2988,14 @@ test "schema 57 preserves Commands and stop references while adding nullable arc
         "INSERT INTO session_archive_command(command_key,archived) VALUES('archive-request',0)",
     }) |statement| try std.testing.expectError(error.SqliteExecFailed, sqlite.exec(database, statement));
     // Causal ending suppression remains durable after restoring the parent.
-    try sqlite.exec(database, "UPDATE session_ending_owed SET suppress_message=1 WHERE turn_id=1");
+    try sqlite.exec(database, "UPDATE session_forward SET suppress_message=1 WHERE source_id=1");
     // Restore changes only current intent; each request keeps its own bool.
     try sqlite.exec(database, "UPDATE session_archive SET command_key=NULL WHERE session_ref='rhvzwc'");
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT count(*) FROM session_archive WHERE session_ref='rhvzwc' AND command_key IS NULL"));
     try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='archive-request'"));
     try std.testing.expectEqual(@as(u32, 0), try sqlite.pragmaInt(database, "SELECT archived FROM session_archive_command WHERE command_key='restore-request'"));
     try openExisting(std.testing.io, database, root, null, null);
-    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_ending_owed WHERE turn_id=1"));
+    try std.testing.expectEqual(@as(u32, 1), try sqlite.pragmaInt(database, "SELECT suppress_message FROM session_forward WHERE source_id=1"));
 }
 
 test "schema 61 migration preserves saved call rows and accepts 200 UTF-8 bytes" {
@@ -3133,7 +3156,7 @@ test "MySQL index hints require a named real-column index on that engine" {
     }
 }
 
-test "model call timing format 67 migration preserves format 66 resolutions with null final attempt timings" {
+test "model call timing format 68 migration preserves format 67 resolutions with null final attempt timings" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var root_buffer: [store_path.max_bytes]u8 = undefined;

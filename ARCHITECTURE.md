@@ -481,7 +481,7 @@ Codex **Reasoning Effort** is an explicitly stated, nullable persistent Session 
 Its closed grammar is `none`, `low`, `medium`, `high`, `xhigh` and `max`.
 For a catalog-listed model, configuration accepts an explicit value only when its exact entry advertises it; an unlisted model passes any value in Rui's closed grammar through (D229).
 Unsupported values reject the whole update.
-`none` is a literal effort, not a reset, and is accepted wherever the catalog lists it.
+`none` is a literal effort, not a reset; like every effort word, it is accepted when the catalog lists it or the model is unlisted.
 Catalog-only values such as `ultra` do not expand Rui's grammar or trigger a fallback.
 Catalog support is source metadata, not account entitlement or live backend qualification.
 
@@ -685,10 +685,12 @@ Clients cannot use keys under `rui.core/`, which Rui keeps for its own commands,
 An owed stop whose obligation a client's stop already settled, or a newer one replaced, runs nothing.
 Every attached child Turn ending owes its parent an ordinary Message from the child, waking the parent through normal Message admission (D39, D122).
 A done ending's Message is the child's saved answer itself, so nothing is copied; any other ending is a short line naming it, which is prompt text (D161).
-An ending caused by the parent's owed stop under `rui.core/stop/` settles quietly without admitting a Message (D139).
-One Store command delivers it and marks the retained owed row delivered, so a retry cannot deliver it twice.
+An ending selected by a parent-caused stop (`session_stop.parent_caused`) settles quietly without admitting a Message (D139).
+The first-hop `session_forward` ending row also owes this Message: its nullable `message_delivered` is 0 while owed and 1 after settlement; approvals and later hops leave it null.
+One Store command admits the Message and marks that retained forward row settled atomically, so a retry cannot deliver it twice.
+Archive suppression stays on this same row and survives parent restoration.
 An attached child's approval request and Turn ending also appear in every ancestor's Activity feed, naming the Session whose Action or Turn it is (D135, D180).
-An approval request queues an unpositioned `session_forward` row for the direct parent in the transaction that saves it, and a Turn ending queues one in the transaction that delivers its owed ending Message (so a root Session's Turn end writes nothing extra); after owed stops and ending Messages, the Host delivers one hop per Store command before core tool calls.
+An approval request queues an unpositioned `session_forward` row for the direct parent in the transaction that saves it, and a Turn ending queues one in the transaction that closes the Turn (so a root Session's Turn end writes nothing extra); after owed stops and ending Messages, the Host delivers one hop per Store command before core tool calls.
 Each delivery claims a position only in the receiving ancestor, retains the delivered row and atomically queues the same child fact for that ancestor's parent, if any.
 The unique `(target_ref,kind,source_id)` key and retained rows make retries no-ops, and no transaction walks the tree or grows with its depth.
 A Permission Decision addressed to an ancestor may name the child's Action only after that ancestor received its forwarded request; it updates the child's Action and Turn, while the saved command retains the Session the client named.
@@ -1478,6 +1480,7 @@ The composed migration finishes with one update of the saved format and wire ver
 The step to 52 lets tool records name an MCP server and keeps the Host tool set (T1e).
 The step to 53 records a Session's parent (D27).
 The step to 54 records the stops and ending Messages an attached child owes (D38, D39), ancestor feed forwarding in `session_forward` (D135, D180), and gives each Store a random `store_id` in `store_meta`, which a Store needs to open.
+The step to 67 folds the separate ending-Message queue into the first-hop forward row, preserving unsettled Messages and settled/suppressed status across upgrade before dropping `session_ending_owed`.
 On MySQL it also adds the `store_owner` row a Host's ownership fence checks and the `content_chunk` rows that hold content bytes in place of `content.payload`, and gives each non-unique partial index a generated first column that is NULL where its predicate fails, so a walk of one Session's rows skips the rows SQLite's index leaves out.
 The step to 55 adds the saved model facts and their catalog source.
 The step to 56 adds the bounded outcome-unknown Message recovery index and moves saved wire 8 metadata to wire 9.
@@ -1490,7 +1493,7 @@ The step to 63 drops `model_operation.usage_content_id`, rebuilding `model_opera
 The step to 64 renames `host_catalog` to `host_tool_set` and `action_operation.bash_timeout_ms` to `attempt_timeout_ms`, without changing their contents.
 The step to 65 freezes each Operation's effective tool offer, retaining its settings revision's offer for old Operations.
 The step to 66 freezes configured effort sources and admitted effort emission/fallback, records immutable refusal provenance in `session_change`, and moves saved wire 12 metadata to 13.
-The step to 67 (D179, D219) adds nullable final-attempt `latency_ms` and `first_event_ms` to `model_operation`, without backfilling old resolutions.
+The step to 68 (D179, D219) adds nullable final-attempt `latency_ms` and `first_event_ms` to `model_operation`, without backfilling old resolutions.
 Each format PR appends its own version and step; even unreleased steps and digests already on main are immutable (D226).
 The schema writes each closed value set as fixed literals, so the Store format never silently follows a code enum, and changing a set is a format change that needs a new version.
 Provider labels and codec names are open by design (Divyansh, 2026-10-31 provider-plugin design): the schema checks their syntax, and a Host refuses a label or codec it does not serve.
@@ -3367,7 +3370,7 @@ It derives `model` from the Operation's immutable settings revision; `served_mod
 Missing served-model evidence, usage and timings are null, not zero.
 The Operation row owns the last ended attempt’s timing pair. One attempt-ending writer snapshots live observations in the existing resolution or retry-scheduling UPDATE, before custody retires. A backoff resolution preserves the saved pair regardless of whether old custody is still attached, retired or lost on restart; replacement admission clears both fields before the replacement can launch. Custody is only the bridge for live observations, not retention across retry waits. The timing owner reads the published event and send boundaries before sampling the monotonic cutoff, yielding one immutable pair with `first_event_ms <= latency_ms` whenever the event is known. Callbacks after those reads cannot amend the pair. No later write amends a resolution.
 Both timings describe the FINAL attempt only: `latency_ms` is request sent to the attempt-ending write (resolution or retry scheduling), and `first_event_ms` is request sent to the first HTTP response event (including an interim head), not the first token; a snapshot that observed no such event leaves it null.
-No per-attempt history is stored; schema 67 adds two nullable nonnegative integer duration columns to `model_operation` on both engines without backfill.
+No per-attempt history is stored; schema 68 adds two nullable nonnegative integer duration columns to `model_operation` on both engines without backfill.
 D219 explicitly excepts these derived rows from fixed-prefix stability: resolution may reveal a `model_call` within an earlier captured end, at its original admission position, never relocated to settlement.
 A forward follower already past that position does not replay it automatically; reread the earlier range to observe it.
 A nonnull ordinal identifies an actual row in this Session and end.

@@ -12390,31 +12390,37 @@ test "core_tools start_agent spec refusals fail calls and name the refused setti
 test "a start_agent child works in its caller's Workspace with its provider" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
-            var tmp = std.testing.tmpDir(.{});
-            defer tmp.cleanup();
-            var storage: Store = undefined;
-            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
-            defer storage.close() catch unreachable;
-            var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
-            const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
-            var create = try completeConfiguration("binding-agent-parent", "", workspace, "model-a");
-            create.configuration.tools = try .of(&.{ "bash", "start_agent" });
-            const parent = (try storage.configure(&create, .{})).accepted.session;
-            try submitTestMessage(&storage, &tmp, "binding-agent-message", "binding-agent-key", parent.slice(), "start a child");
-            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
-            try settleCallsForTesting(&storage, &tmp, model, "binding-agent-call", &.{.{
-                .item_id = "binding-item",
-                .name = "start_agent",
-                .encoded_call_id = "binding-call",
-                .decoded_call_id = "binding-call",
-                .encoded_arguments = "{}",
-                .decoded_arguments = "{}",
-            }});
-            const action = (try storage.nextCoreWork()).?.action;
-            // D122/D221: a Bash spec names no Workspace; the child inherits both.
-            var spec = try testingAgentSpec(&.{"bash"}, "ask");
-            try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "work here", true, &spec, null, .{}) == .started);
-            try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND workspace=?2 AND provider='codex'", .{ parent.slice(), workspace }));
+            for (std.enums.values(protocol.ReasoningEffort)) |effort| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("binding-agent-parent", "", workspace, "model-a");
+                create.configuration.tools = try .of(&.{ "bash", "start_agent" });
+                const parent = (try storage.configure(&create, .{})).accepted.session;
+                try submitTestMessage(&storage, &tmp, "binding-agent-message", "binding-agent-key", parent.slice(), "start a child");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try settleCallsForTesting(&storage, &tmp, model, "binding-agent-call", &.{.{
+                    .item_id = "binding-item",
+                    .name = "start_agent",
+                    .encoded_call_id = "binding-call",
+                    .decoded_call_id = "binding-call",
+                    .encoded_arguments = "{}",
+                    .decoded_arguments = "{}",
+                }});
+                const action = (try storage.nextCoreWork()).?.action;
+                // D122/D221: a Bash spec names no Workspace; the child inherits both.
+                var spec = try testingAgentSpec(&.{"bash"}, "ask");
+                try spec.model.value.set("unlisted-effort-model");
+                spec.reasoning_effort.state = .value;
+                try spec.reasoning_effort.value.set(@tagName(effort));
+                try std.testing.expect(try storage.startAgent(action.binding, parent.slice(), "work here", true, &spec, null, .{}) == .started);
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session WHERE parent_ref=?1 AND workspace=?2 AND provider='codex'", .{ parent.slice(), workspace }));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_revision r JOIN session s ON s.session_ref=r.session_ref WHERE s.parent_ref=?1 AND r.reasoning_effort=?2", .{ parent.slice(), @tagName(effort) }));
+            }
         }
     }.run);
 }
@@ -12465,6 +12471,63 @@ test "explicit or retained null effort on a listed model refuses a mixed update 
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM content WHERE digest=?1", .{store_testing.Blob{ .bytes = &protocol.contentDigest(bytes) }}));
                 try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM model_operation", .{}));
             }
+        }
+    }.run);
+}
+
+test "unlisted effort passes configure preset Message creation and update unchanged" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Surface = enum { configure, preset, message };
+            for (std.enums.values(Surface)) |surface| for (std.enums.values(protocol.ReasoningEffort)) |effort| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const workspace = try canonicalCwd(std.testing.io, &workspace_buffer);
+                var create = try completeConfiguration("unlisted-create", "", workspace, "unlisted-effort-model");
+                create.configuration.reasoning_effort.state = .value;
+                try create.configuration.reasoning_effort.value.set(@tagName(effort));
+                const session = switch (surface) {
+                    .configure => configured: {
+                        const reply = try storage.configure(&create, .{});
+                        try std.testing.expect(reply == .accepted);
+                        break :configured reply.accepted.session;
+                    },
+                    .preset => configured: {
+                        create.preset = .{};
+                        try create.preset.?.set("worker");
+                        const reply = try storage.configureWithPreset(&create, &.{ .request_digest = create.presetRequestDigest() }, .{});
+                        try std.testing.expect(reply == .accepted);
+                        break :configured reply.accepted.session;
+                    },
+                    .message => configured: {
+                        const text = "work";
+                        const file = try tmp.dir.createFile(std.testing.io, "unlisted-message", .{ .read = true });
+                        try file.writeStreamingAll(std.testing.io, text);
+                        try file.sync(std.testing.io);
+                        var message = try completeMessage("unlisted-message", "", file, text);
+                        defer message.removeTemporaryContent(std.testing.io) catch unreachable;
+                        message.configuration = create.configuration;
+                        const reply = storage.submitMessageWithModel(&message, null, .{});
+                        try std.testing.expect(reply == .accepted);
+                        break :configured reply.accepted.session;
+                    },
+                };
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), (try storage.inspectSessionForTesting(session.slice())).reasoning_effort);
+                // Start unspecified, then select this same word through update.
+                var empty = try completeConfiguration("unlisted-empty", "", workspace, "unlisted-effort-model");
+                empty.configuration.reasoning_effort.state = .explicit_null;
+                const target = (try storage.configure(&empty, .{})).accepted.session;
+                var update: wire_request.ConfigureCommand = .{ .session = target };
+                try update.key.set("unlisted-update");
+                update.configuration.reasoning_effort.state = .value;
+                try update.configuration.reasoning_effort.value.set(@tagName(effort));
+                try std.testing.expect(try storage.configure(&update, .{}) == .accepted);
+                try std.testing.expectEqual(@as(?protocol.ReasoningEffort, effort), (try storage.inspectSessionForTesting(target.slice())).reasoning_effort);
+            };
         }
     }.run);
 }
@@ -15467,6 +15530,84 @@ test "child ending Message includes bounded provider report done answer and quie
     }.run);
 }
 
+test "child ending forward is the single durable owed fact across recovery for every ending" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Ending = enum { done, failed, stopped, quiet, root };
+            inline for (std.enums.values(Ending)) |ending| {
+                errdefer std.debug.print("ending case {s} failed\n", .{@tagName(ending)});
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                var opened = true;
+                defer if (opened) {
+                    storage.close() catch unreachable;
+                };
+                const ancestor = try configureTestSession(&storage, "once-ancestor");
+                const parent = try configureTestSession(&storage, "once-parent");
+                const child = try configureTestSession(&storage, "once-child");
+                try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ ancestor.slice(), parent.slice() });
+                if (ending != .root) try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+                try submitTestMessage(&storage, &tmp, "once-task", "once-task", child.slice(), "answer");
+                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                if (ending == .done or ending == .root) {
+                    try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
+                } else if (ending == .failed) {
+                    const report = "saved failure";
+                    try storage.settleModelAttemptFailure(model, .{ .correlated = .{ .code = "malformed_provider_output", .request_id = .{}, .report = report } }, .ordinary, .{});
+                } else {
+                    var stop = try completeSessionStop("once-stop", if (ending == .quiet) parent.slice() else child.slice());
+                    try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                    if (ending == .quiet) {
+                        const owed = (try storage.nextCoreWork()).?.stop;
+                        var child_stop: protocol.SessionStopCommand = .{ .key = owed.key, .session = child };
+                        try std.testing.expect(storage.stopOwedSession(&child_stop, .{}) == .accepted);
+                    }
+                }
+                // The fact exists at Turn close, before either delivery, not in
+                // a second queue or a delivery-time synthesis.
+                try std.testing.expectEqual(@as(u64, if (ending == .root) 0 else 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_forward WHERE source_id=?1 AND kind=2 AND message_delivered=0 AND position IS NULL", .{model.turn_id}));
+                try storage.close();
+                opened = false;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                opened = true;
+                if (ending == .root) {
+                    try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));
+                    try std.testing.expect((try storage.nextCoreWork()) == null);
+                    continue;
+                }
+                // Feed positioning does not settle the Message obligation.
+                const first = try store_testing.queryU64(&storage, "SELECT forward_id FROM session_forward WHERE source_id=?1 AND target_ref=?2", .{ model.turn_id, parent.slice() });
+                try std.testing.expect(try storage.deliverSessionForward(first, .{}));
+                try std.testing.expectError(error.InjectedCommitFailure, storage.deliverChildEnding(model.turn_id, .{ .before_commit = true }));
+                // An injected commit failure fences the Store; recovery opens
+                // a new owner before retrying the retained obligation.
+                try storage.close();
+                opened = false;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                opened = true;
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+                try std.testing.expect(try storage.deliverChildEnding(model.turn_id, .{}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT message_delivered FROM session_forward WHERE forward_id=?1", .{first}));
+                try storage.close();
+                opened = false;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                opened = true;
+                try std.testing.expect(!try storage.deliverChildEnding(model.turn_id, .{}));
+                try std.testing.expectEqual(@as(u64, if (ending == .quiet) 0 else 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+                const hop = (try storage.nextCoreWork()).?.forward;
+                try std.testing.expect(try storage.deliverSessionForward(hop, .{}));
+                try std.testing.expect(!try storage.deliverSessionForward(hop, .{}));
+                try std.testing.expectEqual(@as(u64, 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_forward WHERE source_id=?1 AND position IS NOT NULL", .{model.turn_id}));
+                try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM session_forward WHERE source_id=?1 AND message_delivered IS NOT NULL", .{model.turn_id}));
+                try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{ancestor.slice()}));
+                try std.testing.expect((try storage.nextCoreWork()) == null);
+            }
+        }
+    }.run);
+}
+
 test "MCP missing tools refuse create update creating Message and start_agent with one tool set rule" {
     try store_testing.forEachEngine(struct {
         fn check(reply: anytype, unavailable: bool, message: []const u8, replayed: bool) !void {
@@ -15590,6 +15731,58 @@ test "MCP missing tools refuse create update creating Message and start_agent wi
                     try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM action_operation a JOIN content c ON c.content_id=a.resolution_content_id WHERE a.action_id=?1 AND a.resolution_code='failed' AND c.digest=?2", .{ action.binding.action_id, store_testing.Blob{ .bytes = &protocol.contentDigest(text) } }));
                 }
                 try std.testing.expect(!storage.isFenced());
+            }
+        }
+    }.run);
+}
+
+test "ending migration preserves unsettled and settled Messages exactly once with the new digest" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            inline for (.{ false, true }) |keep_pending_forward| {
+                inline for (.{ false, true }) |suppress_message| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    var opened = true;
+                    defer if (opened) {
+                        storage.close() catch unreachable;
+                    };
+                    const parent = try configureTestSession(&storage, "upgrade-parent");
+                    const child = try configureTestSession(&storage, "upgrade-child");
+                    try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ parent.slice(), child.slice() });
+                    var turns: [2]u64 = undefined;
+                    inline for (0..2) |index| {
+                        const key = if (index == 0) "upgrade-settled" else "upgrade-unsettled";
+                        try submitTestMessage(&storage, &tmp, key, key, child.slice(), "answer");
+                        const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        turns[index] = model.turn_id;
+                        try settleItemsForTesting(&storage, &tmp, model, &.{"{\"type\":\"message\",\"id\":\"answer\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"saved answer\"}]}"}, "saved answer");
+                    }
+                    try std.testing.expect(try storage.deliverChildEnding(turns[0], .{}));
+                    if (suppress_message) try store_testing.exec(&storage, "UPDATE session_forward SET suppress_message=1 WHERE source_id=?1 AND message_delivered=0", .{turns[1]});
+                    try store_testing.stageEndingMessageUpgrade(&storage, keep_pending_forward);
+                    try storage.close();
+                    opened = false;
+                    // Production open validates SQLite's exact bootstrap text and
+                    // MySQL's catalog digest, not just the saved format number.
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    opened = true;
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT message_delivered FROM session_forward WHERE source_id=?1 AND message_delivered IS NOT NULL", .{turns[0]}));
+                    try std.testing.expectEqual(@as(u64, 0), try store_testing.queryU64(&storage, "SELECT message_delivered FROM session_forward WHERE source_id=?1 AND message_delivered IS NOT NULL", .{turns[1]}));
+                    try std.testing.expectEqual(@as(u64, @intFromBool(suppress_message)), try store_testing.queryU64(&storage, "SELECT suppress_message FROM session_forward WHERE source_id=?1 AND message_delivered=0", .{turns[1]}));
+                    try std.testing.expect(!try storage.deliverChildEnding(turns[0], .{}));
+                    try std.testing.expectEqual(@as(u64, 1), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+                    try std.testing.expect(try storage.deliverChildEnding(turns[1], .{}));
+                    try storage.close();
+                    opened = false;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    opened = true;
+                    try std.testing.expect(!try storage.deliverChildEnding(turns[0], .{}));
+                    try std.testing.expect(!try storage.deliverChildEnding(turns[1], .{}));
+                    try std.testing.expectEqual(@as(u64, if (suppress_message) 1 else 2), try store_testing.queryU64(&storage, "SELECT count(*) FROM message_admission WHERE session_ref=?1", .{parent.slice()}));
+                }
             }
         }
     }.run);

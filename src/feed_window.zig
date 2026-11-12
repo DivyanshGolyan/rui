@@ -89,6 +89,61 @@ pub const Opened = struct {
     }
 };
 
+pub const LatestEnding = @import("feed_reads.zig").Ending(Key);
+/// Padding on a synthetic-only wrapped row has no resident text to select.
+pub const RetryHit = union(enum) { link: Key, padding };
+pub const Presentation = struct {
+    latest_ending: ?LatestEnding = null,
+    retry_actionable: bool = false,
+};
+
+// Only the short, shared ending line is decorated, not arbitrary Message text.
+// This is frame-local presentation; no bytes/styles are written to Window.
+const EndingLine = struct {
+    key_start: usize = 0,
+    key_end: usize = 0,
+    document: viewport.Sized(512, true) = .{ .dirty = false, .sidenotes = true, .quotes = true },
+
+    fn init(self: *EndingLine, window: *const Window, entry: Window.Stored, offset: usize, presentation: Presentation) bool {
+        if (!presentation.retry_actionable) return false;
+        const latest = presentation.latest_ending orelse return false;
+        if (!latest.matches(entry.key)) return false;
+        const key = latest.cause.key orelse return false;
+        const end = window.document.lineEnd(offset);
+        if (end + 1 != entry.offset + entry.length) return false;
+        const suffix = " · ";
+        const length = end - offset + suffix.len + key.len;
+        // Ending words and key strings come from marks, never content bytes.
+        std.debug.assert(length < self.document.bytes.len);
+        const head = end - offset;
+        self.key_start = head + suffix.len;
+        self.key_end = length;
+        @memcpy(self.document.bytes[0..head], window.document.bytes[offset..end]);
+        @memcpy(self.document.styles[0..head], window.document.styles[offset..end]);
+        @memcpy(self.document.bytes[head..][0..suffix.len], suffix);
+        @memcpy(self.document.bytes[head + suffix.len ..][0..key.len], key);
+        @memset(self.document.styles[head..length], 0);
+        self.document.bytes[length] = '\n';
+        self.document.styles[length] = 0;
+        self.document.length = length + 1;
+        self.document.width_method = window.document.width_method;
+        return true;
+    }
+
+    /// Paint exactly the wrapped row drawWith paints, then ask that same
+    /// document which byte owns the cell. Margins/indent and the ending's
+    /// words are not part of the retry link.
+    fn hit(self: *const EndingLine, row: u16, cells: []vaxis.Cell, col: usize) bool {
+        if (col >= cells.len) return false;
+        @memset(cells, .{});
+        var screen: vaxis.Screen = .{ .width = @intCast(cells.len), .height = 1, .width_method = self.document.width_method, .buf = cells };
+        const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = 1, .screen = &screen };
+        _ = self.document.draw(window, .{ .row = row }, true, false, .{}, .{});
+        const offset = self.document.cellOffset(cells[col]) orelse return false;
+        return offset >= self.key_start and offset < self.key_end;
+    }
+};
+
 pub const Window = struct {
     const Document = viewport.Sized(byte_capacity, true);
     const Target = struct { point: Point, target: View.Collapsed };
@@ -200,6 +255,10 @@ pub const Window = struct {
     /// with commit=false, including its styles, hanging indents and links.
     /// A gap belongs to the predecessor's last logical line, not its text.
     pub fn heights(self: *Window, layout: viewport.Layout) []const Feed.Entry {
+        return self.heightsWith(layout, .{});
+    }
+
+    pub fn heightsWith(self: *Window, layout: viewport.Layout, presentation: Presentation) []const Feed.Entry {
         self.document.width_method = layout.method;
         var used: usize = 0;
         for (self.entries[0..self.count], 0..) |entry, i| {
@@ -207,7 +266,7 @@ pub const Window = struct {
             var offset = entry.offset;
             const end = offset + entry.length;
             while (offset < end) {
-                self.line_rows[used] = if (layout.width == 0) 1 else self.document.lineRows(layout, offset);
+                self.line_rows[used] = if (layout.width == 0) 1 else self.lineRows(entry, layout, offset, presentation);
                 used += 1;
                 offset = self.document.lineEnd(offset) + 1;
             }
@@ -220,11 +279,20 @@ pub const Window = struct {
     /// Includes the unkeyed Widget tail only for layout/scroll/read policy.
     /// The synthetic key is never persisted, targeted or counted as a row.
     pub fn layoutEntries(self: *Window, layout: viewport.Layout) []const Feed.Entry {
-        _ = self.heights(layout);
+        return self.layoutEntriesWith(layout, .{});
+    }
+
+    pub fn layoutEntriesWith(self: *Window, layout: viewport.Layout, presentation: Presentation) []const Feed.Entry {
+        _ = self.heightsWith(layout, presentation);
         if (self.tail_rows == 0) return self.dimensions[0..self.count];
         self.tail_lines[0] = self.tail_rows;
         self.dimensions[self.count] = .{ .key = tail_key, .lines = &self.tail_lines };
         return self.dimensions[0 .. self.count + 1];
+    }
+
+    pub fn lineRows(self: *const Window, entry: Stored, layout: viewport.Layout, offset: usize, presentation: Presentation) u16 {
+        var ending: EndingLine = .{};
+        return if (ending.init(self, entry, offset, presentation)) ending.document.lineRows(layout, 0) else self.document.lineRows(layout, offset);
     }
 
     pub fn pointAt(self: *const Window, offset: usize) ?Point {
@@ -270,8 +338,25 @@ pub const Window = struct {
         return null;
     }
 
+    /// A synthetic retry link uses EndingLine's own drawing/layout, never a
+    /// resident-text offset. The caller lends one pane-width row of cells.
+    pub fn retryAt(self: *const Window, position: viewport.Position, cells: []vaxis.Cell, col: usize, presentation: Presentation) ?RetryHit {
+        if (cells.len == 0) return null;
+        const point = self.pointAt(position.offset) orelse return null;
+        const entry = self.entries[self.indexOf(point.key) orelse return null];
+        var ending: EndingLine = .{};
+        if (!ending.init(self, entry, position.offset, presentation)) return null;
+        if (ending.hit(position.row, cells, col)) return .{ .link = entry.key };
+        const layout: viewport.Layout = .{ .width = @intCast(cells.len), .method = self.document.width_method };
+        return if (position.row >= self.document.lineRows(layout, position.offset)) .padding else null;
+    }
+
     /// Logical text row beneath the pointer, excluding adjacency gaps/tail.
     pub fn positionAt(self: *const Window, visible: Feed.Visible, row: u32, layout: viewport.Layout) ?viewport.Position {
+        return self.positionAtWith(visible, row, layout, .{});
+    }
+
+    pub fn positionAtWith(self: *const Window, visible: Feed.Visible, row: u32, layout: viewport.Layout, presentation: Presentation) ?viewport.Position {
         if (row < visible.pad or visible.first >= self.count) return null;
         var wanted = row - visible.pad;
         for (self.entries[visible.first..self.count], visible.first..) |entry, i| {
@@ -281,7 +366,7 @@ pub const Window = struct {
                 const next = self.document.lineEnd(offset) + 1;
                 if (i != visible.first or line >= visible.line) {
                     const skip = if (i == visible.first and line == visible.line) visible.row else 0;
-                    const rows = self.document.lineRows(layout, offset) - skip;
+                    const rows = self.lineRows(entry, layout, offset, presentation) - skip;
                     if (wanted < rows) return .{ .offset = offset, .row = @intCast(wanted + skip) };
                     wanted -= rows;
                     if (next == entry.offset + entry.length and self.gapAfter(i) != 0) {
@@ -298,6 +383,12 @@ pub const Window = struct {
     /// Feed.Visible must have been obtained at this window's current width and
     /// width method. The supplied vaxis window is already the shell's feed pane.
     pub fn draw(self: *const Window, visible: Feed.Visible, window: vaxis.Window, colour: bool, plain: vaxis.Style, colours: viewport.Colours) void {
+        self.drawWith(visible, window, colour, plain, colours, .{}, null) catch unreachable;
+    }
+
+    /// Arena retains decorated graphemes through rendering; null is valid only
+    /// for undecorated drawing (the allocation-free draw wrapper).
+    pub fn drawWith(self: *const Window, visible: Feed.Visible, window: vaxis.Window, colour: bool, plain: vaxis.Style, colours: viewport.Colours, presentation: Presentation, arena: ?std.mem.Allocator) !void {
         window.fill(.{ .style = plain });
         if (window.width == 0 or window.height == 0 or visible.first >= self.count) return;
         std.debug.assert(self.document.width_method == window.screen.width_method);
@@ -311,7 +402,15 @@ pub const Window = struct {
                 if (i != visible.first or line >= visible.line) {
                     const skip = if (i == visible.first and line == visible.line) visible.row else 0;
                     if (row >= window.height) return;
-                    const height = self.document.printLine(window, @intCast(row - @as(i32, @intCast(skip))), offset, true, colour, plain, colours);
+                    var ending: EndingLine = .{};
+                    const top: i17 = @intCast(row - @as(i32, @intCast(skip)));
+                    const height = if (ending.init(self, entry, offset, presentation)) decorated: {
+                        // Cells borrow graphemes through Surface.render, beyond
+                        // this call. Exactly one decorated line per frame.
+                        const held = try arena.?.create(EndingLine);
+                        held.* = ending;
+                        break :decorated held.document.printLine(window, top, 0, true, colour, plain, colours);
+                    } else self.document.printLine(window, top, offset, true, colour, plain, colours);
                     row += @as(i32, height) - @as(i32, @intCast(skip));
                     if (next == end) row += self.gapAfter(i);
                 }

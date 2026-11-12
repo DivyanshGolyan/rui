@@ -30,6 +30,7 @@ const feed_reads = @import("feed_reads.zig");
 const feed_window = @import("feed_window.zig");
 const Key = feed_window.Key;
 const FeedPolicy = feed_reads.Policy(Key);
+pub const LatestEnding = feed_reads.Ending(Key);
 
 /// Independent raw rendering in inspection. The shell prepares the text and
 /// pairs summary markers with the retained targets in emission order.
@@ -234,6 +235,10 @@ pub const Job = struct {
     /// The tool rows the person left open, as of this read's start.
     opened: feed_window.Opened = .{},
     recall: ?Input.Step = null,
+    /// Frozen live fact for scans; fills neither read nor publish it.
+    latest_ending: ?LatestEnding = null,
+    /// Retry request: newest person Message strictly before this ending.
+    retry: ?Key = null,
     queued_line: u64 = 0,
     inspection_kind: Inspection = .status,
     // A command observes exit or a signal as an interruption.
@@ -280,6 +285,7 @@ pub const Job = struct {
         queued: protocol.Queued = .{},
         queued_line: ?queued_line.Shown = null,
         live: View.Live = .{},
+        latest_ending: ?LatestEnding = null,
         cursor: protocol_reply.ActivityCursor = .{},
         compact_tools: bool = false,
         // Output custody began; a later failure is not a silent preparation one.
@@ -297,7 +303,86 @@ pub const Job = struct {
         recalled: ?Input.Found = null,
         // The step passed over a sent Message the draft cannot hold.
         recall_passed: bool = false,
+        retry: ?Retry = null,
     } = .{},
+
+    /// Call only after a successful reader join. Scratch is borrowed until the
+    /// next reader starts; consume/copy the exact range before reusing it.
+    pub fn retryCompletion(self: *const Job, latest: ?LatestEnding) RetryCompletion {
+        const key = self.retry.?;
+        if (latest == null or !latest.?.matches(key)) return .stale;
+        return switch (self.result.retry.?) {
+            .stale => .stale,
+            .message => |message| .{ .message = message },
+            .failure => |failure| .{ .failure = failure },
+        };
+    }
+};
+
+pub const RetryFailure = enum { no_message, too_large };
+pub const RetryMessage = struct { ending: Key, position: u64, length: usize };
+const Retry = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
+pub const RetryCompletion = union(enum) { stale, message: RetryMessage, failure: RetryFailure };
+
+/// Runs on ClientTask, never on the key path. No fallback to an older Message:
+/// failure of the one newest admission fails the request. Transport, canonical
+/// Store, cancellation and local I/O failures retain ClientTask's error boundary.
+pub fn retry(raw: *anyopaque, task: *Task) !void {
+    const job: *Job = @ptrCast(@alignCast(raw));
+    const key = job.retry.?;
+    const requests = task.requests();
+    try job.files.scratch.setLength(task.io, 0);
+    // Bind the backwards walk to Host truth, not the frontend's last scan.
+    // Any activity after this ending supersedes the retry, even if a stale
+    // observation still presents the ending as the latest one.
+    const newest = switch (try requests.activityPage(job.store, job.session, .{
+        .direction = .backward,
+        .kinds = .full,
+        .limit = 1,
+    })) {
+        .page => |page| page,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    job.result.retry = .stale;
+    if (newest.facts.count == 0) return;
+    const head = newest.facts.items[0];
+    if (head.position != key.position or head.ordinal != key.ordinal) return;
+    const page = switch (try requests.activityPage(job.store, job.session, .{
+        .end = newest.facts.end,
+        .position = key.position,
+        .ordinal = key.ordinal,
+        .direction = .backward,
+        .kinds = .initOne(.admission),
+        .limit = 1,
+    })) {
+        .page => |page| page,
+        .failure => |failure| return requests.failRead(failure),
+    };
+    job.result.retry = .{ .failure = .no_message };
+    if (page.facts.count == 0) return;
+    const item = page.facts.items[0];
+    const content = item.value.admission.content;
+    if (content.length > Input.capacity) {
+        job.result.retry = .{ .failure = .too_large };
+        return;
+    }
+    var staging: RetryStaging = .{ .io = task.io, .file = job.files.scratch, .length = content.length };
+    const reference: protocol_reply.CommandObservation.ContentReference = .{ .bytes = content.length, .digest = content.digest };
+    if (try requests.readActivityContent(job.store, job.session, item.position, item.ordinal, reference, &staging)) |failure| return requests.failRead(failure);
+    job.result.retry = .{ .message = .{ .ending = key, .position = item.position, .length = @intCast(staging.offset) } };
+}
+
+const RetryStaging = struct {
+    io: std.Io,
+    file: std.Io.File,
+    length: u64,
+    offset: u64 = 0,
+
+    pub fn feed(self: *@This(), bytes: []const u8) !void {
+        if (bytes.len > self.length - self.offset) return error.ContentLengthMismatch;
+        try self.file.writePositionalAll(self.io, bytes, self.offset);
+        self.offset += bytes.len;
+    }
 };
 
 /// One step over the Messages the person sent, from the one the draft
@@ -503,6 +588,11 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
         .failure => |failure| return requests.failRead(failure),
     };
     if (plan.kinds == .all) {
+        job.result.latest_ending = if (job.opening) null else job.latest_ending;
+        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session);
+        if (job.opening and job.result.latest_ending == null and page.facts.more) {
+            try latestEnding(requests, job, page.facts.end);
+        }
         job.result.work = page.facts.work;
         const line_stale = Line.stale(job.line_read, &page.facts);
         if (job.open_status or job.watch_status or line_stale) {
@@ -561,6 +651,35 @@ pub fn scan(raw: *anyopaque, task: *Task) !void {
     if (job.result.at_end) job.result.high = if (page.facts.end == 0) null else .{ .position = page.facts.end, .ordinal = std.math.maxInt(u64) };
     if (plan.kinds == .all) {
         job.result.cursor = if (plan.direction == .backward) .{ .position = page.facts.end } else page.continuation() orelse .{ .position = page.facts.end };
+    }
+}
+
+/// Forward scans can replay older provisional rows; only a newer own ending
+/// advances this fact. Child endings never grant retry authority for a parent.
+fn observeEnding(latest: *?LatestEnding, item: protocol.ActivityItem, session: []const u8) void {
+    const key: Key = .{ .position = item.position, .ordinal = item.ordinal };
+    if (latest.*) |old| if (key.order(old.key) != .gt) return;
+    const marks = @import("marks.zig");
+    const cause: marks.Cause = switch (item.value) {
+        .turn_ended => |ended| if (!std.mem.eql(u8, ended.session.slice(), session)) return else if (ended.ending == .done) .{ .words = "Finished" } else marks.cause(ended.code.slice()),
+        .stop => |stop| if (stop.turn == null) marks.cause("cancelled") else return,
+        else => return,
+    };
+    latest.* = .{ .key = key, .cause = cause };
+}
+
+/// Opening's row page need not contain an ending. Find it with a separate,
+/// snapshot-bound cursor, never by filling/rendering historical window rows.
+fn latestEnding(requests: client.Requests, job: *Job, end: u64) !void {
+    var cursor: protocol_reply.ActivityCursor = .{ .end = end, .direction = .backward, .kinds = .initMany(&.{ .turn_ended, .stop }) };
+    while (true) {
+        const page = switch (try requests.activityPage(job.store, job.session, cursor)) {
+            .page => |page| page,
+            .failure => |failure| return requests.failRead(failure),
+        };
+        for (page.facts.items[0..page.facts.count]) |item| observeEnding(&job.result.latest_ending, item, job.session);
+        if (job.result.latest_ending != null) return;
+        cursor = page.continuation() orelse return;
     }
 }
 
@@ -1299,8 +1418,13 @@ const FakeHost = struct {
 
     /// Runs `job` as a read against this Host; output is then in `shown`.
     fn read(self: *FakeHost, job: *Job) !void {
+        try self.readWith(job, scan);
+    }
+
+    fn readWith(self: *FakeHost, job: *Job, run_read: Task.Run) !void {
         const Read = struct {
             job: *Job,
+            run_read: Task.Run,
             fn run(action: *@This(), host: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
                 const io = std.testing.io;
                 const inspection = try dir.createFile(io, "inspection", .{ .read = true });
@@ -1309,11 +1433,11 @@ const FakeHost = struct {
                 if (action.job.session.len == 0) action.job.session = "k7m2qx";
                 action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
                 var task: Task = .{ .io = io };
-                try scan(action.job, &task);
+                try action.run_read(action.job, &task);
                 host.shown = host.output[0..try inspection.readPositionalAll(io, &host.output, 0)];
             }
         };
-        var action: Read = .{ .job = job };
+        var action: Read = .{ .job = job, .run_read = run_read };
         try self.withHost(&action);
     }
 };
@@ -1776,7 +1900,8 @@ test "session_reads long Session opening and visible fill each cost one page of 
     try host.read(&job);
     try std.testing.expectEqual(@as(usize, 32), host.contents);
     try std.testing.expectEqual(@as(usize, 16), job.result.row_count);
-    try std.testing.expectEqual(@as(usize, 2), host.pages);
+    // One metadata-only ending lookup on opening, plus two visible pages.
+    try std.testing.expectEqual(@as(usize, 3), host.pages);
 }
 
 test "session_reads row caps never split UTF-8 scalars or presentation controls" {
@@ -1840,6 +1965,174 @@ test "session_reads stopped collapsed Messages retain their exact ordered identi
             try std.testing.expectEqual(@as(u64, position), target.position);
             try std.testing.expectEqual(View.Collapsed{ .source = .activity, .position = position, .ordinal = 0, .row = false, .content = .{ .length = text.len, .digest = protocol.contentDigest(text) } }, target);
         }
+    }
+}
+
+fn testEnding(code: []const u8, kind: protocol.TurnEnding, session: []const u8) protocol.ActivityItem.Value {
+    var ended: protocol.ActivityItem.TurnEnded = .{ .session = .{}, .turn = 1, .operation = 1, .ending = kind, .code = .{}, .content = if (kind == .done) FakeHost.content() else null };
+    ended.session.set(session) catch unreachable;
+    ended.code.set(code) catch unreachable;
+    return .{ .turn_ended = ended };
+}
+
+test "session_reads latest ending follows scan cursor, survives empty scans, ignores child endings and fills" {
+    const tail = [_]FakeHost.Tail{
+        .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+        .{ .value = testEnding("provider_http_500", .failed, "9f8e7d") },
+        .{ .value = testEnding("provider_quota", .failed, "k7m2qx") },
+        .{ .value = testEnding("completed", .done, "k7m2qx") },
+        .{ .value = .{ .stop = .{ .key = .{}, .turn = null, .cutoff = 0, .completion = .completed } } },
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = 1 };
+    var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = 1 } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u64, 1), job.result.latest_ending.?.key.position);
+    try std.testing.expectEqualStrings("ctrl+r retries", job.result.latest_ending.?.cause.key.?);
+    for ([_]u64{ 1, 2, 3, 4, 5 }) |end| {
+        job.latest_ending = job.result.latest_ending;
+        job.cursor = job.result.cursor;
+        job.opening = false;
+        job.result = .{};
+        host.end = end;
+        job.line_read = .{ .revision = 1, .end = end };
+        try host.read(&job);
+        try std.testing.expectEqual(if (end <= 2) @as(u64, 1) else end, job.result.latest_ending.?.key.position);
+        try std.testing.expectEqual(end <= 2, job.result.latest_ending.?.cause.key != null);
+        try std.testing.expect(std.mem.indexOf(u8, host.shown, "ctrl+r") == null);
+    }
+    job.latest_ending = job.result.latest_ending;
+    job.feed_page = .{ .direction = .backward, .kinds = .visible, .from = null, .started_from = null };
+    job.result = .{};
+    try host.read(&job);
+    try std.testing.expect(job.result.latest_ending == null);
+}
+
+test "session_reads opening finds own newest ending outside resident rows and across child ending pages" {
+    var tail: [40]FakeHost.Tail = undefined;
+    tail[0] = .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") };
+    for (tail[1..]) |*item| item.* = .{ .value = testEnding("completed", .done, "9f8e7d") };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len };
+    var job: Job = .{ .opening = true, .line_read = .{ .revision = 1, .end = tail.len } };
+    try host.read(&job);
+    try std.testing.expectEqual(@as(u64, 1), job.result.latest_ending.?.key.position);
+    try std.testing.expect(job.result.latest_ending.?.cause.key != null);
+    try std.testing.expectEqual(@as(usize, 4), host.pages);
+    try std.testing.expectEqual(@as(usize, 0), host.contents);
+    try std.testing.expectEqual(@as(usize, 0), job.result.row_count);
+}
+
+test "session_reads retry stages exact multi-window bytes before its ending and rejects stale completion" {
+    const text = try std.testing.allocator.alloc(u8, 3 * protocol.content_window_bytes + 7);
+    defer std.testing.allocator.free(text);
+    @memset(text, 'a');
+    // A scalar crosses a content window; no escaping, normalization or trimming.
+    @memcpy(text[protocol.content_window_bytes - 1 ..][0.."💚é\n\t /".len], "💚é\n\t /");
+    text[0] = '/';
+    var message = FakeHost.message(1).admission;
+    message.content = .{ .length = text.len, .digest = protocol.contentDigest(text) };
+    const tail = [_]FakeHost.Tail{
+        .{ .value = FakeHost.message(1) },
+        .{ .value = .{ .admission = message } },
+        .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+    };
+    var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len, .content_texts = &.{ FakeHost.text, text, "" } };
+    var job: Job = .{ .retry = .{ .position = 3 } };
+    // FakeHost's scan capture is bounded; the large scratch is checked within
+    // its lifetime instead, after the production Task's real join.
+    const Read = struct {
+        job: *Job,
+        expected: []const u8,
+        fn run(action: *@This(), _: *FakeHost, dir: std.Io.Dir, root: []const u8) !void {
+            const io = std.testing.io;
+            const file = try dir.createFile(io, "retry", .{ .read = true });
+            defer file.close(io);
+            action.job.store = root;
+            action.job.session = "k7m2qx";
+            action.job.files = .{ .scratch = file, .inspection = file, .action = file, .status = file, .actions = .{ file, file } };
+            var task: Task = .{};
+            try task.start(io, action.job, retry);
+            try task.join();
+            const latest: LatestEnding = .{ .key = .{ .position = 3 }, .cause = @import("marks.zig").cause("provider_http_500") };
+            const completion = action.job.retryCompletion(latest);
+            try std.testing.expectEqual(@as(u64, 2), completion.message.position);
+            try std.testing.expectEqualDeep(latest.key, completion.message.ending);
+            try std.testing.expectEqual(action.expected.len, completion.message.length);
+            const bytes = try std.testing.allocator.alloc(u8, action.expected.len);
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqual(bytes.len, try file.readPositionalAll(io, bytes, 0));
+            try std.testing.expectEqualStrings(action.expected, bytes);
+            for ([_]?LatestEnding{ null, .{ .key = .{ .position = 4 }, .cause = latest.cause }, .{ .key = .{ .position = 3, .ordinal = 1 }, .cause = latest.cause } }) |changed|
+                try std.testing.expect(action.job.retryCompletion(changed) == .stale);
+        }
+    };
+    var read: Read = .{ .job = &job, .expected = text };
+    try host.withHost(&read);
+    try std.testing.expectEqual(@as(usize, 2), host.pages);
+    try std.testing.expectEqual(@as(usize, 1), host.contents);
+}
+
+test "session_reads retry reports only Message state without falling back" {
+    for ([_]enum { absent, too_large }{ .absent, .too_large }) |case| {
+        var message = FakeHost.message(2).admission;
+        switch (case) {
+            .too_large => message.content.length = Input.capacity + 1,
+            else => {},
+        }
+        const tail = [_]FakeHost.Tail{
+            .{ .value = if (case == .absent) testEnding("provider_http_500", .failed, "k7m2qx") else FakeHost.message(1) },
+            .{ .value = .{ .admission = message } },
+            .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+        };
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = if (case == .absent) 1 else tail.len };
+        var job: Job = .{ .retry = .{ .position = if (case == .absent) 1 else 3 } };
+        try host.readWith(&job, retry);
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        const expected: RetryFailure = switch (case) {
+            .absent => .no_message,
+            .too_large => .too_large,
+        };
+        try std.testing.expectEqual(expected, job.retryCompletion(latest).failure);
+        try std.testing.expectEqual(@as(usize, 2), host.pages);
+        try std.testing.expectEqual(@as(usize, 0), host.contents);
+    }
+}
+
+test "session_reads retry rejects newer Host activity before reading any Message" {
+    var applied = FakeHost.message(4).admission;
+    applied.state = .applied;
+    applied.turn = 2;
+    const newer = [_]FakeHost.Tail{
+        .{ .value = FakeHost.message(4) },
+        .{ .value = FakeHost.message(4), .excluded_at = 4 },
+        .{ .value = .{ .user = applied } },
+        .{ .value = .{ .assistant = .{ .content = FakeHost.content(), .final = true } } },
+        .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+        .{ .value = .{ .session_changed = .{ .revision = 2, .field = .label } } },
+    };
+    for (newer) |row| {
+        const tail = [_]FakeHost.Tail{
+            .{ .value = FakeHost.message(1) },
+            .{ .value = FakeHost.message(2) },
+            .{ .value = testEnding("provider_http_500", .failed, "k7m2qx") },
+            row,
+        };
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = tail.len };
+        var job: Job = .{ .retry = .{ .position = 3 } };
+        try host.readWith(&job, retry);
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        try std.testing.expect(job.retryCompletion(latest) == .stale);
+        try std.testing.expectEqual(@as(usize, 1), host.pages);
+        try std.testing.expectEqual(@as(usize, 0), host.contents);
+    }
+    // Empty history and a different row at the same position are stale too.
+    for ([_]u64{ 0, 1 }) |end| {
+        const tail = [_]FakeHost.Tail{.{ .value = testEnding("provider_http_500", .failed, "k7m2qx") }};
+        var host: FakeHost = .{ .history = 0, .tail = &tail, .end = end };
+        var job: Job = .{ .retry = .{ .position = 1, .ordinal = 1 } };
+        try host.readWith(&job, retry);
+        const latest: LatestEnding = .{ .key = job.retry.?, .cause = @import("marks.zig").cause("provider_http_500") };
+        try std.testing.expect(job.retryCompletion(latest) == .stale);
+        try std.testing.expectEqual(@as(usize, 0), host.contents);
     }
 }
 

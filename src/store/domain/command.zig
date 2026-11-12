@@ -24,7 +24,6 @@ const command_input = @import("../../command_input.zig");
 const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const action_domain = @import("action.zig");
-const forward_domain = @import("forward.zig");
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const reads_domain = @import("reads.zig");
@@ -570,8 +569,8 @@ fn childEndingKey(buffer: *[idempotency_key.max_bytes]u8, turn_id: u64) []const 
 /// its Turn ended, with the answer's digest when done or its bounded report.
 const owed_ending_facts = rsql.Read(.{
     .sql = "SELECT child.session_ref,child.workspace_key,child.next_position,child.parent_ref AS parent,t.outcome_code,t.outcome_content_id,c.digest,CASE WHEN t.outcome_content_id IS NOT NULL AND t.outcome_code<>'completed' THEN @payload(c) ELSE NULL END AS report," ++
-        action_domain.ending_stop_sql ++ " FROM session_ending_owed e JOIN turn t ON t.turn_id=e.turn_id " ++
-        "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.turn_id=?1 AND e.delivered=0",
+        action_domain.ending_stop_sql ++ " FROM session_forward e JOIN turn t ON t.turn_id=e.source_id " ++
+        "JOIN session child ON child.session_ref=t.session_ref LEFT JOIN content c ON c.content_id=t.outcome_content_id WHERE e.source_id=?1 AND e.message_delivered=0",
     .Args = struct { turn_id: u64 },
     .Row = struct {
         child: rsql.SessionHead,
@@ -587,7 +586,7 @@ const owed_ending_facts = rsql.Read(.{
 });
 
 const settle_owed_ending = rsql.Write(.{
-    .sql = "UPDATE session_ending_owed SET delivered=1 WHERE turn_id=?1 AND delivered=0",
+    .sql = "UPDATE session_forward SET message_delivered=1 WHERE source_id=?1 AND message_delivered=0",
     .Args = struct { turn_id: u64 },
     .expect = .{ .exact = .{ .rows = 1, .otherwise = error.CorruptStore } },
 });
@@ -621,9 +620,6 @@ pub fn deliverChildEnding(a: anytype, turn_id: u64, captured: ?*const skills_dom
         return false;
     };
     a.write(settle_owed_ending, .{ .turn_id = turn_id });
-    // The ending's feed row climbs the tree from here (D180): queued with
-    // the owed Message, so a root Session's Turn end writes nothing more.
-    try forward_domain.queue(a, &found.child.ref, &found.child.ref, .ending, turn_id);
     if (found.quiet) {
         if (faults.before_commit) return error.InjectedCommitFailure;
         try a.commit();
@@ -1159,16 +1155,14 @@ fn cancelActions(
 }
 
 const archive_ending_count = rsql.Read(.{
-    .sql = "SELECT count(*) AS count FROM session_ending_owed ending JOIN turn t ON t.turn_id=ending.turn_id " ++
-        "JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref=?1 AND ending.delivered=0 AND ending.suppress_message=0",
+    .sql = "SELECT count(*) AS count FROM session_forward ending WHERE ending.target_ref=?1 AND ending.message_delivered=0 AND ending.suppress_message=0",
     .Args = struct { parent: []const u8 },
     .Row = struct { count: u64 },
     .cardinality = .one,
 });
 
 const suppress_archive_endings = rsql.Write(.{
-    .sql = "UPDATE session_ending_owed SET suppress_message=1 WHERE delivered=0 AND suppress_message=0 AND turn_id IN(" ++
-        "SELECT t.turn_id FROM turn t JOIN session child ON child.session_ref=t.session_ref WHERE child.parent_ref=?1)",
+    .sql = "UPDATE session_forward SET suppress_message=1 WHERE message_delivered=0 AND suppress_message=0 AND target_ref=?1",
     .Args = struct { parent: []const u8 },
     .expect = .{ .counted = .{ .otherwise = error.StopSelectionChanged } },
 });
