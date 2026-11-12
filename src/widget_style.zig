@@ -9,6 +9,8 @@ pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
     if (caps.depth == .none) {
         style.bold = role.bold or role.background == .band;
         style.reverse = role.background == .band or role.background == .selection;
+        // Reverse marks the keyboard's row; the pointer's row only underlines.
+        if (role.background == .hover) style.ul_style = .single;
         return style;
     }
     const mode: theme.Mode = switch (caps.skin()) {
@@ -24,6 +26,7 @@ pub fn of(caps: view.Caps, role: view.Style) vaxis.Style {
         .ground => .ground,
         .bar => .selvedge,
         .selection => .selection,
+        .hover => .hover,
         .band => .alert,
     };
     const fg: theme.Color = switch (role.colour) {
@@ -70,7 +73,27 @@ test "widget styles resolve theme colours and preserve NO_COLOR" {
         try std.testing.expectEqual(vaxis.Color.default, plain.bg);
         try std.testing.expectEqual(background == .band, plain.bold);
         try std.testing.expectEqual(background == .band or background == .selection, plain.reverse);
+        try std.testing.expectEqual(if (background == .hover) vaxis.Style.Underline.single else .off, plain.ul_style);
     };
+}
+
+test "hover differs from the ground, bar and selection it sits beside in every skin and depth" {
+    for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
+        for ([_]view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+            const caps: view.Caps = .{ .depth = depth, .background = terminal };
+            const hover = of(caps, .{ .background = .hover });
+            if (depth == .none) {
+                try std.testing.expectEqual(vaxis.Style.Underline.single, hover.ul_style);
+                try std.testing.expect(!hover.reverse);
+                try std.testing.expect(of(caps, .{ .background = .selection }).reverse);
+                continue;
+            }
+            try std.testing.expectEqual(vaxis.Style.Underline.off, hover.ul_style);
+            for ([_]view.Background{ .ground, .bar, .selection }) |surface| {
+                try std.testing.expect(!std.meta.eql(of(caps, .{ .background = surface }).bg, hover.bg));
+            }
+        }
+    }
 }
 
 test "widget indexed colours use nearest xterm entries and decided pins" {
@@ -103,7 +126,11 @@ test "widget indexed colours use nearest xterm entries and decided pins" {
             const direct = of(.{ .background = terminal }, role);
             const indexed = of(.{ .depth = .indexed, .background = terminal }, role);
             const expected_fg: u8 = if (terminal != null and colour == .attention) 58 else Check.nearest(direct.fg.rgb);
-            const expected_bg: u8 = if (terminal == null and ground == .selection) 237 else Check.nearest(direct.bg.rgb);
+            const expected_bg: u8 = switch (ground) {
+                .selection => if (terminal == null) 237 else Check.nearest(direct.bg.rgb),
+                .hover => if (terminal == null) 235 else 231,
+                else => Check.nearest(direct.bg.rgb),
+            };
             try std.testing.expectEqual(vaxis.Color{ .index = expected_fg }, indexed.fg);
             try std.testing.expectEqual(vaxis.Color{ .index = expected_bg }, indexed.bg);
         };
@@ -143,7 +170,7 @@ test "widget text meets WCAG contrast on each used ground" {
     for ([_]?view.Rgb{ .{ 255, 255, 255 }, null }) |terminal| {
         for ([_]view.Caps.Depth{ .direct, .indexed }) |depth| {
             const caps: view.Caps = .{ .depth = depth, .background = terminal };
-            for ([_]view.Background{ .ground, .bar, .selection }) |ground| {
+            for ([_]view.Background{ .ground, .bar, .selection, .hover }) |ground| {
                 for ([_]view.Colour{ .strong, .ink, .normal, .quiet, .mark, .attention, .failure }) |colour| {
                     try Check.check(caps, .{ .colour = colour, .background = ground });
                 }
