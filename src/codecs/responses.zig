@@ -1,12 +1,17 @@
-//! The OpenAI Responses codec, in two versions. `openai-responses/1` sends
-//! each Operation's effort at the top of its request, so changing effort
-//! costs the prompt cache. `openai-responses/2` keeps the Session's
+//! The OpenAI Responses codec, in three versions. `openai-responses/1`
+//! sends each Operation's effort at the top of its request, so changing
+//! effort costs the prompt cache. `openai-responses/2` keeps the Session's
 //! starting effort at the top and changes it inside the history with a
 //! `configuration_update` item at the Operation that changed it (D75-D77).
 //! It also declares function tools inside the history, with an
 //! `additional_tools` item at each Operation that adds or rewords one, so a
 //! tool change keeps the cache too; its top-level `tools` holds only the
 //! provider-run tools, which the provider ignores anywhere else.
+//! `openai-responses/3` is version two for an endpoint that refuses the
+//! `configuration_update` and `compaction_trigger` input items: it sends
+//! each Operation's effort at the top, as version one does, and a
+//! compaction request asks for compaction with a top-level
+//! `context_management` instead of the trigger item.
 const std = @import("std");
 const codec_abi = @import("../codec_abi.zig");
 const json = @import("json.zig");
@@ -23,11 +28,26 @@ pub const manifest: codec_abi.Manifest = .{
 const ItemHeader = codec_abi.ItemHeader;
 const Pieces = codec_abi.Pieces;
 
-pub const Version = enum { one, two };
+pub const Version = enum {
+    one,
+    two,
+    three,
+
+    /// Whether function tools are declared inside the history instead of
+    /// in the tools stage.
+    pub fn declaresTools(self: Version) bool {
+        return self != .one;
+    }
+};
+
+/// How version three asks for compaction. Every request holds more than
+/// one token, so the provider compacts on every compaction request.
+const context_management = ",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1}]";
 
 /// The encoder's state between history elements: whether one was written,
 /// since the next input item then takes a comma, and under version two the
-/// effort in force, which an Operation boundary changes.
+/// effort in force, which an Operation boundary changes. Versions one and
+/// three send each Operation's effort at the top instead.
 pub const Carry = struct {
     input_comma: bool = false,
     version: Version,
@@ -38,7 +58,7 @@ pub const Carry = struct {
 /// effort its requests send at the top.
 pub fn initial(version: Version, starting_effort: ?codec_abi.Effort) Carry {
     return switch (version) {
-        .one => .{ .version = .one },
+        .one, .three => .{ .version = version },
         .two => .{ .version = .two, .effort = starting_effort },
     };
 }
@@ -52,6 +72,9 @@ pub const Encoder = struct {
     omit_reasoning_text: bool = false,
     array: codec_abi.PartArray = .none,
     tool_comma: bool = false,
+    /// A version three compaction request, which asks for compaction at
+    /// the request's end.
+    compact: bool = false,
 
     pub fn encodeItem(self: *Encoder, header: *const ItemHeader, out: *Pieces) error{Declined}!void {
         out.len = 0;
@@ -61,7 +84,7 @@ pub const Encoder = struct {
                 out.content(0, .json_string_v1);
                 out.literal(envelope);
                 const top = switch (self.carry.version) {
-                    .one => settings.effort,
+                    .one, .three => settings.effort,
                     .two => settings.starting_effort,
                 };
                 if (top) |effort| out.literal(switch (effort) {
@@ -161,7 +184,8 @@ pub const Encoder = struct {
                 out.literal("\"}");
             },
             // Version two changes effort where an Operation changed it; an
-            // unchanged effort writes nothing. Effort is null for a whole
+            // unchanged effort writes nothing. Versions one and three wrote
+            // this Operation's effort at the top. Effort is null for a whole
             // Session or for none of it, so a boundary never returns to it.
             .operation => |effort| if (self.carry.version == .two and !std.meta.eql(effort, self.carry.effort)) {
                 self.changeEffort(effort orelse return error.Declined, out);
@@ -170,32 +194,36 @@ pub const Encoder = struct {
             // refused retries above may restore an already admitted value.
             .effort_update => |effort| if (self.carry.version == .two) self.changeEffort(effort, out),
             .declare_open => {
-                if (self.carry.version != .two) return error.Declined;
+                if (!self.carry.version.declaresTools()) return error.Declined;
                 self.separateInput(out);
                 self.tool_comma = false;
                 out.literal("{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[");
             },
             .declared_tool => {
-                if (self.carry.version != .two) return error.Declined;
+                if (!self.carry.version.declaresTools()) return error.Declined;
                 self.functionTool(out);
             },
             .declare_close => {
-                if (self.carry.version != .two) return error.Declined;
+                if (!self.carry.version.declaresTools()) return error.Declined;
                 self.tool_comma = false;
                 out.literal("]}");
             },
             .history_end => {},
-            .compaction_trigger => {
-                self.separateInput(out);
-                out.literal("{\"type\":\"compaction_trigger\"}");
+            .compaction_trigger => switch (self.carry.version) {
+                .one, .two => {
+                    self.separateInput(out);
+                    out.literal("{\"type\":\"compaction_trigger\"}");
+                },
+                .three => self.compact = true,
             },
             .tools_start => {
                 self.tool_comma = false;
                 out.literal("],\"tools\":[");
             },
-            // Version two declares function tools in the history instead.
+            // Versions two and three declare function tools in the history
+            // instead.
             .tool => {
-                if (self.carry.version != .one) return error.Declined;
+                if (self.carry.version.declaresTools()) return error.Declined;
                 self.functionTool(out);
             },
             // OpenAI runs the search and may open live pages; its results
@@ -211,7 +239,7 @@ pub const Encoder = struct {
                 out.content(0, .verbatim);
                 out.literal("}}");
             } else out.literal("],\"text\":{\"verbosity\":\"low\"}"),
-            .request_end => out.literal("}"),
+            .request_end => out.literal(if (self.compact) context_management ++ "}" else "}"),
         }
     }
 
@@ -2026,11 +2054,12 @@ test "every item at its longest fits max_pieces and names only handles it has" {
             var encoder: Encoder = .{ .carry = .{ .input_comma = comma, .version = version, .effort = .low }, .tool_comma = comma, .omit_reasoning_text = omit, .array = array };
             const header: ItemHeader = .{ .item = case.item, .handles = handles };
             var pieces: Pieces = .{ .len = 0 };
-            // Version two declines a boundary back to no effort and a
-            // tools-stage function tool; version one, a declaration.
+            // Version two declines a boundary back to no effort; versions
+            // two and three, a tools-stage function tool; version one, a
+            // declaration.
             const declined = switch (case.item) {
                 .operation => |value| value == null and version == .two,
-                .tool => version == .two,
+                .tool => version != .one,
                 .declare_open, .declared_tool, .declare_close => version == .one,
                 else => false,
             };

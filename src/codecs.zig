@@ -12,11 +12,12 @@ fn module(comptime codec: protocol.Codec) type {
     return switch (codec) {
         .@"openai-responses/1" => Responses(.one),
         .@"openai-responses/2" => Responses(.two),
+        .@"openai-responses/3" => Responses(.three),
     };
 }
 
 /// A version of the Responses codec: one grammar, read the same way, whose
-/// versions differ only in where effort is written.
+/// versions differ only in the requests they write.
 fn Responses(comptime version: responses.Version) type {
     return struct {
         pub const manifest = responses.manifest;
@@ -44,8 +45,9 @@ fn Responses(comptime version: responses.Version) type {
 /// Operation boundary, instead of in the tools stage.
 pub fn declaresTools(codec: protocol.Codec) bool {
     return switch (codec) {
-        .@"openai-responses/1" => false,
-        .@"openai-responses/2" => true,
+        .@"openai-responses/1" => responses.Version.one.declaresTools(),
+        .@"openai-responses/2" => responses.Version.two.declaresTools(),
+        .@"openai-responses/3" => responses.Version.three.declaresTools(),
     };
 }
 
@@ -160,7 +162,7 @@ pub fn classify(codec: protocol.Codec, scratch: *ClassifyScratch, body: []const 
 /// The pinned codec owns whether status and error body refused an effort update.
 pub fn effortChangeRefused(codec: protocol.Codec, scratch: *const ClassifyScratch, status: u16, body: []const u8) bool {
     return switch (codec) {
-        .@"openai-responses/1" => false,
+        .@"openai-responses/1", .@"openai-responses/3" => false,
         .@"openai-responses/2" => responses.effortChangeRefused(&@field(scratch, "openai-responses/2"), status, body),
     };
 }
@@ -311,6 +313,71 @@ test "a resumed encoder writes what an uninterrupted one writes" {
     }
     try std.testing.expectStringStartsWith(whole.buffered(), "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"one\"}]},{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"x\"}");
     try std.testing.expectStringEndsWith(whole.buffered(), "{\"type\":\"compaction_trigger\"}],\"tools\":[],\"text\":{\"verbosity\":\"low\"}}");
+}
+
+/// A whole `openai-responses/3` request for a Session whose first
+/// Operation froze low effort, as the Host encodes it: resumed from the
+/// carry before each element.
+fn versionThreeForTesting(items: []const TestItem, out: *std.Io.Writer) !void {
+    var carry = initialCarry(.@"openai-responses/3", .low);
+    var encoder = resumeFrom(carry);
+    try encodeForTesting(&encoder, &carry, items, out);
+}
+
+const version_three_top = "{\"model\":\"m\",\"parallel_tool_calls\":true,\"store\":false,\"stream\":true,\"include\":[\"reasoning.encrypted_content\"],\"reasoning\":{\"effort\":\"high\"},\"instructions\":\"i\",\"input\":[";
+const version_three_first_operation = [_]TestItem{
+    .{ .item = .{ .settings = .{ .effort = .high, .starting_effort = .low, .session_affinity = @splat(0), .model_length = 1 } }, .handles = &.{"m"} },
+    .{ .item = .instructions, .handles = &.{"i"} },
+    .{ .item = .{ .message = .user }, .handles = &.{"one"} },
+    .{ .item = .{ .operation = .low } },
+    .{ .item = .declare_open },
+    .{ .item = .declared_tool, .handles = &.{ "bash", "d", "{}" } },
+    .{ .item = .declare_close },
+    .{ .item = .{ .output_open = .{ .kind = .message, .phase = .final_answer, .omit_reasoning_text = false } } },
+    .{ .item = .{ .output_part = .{ .array = .content, .kind = .output_text } }, .handles = &.{"done"} },
+    .{ .item = .output_close },
+    .{ .item = .{ .message = .user }, .handles = &.{"two"} },
+    .{ .item = .history_end },
+};
+const version_three_history = "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"one\"}]}," ++
+    "{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[{\"type\":\"function\",\"name\":\"bash\",\"description\":\"d\",\"strict\":false,\"parameters\":{}}]}," ++
+    "{\"type\":\"message\",\"role\":\"assistant\",\"phase\":\"final_answer\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}," ++
+    "{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"two\"}]}";
+const version_three_tools = [_]TestItem{ .{ .item = .tools_start }, .{ .item = .web_search }, .{ .item = .text_format }, .{ .item = .request_end } };
+const version_three_end = "],\"tools\":[{\"type\":\"web_search\",\"external_web_access\":true}],\"text\":{\"verbosity\":\"low\"}";
+
+test "version three sends a changed effort at the top of the request, never as an input item" {
+    var buffer: [2048]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    // The first Operation froze low and this one high: both boundaries
+    // write nothing.
+    try versionThreeForTesting(&(version_three_first_operation ++ [_]TestItem{.{ .item = .{ .operation = .high } }} ++ version_three_tools), &out);
+    try std.testing.expectEqualStrings(version_three_top ++ version_three_history ++ version_three_end ++ "}", out.buffered());
+}
+
+test "version three declares a tool an Operation adds inside the history" {
+    var buffer: [2048]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try versionThreeForTesting(&(version_three_first_operation ++ [_]TestItem{
+        .{ .item = .{ .operation = .high } },
+        .{ .item = .declare_open },
+        .{ .item = .declared_tool, .handles = &.{ "read", "r", "{\"type\":\"object\"}" } },
+        .{ .item = .declare_close },
+    } ++ version_three_tools), &out);
+    try std.testing.expectEqualStrings(version_three_top ++ version_three_history ++
+        ",{\"type\":\"additional_tools\",\"role\":\"developer\",\"tools\":[{\"type\":\"function\",\"name\":\"read\",\"description\":\"r\",\"strict\":false,\"parameters\":{\"type\":\"object\"}}]}" ++
+        version_three_end ++ "}", out.buffered());
+}
+
+test "a version three compaction request asks for compaction at the top, never with a trigger item" {
+    var buffer: [2048]u8 = undefined;
+    var out: std.Io.Writer = .fixed(&buffer);
+    try versionThreeForTesting(&(version_three_first_operation ++ [_]TestItem{
+        .{ .item = .{ .operation = .high } },
+        .{ .item = .compaction_trigger },
+    } ++ version_three_tools), &out);
+    try std.testing.expectEqualStrings(version_three_top ++ version_three_history ++ version_three_end ++
+        ",\"context_management\":[{\"type\":\"compaction\",\"compact_threshold\":1}]}", out.buffered());
 }
 
 test "the codec's JSON reader names each syntax error as validation did" {
