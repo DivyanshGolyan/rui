@@ -152,6 +152,12 @@ pub fn validateSelected(record: *const Record, fixture: bool, scratch: *ClaimScr
     if (try expiryOf(record, scratch) != record.expires_at) return error.InvalidCredentialExpiry;
 }
 
+/// A fixture whose token endpoint is a loopback accepts only a record issued
+/// to `fixture_client_id`, so no real refresh token or access token reaches it.
+pub fn requireFixtureClient(record: *const Record) !void {
+    if (!std.mem.eql(u8, record.client_id.slice(), fixture_client_id)) return error.FixtureRequiresSyntheticCredential;
+}
+
 /// The account `id_token` names for a record of `record`'s kind. A Codex
 /// login's account is its ChatGPT account claim (`parseAccount`); a plan
 /// sign-in, the record with an issued client id, carries no such claim and is
@@ -709,6 +715,16 @@ test "a plan record refreshes inside the launch margin of its token's expiry, ne
     try deriveClaims(&record, &claims);
     try std.testing.expectEqual(@as(i64, 0), record.expires_at);
     try validateRecord(&record);
+}
+
+test "a fixture token endpoint takes only the fixture client's record" {
+    var record: Record = undefined;
+    try fixtureRecord(&record);
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, requireFixtureClient(&record));
+    try record.client_id.set("oaiapp_real");
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, requireFixtureClient(&record));
+    try record.client_id.set(fixture_client_id);
+    try requireFixtureClient(&record);
 }
 
 test "launch rejects a leased token that expired after selection" {

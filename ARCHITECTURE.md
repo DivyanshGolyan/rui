@@ -1253,7 +1253,7 @@ V1 depends on neither that endpoint nor automatic `context_management` support.
 Under `openai-responses/3`, for an endpoint that refuses the trigger item, a compaction request appends no item and instead ends with the top-level `"tool_choice":"none","context_management":[{"type":"compaction","compact_threshold":1000}]`, after the history span, so the span and its carry are unchanged.
 The provider refuses a threshold under 1000 tokens, and a compaction Operation runs only on a large context, so 1000 always compacts; `tool_choice` keeps the reply the provider writes while compacting from calling a function or searching the web.
 With `context_management` the provider's response is `compaction`, `message`, `compaction`, and the last compaction item alone carries the whole memory: replaying only it keeps the context.
-The rule above still expects exactly one compaction item, so a version-three compaction does not settle yet; no provider pins `openai-responses/3`, and accepting that shape is a separate decision.
+The rule above still expects exactly one compaction item, so a version-three compaction does not settle yet; only `chatgpt` pins `openai-responses/3`, so a ChatGPT plan Session's compaction fails until accepting that shape, a separate decision, lands.
 
 Require a completed response with exactly one nonempty supported compaction item for explicit compaction.
 Store the complete ordered output once on that Operation.

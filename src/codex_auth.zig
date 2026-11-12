@@ -110,7 +110,7 @@ pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
 /// leases the replacement.
 pub fn acquireInto(io: std.Io, source: Source, work: *Work, destination: *credentials.Lease) !void {
     try credentials.leaseInto(source.path, destination, &work.credentials);
-    const selection = policy.select(&destination.record, source.synthetic(), nowSeconds(io), &work.claims) catch |err| {
+    const selection = select(source, &destination.record, nowSeconds(io), &work.claims) catch |err| {
         destination.release();
         return err;
     };
@@ -122,6 +122,12 @@ pub fn acquireInto(io: std.Io, source: Source, work: *Work, destination: *creden
     }
     errdefer destination.release();
     try policy.launchCheck(&destination.record, source.synthetic(), nowSeconds(io), &work.claims);
+}
+
+/// The policy's selection, after the fixture endpoint's own canary.
+fn select(source: Source, record: *const credentials.Record, now_seconds: i64, claims: *policy.ClaimScratch) !policy.Selection {
+    if (source.refresh == .fixture_endpoint) try policy.requireFixtureClient(record);
+    return policy.select(record, source.synthetic(), now_seconds, claims);
 }
 
 /// After a model 401, refreshes once if the committed credential generation
@@ -455,7 +461,7 @@ fn refresh(io: std.Io, source: Source, current: *const credentials.Record, repla
         // Only a record issued to the fixture client goes to a fixture's
         // token endpoint, so a real refresh token never does.
         .fixture_endpoint => |url| {
-            if (!std.mem.eql(u8, current.client_id.slice(), policy.fixture_client_id)) return error.RefreshRequestNotSent;
+            policy.requireFixtureClient(current) catch return error.RefreshRequestNotSent;
             request.url = url;
         },
         .synthetic => unreachable,

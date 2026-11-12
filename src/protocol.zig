@@ -239,28 +239,34 @@ pub fn parseInstanceId(text: []const u8) !InstanceId {
     return id;
 }
 
-pub const HostInfo = struct {
-    version: []const u8,
-    type: []const u8,
-    store: []const u8,
-    instance: []const u8,
-    active_capacity: []const u8,
-    intake_capacity: []const u8 = "100",
-    descriptor_limit: []const u8 = "unlimited",
-    /// Host Unix seconds, fixed before the execution thread starts.
-    started_at: []const u8,
-    /// Slots in use: held custody records, including detached cleanup. The
-    /// value Current reports as `execution.custody_occupied`.
-    custody_occupied: []const u8,
-    /// Whether the Host holds every new Turn until resumed (D193).
-    paused: bool,
-    /// MySQL engine diagnostic (D200); absent on SQLite.
-    innodb_doublewrite: ?[]const u8 = null,
-    capabilities: struct {
-        bash: bool,
-        providers: Routes,
-    },
-};
+pub const HostInfo = HostInfoWith(Routes);
+
+/// The `host_info` reply whose `capabilities.providers` is `Providers`: a
+/// released Host's names only the providers its build knew.
+pub fn HostInfoWith(comptime Providers: type) type {
+    return struct {
+        version: []const u8,
+        type: []const u8,
+        store: []const u8,
+        instance: []const u8,
+        active_capacity: []const u8,
+        intake_capacity: []const u8 = "100",
+        descriptor_limit: []const u8 = "unlimited",
+        /// Host Unix seconds, fixed before the execution thread starts.
+        started_at: []const u8,
+        /// Slots in use: held custody records, including detached cleanup. The
+        /// value Current reports as `execution.custody_occupied`.
+        custody_occupied: []const u8,
+        /// Whether the Host holds every new Turn until resumed (D193).
+        paused: bool,
+        /// MySQL engine diagnostic (D200); absent on SQLite.
+        innodb_doublewrite: ?[]const u8 = null,
+        capabilities: struct {
+            bash: bool,
+            providers: Providers,
+        },
+    };
+}
 
 pub const ListSessions = session_list.ListSessions;
 
