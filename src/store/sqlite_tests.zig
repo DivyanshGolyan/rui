@@ -10156,6 +10156,56 @@ test "an empty MCP selection does not visit queued Bash Actions from a Bash-only
     try std.testing.expectEqual(costs[0], costs[1]);
 }
 
+test "MCP selection cost does not grow with earlier Operations of an open Turn" {
+    var costs: [2]c_int = undefined;
+    for ([_]usize{ 1, 32 }, &costs) |count, *cost| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var storage: Store = undefined;
+        try testingStoreToolSet(&storage, &tmp, std.testing.io, &mcp_tool_set);
+        defer storage.close() catch unreachable;
+        var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+        var configuration = try completeConfiguration("mcp-history", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+        configuration.configuration.tools = try .of(&.{"fetch_page"});
+        configuration.configuration.permission_mode.state = .value;
+        try configuration.configuration.permission_mode.value.set("bypass");
+        const configured = try storage.configure(&configuration, .{});
+        try std.testing.expect(configured == .accepted);
+        const session = configured.accepted.session;
+        try submitTestMessage(&storage, &tmp, "mcp-history-input", "mcp-history-input", session.slice(), "fetch");
+        var turn_id: u64 = 0;
+        for (0..count) |index| {
+            const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+            if (index == 0) turn_id = model.turn_id;
+            try std.testing.expectEqual(turn_id, model.turn_id);
+            if (index + 1 < count) {
+                // Queued input keeps the answer's Turn open for another Operation,
+                // without adding historical Actions to MCP serialization's work.
+                var key_buffer: [64]u8 = undefined;
+                const key = try std.fmt.bufPrint(&key_buffer, "mcp-history-input-{d}", .{index});
+                try submitTestMessage(&storage, &tmp, key, key, session.slice(), "continue");
+                try settleMessagesForTesting(&storage, &tmp, model, 1, false, null);
+            } else {
+                try settleCallsForTesting(&storage, &tmp, model, "mcp-history-calls", &.{
+                    .{ .item_id = "item", .name = "fetch_page", .encoded_call_id = "call", .decoded_call_id = "call", .encoded_arguments = "{}", .decoded_arguments = "{}" },
+                });
+            }
+        }
+        // Read the durable population through production selection before measuring.
+        const selected = (try storage.nextAction(.mcp)).?;
+        try std.testing.expectEqual(count, try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE turn_id=?1", .{turn_id}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM turn WHERE turn_id=?1 AND outcome_code IS NULL", .{turn_id}));
+        try std.testing.expectEqual(@as(u64, 1), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM action_operation WHERE authorized=1 AND resolution_code IS NULL AND attempt_ordinal=0", .{}));
+        const statement = try sqlite.prepare(storage.sqliteDatabase(), action_domain.next_mcp_action_sql);
+        defer _ = c.sqlite3_finalize(statement);
+        try std.testing.expectEqual(c.SQLITE_ROW, c.sqlite3_step(statement));
+        try std.testing.expectEqual(selected.action_id, @as(u64, @intCast(c.sqlite3_column_int64(statement, 0))));
+        try std.testing.expectEqual(c.SQLITE_DONE, c.sqlite3_step(statement));
+        cost.* = c.sqlite3_stmt_status(statement, c.SQLITE_STMTSTATUS_VM_STEP, 0);
+    }
+    try std.testing.expectEqual(costs[0], costs[1]);
+}
+
 test "MCP attempts serialize Sessions and recover without replay" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
