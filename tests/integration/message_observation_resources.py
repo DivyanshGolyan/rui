@@ -47,7 +47,7 @@ def retained(state, binary, label, repetition, failed_key):
                     # sees its own reply and not this one.
                     cli.command_frame(master, "\x1b", lambda frame: "result: failed" not in frame, end="")
             samples.append(sample(process.pid))
-        cli.terminal_step(master, "/exit", "Detached.")
+        cli.terminal_step(master, "\x03", "Detached.")
         assert process.wait(timeout=5) == 0
         # Stdio plus the frontend's descriptor-owned render scratch; polling
         # owns at most one transient socket, never another retained reader.

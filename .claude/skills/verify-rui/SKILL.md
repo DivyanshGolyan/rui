@@ -85,6 +85,8 @@ It also prints macOS Accessibility and Screen Recording status for information o
 
 ## Drive
 
+Typing `/` shows command names only, with fixed choices in quiet colour separated by ` · `; option and choice rows have no descriptions or argument placeholders. Check this in both the conversation and overview. Use the app settings **Version** row for Upgrade, and `C-c` to leave; `/upgrade`, `/exit`, `/login`, `/wait` and `/inspect-action` are ordinary unknown commands. `/help` still shows names and argument shapes.
+
 | Action | Command |
 | --- | --- |
 | Type text | `$V send "$RUN" NAME --text 'hello'` (tmux: `send-keys -l`; pty: FIFO) |
