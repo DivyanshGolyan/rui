@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const overview_view = @import("overview_view.zig");
 const widget_style = @import("widget_style.zig");
+const Hover = @import("widgets/Hover.zig");
 
 pub const Header = struct {
     state: *const overview_view.State,
@@ -91,6 +92,8 @@ test "overview header draws no counts view name or Host-stopped band" {
 /// Pinned list tail, with a click target only on the Settings row.
 pub const Settings = struct {
     selected: bool,
+    hover: Hover = .{},
+    size: vxfw.Size = .{ .width = 0, .height = 0 },
     caps: overview_view.Caps,
     userdata: *anyopaque,
     on_click: *const fn (*anyopaque, *vxfw.EventContext, overview_view.Click) anyerror!void,
@@ -101,9 +104,10 @@ pub const Settings = struct {
 
     fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
         const self: *Settings = @ptrCast(@alignCast(raw));
+        try self.hover.handleEvent(ctx, input);
         if (input != .mouse) return;
         const mouse = input.mouse;
-        if (mouse.button != .left or mouse.type != .press or mouse.row != 1) return;
+        if (mouse.button != .left or mouse.type != .press or mouse.row != 1 or self.size.height < 2 or mouse.col < 0 or mouse.col >= self.size.width) return;
         try self.on_click(self.userdata, ctx, .settings);
         ctx.consumeAndRedraw();
     }
@@ -112,16 +116,20 @@ pub const Settings = struct {
         const self: *Settings = @ptrCast(@alignCast(raw));
         const size = ctx.max.size();
         const height = @min(2, size.height);
+        self.size = .{ .width = size.width, .height = height };
+        const target: Hover.Rect = .{ .row = 1, .width = size.width };
+        self.hover.targets = if (height == 2 and size.width > 0) try ctx.arena.dupe(Hover.Rect, &.{target}) else &.{};
+        const ground: overview_view.Background = if (self.selected) .selection else if (self.hover.targets.len != 0 and self.hover.contains(target)) .hover else .ground;
         const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = size.width, .height = height });
         @memset(surface.buffer, .{ .style = widget_style.of(self.caps, .{}) });
         if (height == 0 or size.width == 0) return surface;
         for (0..size.width) |x| surface.writeCell(@intCast(x), 0, .{ .char = .{ .grapheme = if (self.caps.unicode) "─" else "-", .width = 1 }, .style = widget_style.of(self.caps, .{ .colour = .quiet }) });
         if (height < 2) return surface;
-        const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = if (self.selected) .selection else .ground });
+        const style = widget_style.of(self.caps, .{ .colour = .quiet, .background = ground });
         const footer: @import("widgets/Footer.zig") = .{ .left = "", .right = @import("transport_options").version ++ " ", .style = style };
         const drawn = try footer.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width, .height = 1 }));
         @memcpy(surface.buffer[size.width..], drawn.buffer);
-        const name: vxfw.RichText = .{ .text = &.{.{ .text = "  Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = if (self.selected) .selection else .ground }) }}, .softwrap = false };
+        const name: vxfw.RichText = .{ .text = &.{.{ .text = "  Settings", .style = widget_style.of(self.caps, .{ .colour = if (self.selected) .strong else .normal, .bold = self.selected, .background = ground }) }}, .softwrap = false };
         const label = try name.widget().draw(ctx.withConstraints(.{}, .{ .width = size.width -| @as(u16, @intCast(@import("transport_options").version.len + 2)), .height = 1 }));
         if (label.size.height > 0) @memcpy(surface.buffer[size.width..][0..label.size.width], label.buffer[0..label.size.width]);
         return surface;
@@ -152,4 +160,41 @@ test "overview Settings row is pinned selected and opens only on its second line
         const tiny = try settings.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = @intCast(width), .height = @intCast(height) }, .cell_size = .{} });
         try std.testing.expect(tiny.size.width <= width and tiny.size.height <= height);
     };
+}
+
+test "overview Settings hover follows only its drawn row without selecting or focusing" {
+    var clicks: Clicks = .{};
+    var settings: Settings = .{ .selected = false, .caps = .{}, .userdata = &clicks, .on_click = Clicks.take };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 40, .height = 2 }, .cell_size = .{} };
+    const plain = try settings.widget().draw(draw_ctx);
+    var events: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try settings.widget().handleEvent(&events, .mouse_enter);
+    try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 0, .button = .none, .type = .motion, .mods = .{} } });
+    const separator = try settings.widget().draw(draw_ctx);
+    try std.testing.expectEqual(plain.readCell(3, 1).style, separator.readCell(3, 1).style);
+    try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    const hovered = try settings.widget().draw(draw_ctx);
+    for (0..40) |col| try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .hover }).bg, hovered.readCell(@intCast(col), 1).style.bg);
+    try std.testing.expectEqual(plain.readCell(3, 1).style.fg, hovered.readCell(3, 1).style.fg);
+    try std.testing.expect(!settings.selected);
+    try std.testing.expectEqual(null, clicks.got);
+    for (events.cmds.items) |cmd| try std.testing.expect(cmd != .request_focus);
+    try settings.widget().handleEvent(&events, .mouse_leave);
+    const left = try settings.widget().draw(draw_ctx);
+    try std.testing.expectEqual(plain.readCell(3, 1).style, left.readCell(3, 1).style);
+    // A row clipped out of the frame is neither hoverable nor clickable.
+    _ = try settings.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 40, .height = 1 }));
+    try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqual(null, clicks.got);
+    _ = try settings.widget().draw(draw_ctx);
+    try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .left, .type = .press, .mods = .{} } });
+    try std.testing.expectEqual(overview_view.Click.settings, clicks.got.?);
+    try std.testing.expect(!settings.selected);
+    // Selection wins under the pointer.
+    settings.selected = true;
+    try settings.widget().handleEvent(&events, .{ .mouse = .{ .col = 3, .row = 1, .button = .none, .type = .motion, .mods = .{} } });
+    const both = try settings.widget().draw(draw_ctx);
+    try std.testing.expectEqual(widget_style.of(settings.caps, .{ .background = .selection }).bg, both.readCell(3, 1).style.bg);
 }

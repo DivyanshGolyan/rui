@@ -18,7 +18,7 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
    $V build FULLSHA --source ../rui-verify-pin-SHORT --pkg-dir "$ZIG_LOCAL_PKG_DIR"
    ```
 
-   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term` and `wait` refuse such builds with one line; direct tmux terminals and `frames` work. A build made before the library existed has none; rebuild it with `--force` to add it.
+   The build refuses a dirty or mismatched checkout. It runs `zig build -Doptimize=ReleaseSafe` and copies `zig-out/bin` to `~/.cache/verify-rui/builds/SHA/bin`. It then runs `zig build screen-emulator`, which installs the libghostty-vt that decodes committed frames into `~/.cache/verify-rui/builds/SHA/screen`. It also writes `manifest.json` with the SHA, tree and binary and library sha256 values. A cold build takes about 5 minutes on an M-series Mac, plus about 5 for libghostty-vt. A line saying `failed command: sh ./src/build_transport.sh` in the log is normal when rc=0. Use `build FULLSHA --no-screen` to skip libghostty-vt: the manifest records `screen_library: null`. The tap, tapped `term`, `wait` and `frames` refuse such builds with one line; direct untapped tmux terminals still work. A build made before the library existed has none; rebuild it with `--force` to add it.
 
 2. **New run, one per experiment.**
 
@@ -58,10 +58,14 @@ The helper is `scripts/verify-rui`. Set `V=.claude/skills/verify-rui/scripts/ver
 ## Frames
 
 ```sh
-$V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--no-png] [--keep]
+$V frames FULLSHA [--scenario FILE] [--only NAME,...] [--sizes 140x40,46x30] [--out DIR] [--record] [--no-png] [--keep]
 ```
 
-Renders the named states in `scripts/frames.json` to text, ANSI, HTML and 2× PNG using realistic fixture answers and private tmux windows, without a screen library. Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html` and `frames.json` results; cleans up unless `--keep`. Requires tmux and Node/Playwright/Chromium unless `--no-png`. See [scenario format and selection](features/frames.md). These are L2 layout captures, not physical-input proof. State `expect` markers must be present and optional `absent: ["TEXT", ...]` markers must be absent from every saved capture at every size.
+Runs each named state in `scripts/frames.json` on a plain PTY, with libghostty-vt answering terminal queries and observing committed cells. Requires a build with `screen_library` (`build` without `--no-screen`); no tmux. Text, re-encoded ANSI, HTML and 2× PNG share those cells, including terminal theme, styles and cursor. PNG requires Node/Playwright/Chromium.
+
+`--record` (or state `"record": true`) rebuilds first-size transitions from `frames-pty/STATE/output.{bin,jsonl}` after the run as an inline-PR GIF, plus optional MP4. Every state writes that timed byte log; replay stops at the first resize and sends no replies. Recordings use the same HTML renderer, deduplicate unchanged pictures, coalesce playback into 80 ms buckets (latest wins), bound frame delays to 60–1500 ms and hold the last frame for 2 s. Requires PNG rendering and ffmpeg; recordings refuse missing ffmpeg before allocating a run. The index displays GIFs when present.
+
+Prints `RUN/evidence/frames/` (or `--out`), with ordered `index.html`, `frames.json` results and failure captures. Cleans up unless `--keep`; PTYs always close. `expect`/`absent` apply to every size. These are L1 synthetic PTY layout/transition captures, not physical-input proof. See [scenario format and selection](features/frames.md), including mouse steps: emitted mouse bytes wait for changed committed cells; top-level `"repaint": false` declares an intentional no-op, and no emitted bytes skips the wait.
 
 ## Doctor
 
@@ -92,7 +96,7 @@ For the full keys-only reference, open the overview and press End then Enter to 
 | Action | Command |
 | --- | --- |
 | Type text | `$V send "$RUN" NAME --text 'hello'` (tmux: `send-keys -l`; pty: FIFO) |
-| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r C-x BSpace PgUp PgDn S-PgUp Up Down Left Right End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names send unsolicited mouse reports; a real wheel reaches Rui as `Up`/`Down`. |
+| Keys | `$V send "$RUN" NAME --keys Enter`. Names: `Enter Esc C-c C-g C-r C-x BSpace PgUp PgDn S-PgUp Up Down Left Right End Home Tab SGRWheelUp SGRWheelDown`. Through tmux these are sent as exact bytes with `send-keys -H`. The SGR names inject mouse wheel reports; App enables mouse reporting. This is byte replay, not physical-wheel proof. |
 | Raw bytes | `$V send "$RUN" NAME --hex 1b5b4d2069730a` (tmux: `send-keys -H`) |
 | Through the attached client | add `--via client` (bytes enter tmux as terminal input, not `send-keys`) |
 | Signal Rui | `$V signal "$RUN" NAME INT\|TERM\|HUP` (verifies the PID is this terminal's Rui) |

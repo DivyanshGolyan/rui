@@ -16,6 +16,7 @@ const store_core = @import("../Store.zig");
 const Store = store_core.Store;
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
+const transition = @import("../transition.zig");
 const action_domain = @import("action.zig");
 const configuration_domain = @import("configuration.zig");
 const operation_effort = @import("operation_effort.zig");
@@ -759,6 +760,54 @@ const IdleChecks = struct {
 /// and commits. The Entry mutex excludes every other writer; a moved head is
 /// `SelectionChanged`.
 pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, start: ?historical_domain.Start) !?AttemptAdmission {
+    var queued: QueuedAdmission = undefined;
+    if (!try queueNextModelAttempt(reader, writer, kind, pressure, faults, &queued)) return null;
+    return commitAdmission(writer, &queued, start);
+}
+
+/// Commits the admission `writer` holds queued, starting the admitted
+/// Attempt's request in `start` where the commit's message carries reads.
+/// Never inlined: the request's reads live in this frame through the
+/// commit only, beside `queueNextModelAttempt`'s and not under it.
+noinline fn commitAdmission(writer: anytype, queued: *const QueuedAdmission, start: ?historical_domain.Start) !?AttemptAdmission {
+    const binding = queued.binding;
+    // The request's settings round reads only what this commit saves, so
+    // it follows COMMIT in the same message where that message has room.
+    var request: historical_domain.SettingsRead = undefined;
+    // Only a network engine's commit carries reads after it.
+    const opened = if (start) |into| writer.store.engine.batches() and into.open(writer.store, binding) else false;
+    if (opened) {
+        request = .init(start.?.view, start.?.settings);
+        request.readAhead(start.?, &queued.session, queued.position);
+        store_core.followCommit(writer.store, request.follow());
+    }
+    defer if (opened) store_core.followCommit(writer.store, null);
+    writer.commit() catch |err| {
+        if (opened) start.?.view.close();
+        return err;
+    };
+    const started = opened and start.?.view.settled != null;
+    if (opened and !started) start.?.view.close();
+    return .{ .permit = .{ .binding = binding }, .request_started = started };
+}
+
+/// What `queueNextModelAttempt` queued: the Attempt its writes admit.
+const QueuedAdmission = struct {
+    binding: AttemptBinding,
+    session: @FieldType(rsql.SessionHead, "ref"),
+    /// The Operation's admission position.
+    position: u64,
+    /// The selected model: the Operation's insert reads these bytes in
+    /// place when the commit steps it, after the facts' frame is gone.
+    model: @FieldType(SelectedRow, "model"),
+};
+
+/// Selects the next Attempt and queues its admission's writes on `writer`,
+/// which the caller commits, and says in `queued` what they admit; false
+/// when nothing is runnable. Never inlined:
+/// the facts it reads are over 1 KiB, and its frame is gone before the
+/// commit, whose message is the deepest part of the engine thread's stack.
+noinline fn queueNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmissionKind, pressure: Pressure, faults: Faults, queued: *QueuedAdmission) !bool {
     var found: runnable_selection.Result = undefined;
     var facts_row: SelectedRow = undefined;
     var facts_found: store_access.Found = undefined;
@@ -774,13 +823,14 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         idle.queue(reader);
         try store_access.runNamed(reader, .{.{ blocked_operation, error.CallReadFailed }}, error.TurnReadFailed);
         try idle.settle(reader);
-        return null;
+        return false;
     };
     if (selection.cutoff.get() < selection.first_admission.get()) return error.CorruptStore;
     const session_ref: []const u8 = &selection.session.ref;
     const first_admission = selection.first_admission.get();
     if (!facts_found.get()) return error.CorruptStore;
     const facts = &facts_row;
+    queued.model = facts.model;
     if (facts.session.next_position != selection.session.next_position) return error.SelectionChanged;
     const policy = model_capability.compactionPolicy(facts.model.slice(), if (facts.compaction_trigger) |trigger| trigger.get() else null, facts.output_reservation);
     var compaction: turn_policy.CompactionFacts = .{
@@ -864,13 +914,14 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
             .revision = facts.revision.get(),
         }, instructions);
     }
+    const position = try positions.take(1);
     writer.write(insert_operation, .{
         .operation_id = operation_id,
         .turn_id = turn_id,
         .session = facts.session,
         .revision = facts.revision.get(),
         .cutoff = cutoff,
-        .position = try positions.take(1),
+        .position = position,
         .compaction = purpose == .compaction,
         .compaction_trigger = policy.compaction_trigger,
         .output_reservation = policy.output_reservation,
@@ -878,31 +929,17 @@ pub fn admitNextModelAttempt(reader: anytype, writer: anytype, kind: ModelAdmiss
         .history_floor = floor,
         .history_level = if (room) |choice| choice.level else null,
         .history_dropped = if (room != null) dropped else null,
-        .model = facts.model.slice(),
+        .model = queued.model.slice(),
         .shipped_context_window = model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()),
         .unlisted_context_window = @import("../../product_defaults.zig").unlisted_context_window,
         .tool_set_id = offer,
     });
     // The writes are queued, not run, as in every converted entry point.
     if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    const binding: AttemptBinding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
-    // The request's settings round reads only what this commit saves, so
-    // it follows COMMIT in the same message where that message has room.
-    var request: historical_domain.SettingsRead = undefined;
-    // Only a network engine's commit carries reads after it.
-    const opened = if (start) |into| writer.store.engine.batches() and into.open(writer.store, binding) else false;
-    if (opened) {
-        request = .init(start.?.view, start.?.settings);
-        store_core.followCommit(writer.store, request.follow());
-    }
-    defer if (opened) store_core.followCommit(writer.store, null);
-    writer.commit() catch |err| {
-        if (opened) start.?.view.close();
-        return err;
-    };
-    const started = opened and start.?.view.settled != null;
-    if (opened and !started) start.?.view.close();
-    return .{ .permit = .{ .binding = binding }, .request_started = started };
+    queued.binding = .{ .turn_id = turn_id, .operation_id = operation_id, .attempt_ordinal = 1 };
+    queued.session = facts.session.ref;
+    queued.position = position;
+    return true;
 }
 
 /// Which of the dispatch loop's commit-driven scans would find work now.
@@ -1052,53 +1089,79 @@ const RetryChoice = struct {
     }
 };
 
-/// The read Access `candidate` pages through due retries in id order,
-/// outside any transaction, until it finds one `active` does not hold,
-/// after at most one more than it can exclude; each page is a round. The
-/// Store runs no other entry point meanwhile, so the write Access `a`
-/// starts the replacement Attempt from what the scan read, in one round.
-/// The first page's round also reads `scheduled`, when given: the Unix
-/// millisecond the earliest scheduled retry not yet due falls due.
-pub fn tryAdmitNextModelRetry(candidate: anytype, a: anytype, io: std.Io, active: ActiveOperationFilter, faults: Faults, scheduled: ?*?u64) !?AttemptAdmission {
-    const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(io)) orelse return error.IntegerOutOfRange;
-    const limit = try std.math.add(u64, active.maximum_exclusions, 1);
-    var choice: RetryChoice = .{ .active = active, .now_ms = now_ms };
-    var next_scheduled: next_scheduled_retry.Result = null;
-    var first_page = true;
-    while (choice.chosen == null and choice.scanned < limit) {
-        choice.page_rows = 0;
-        candidate.readEach(due_retries, .{ .now_ms = now_ms, .after = choice.after }, limit - choice.scanned, &choice);
-        if (first_page and scheduled != null) candidate.read(next_scheduled_retry, .{ .now_ms = now_ms }, &next_scheduled);
-        try store_access.runAs(candidate, error.RetrySelectionFailed);
-        if (first_page) if (scheduled) |out| {
-            out.* = if (next_scheduled) |row| row.retry_due_at_ms else null;
-        };
-        first_page = false;
-        if (choice.corrupt) return error.CorruptStore;
-        if (choice.page_rows < retry_admission_page_rows) break;
-    }
-    const chosen = choice.chosen orelse return null;
-    const replacement = chosen.attempt_ordinal.get() + 1;
-    a.write(retry_attempt, .{
-        .operation_id = chosen.operation_id.get(),
-        .replacement = replacement,
-        .turn_id = chosen.turn_id.get(),
-        .attempt_ordinal = chosen.attempt_ordinal.get(),
-        .now_ms = now_ms,
-        .session = chosen.session,
+/// Admits the oldest due retry no slot in `active` holds. It pages
+/// through due retries in id order, outside any transaction, until it
+/// finds one `active` does not hold, after at most one more than it can
+/// exclude; each page is a round. The Store runs no other entry point
+/// meanwhile, so the commit starts the replacement Attempt from what the
+/// scan read. The first page's round also reads `scheduled`, when given:
+/// the Unix millisecond the earliest scheduled retry not yet due falls due.
+pub const AdmitRetry = struct {
+    pub const rounds = transition.rounds(.{
+        .first_page = .{ .always, error.RetrySelectionFailed },
+        .next_page = .{ .paged, error.RetrySelectionFailed },
     });
-    if (faults.attempt_before_commit) return error.InjectedAttemptCommitFailure;
-    a.commit() catch |err| {
-        if (err != error.RetryNoLongerDue) return err;
-        try a.abandon(faults);
+    pub const round_budget = 2;
+    pub const writes = true;
+    pub const Input = struct { io: std.Io, active: ActiveOperationFilter, scheduled: ?*?u64 };
+    pub const Result = ?AttemptAdmission;
+    pub const Ordinary = store_core.Ordinary.none;
+    /// The retry changed since the scan read it: the admission answers null.
+    pub const Declined = error{RetryNoLongerDue};
+
+    input: Input,
+    limit: u64 = 0,
+    choice: RetryChoice = undefined,
+    next_scheduled: next_scheduled_retry.Result = null,
+
+    pub fn step(t: *AdmitRetry, r: *transition.Round(AdmitRetry), ran: ?rounds.At) !transition.Next(AdmitRetry) {
+        const page = ran orelse {
+            const now_ms = std.math.cast(u64, try store_core.readUnixMilliseconds(t.input.io)) orelse return error.IntegerOutOfRange;
+            t.limit = try std.math.add(u64, t.input.active.maximum_exclusions, 1);
+            t.choice = .{ .active = t.input.active, .now_ms = now_ms };
+            t.queuePage(r);
+            if (t.input.scheduled != null) r.read(next_scheduled_retry, .{ .now_ms = now_ms }, &t.next_scheduled);
+            return .{ .round = .first_page };
+        };
+        if (page == .first_page) if (t.input.scheduled) |out| {
+            out.* = if (t.next_scheduled) |row| row.retry_due_at_ms else null;
+        };
+        if (t.choice.corrupt) return error.CorruptStore;
+        if (t.choice.chosen == null and t.choice.scanned < t.limit and t.choice.page_rows >= retry_admission_page_rows) {
+            t.queuePage(r);
+            return .{ .round = .next_page };
+        }
+        const chosen = t.choice.chosen orelse return .{ .done = null };
+        r.write(retry_attempt, .{
+            .operation_id = chosen.operation_id.get(),
+            .replacement = chosen.attempt_ordinal.get() + 1,
+            .turn_id = chosen.turn_id.get(),
+            .attempt_ordinal = chosen.attempt_ordinal.get(),
+            .now_ms = t.choice.now_ms,
+            .session = chosen.session,
+        });
+        if (r.faults().attempt_before_commit) return error.InjectedAttemptCommitFailure;
+        return .commit;
+    }
+
+    fn queuePage(t: *AdmitRetry, r: *transition.Round(AdmitRetry)) void {
+        t.choice.page_rows = 0;
+        r.readEach(due_retries, .{ .now_ms = t.choice.now_ms, .after = t.choice.after }, t.limit - t.choice.scanned, &t.choice);
+    }
+
+    pub fn committed(t: *const AdmitRetry) Result {
+        const chosen = t.choice.chosen.?;
+        return .{ .permit = .{ .binding = .{
+            .turn_id = chosen.turn_id.get(),
+            .operation_id = chosen.operation_id.get(),
+            .attempt_ordinal = chosen.attempt_ordinal.get() + 1,
+        } } };
+    }
+
+    pub fn declined(_: *const AdmitRetry, _: Declined) Result {
         return null;
-    };
-    return .{ .permit = .{ .binding = .{
-        .turn_id = chosen.turn_id.get(),
-        .operation_id = chosen.operation_id.get(),
-        .attempt_ordinal = replacement,
-    } } };
-}
+    }
+};
 
 /// Every active Turn's current Operation that proposed tool calls, the
 /// Operations that can be blocking successor discovery: main's scope.

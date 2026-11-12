@@ -19,7 +19,7 @@ import unittest
 from unittest.mock import patch
 
 from host_process import stop_process, wait_for
-from terminal_process import (close_pty, CAPTURES, answers_to, capture_descriptors, open_pty,
+from terminal_process import (close_pty, CAPTURES, TerminalOutput, answers_to, capture_descriptors, open_pty,
                               register_capture, spawn, terminal_process)
 from terminal_screen import ScreenCapture
 
@@ -57,6 +57,68 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
+    def test_screen_theme_queries_keep_defaults_and_report_light_terminal(self):
+        replies = []
+        default = ScreenCapture(8, 2, reply=replies.append)
+        default.feed(b"\x1b]11;?\x1b\\\x1b[?996n")
+        self.assertEqual(replies, [b"\x1b]11;rgb:2828/2c2c/3434\x1b\\", b"\x1b[?997;1n"])
+        replies.clear()
+        day = ScreenCapture(8, 2, reply=replies.append, background=(243, 238, 226),
+                            foreground=(47, 43, 37), color_scheme="light")
+        day.feed(b"\x1b]10;?\x1b\\\x1b]11;?\x1b\\\x1b[?996n")
+        self.assertEqual(replies, [b"\x1b]10;rgb:2f2f/2b2b/2525\x1b\\",
+                                   b"\x1b]11;rgb:f3f3/eeee/e2e2\x1b\\", b"\x1b[?997;2n"])
+        day.feed(b"\x1b[?2026hX\x1b[?2026l")
+        self.assertEqual((day.frame.background, day.frame.foreground), ("f3eee2", "2f2b25"))
+        with self.assertRaises(ValueError):
+            ScreenCapture(color_scheme="sepia")
+
+    def test_committed_style_resolves_native_palette_and_blank_backgrounds(self):
+        from terminal_screen import Cell
+        self.assertEqual(Cell("X", None, False), Cell("X", None, False, False))
+        capture = ScreenCapture(12, 3, foreground=(47, 43, 37), background=(243, 238, 226))
+        # Override a palette slot: the oracle must use the terminal's palette,
+        # not a second ANSI table. Erased blank cells also retain backgrounds.
+        capture.feed(b"\x1b]4;1;rgb:12/34/56\x1b\\"
+                     b"\x1b[?2026h\x1b[38;5;1;48;2;1;2;3;1;2;3;4:3;7;9;53mX"
+                     b"\x1b[0;48;2;4;5;6m\x1b[K\x1b[?25l\x1b[?2026l")
+        frame = capture.frame
+        cell = frame.cells[0][0]
+        self.assertEqual(cell.fg, 1)  # Existing style oracles retain their vocabulary.
+        self.assertEqual((cell.fg_rgb, cell.bg), ("123456", "010203"))
+        self.assertEqual(frame.colors(cell), ("010203", "123456"))
+        self.assertTrue(all((cell.bold, cell.reverse, cell.italic, cell.faint, cell.strike, cell.overline)))
+        self.assertEqual(cell.underline, 3)
+        self.assertEqual(frame.cells[0][1].bg, "040506")
+        self.assertFalse(frame.visible)
+        self.assertEqual((frame.cursor.x, frame.cursor.y), (1, 0))
+        capture.feed(b"\x1b[?2026h\x1b[0mY\x1b[?25h\x1b[?2026l")
+        self.assertEqual(frame.cells[0][1].data, " ")  # Immutable old commit.
+        self.assertTrue(capture.frame.visible)
+        self.assertEqual(capture.frame.cells[0][1].data, "Y")
+
+    def test_mouse_encoder_obeys_terminal_modes_and_held_button(self):
+        capture = ScreenCapture()
+        for action in ("press", "release", "move", "wheel-up", "wheel-down"):
+            self.assertEqual(capture.mouse(action, 2, 3), b"")
+        capture.feed(b"\x1b[?1000h")
+        self.assertEqual(capture.mouse("press", 2, 3), b"\x1b[M #$")
+        self.assertEqual(capture.mouse("release", 2, 3), b"\x1b[M##$")
+        self.assertEqual(capture.mouse("move", 2, 3), b"")
+        capture.feed(b"\x1b[?1000l\x1b[?1002h\x1b[?1006h")
+        self.assertEqual(capture.mouse("press", 2, 3), b"\x1b[<0;3;4M")
+        self.assertEqual(capture.mouse("release", 2, 3), b"\x1b[<0;3;4m")
+        self.assertEqual(capture.mouse("press", 2, 3, "right"), b"\x1b[<2;3;4M")
+        self.assertEqual(capture.mouse("press", 2, 3, "middle"), b"\x1b[<1;3;4M")
+        self.assertEqual(capture.mouse("move", 2, 3), b"")
+        self.assertEqual(capture.mouse("move", 2, 3, pressed=True), b"\x1b[<32;3;4M")
+        self.assertEqual(capture.mouse("wheel-up", 2, 3), b"\x1b[<64;3;4M")
+        self.assertEqual(capture.mouse("wheel-down", 2, 3), b"\x1b[<65;3;4M")
+        capture.feed(b"\x1b[?1002l\x1b[?1003h")
+        self.assertEqual(capture.mouse("move", 2, 3), b"\x1b[<35;3;4M")
+        capture.feed(b"\x1b[?1003l")
+        self.assertEqual(capture.mouse("press", 2, 3), b"")
+
     def setUp(self):
         self.descriptors = []
         real_openpty = pty.openpty
@@ -85,6 +147,134 @@ class TerminalProcessTest(unittest.TestCase):
             with self.assertRaises(OSError) as raised:
                 os.fstat(fd)
             self.assertEqual(raised.exception.errno, errno.EBADF)
+
+    def test_background_collection_drains_exited_job_before_releasing_slave(self):
+        received, observation = bytearray(), {}
+        completed = threading.Event()
+        program = "import os, tty; tty.setraw(0); os.write(1, b'Detached. Host work continues.')"
+        with terminal_process([sys.executable, "-c", program], env=os.environ) as (process, master):
+            # Start collection after exit: the final drain, not the live read
+            # loop, must collect the tail from the still-retained terminal.
+            self.assertEqual(process.wait(timeout=5), 0)
+            slave = self.descriptors[1]
+
+            def collected(error):
+                observation.update(error=error, data=bytes(received), slave_open=os.isatty(slave),
+                                   raw=not (termios.tcgetattr(master)[3] & termios.ICANON))
+                completed.set()
+
+            output = TerminalOutput(process, master, received.extend, collected)
+            try:
+                wait_for(completed.is_set, "final retained-slave collection", drain=False)
+                self.assertEqual(observation, {"error": None, "data": b"Detached. Host work continues.",
+                                               "slave_open": True, "raw": True})
+            finally:
+                output.close()
+        self.assert_descriptors_closed()
+
+    def test_background_collection_preserves_every_chunk_and_reports_completion(self):
+        received, observation = bytearray(), {}
+        completed = threading.Event()
+        count = 2 * 1024 * 1024
+        program = ("import os, tty\ntty.setraw(0)\ndata = b'x' * " + str(count) + "\n"
+                   "while data:\n n = os.write(1, data)\n data = data[n:]\nos.write(1, b'final tail')")
+
+        def collected(error):
+            observation.update(error=error, data=bytes(received), slave_open=os.isatty(self.descriptors[1]))
+            completed.set()
+
+        with terminal_process([sys.executable, "-c", program], env=os.environ,
+                              feed=received.extend, collected=collected) as (process, _master):
+            wait_for(completed.is_set, "continuous terminal collection", drain=False)
+            self.assertEqual(process.returncode, 0)
+            self.assertEqual(observation, {"error": None, "data": b"x" * count + b"final tail", "slave_open": True})
+        self.assert_descriptors_closed()
+
+    def test_background_feed_failure_reaches_scope_disposal(self):
+        entered = threading.Event()
+
+        def feed(_data):
+            entered.set()
+            raise RuntimeError("terminal feed failed")
+
+        with self.assertRaisesRegex(RuntimeError, "terminal feed failed"):
+            with terminal_process(child(), env=os.environ, feed=feed):
+                wait_for(entered.is_set, "failing terminal feed", drain=False)
+        self.assert_descriptors_closed()
+
+    def test_background_feed_eio_is_reported_not_mistaken_for_terminal_eof(self):
+        observation = {}
+        completed = threading.Event()
+
+        def feed(_data):
+            raise OSError(errno.EIO, "consumer failure")
+
+        def collected(error):
+            observation["error"] = error
+            completed.set()
+
+        with self.assertRaisesRegex(OSError, "consumer failure"):
+            with terminal_process(child(), env=os.environ, feed=feed, collected=collected) as (process, _master):
+                wait_for(completed.is_set, "consumer EIO outcome", drain=False)
+                self.assertIsInstance(observation["error"], OSError)
+                self.assertEqual(observation["error"].errno, errno.EIO)
+                with self.assertRaises(OSError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, observation["error"])
+        self.assert_descriptors_closed()
+
+    def test_collector_failure_does_not_replace_a_primary_body_failure(self):
+        entered = threading.Event()
+        failure = RuntimeError("collector failure")
+
+        def feed(_data):
+            entered.set()
+            raise failure
+
+        with self.assertRaisesRegex(ValueError, "primary body failure") as primary:
+            with terminal_process(child(), env=os.environ, feed=feed, collected=lambda _error: None) as (process, _master):
+                wait_for(lambda: entered.is_set() and process.output.complete, "retained collector failure", drain=False)
+                with self.assertRaises(RuntimeError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, failure)
+                raise ValueError("primary body failure")
+        self.assertTrue(any("collector failure" in note for note in primary.exception.__notes__))
+        self.assert_descriptors_closed()
+
+    def test_final_collection_callback_failure_is_shared_by_check_and_close(self):
+        failure = RuntimeError("final commit failure")
+
+        def collected(_error):
+            raise failure
+
+        with self.assertRaises(RuntimeError) as disposed:
+            with terminal_process([sys.executable, "-c", "pass"], env=os.environ,
+                                  feed=lambda _data: None, collected=collected) as (process, _master):
+                wait_for(lambda: process.output.complete, "final collection callback", drain=False)
+                with self.assertRaises(RuntimeError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, failure)
+        self.assertIs(disposed.exception, failure)
+        self.assert_descriptors_closed()
+
+    def test_callback_failure_keeps_the_original_collection_error(self):
+        failure = RuntimeError("original collection failure")
+
+        def feed(_data):
+            raise failure
+
+        def collected(_error):
+            raise ValueError("secondary callback failure")
+
+        with self.assertRaises(RuntimeError) as disposed:
+            with terminal_process(child(), env=os.environ, feed=feed, collected=collected) as (process, _master):
+                wait_for(lambda: process.output.complete, "collection and callback failure", drain=False)
+                with self.assertRaises(RuntimeError) as retained:
+                    process.output.check()
+                self.assertIs(retained.exception, failure)
+        self.assertIs(disposed.exception, failure)
+        self.assertTrue(any("secondary callback failure" in note for note in failure.__notes__))
+        self.assert_descriptors_closed()
 
     def test_wait_drains_writer_and_opt_out_preserves_output(self):
         master, slave = open_pty()

@@ -11,6 +11,7 @@ const View = @import("session_view.zig");
 const selecting = @import("transcript_selection.zig");
 const Row = selecting.RowFor(@FieldType(Window, "document"));
 const Self = @This();
+const Hover = @import("widgets/Hover.zig");
 
 window: *Window,
 anchor: *Feed,
@@ -18,6 +19,9 @@ tail: ?vxfw.Widget = null,
 latest_ending: ?resident.LatestEnding = null,
 retry_actionable: bool = false,
 style: vaxis.Style = .{},
+/// The pointer's tool or Message row, quieter than the selection background an open row keeps.
+hover_style: vaxis.Style = .{ .ul_style = .single },
+hover: Hover = .{},
 colours: viewport.Colours = .{},
 method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
@@ -97,10 +101,14 @@ pub fn openable(self: *Self, gpa: std.mem.Allocator) !?Openable {
     if (self.drawn.width == 0 or self.drawn.height == 0) return null;
     const cells = try gpa.alloc(vaxis.Cell, self.drawn.width);
     defer gpa.free(cells);
+    const positions = try gpa.alloc(?viewport.Position, self.drawn.height);
+    defer gpa.free(positions);
+    var rows = self.laidRows();
+    for (positions) |*position| position.* = rows.next() orelse null;
     var row: u16 = self.drawn.height;
     while (row > 0) {
         row -= 1;
-        const position = self.rowPosition(row) orelse continue;
+        const position = positions[row] orelse continue;
         if (self.window.document.toolHeading(position.offset)) return .{ .tool = self.window.pointAt(position.offset).?.key };
         self.paintRow(cells, position);
         var column: usize = cells.len;
@@ -152,6 +160,11 @@ fn rowPosition(self: *const Self, row: u16) ?viewport.Position {
     return self.window.positionAtWith(self.laidVisible(), row, self.layout(), self.presentation());
 }
 
+/// Every row `rowPosition` answers, in order, laying the frame out once.
+fn laidRows(self: *const Self) resident.Window.Rows {
+    return self.window.rowsWith(self.laidVisible(), self.layout(), self.presentation());
+}
+
 fn paintRow(self: *const Self, cells: []vaxis.Cell, position: viewport.Position) void {
     @memset(cells, .{});
     var screen: vaxis.Screen = .{ .width = @intCast(cells.len), .height = 1, .width_method = self.method, .buf = cells };
@@ -201,6 +214,7 @@ fn retryAt(self: *const Self, gpa: std.mem.Allocator, at: Cell) !?resident.Retry
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.hover.handleEvent(ctx, input);
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
         .mouse_leave => {
@@ -338,6 +352,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             }
         }
     }
+    try self.drawHover(ctx.arena, surface);
     if (self.selection) |*held| {
         const anchor = self.resolved(held.anchor) orelse {
             self.selection = null;
@@ -361,8 +376,9 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
             held.row = visible.row;
             const range: selecting.Range = .of(anchor, self.resolved(held.head).?);
             const columns = try ctx.arena.alloc(bool, self.size.width);
+            var rows = self.laidRows();
             for (0..self.size.height) |row| {
-                const position = self.rowPosition(@intCast(row)) orelse continue;
+                const position = (rows.next() orelse break) orelse continue;
                 const cells = surface.buffer[row * self.size.width ..][0..self.size.width];
                 (Row{ .document = &self.window.document, .cells = cells, .line = position.offset }).covered(range, columns);
                 for (cells, columns) |*cell, selected| if (selected) {
@@ -372,6 +388,50 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         }
     }
     return surface;
+}
+
+/// Build hover from the same clipped rows and retry decorator as hit testing.
+/// Tool rows take the hover look unless open, where the selection background wins;
+/// retry chips keep underline.
+fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void {
+    self.hover.targets = &.{};
+    const handler = self.handler orelse return;
+    if (surface.size.width == 0) return;
+    var targets: std.ArrayList(Hover.Rect) = .empty;
+    const scratch = try arena.alloc(vaxis.Cell, surface.size.width);
+    var rows = self.laidRows();
+    for (0..surface.size.height) |row| {
+        const position = (rows.next() orelse break) orelse continue;
+        const point = self.window.pointAt(position.offset);
+        const open_row = handler.on_click != null and (self.window.document.toolHeading(position.offset) or (if (point) |p| self.messageAt(p) != null else false));
+        const retry = if (handler.on_retry != null) self.window.retryColumns(position, scratch, self.presentation()) else null;
+        const cells = surface.buffer[row * surface.size.width ..][0..surface.size.width];
+        if (open_row) {
+            const rect: Hover.Rect = .{ .row = @intCast(row), .width = surface.size.width };
+            try targets.append(arena, rect);
+            const open = self.colour and self.window.document.toolIsOpen(position.offset);
+            if (!open and self.hover.contains(rect)) for (cells) |*cell| {
+                cell.style.bg = self.hover_style.bg;
+                cell.style.reverse = self.hover_style.reverse;
+                cell.style.ul_style = self.hover_style.ul_style;
+            };
+        }
+        if (retry) |columns| {
+            const rect: Hover.Rect = .{ .row = @intCast(row), .col = columns.start, .width = columns.end - columns.start };
+            try targets.append(arena, rect);
+            if (self.hover.contains(rect)) for (cells[columns.start..columns.end]) |*cell| {
+                cell.style.ul_style = .single;
+            };
+        }
+        if (handler.on_open != null) for (try selecting.peers(&self.window.document, cells, arena)) |span| {
+            const rect: Hover.Rect = .{ .row = @intCast(row), .col = span.start, .width = span.end - span.start };
+            try targets.append(arena, rect);
+            if (self.hover.contains(rect)) for (cells[span.start..span.end]) |*cell| {
+                cell.style.ul_style = .single;
+            };
+        };
+    }
+    self.hover.targets = targets.items;
 }
 
 fn testFrame(self: *Self, arena: std.mem.Allocator, width: u16, height: u16) !vxfw.Surface {
@@ -708,4 +768,199 @@ test "FeedView terminal aggregate blocks Ctrl-O and clicks without opening earli
     _ = try testFrame(&view, arena.allocator(), 30, 2);
     try std.testing.expect((try view.openable(arena.allocator())) == null);
     try std.testing.expect(view.messageAt(.{ .key = .{ .position = 50 }, .offset = aggregate }) == null);
+}
+
+test "FeedView tool rows and retry chips hover only their painted targets without selecting" {
+    const Actions = struct {
+        tools: usize = 0,
+        retries: usize = 0,
+        fn tool(raw: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.tools += 1;
+        }
+        fn retry(raw: *anyopaque, _: *vxfw.EventContext) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.retries += 1;
+        }
+    };
+    const window = try testWindow();
+    defer std.testing.allocator.destroy(window);
+    var heading: viewport.Sized(256, true) = .{};
+    try heading.append(@import("tool_fold.zig").heading_marker ++ "$ Bash done\n");
+    try heading.prepare();
+    try window.append(&.{
+        .{ .key = .{ .position = 10 }, .text = resident.Text.fromDocument(&heading), .tight = true },
+        .{ .key = .{ .position = 20 }, .text = .{ .bytes = "× Model reply unreadable\n" }, .tight = true },
+    });
+    var anchor: Feed = .{};
+    var actions: Actions = .{};
+    var view: Self = .{
+        .window = window,
+        .anchor = &anchor,
+        .handler = .{ .userdata = &actions, .on_click = Actions.tool, .on_retry = Actions.retry, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll },
+        .retry_actionable = true,
+        .latest_ending = .{ .key = .{ .position = 20 }, .cause = @import("marks.zig").cause("malformed_provider_output") },
+        .hover_style = .{ .bg = .{ .index = 2 } },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 16, 80 }) |width| {
+        const initial = try testFrame(&view, arena.allocator(), width, 8);
+        try std.testing.expect(view.hover.targets.len >= 2);
+        const tool = view.hover.targets[0];
+        const retry = view.hover.targets[view.hover.targets.len - 1];
+        const before_tools = actions.tools;
+        const before_retries = actions.retries;
+        for ([_]struct { rect: Hover.Rect, tool: bool }{ .{ .rect = tool, .tool = true }, .{ .rect = retry, .tool = false } }) |case| {
+            try view.widget().handleEvent(&ctx, .mouse_enter);
+            const motion: vaxis.Mouse = .{ .row = @intCast(case.rect.row), .col = @intCast(case.rect.col), .button = .none, .mods = .{}, .type = .motion };
+            try view.widget().handleEvent(&ctx, .{ .mouse = motion });
+            const hovered = try testFrame(&view, arena.allocator(), width, 8);
+            const cell = hovered.readCell(@intCast(case.rect.col), @intCast(case.rect.row));
+            const original = initial.readCell(@intCast(case.rect.col), @intCast(case.rect.row));
+            if (case.tool) {
+                try std.testing.expectEqual(view.hover_style.bg, cell.style.bg);
+                try std.testing.expectEqual(original.style.fg, cell.style.fg);
+            } else try std.testing.expectEqual(.single, cell.style.ul_style);
+            try std.testing.expect(view.selection == null);
+            try std.testing.expectEqual(before_tools, actions.tools);
+            try std.testing.expectEqual(before_retries, actions.retries);
+            try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
+            try view.widget().handleEvent(&ctx, .mouse_leave);
+            const left = try testFrame(&view, arena.allocator(), width, 8);
+            try std.testing.expectEqual(original.style, left.readCell(@intCast(case.rect.col), @intCast(case.rect.row)).style);
+        }
+        try retryMouse(&view, &ctx, .{ .row = tool.row, .col = tool.col }, .press);
+        try retryMouse(&view, &ctx, .{ .row = tool.row, .col = tool.col }, .release);
+        try std.testing.expectEqual(before_tools + 1, actions.tools);
+        try retryMouse(&view, &ctx, .{ .row = retry.row, .col = retry.col }, .press);
+        try retryMouse(&view, &ctx, .{ .row = retry.row, .col = retry.col }, .release);
+        try std.testing.expectEqual(before_retries + 1, actions.retries);
+        view.retry_actionable = false;
+        _ = try testFrame(&view, arena.allocator(), width, 8);
+        for (view.hover.targets) |target| try std.testing.expectEqual(@as(u16, 0), @as(u16, @intCast(target.col)));
+        view.retry_actionable = true;
+    }
+}
+
+test "FeedView open tool heading keeps its selection background under the pointer" {
+    const Actions = struct {
+        fn tool(_: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {}
+    };
+    const window = try testWindow();
+    defer std.testing.allocator.destroy(window);
+    const fold = @import("tool_fold.zig");
+    var tools: viewport.Sized(256, true) = .{};
+    try tools.append(fold.heading_marker ++ "$ Bash open\n" ++ fold.output_marker ++ "out\n" ++ fold.heading_marker ++ "$ Bash shut\n");
+    try tools.prepare();
+    try window.append(&.{.{ .key = .{ .position = 10 }, .text = resident.Text.fromDocument(&tools), .tight = true }});
+    var anchor: Feed = .{};
+    var unused: u8 = 0;
+    var view: Self = .{
+        .window = window,
+        .anchor = &anchor,
+        .handler = .{ .userdata = &unused, .on_click = Actions.tool, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll },
+        .colours = .{ .selection = .{ .index = 9 } },
+        .hover_style = .{ .bg = .{ .index = 2 } },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    const initial = try testFrame(&view, arena.allocator(), 40, 3);
+    try std.testing.expectEqual(vaxis.Color{ .index = 9 }, initial.readCell(0, 0).style.bg);
+    try view.widget().handleEvent(&ctx, .mouse_enter);
+    for ([_]struct { row: u16, bg: vaxis.Color }{ .{ .row = 0, .bg = .{ .index = 9 } }, .{ .row = 2, .bg = .{ .index = 2 } } }) |case| {
+        try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(case.row), .col = 1, .button = .none, .mods = .{}, .type = .motion } });
+        const hovered = try testFrame(&view, arena.allocator(), 40, 3);
+        for (0..40) |col| try std.testing.expectEqual(case.bg, hovered.readCell(@intCast(col), case.row).style.bg);
+        try std.testing.expectEqual(vaxis.Color{ .index = 9 }, hovered.readCell(0, 0).style.bg);
+    }
+}
+
+test "FeedView Message summaries and wrapped peer links hover without making aggregate or prose actionable" {
+    const Actions = struct {
+        messages: usize = 0,
+        opened: usize = 0,
+        fn click(raw: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.messages += 1;
+        }
+        fn open(raw: *anyopaque, _: *vxfw.EventContext, id: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqualStrings("k7m2qx", id);
+            self.opened += 1;
+        }
+    };
+    const window = try testWindow();
+    defer std.testing.allocator.destroy(window);
+    const Text = @import("TerminalText.zig");
+    var prepared: viewport.Sized(1024, true) = .{};
+    try prepared.append(View.Mark.summary ++ "┄ 9 more lines" ++ View.Mark.reset ++ "\n" ++ View.Mark.summary ++ "┄ 4 more summaries" ++ View.Mark.reset ++ "\nplain " ++ Text.link_open ++ Text.session_link ++ "k7m2qx" ++ Text.link_end ++ "Review this plan" ++ Text.link_close ++ " end\n");
+    try prepared.prepare();
+    const message: View.Collapsed = .{ .source = .activity, .position = 44, .ordinal = 3, .content = .{ .length = 10, .digest = @splat(2) }, .row = false };
+    try window.append(&.{.{ .key = .{ .position = 50 }, .text = resident.Text.fromDocument(&prepared), .messages = &.{.{ .offset = 0, .target = message }} }});
+    var anchor: Feed = .{};
+    var actions: Actions = .{};
+    var view: Self = .{ .window = window, .anchor = &anchor, .handler = .{ .userdata = &actions, .on_click = Actions.click, .on_open = Actions.open, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll }, .hover_style = .{ .bg = .{ .index = 2 } } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]u16{ 14, 80 }) |width| {
+        _ = try testFrame(&view, arena.allocator(), width, 12);
+        var links: usize = 0;
+        var summaries: usize = 0;
+        for (view.hover.targets) |rect| {
+            const position = view.rowPosition(@intCast(rect.row)).?;
+            const is_summary = prepared.collapsed(0, prepared.lineEnd(0)).last != null and position.offset == 0;
+            if (is_summary) {
+                summaries += 1;
+            } else {
+                links += 1;
+                try std.testing.expect(rect.width > 1);
+            }
+            try view.widget().handleEvent(&ctx, .mouse_enter);
+            try view.widget().handleEvent(&ctx, .{ .mouse = .{ .row = @intCast(rect.row), .col = @intCast(rect.col), .button = .none, .mods = .{}, .type = .motion } });
+            const hovered = try testFrame(&view, arena.allocator(), width, 12);
+            if (is_summary) {
+                try std.testing.expectEqual(view.hover_style.bg, hovered.readCell(0, @intCast(rect.row)).style.bg);
+            } else for (@as(usize, @intCast(rect.col))..@as(usize, @intCast(rect.col)) + rect.width) |col| try std.testing.expectEqual(.single, hovered.readCell(col, @intCast(rect.row)).style.ul_style);
+            try std.testing.expect(view.selection == null and actions.messages == 0 and actions.opened == 0);
+            try view.widget().handleEvent(&ctx, .mouse_leave);
+        }
+        try std.testing.expect(summaries > 0 and links > 0);
+        if (width == 14) try std.testing.expect(links > 1);
+    }
+}
+
+test "FeedView hover and drag highlight measure each visible line a bounded number of times" {
+    const Actions = struct {
+        fn click(_: *anyopaque, _: *vxfw.EventContext, _: resident.Point) !void {}
+        fn open(_: *anyopaque, _: *vxfw.EventContext, _: []const u8) !void {}
+    };
+    var unused: u8 = 0;
+    var measured: [2]usize = undefined;
+    const heights = [_]u16{ 64, 2048 };
+    for (heights, &measured) |height, *count| {
+        const window = try testWindow();
+        defer std.testing.allocator.destroy(window);
+        const text = try std.testing.allocator.alloc(u8, 2 * @as(usize, height));
+        defer std.testing.allocator.free(text);
+        for (0..height) |line| @memcpy(text[2 * line ..][0..2], "x\n");
+        try window.append(&.{.{ .key = .{ .position = 10 }, .text = .{ .bytes = text } }});
+        var anchor: Feed = .{};
+        var view: Self = .{ .window = window, .anchor = &anchor, .handler = .{ .userdata = &unused, .on_click = Actions.click, .on_open = Actions.open, .on_retry = RetryClicks.retry, .on_notice = RetryClicks.notice, .on_scroll = RetryClicks.scroll } };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        _ = try testFrame(&view, arena.allocator(), 8, height);
+        const start = (try view.spotAt(arena.allocator(), .{ .row = 0, .col = 0 })).?;
+        view.selection = .{ .press = .{ .row = 0, .col = 0 }, .anchor = start, .head = start, .dragging = true };
+        viewport.measured_lines = 0;
+        const frame = try testFrame(&view, arena.allocator(), 8, height);
+        try std.testing.expect(frame.buffer[0].style.reverse);
+        count.* = viewport.measured_lines;
+    }
+    // Every line is one row, so a linear frame costs at most 32 times as
+    // much for 32 times the rows; the quadratic walk cost about 1000 times.
+    try std.testing.expect(measured[1] <= 32 * measured[0]);
 }

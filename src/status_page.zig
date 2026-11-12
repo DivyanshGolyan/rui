@@ -191,6 +191,15 @@ pub fn line(setting: Setting) usize {
     return comptime_lines.get(setting);
 }
 
+/// The changeable setting on a rendered logical line. Headings, work and
+/// fixed settings have no action; wrapped visual rows keep their source line.
+pub fn settingAtLine(index: usize) ?Setting {
+    for (std.enums.values(Setting)) |setting| {
+        if (line(setting) == index and rows.get(setting).change != .fixed) return setting;
+    }
+    return null;
+}
+
 const comptime_lines = blk: {
     var lines: std.enums.EnumArray(Setting, usize) = undefined;
     var at: usize = 1;
@@ -397,7 +406,7 @@ fn writeTokens(out: *std.Io.Writer, tokens: u64) !void {
 }
 
 /// `value` with a comma between each group of three digits.
-fn writeGrouped(out: *std.Io.Writer, value: u64) !void {
+pub fn writeGrouped(out: *std.Io.Writer, value: u64) !void {
     var digits: [20]u8 = undefined;
     const text = std.fmt.bufPrint(&digits, "{d}", .{value}) catch unreachable;
     for (text, 0..) |digit, index| {
@@ -756,4 +765,10 @@ test "status defaults compare the provider-aware client product choices" {
     try std.testing.expectEqualStrings("Session override", (try writeValue(.compact_at, held.facts(), &out)).?);
     held.session.compaction_trigger = 945000;
     try std.testing.expectEqualStrings("model default", (try writeValue(.compact_at, held.facts(), &out)).?);
+}
+
+test "status change targets include every editable line and exclude fixed rows headings and work" {
+    const expected = [_]?Setting{ null, null, .effort, .permissions, .tools, .name, .folder, .compact_at, .headroom, .model, null, null, null, .default_model, .default_effort, .notifications, .default_store, null, null, null };
+    for (expected, 0..) |setting, index| try std.testing.expectEqual(setting, settingAtLine(index));
+    try std.testing.expectEqual(null, settingAtLine(std.math.maxInt(usize)));
 }

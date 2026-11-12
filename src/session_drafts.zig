@@ -22,6 +22,22 @@ pub const Drafts = struct {
         next: ?*Node,
     };
 
+    pub const Entry = struct { id: []const u8, snapshot: Input.Snapshot };
+    pub const Iterator = struct {
+        node: ?*const Node,
+
+        /// Borrows each snapshot until the collection is changed.
+        pub fn next(self: *Iterator) ?Entry {
+            const node = self.node orelse return null;
+            self.node = node.next;
+            return .{ .id = &node.id, .snapshot = node.draft.snapshot };
+        }
+    };
+
+    pub fn iterator(self: *const Drafts) Iterator {
+        return .{ .node = self.first };
+    }
+
     pub fn deinit(self: *Drafts, gpa: std.mem.Allocator) void {
         while (self.first) |node| {
             self.first = node.next;

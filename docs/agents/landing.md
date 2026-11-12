@@ -7,6 +7,8 @@
 
 Before publishing, run the focused checks in [Evidence](../../CODING_STANDARDS.md#evidence).
 For PR descriptions, use the `pr` skill.
+The description lists every behavior change in the diff, small ones included, so the summary and the diff agree.
+PRs changing `src/` carry a [Shape section](../../CODING_STANDARDS.md#shape-before-code), and the plan job refuses them without it.
 Every PR commit states its actual test commands and results.
 Open every PR with `python3 tests/ci/open_pr.py open --title TITLE --body-file FILE`, which lists open PRs sharing its files and opens it as a draft.
 Draft CI runs only the plan (candidate, whitespace and selection checks) and cheap aggregates; local `prepush.py` owns development feedback.
