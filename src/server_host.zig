@@ -247,6 +247,9 @@ pub const Hooks = struct {
 /// What the hidden `host serve` test options narrow a Host to. Production
 /// spells none of them, so it runs on the defaults.
 pub const Tuning = struct {
+    /// Process facts read by the startup shell, not document settings.
+    home: ?[]const u8 = null,
+    fixtures: providers_module.Fixtures = .{},
     limits: Limits = .{},
     hooks: Hooks = .{},
 
@@ -424,7 +427,7 @@ pub const Host = struct {
     /// then starts from the Host facts alone.
     environments: ?*SessionEnvironments = null,
     bash_timeout_ms: u64 = default_bash_timeout_ms,
-    /// Launch-frame configuration, owned and wiped after execution joins.
+    /// MCP settings projection, owned and wiped after execution joins.
     mcp_servers: @import("mcp/servers.zig").Servers = .{},
     retention: *output_retention.Queue = undefined,
     /// The Store directory for optional failed-response records; null in

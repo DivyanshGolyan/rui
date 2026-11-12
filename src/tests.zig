@@ -1,4 +1,6 @@
 test {
+    _ = @import("host_start.zig");
+    _ = @import("server_mcp_settings.zig");
     _ = @import("testing/host_settings.zig");
     _ = @import("relaunch_handoff.zig");
     _ = @import("widgets/Panel.zig");

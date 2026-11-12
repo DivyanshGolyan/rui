@@ -56,7 +56,8 @@ pub fn PathWith(comptime capacity: usize) type {
         pub const kind: Kind = .path;
         pub const max_bytes = capacity;
         text: Text(capacity) = .{},
-        /// The Host directory must replace this path before it can be sealed.
+        /// Default routing is relative to the Host directory. For interface.dir
+        /// this selects the platform-derived socket, not an explicit runtime dir.
         anchored: bool = false,
         pub fn slice(self: *const @This()) []const u8 {
             return self.text.slice();
@@ -257,7 +258,7 @@ pub const Interface = struct {
     pub const doc = .{ .dir = "Private interface directory. Default: the Host directory; MySQL requires an explicit directory.", .lifetime = "detached: until stopped; stdin: also stop when stdin closes." };
 };
 pub const Execution = struct {
-    active_capacity: Count(usize, 1, std.math.maxInt(usize), defaults.active_capacity) = .{},
+    active_capacity: Count(usize, 0, std.math.maxInt(usize), defaults.active_capacity) = .{},
     paused: Flag = .{},
     pub const doc = .{ .active_capacity = "How many Turns may run at once.", .paused = "Open with Turns held, as after host_pause." };
 };
@@ -706,6 +707,13 @@ fn readValue(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, 
         else => @compileError("not a Host settings kind: " ++ @typeName(T)),
     }
 }
+// These adapters already interpret relative paths: SQLite and TLS from the
+// Host cwd, Bash after entering the Session workspace. Secret/sign-in sources
+// and explicit interface directories retain their absolute-path contract.
+fn relativePathAllowed(at: []const u8) bool {
+    return std.mem.eql(u8, at, "store.sqlite.dir") or std.mem.eql(u8, at, "tools.bash.path") or std.mem.eql(u8, at, "network.caFile");
+}
+
 fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, read: *const Read) Error!void {
     switch (T.kind) {
         .text => dest.set(try string(value, at, read)) catch return refuse(read.failure, at, "must be bounded UTF-8 without NUL"),
@@ -717,7 +725,7 @@ fn readKind(comptime T: type, dest: *T, value: std.json.Value, at: []const u8, r
             }
             const raw = try string(value, at, read);
             const text = if (T.max_bytes == max_runtime_dir_bytes) std.mem.trimEnd(u8, raw, "/") else raw;
-            if (text.len == 0 or !std.fs.path.isAbsolute(text)) return refuse(read.failure, at, "must be an absolute path");
+            if (text.len == 0 or (!relativePathAllowed(at) and !std.fs.path.isAbsolute(text))) return refuse(read.failure, at, "must be an absolute path");
             dest.text.set(text) catch return refuse(read.failure, at, "path exceeds its byte bound or contains invalid text");
             dest.anchored = false;
         },
@@ -1072,8 +1080,7 @@ fn anchorValue(comptime T: type, value: *T, host_dir: []const u8) error{Settings
     }
     if (comptime isKind(T)) {
         switch (T.kind) {
-            .path => if (value.anchored) {
-                if (T.max_bytes == max_runtime_dir_bytes and std.mem.eql(u8, host_dir, "/")) return error.SettingsInvalid;
+            .path => if (value.anchored and T.max_bytes != max_runtime_dir_bytes) {
                 try value.text.set(host_dir);
                 value.anchored = false;
             },
@@ -1110,7 +1117,7 @@ pub const Prepared = struct {
 
 pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{SettingsInvalid}!Prepared {
     try validateShape(Settings, settings, "", failure);
-    if (settings.interface.dir.slice().len == 0 or std.mem.eql(u8, settings.interface.dir.slice(), "/")) return refuse(failure, "interface.dir", "must be anchored to a non-root interface directory");
+    if (!settings.interface.dir.anchored and (settings.interface.dir.slice().len == 0 or std.mem.eql(u8, settings.interface.dir.slice(), "/"))) return refuse(failure, "interface.dir", "must be anchored to a non-root interface directory");
     if (settings.store == .mysql and settings.interface.dir.anchored) return refuse(failure, "interface.dir", "MySQL requires an explicit interface directory");
     if (settings.store == .sqlite) {
         if (settings.store.sqlite.dir.slice().len == 0) return refuse(failure, "store.sqlite.dir", "must be anchored");
@@ -1129,7 +1136,10 @@ pub fn seal(settings: *const Settings, failure: *start_report.Failure) error{Set
                         endpoint_value.validateKeyEndpoint(endpoint, if (settings.network.ca_file) |*ca| ca.slice() else null, false) catch return refuse(failure, at ++ ".endpoint", "credentials require HTTPS");
                         if (!secret_value.valid(entry.key.value())) return refuse(failure, at ++ ".key", "credential source has not been resolved");
                     },
-                    .sign_in => if (!std.mem.eql(u8, endpoint, provider.facts().endpoint)) return refuse(failure, at ++ ".endpoint", "sign-in credentials require the Adapter's own endpoint"),
+                    .sign_in => {
+                        if (entry.credential_file == null) return refuse(failure, at ++ ".credentialFile", "credential source has not been resolved");
+                        if (!std.mem.eql(u8, endpoint, provider.facts().endpoint)) return refuse(failure, at ++ ".endpoint", "sign-in credentials require the Adapter's own endpoint");
+                    },
                 }
             }
         }
@@ -1451,7 +1461,12 @@ fn validateShape(comptime T: type, value: *const T, at: []const u8, failure: *st
     if (comptime isKind(T)) {
         switch (T.kind) {
             .text => if (value.len > T.max_bytes or !std.unicode.utf8ValidateSlice(value.slice()) or std.mem.indexOfScalar(u8, value.slice(), 0) != null) return refuse(failure, at, "invalid UTF-8 text"),
-            .path => if (value.text.len > T.max_bytes or value.anchored or value.slice().len == 0 or !std.fs.path.isAbsolute(value.slice())) return refuse(failure, at, "must be an anchored absolute path"),
+            .path => {
+                // An anchored interface uses the platform-derived Host socket,
+                // not a literal runtime directory (whose path has a smaller bound).
+                if (T.max_bytes == max_runtime_dir_bytes and value.anchored) return;
+                if (value.text.len > T.max_bytes or value.anchored or value.slice().len == 0 or (!relativePathAllowed(at) and !std.fs.path.isAbsolute(value.slice()))) return refuse(failure, at, "must be an anchored absolute path");
+            },
             .url => {
                 if (value.text.len > T.max_bytes) return refuse(failure, at, "URL exceeds its byte bound");
                 switch (T.url_rule) {
@@ -1597,7 +1612,7 @@ test "Host settings anchor and seal require explicit MySQL interface and resolve
     const prepared = try seal(settings, &failure);
     try std.testing.expect(prepared.get() == settings);
     try std.testing.expectEqualStrings("/tmp/host-settings", settings.store.sqlite.dir.slice());
-    try std.testing.expect(!settings.interface.dir.anchored);
+    try std.testing.expect(settings.interface.dir.anchored);
     settings.interface.dir.anchored = true;
     try assign(settings, gpa, "store.mysql.url", "env:DATABASE_URL", checkSample, &failure);
     try std.testing.expectError(error.SettingsInvalid, anchor(settings, "/tmp/host-settings"));
@@ -1609,9 +1624,9 @@ test "Host settings anchor and seal require explicit MySQL interface and resolve
     try settings.store.mysql.url.bytes.set(gpa, "mysql://user:@localhost/db");
     _ = try seal(settings, &failure);
     try assign(settings, gpa, "execution.activeCapacity", "1", checkSample, &failure);
-    settings.execution.active_capacity.value = 0;
+    settings.tools.bash.timeout_ms.value = 0;
     try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
-    settings.execution.active_capacity.value = 1;
+    settings.tools.bash.timeout_ms.value = default_bash_timeout_ms;
     settings.tools.mcp.len = max_mcp_servers + 1;
     try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
     settings.tools.mcp.len = 0;
@@ -1644,7 +1659,11 @@ test "Host settings every derived provider credential respects resolution redact
             try std.testing.expect(std.mem.indexOf(u8, output.written(), "\"owner\":true") != null);
             try apply(restored, gpa, output.written(), .file, checkSample, &failure);
             try std.testing.expectError(error.SettingsInvalid, seal(restored, &failure));
-        } else _ = try seal(settings, &failure);
+        } else {
+            try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
+            try assign(settings, gpa, "providers." ++ name ++ ".credentialFile", "/tmp/sign-in.json", checkSample, &failure);
+            _ = try seal(settings, &failure);
+        }
         try assign(settings, gpa, "providers." ++ name ++ ".endpoint", "http://127.0.0.1:3000/responses", checkSample, &failure);
         try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
         entry.unauthenticated.value = true;
@@ -1799,5 +1818,74 @@ test "Host settings defaults and anchored defaults round trip as complete docume
         var failure: start_report.Failure = undefined;
         try apply(restored, gpa, out.written(), .file, checkSample, &failure);
         try expectSame(Settings, original, restored);
+    }
+}
+
+test "Host settings default interface preserves derived socket routing for long Store paths" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    try apply(settings, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
+    const host_dir = "/tmp/" ++ @as([max_runtime_dir_bytes]u8, @splat('h'));
+    try anchor(settings, host_dir);
+    try std.testing.expect(settings.interface.dir.anchored);
+    _ = try seal(settings, &failure);
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try write(settings, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"dir\":null") != null);
+}
+
+test "Host settings preserve existing relative Store Bash and provider CA paths" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    try apply(settings, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
+    for ([_][]const u8{ "store.sqlite.dir", "tools.bash.path", "network.caFile" }) |leaf| {
+        try assign(settings, gpa, leaf, "relative/path", checkSample, &failure);
+    }
+    try anchor(settings, "/tmp/host-settings");
+    _ = try seal(settings, &failure);
+    try std.testing.expectEqualStrings("relative/path", settings.store.sqlite.dir.slice());
+    try std.testing.expectEqualStrings("relative/path", settings.tools.bash.path.slice());
+    try std.testing.expectEqualStrings("relative/path", settings.network.ca_file.?.slice());
+    try std.testing.expectError(error.SettingsInvalid, assign(settings, gpa, "interface.dir", "relative/path", checkSample, &failure));
+}
+
+test "Host settings admit the existing provider-free zero active capacity" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    settings.* = .{};
+    defer settings.deinit();
+    var failure: start_report.Failure = undefined;
+    try apply(settings, gpa, "{\"providers\":{}}", .file, checkSample, &failure);
+    try assign(settings, gpa, "execution.activeCapacity", "0", checkSample, &failure);
+    try anchor(settings, "/tmp/host-settings");
+    _ = try seal(settings, &failure);
+    try std.testing.expectEqual(@as(usize, 0), settings.execution.active_capacity.value);
+}
+
+test "Host settings proof requires each served sign-in path to be resolved" {
+    const gpa = std.testing.allocator;
+    const settings = try gpa.create(Settings);
+    defer gpa.destroy(settings);
+    inline for (std.enums.values(provider_name.Provider)) |provider| {
+        if (comptime provider.facts().credential == .sign_in) {
+            settings.* = .{};
+            defer settings.deinit();
+            var failure: start_report.Failure = undefined;
+            try apply(settings, gpa, "{\"providers\":{\"" ++ @tagName(provider) ++ "\":{}}}", .file, checkSample, &failure);
+            try anchor(settings, "/tmp/host-settings");
+            try std.testing.expectError(error.SettingsInvalid, seal(settings, &failure));
+            try assign(settings, gpa, "providers." ++ @tagName(provider) ++ ".credentialFile", "/tmp/sign-in.json", checkSample, &failure);
+            _ = try seal(settings, &failure);
+        }
     }
 }
