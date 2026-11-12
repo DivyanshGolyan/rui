@@ -128,6 +128,12 @@ def chunks(tty, vector):
             tty.send(bytes.fromhex(chunk["hex"]))
 
 
+def leave(tty):
+    """Detach via the raw Ctrl-C key and retain all terminal-restoration checks."""
+    tty.send(b"\x03")
+    tty.finish()
+
+
 def editor(fixture, row):
     fixture.answer("TD4 exact answer")
     tty = fixture.terminal()
@@ -148,8 +154,7 @@ def editor(fixture, row):
     tty.marker("TD4 exact answer")
     tty.draft("", 2)
     assert_submitted(fixture.endpoint.requests, [row["expected"]])
-    tty.send(b"\x03")
-    tty.finish()
+    leave(tty)
     assert_submitted(fixture.endpoint.requests, [row["expected"]])
 
 
@@ -163,8 +168,7 @@ def rejection(fixture, row):
     tty.send(b"valid\r")
     tty.marker("TD4 valid after rejection")
     assert_submitted(fixture.endpoint.requests, ["valid"])
-    tty.send(b"\x03")
-    tty.finish()
+    leave(tty)
 
 
 def recovery(fixture, row):
@@ -197,8 +201,7 @@ def recovery(fixture, row):
     assert next_request["text"]["value"] == "next cafXYé!", next_request
     assert next_request["key"] != json.loads(original)["key"], "next draft reused original key"
     assert_submitted(fixture.endpoint.requests, ["original éZ", "next cafXYé!"])
-    tty.send(b"\x03")
-    tty.finish()
+    leave(tty)
 
 
 def assert_navigation_history(screen, first, browsing):
@@ -287,8 +290,7 @@ def navigation(fixture, row):
     tty.marker("TD4 history end")
     assert_submitted(fixture.endpoint.requests, ["seed history"])
     assert set((fixture.home / ".config/rui/requests").glob("*.json")) == captures, "navigation captured intent"
-    tty.send(b"\x03")
-    tty.finish()
+    leave(tty)
 
 
 SCENARIOS = {"editor": editor, "rejection": rejection, "recovery": recovery,
