@@ -3508,8 +3508,11 @@ pub fn listSegments(arena: Allocator, state: *const State, item: Item, width: u1
 /// The Footer's key: what Enter does (`enterAction`), after Esc when a
 /// cancellable Upgrade takes it. The frame keeps the list it draws in
 /// `state.commands` before asking.
+pub const ChoiceKeys = chrome.ChoiceKeys;
+pub const choiceKeys = chrome.choiceKeys;
+
 pub fn footerKeys(state: *const State, draft: Draft, choice_open: bool) []const u8 {
-    if (choice_open) return "enter pick";
+    if (choice_open) return choiceKeys(true).text;
     if (state.footer.focus != .input) return "enter open";
     return footerRight(state, draft);
 }
@@ -7312,7 +7315,7 @@ test "new chat footer keys describe the action that currently owns Enter" {
     for (std.enums.values(FooterFocus)) |focus| {
         state.footer.focus = focus;
         try std.testing.expectEqualStrings(if (focus == .input) "enter start" else "enter open", footerKeys(&state, .{}, false));
-        try std.testing.expectEqualStrings("enter pick", footerKeys(&state, .{}, true));
+        try std.testing.expectEqualStrings("enter pick · esc close", footerKeys(&state, .{}, true));
     }
 }
 

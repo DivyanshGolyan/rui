@@ -407,6 +407,8 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
 
 const Fixture = struct {
     unicode: bool = true,
+    read_calls: usize = 0,
+    save_calls: usize = 0,
     values: preferences.Values = .{},
     save_status: SaveState = .idle,
     fail_read: bool = false,
@@ -421,11 +423,13 @@ const Fixture = struct {
     }
     fn read(raw: *anyopaque) !preferences.Values {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.read_calls += 1;
         if (self.fail_read) return error.AccessDenied;
         return self.values;
     }
     fn saveEdit(raw: *anyopaque, edit: preferences.Edit) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.save_calls += 1;
         if (self.fail_save) return error.AccessDenied;
         self.last_edit = edit;
         if (self.home) |home| {
@@ -1164,4 +1168,108 @@ test "App settings standalone model retry retains the drawn context through back
     try page.refresh();
     try std.testing.expectEqual(protocol.Provider.codex, page.provider().?);
     try std.testing.expectEqualStrings("gpt-5.5", page.model());
+}
+
+test "App settings standalone Model and Effort retry read and save failures by drawn click or Enter" {
+    const Failure = enum { read, save, publication };
+    for ([_]Row{ .model, .effort }) |field| for (std.enums.values(Failure)) |failure| for ([_]bool{ false, true }) |pointer| for ([_]u16{ 46, 140 }) |width| {
+        errdefer std.debug.print("App standalone field={s} failure={s} pointer={} width={d}\n", .{ @tagName(field), @tagName(failure), pointer, width });
+        var fixture: Fixture = .{ .fail_read = failure == .read };
+        try fixture.values.provider.set("codex");
+        try fixture.values.model.set("gpt-5.5");
+        fixture.values.reasoning_effort = .low;
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
+        var current = view.Default.of("openai", "gpt-6.1-sol").?;
+        current.effort = .high;
+        try page.openStandaloneChoice(&ctx, field, current);
+        if (failure != .read) {
+            fixture.fail_save = failure == .publication;
+            try press(&page, &ctx, vaxis.Key.enter);
+            fixture.fail_save = false;
+            if (failure == .save) {
+                try std.testing.expect(!page.standaloneOpen());
+                const pending = try page.standaloneWidget().draw(draw_ctx);
+                try std.testing.expectEqual(@as(u16, 0), pending.size.height);
+                const reads = fixture.read_calls;
+                const saves = fixture.save_calls;
+                try @import("testing/app_events.zig").mouse(&ctx, pending, click);
+                try press(&page, &ctx, vaxis.Key.enter);
+                try std.testing.expectEqual(reads, fixture.read_calls);
+                try std.testing.expectEqual(saves, fixture.save_calls);
+                fixture.save_status = .failed;
+                try page.widget().handleEvent(&ctx, .tick);
+            }
+        }
+        try std.testing.expect(page.standaloneOpen() and !page.hasChoice());
+        try std.testing.expectEqualStrings(if (failure == .read) " · couldn't read settings" else " · couldn't save", page.failures.get(field).?);
+        const retained = try page.standaloneWidget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(u16, 2), retained.size.height);
+        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(1, 1).char.grapheme));
+        fixture.fail_read = false;
+        const before_read = fixture.read_calls;
+        const before_save = fixture.save_calls;
+        if (pointer) try @import("testing/app_events.zig").mouse(&ctx, retained, click) else try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(before_read + 1, fixture.read_calls);
+        try std.testing.expectEqual(before_save, fixture.save_calls);
+        try std.testing.expect(page.standaloneOpen() and page.hasChoice());
+        try std.testing.expectEqual(field, page.standalone.?.row);
+        try std.testing.expectEqualDeep(current, page.standalone.?.current.?);
+        try std.testing.expectEqual(@as(?usize, @backingInt(field)), page.panel.choice_only);
+        try std.testing.expect(page.failures.get(field) == null);
+        if (field == .model) {
+            try std.testing.expect(page.model_choice.active);
+            try std.testing.expectEqual(protocol.Provider.openai, page.model_choice.provider);
+            try std.testing.expectEqualStrings(current.model.slice(), page.model_choice.current);
+        } else {
+            const choice = page.panel.choice.?;
+            try std.testing.expectEqualStrings("high", choice.labels[choice.current.?]);
+        }
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(before_save + 1, fixture.save_calls);
+        if (field == .model) {
+            try std.testing.expectEqualStrings("openai", fixture.last_edit.?.provider.set);
+            try std.testing.expectEqualStrings(current.model.slice(), fixture.last_edit.?.model.set);
+        } else try std.testing.expectEqual(catalog.ReasoningEffort.high, fixture.last_edit.?.reasoning_effort.set);
+        fixture.save_status = .saved;
+        try page.widget().handleEvent(&ctx, .tick);
+        const saved = try page.standaloneWidget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(u16, 0), saved.size.height);
+        const saves = fixture.save_calls;
+        try @import("testing/app_events.zig").mouse(&ctx, saved, click);
+        try std.testing.expectEqual(saves, fixture.save_calls);
+        try std.testing.expect(!page.standaloneOpen());
+    };
+}
+
+test "App settings standalone without a backend retains only its drawn field until a source can retry" {
+    for ([_]Row{ .model, .effort }) |field| for ([_]bool{ false, true }) |pointer| {
+        var page: Self = .{};
+        var fixture: Fixture = .{};
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 20 }, .cell_size = .{} };
+        const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
+        try page.refresh();
+        try page.openStandaloneChoice(&ctx, field, null);
+        var retained = try page.standaloneWidget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(u16, 2), retained.size.height);
+        try @import("testing/app_events.zig").mouse(&ctx, retained, click);
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.standaloneOpen() and !page.hasChoice());
+        try std.testing.expectEqual(@as(usize, 0), fixture.read_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+        page.backend = fixture.backend();
+        retained = try page.standaloneWidget().draw(draw_ctx);
+        if (pointer) try @import("testing/app_events.zig").mouse(&ctx, retained, click) else try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expect(page.hasChoice());
+        try std.testing.expectEqual(field, page.standalone.?.row);
+        try std.testing.expectEqual(@as(usize, 1), fixture.read_calls);
+        try std.testing.expectEqual(@as(usize, 0), fixture.save_calls);
+    };
 }

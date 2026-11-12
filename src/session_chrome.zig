@@ -60,15 +60,37 @@ pub const Footer = struct {
     }
 };
 
+pub const ChoiceAction = enum { pick, close };
+pub const ChoiceKey = struct { text: []const u8, action: ChoiceAction };
+pub const ChoiceKeys = struct { text: []const u8, actions: [2]ChoiceKey };
+pub const ChoiceState = enum { closed, pick, retry };
+
+/// Drawn actions for the topmost choice; retry is the same owner's Enter.
+pub fn choiceKeys(has_choice: bool) ChoiceKeys {
+    const pick = "enter pick";
+    const retry = "enter retry";
+    const close = "esc close";
+    return .{
+        .text = if (has_choice) pick ++ " · " ++ close else retry ++ " · " ++ close,
+        .actions = .{
+            .{ .text = if (has_choice) pick else retry, .action = .pick },
+            .{ .text = close, .action = .close },
+        },
+    };
+}
+
 pub const FooterKeys = struct {
     text: []const u8,
     action: enum { info, pick },
     other_actions: bool,
+    choice: ?ChoiceKeys = null,
 };
 
-/// The footer names an action the topmost layer can actually take.
-pub fn footerKeys(choice_open: bool) FooterKeys {
-    return if (choice_open) .{ .text = "enter pick", .action = .pick, .other_actions = false } else .{ .text = "alt+i info", .action = .info, .other_actions = true };
+/// The footer names actions the topmost layer can actually take.
+pub fn footerKeys(choice: ChoiceState) FooterKeys {
+    if (choice == .closed) return .{ .text = "alt+i info", .action = .info, .other_actions = true };
+    const keys = choiceKeys(choice == .pick);
+    return .{ .text = keys.actions[0].text, .action = .pick, .other_actions = false, .choice = keys };
 }
 
 pub const FooterSpan = struct { text: []const u8, field: ?FooterField = null };
@@ -646,4 +668,19 @@ test "deferred footer effect is superseded by interaction without making invisib
     const decision = footer.step(true, .{ .click = .effort });
     try std.testing.expectEqual(@as(?FooterField, .effort), footer.pending);
     try std.testing.expectEqual(@as(?FooterField, .effort), decision.open_choice);
+}
+
+test "footer standalone actions describe pick retry and close from one owner" {
+    for ([_]ChoiceState{ .pick, .retry }) |state| {
+        const keys = footerKeys(state);
+        try std.testing.expect(!keys.other_actions);
+        try std.testing.expectEqual(.pick, keys.action);
+        const choice = keys.choice.?;
+        try std.testing.expectEqualStrings(if (state == .pick) "enter pick · esc close" else "enter retry · esc close", choice.text);
+        try std.testing.expectEqualStrings(if (state == .pick) "enter pick" else "enter retry", choice.actions[0].text);
+        try std.testing.expectEqualStrings("esc close", choice.actions[1].text);
+        try std.testing.expectEqual(ChoiceAction.pick, choice.actions[0].action);
+        try std.testing.expectEqual(ChoiceAction.close, choice.actions[1].action);
+    }
+    try std.testing.expect(footerKeys(.closed).choice == null);
 }

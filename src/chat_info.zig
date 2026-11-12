@@ -551,6 +551,8 @@ fn drawTitle(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxf
 
 const Fixture = struct {
     unicode: bool = true,
+    read_calls: usize = 0,
+    save_calls: usize = 0,
     session: status.Session = undefined,
     state_value: SaveState = .idle,
     fail_read: bool = false,
@@ -575,11 +577,13 @@ const Fixture = struct {
     }
     fn read(raw: *anyopaque, out: *status.Session) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.read_calls += 1;
         if (self.fail_read) return error.AccessDenied;
         out.* = self.session;
     }
     fn configure(raw: *anyopaque, edit: Edit) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
+        self.save_calls += 1;
         if (self.fail_submit) return error.AccessDenied;
         self.edit = switch (edit) {
             .label, .model => |text| blk: {
@@ -1602,4 +1606,74 @@ test "Chat info standalone failure retry preserves field-only presentation and t
     try page.openStandaloneChoice(&ctx, .effort);
     page.refresh();
     try std.testing.expect(!page.standaloneOpen());
+}
+
+test "Chat info standalone Model and Effort retry read and save failures by drawn click or Enter" {
+    const Failure = enum { read, save, publication };
+    for ([_]Row{ .model, .effort }) |field| for (std.enums.values(Failure)) |failure| for ([_]bool{ false, true }) |pointer| for ([_]u16{ 46, 140 }) |width| {
+        errdefer std.debug.print("Chat standalone field={s} failure={s} pointer={} width={d}\n", .{ @tagName(field), @tagName(failure), pointer, width });
+        var fixture: Fixture = .{ .fail_read = failure == .read };
+        fixture.init();
+        fixture.session.effort_override = false;
+        var page: Self = .{ .backend = fixture.backend() };
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 20 }, .cell_size = .{} };
+        const click: vaxis.Mouse = .{ .col = 1, .row = 1, .button = .left, .type = .press, .mods = .{} };
+        const index: usize = if (field == .model) 4 else 0;
+        try page.openStandaloneChoice(&ctx, field);
+        if (failure != .read) {
+            fixture.fail_submit = failure == .publication;
+            try press(&page, &ctx, vaxis.Key.enter);
+            fixture.fail_submit = false;
+            if (failure == .save) {
+                try std.testing.expect(!page.standaloneOpen());
+                const pending = try page.standaloneWidget().draw(draw_ctx);
+                try std.testing.expectEqual(@as(u16, 0), pending.size.height);
+                const reads = fixture.read_calls;
+                const saves = fixture.save_calls;
+                try @import("testing/app_events.zig").mouse(&ctx, pending, click);
+                try press(&page, &ctx, vaxis.Key.enter);
+                try std.testing.expectEqual(reads, fixture.read_calls);
+                try std.testing.expectEqual(saves, fixture.save_calls);
+                fixture.state_value = .failed;
+                try page.widget().handleEvent(&ctx, .tick);
+            }
+        }
+        try std.testing.expect(page.standaloneOpen() and !page.hasChoice());
+        try std.testing.expectEqualStrings(if (failure == .read) " · couldn't read chat" else " · couldn't save", page.failures[index].?);
+        const retained = try page.standaloneWidget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(u16, 2), retained.size.height);
+        try std.testing.expect(!std.mem.eql(u8, " ", retained.readCell(1, 1).char.grapheme));
+        fixture.fail_read = false;
+        const before_read = fixture.read_calls;
+        const before_save = fixture.save_calls;
+        if (pointer) try @import("testing/app_events.zig").mouse(&ctx, retained, click) else try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(before_read + 1, fixture.read_calls);
+        try std.testing.expectEqual(before_save, fixture.save_calls);
+        try std.testing.expect(page.standaloneOpen() and page.hasChoice());
+        try std.testing.expectEqual(@as(?Row, field), page.standalone_row);
+        try std.testing.expectEqual(@as(?usize, index), page.panel.choice_only);
+        try std.testing.expect(page.failures[index] == null);
+        if (field == .model) {
+            try std.testing.expect(page.model_choice.active);
+            try std.testing.expectEqual(fixture.session.provider, page.model_choice.provider);
+            try std.testing.expectEqualStrings(fixture.session.model.slice(), page.model_choice.current);
+        } else {
+            const choice = page.panel.choice.?;
+            try std.testing.expectEqualStrings("high", choice.labels[choice.current.?]);
+        }
+        try press(&page, &ctx, vaxis.Key.enter);
+        try std.testing.expectEqual(before_save + 1, fixture.save_calls);
+        if (field == .model) try std.testing.expectEqualStrings(fixture.session.model.slice(), fixture.edit.?.model) else try std.testing.expectEqual(Edit{ .effort = .high }, fixture.edit.?);
+        fixture.state_value = .saved;
+        try page.widget().handleEvent(&ctx, .tick);
+        const saved = try page.standaloneWidget().draw(draw_ctx);
+        try std.testing.expectEqual(@as(u16, 0), saved.size.height);
+        const saves = fixture.save_calls;
+        try @import("testing/app_events.zig").mouse(&ctx, saved, click);
+        try std.testing.expectEqual(saves, fixture.save_calls);
+        try std.testing.expect(!page.standaloneOpen());
+    };
 }

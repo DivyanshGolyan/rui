@@ -456,6 +456,8 @@ app_frame: u64 = 0,
 app_host_hover: Hover = .{},
 app_model: Chip = undefined,
 app_effort: Chip = undefined,
+app_choice_pick: Chip = undefined,
+app_choice_close: Chip = undefined,
 session_screen: *SessionScreen = undefined,
 app_session: ?Left = null,
 /// Where leaving a Session goes when Session links are followed.
@@ -669,8 +671,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
                     if (input == .key_press and !self.root.pasting) {
                         const named = TerminalEditor.named(input.key_press);
                         if (named == .escape or named == .ctrl_g) {
-                            self.root.settings_page.closeStandaloneChoice();
-                            _ = try self.event(.{ .footer_input = .escape });
+                            try self.closeStandaloneChoice(ctx);
                             ctx.consumeAndRedraw();
                             return;
                         }
@@ -1131,11 +1132,32 @@ fn appEffortClick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     try appClick(raw, ctx, .{ .footer = .effort });
 }
 
+/// Both Escape and its drawn action close only this presentation.
+fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (!self.root.settings_page.standaloneOpen() or self.root.pasting) return;
+    self.root.settings_page.closeStandaloneChoice();
+    _ = try self.event(.{ .footer_input = .escape });
+    try ctx.requestFocus(self.app_input.composer.widget());
+    ctx.redraw = true;
+}
+
+fn appChoiceClose(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    try self.closeStandaloneChoice(ctx);
+}
+
+fn appChoicePick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    if (!self.root.settings_page.standaloneOpen() or self.root.pasting) return;
+    try self.root.settings_page.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+}
+
 /// Footer owns the cells; the core's spans supply their drawn identities.
 fn appFooterDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
     const size = ctx.max.size();
-    const keys = view.footerKeys(&self.state, self.composerDraft(), self.root.settings_page.standaloneOpen());
+    const choice: ?view.ChoiceKeys = if (self.root.settings_page.standaloneOpen()) view.choiceKeys(self.root.settings_page.hasChoice()) else null;
+    const keys = if (choice) |shown| shown.text else view.footerKeys(&self.state, self.composerDraft(), false);
     const width = size.width -| @as(u16, @intCast(@min(ctx.stringWidth(keys), size.width)));
     const spans = try view.footerSpans(ctx.arena, &self.state, width, self.caps);
     var text: std.ArrayList(u8) = .empty;
@@ -1152,7 +1174,7 @@ fn appFooterDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error
     };
     var surface = try footer.widget().draw(ctx);
     surface.widget = .{ .userdata = self, .drawFn = appFooterDraw };
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
+    const children = try ctx.arena.alloc(vxfw.SubSurface, 4);
     var count: usize = 0;
     if (surface.size.height != 0) for (spans) |fact| if (fact.button) |field| {
         const chip = switch (field) {
@@ -1170,6 +1192,28 @@ fn appFooterDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error
         chip.hover.ul_style = .single;
         children[count] = .{ .origin = .{ .row = 0, .col = fact.span.column }, .surface = try chip.widget().draw(ctx.withConstraints(.{}, .{ .width = fact.span.cells, .height = 1 })) };
         count += 1;
+    };
+    if (surface.size.height != 0) if (choice) |shown| {
+        const right_width: u16 = @intCast(@min(ctx.stringWidth(keys), size.width));
+        var col: usize = size.width - right_width;
+        for (shown.actions, 0..) |action, index| {
+            if (index > 0) col += ctx.stringWidth(" · ");
+            const chip = switch (action.action) {
+                .pick => &self.app_choice_pick,
+                .close => &self.app_choice_close,
+            };
+            chip.label = action.text;
+            chip.method = self.caps.width;
+            chip.style = footer.style;
+            chip.hover = chip.style;
+            chip.hover.ul_style = .single;
+            if (col < size.width) {
+                const cells: u16 = @intCast(@min(ctx.stringWidth(action.text), size.width - col));
+                children[count] = .{ .origin = .{ .row = 0, .col = @intCast(col) }, .surface = try chip.widget().draw(ctx.withConstraints(.{}, .{ .width = cells, .height = 1 })) };
+                count += 1;
+            }
+            col += ctx.stringWidth(action.text);
+        }
     };
     surface.children = children[0..count];
     return surface;
@@ -1230,6 +1274,8 @@ fn create(init: std.process.Init, options: Options, hooks: Hooks, ops: Operation
     self.app_header = .{ .state = &self.state };
     self.app_model = .{ .label = "", .userdata = self, .on_click = appModelClick };
     self.app_effort = .{ .label = "", .userdata = self, .on_click = appEffortClick };
+    self.app_choice_pick = .{ .label = "", .userdata = self, .on_click = appChoicePick };
+    self.app_choice_close = .{ .label = "", .userdata = self, .on_click = appChoiceClose };
     self.app_settings_line = .{ .selected = false, .caps = self.caps, .userdata = self, .on_click = appClick };
     self.app_sessions.on_press = .{ .userdata = self, .pressed = appClick };
     try self.state.init(init.gpa, .{ .cwd = options.workspace, .home = options.home, .login_at = options.login_at, .default = .of(options.provider, options.model) });
@@ -7893,4 +7939,72 @@ test "Overview footer standalone choices receive the held creation binding and e
     // Saving defaults never overwrites an independently held binding.
     try std.testing.expectEqualStrings("azure/gpt-5-pro", overview.state.nextBinding().model.?);
     try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .high), overview.state.nextEffort());
+}
+
+test "Overview standalone footer close clicks match Escape preserve paste and ignore admitted saves" {
+    for ([_]u16{ 140, 46 }) |width| for ([_]AppSettings.Row{ .model, .effort }) |row| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6.1-sol" }, fake_operations, &cancellation);
+        defer rig.close();
+        const self = rig.overview;
+        const page = &self.root.settings_page;
+        try std.testing.expect(try rig.press("kept draft\x1b[D") == null);
+        const draft = self.composerDraft();
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const draw: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} };
+        for ([_]bool{ false, true }) |retained_failure| {
+            try page.openStandaloneChoice(&ctx, row, self.state.nextStart());
+            if (retained_failure) {
+                page.cancelChoice();
+                page.failures.set(row, " · couldn't save");
+            }
+            const footer = try appFooterDraw(self, draw);
+            var text: std.Io.Writer.Allocating = .init(arena.allocator());
+            for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+            try std.testing.expect(std.mem.endsWith(u8, text.written(), if (retained_failure) "enter retry · esc close" else "enter pick · esc close"));
+            const close = for (footer.children) |child| {
+                if (child.surface.widget.eql(self.app_choice_close.widget())) break child;
+            } else return error.TestExpectedCloseTarget;
+            try std.testing.expectEqual(@as(u16, 9), close.surface.size.width);
+            try std.testing.expect(close.origin.col + close.surface.size.width <= width);
+            self.root.pasting = true;
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            try std.testing.expect(page.standaloneOpen());
+            self.root.pasting = false;
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            try std.testing.expect(!page.standaloneOpen());
+            try std.testing.expectEqual(view.FooterFocus.input, self.state.footer.focus);
+            try std.testing.expectEqualStrings(draft.bytes, self.composerDraft().bytes);
+            try std.testing.expectEqual(draft.cursor, self.composerDraft().cursor);
+            try std.testing.expect(page.saving_row == null);
+            // The keyboard closes the same presentation, preserving the same draft.
+            try page.openStandaloneChoice(&ctx, row, self.state.nextStart());
+            try std.testing.expect(try rig.press("\x1b") == null);
+            try std.testing.expect(!page.standaloneOpen());
+            try std.testing.expectEqualStrings(draft.bytes, self.composerDraft().bytes);
+        }
+        try page.openStandaloneChoice(&ctx, row, self.state.nextStart());
+        const stale_footer = try appFooterDraw(self, draw);
+        const close = for (stale_footer.children) |child| {
+            if (child.surface.widget.eql(self.app_choice_close.widget())) break child;
+        } else return error.TestExpectedCloseTarget;
+        const pick = for (stale_footer.children) |child| {
+            if (child.surface.widget.eql(self.app_choice_pick.widget())) break child;
+        } else return error.TestExpectedPickTarget;
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, stale_footer, .{ .row = 0, .col = @intCast(pick.origin.col), .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(!page.standaloneOpen());
+        try std.testing.expectEqual(@as(?AppSettings.Row, row), page.saving_row);
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, stale_footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(page.standalone != null);
+        try std.testing.expectEqual(@as(?AppSettings.Row, row), page.saving_row);
+        try std.testing.expectEqualStrings(draft.bytes, self.composerDraft().bytes);
+        try std.testing.expectEqual(draft.cursor, self.composerDraft().cursor);
+    };
 }

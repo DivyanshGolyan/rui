@@ -463,7 +463,7 @@ pub fn attach(self: *Self, hooks: AppHooks, caps: overview_view.Caps) vxfw.Widge
     self.screen.setWidth(caps.width);
     self.app_preview = .{ .document = &self.screen.browsing, .colour = self.colour, .more = true, .handler = .{ .userdata = self, .on_notice = appNotice, .on_scroll = appDragScroll, .on_click = appPreviewClick } };
     self.app_card = .{ .consent = &self.app_consent, .pasting = &hooks.root.pasting, .description = "", .body = self.app_preview.widget(), .userdata = self, .on_decision = appDecision };
-    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .unarchive = chromeClick(.unarchive), .pick = chromeClick(.footer_pick), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
+    self.chrome = .init(.{ .userdata = self, .key = chromeClick(.needs), .stop = chromeClick(.{ .action = .stop }), .back = chromeClick(.{ .action = .close }), .latest = chromeClick(.{ .action = .latest }), .status_page = chromeClick(.status), .details = chromeClick(.details), .unarchive = chromeClick(.unarchive), .pick = chromeClick(.footer_pick), .close = chromeClick(.footer_close), .model = chromeClick(.{ .footer = .model }), .effort = chromeClick(.{ .footer = .effort }) });
     return self.widget();
 }
 
@@ -495,6 +495,14 @@ fn footerEvent(self: *Self, ctx: *vxfw.EventContext, input: session_chrome.Foote
     }
     self.dirty = true;
     return decision.forward;
+}
+
+fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
+    if (!self.app_info.standaloneOpen() or self.app_hooks.root.pasting) return;
+    self.footer.pending = null;
+    self.app_info.closeStandaloneChoice();
+    self.footer.focus = .input;
+    try ctx.requestFocus(self.app_input.composer.widget());
 }
 
 fn openFooterChoice(self: *Self, ctx: *vxfw.EventContext) !void {
@@ -618,6 +626,7 @@ const Click = union(enum) {
     status,
     footer: session_chrome.FooterField,
     footer_pick,
+    footer_close,
     details,
     unarchive,
     /// The key that ends what needs the person: Ctrl-R's retry, or the
@@ -639,7 +648,8 @@ fn chromeClick(comptime click: Click) *const fn (*anyopaque, *vxfw.EventContext)
                 .footer => |field| {
                     _ = try self.footerEvent(ctx, .{ .click = field });
                 },
-                .footer_pick => if (self.app_info.standaloneOpen()) {
+                .footer_close => try self.closeStandaloneChoice(ctx),
+                .footer_pick => if (self.app_info.standaloneOpen() and !self.app_hooks.root.pasting) {
                     try self.app_info.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
                 },
                 .details => try self.showSubmissionFailure(),
@@ -886,10 +896,7 @@ fn appEvent(raw: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) !void {
                     try self.perform(action);
                 } else if (event == .key_press and !pasting and (Editor.named(event.key_press) == .escape or Editor.named(event.key_press) == .ctrl_g)) {
                     if (!self.info_open) {
-                        self.footer.pending = null;
-                        self.app_info.closeStandaloneChoice();
-                        self.footer.focus = .input;
-                        try ctx.requestFocus(self.app_input.composer.widget());
+                        try self.closeStandaloneChoice(ctx);
                     } else if (self.app_info.hasChoice()) self.app_info.cancelChoice() else {
                         self.info_open = false;
                         try ctx.requestFocus(self.app_input.composer.widget());
@@ -1122,7 +1129,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const list_visible = self.app_hooks.root.listVisible();
     chrome.place(&self.app_screen, .{
         .list_visible = list_visible,
-        .choice_open = self.app_info.standaloneOpen(),
+        .choice = if (!self.app_info.standaloneOpen()) .closed else if (self.app_info.hasChoice()) .pick else .retry,
         .browsing = browsing,
         .new_entries = self.new_below,
         .needs = send.needs,
@@ -9323,5 +9330,66 @@ test "chat footer permission transitions follow the current line with absent cur
         self.footer.focus = .model;
         _ = try self.footerEvent(&ctx, .{ .tab = false });
         try std.testing.expectEqual(session_chrome.FooterFocus.effort, self.footer.focus);
+    };
+}
+
+test "chat standalone footer close clicks match Escape preserve paste and ignore admitted saves" {
+    for ([_]u16{ 140, 46 }) |width| for ([_]ChatInfo.Row{ .model, .effort }) |row| {
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        const self = &held.self;
+        try captureInfo(held, "Chat");
+        held.size = .{ .width = width, .height = 40 };
+        try held.keys("kept draft\x1b[D");
+        const cursor = self.input.composition().cursor;
+        var ctx = held.context();
+        for ([_]bool{ false, true }) |failed| {
+            try self.app_info.openStandaloneChoice(&ctx, row);
+            if (failed) {
+                self.app_info.cancelChoice();
+                self.app_info.failures[if (row == .model) @as(usize, 4) else 0] = " · couldn't save";
+            }
+            _ = try held.draw();
+            const footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+            const close = for (footer.children) |child| {
+                if (child.surface.widget.eql(self.chrome.close.widget())) break child;
+            } else return error.TestExpectedCloseTarget;
+            try std.testing.expectEqual(@as(u16, 9), close.surface.size.width);
+            try std.testing.expect(close.origin.col + close.surface.size.width <= width);
+            var text: std.Io.Writer.Allocating = .init(held.arena.allocator());
+            for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
+            try std.testing.expect(std.mem.endsWith(u8, text.written(), if (failed) "enter retry · esc close" else "enter pick · esc close"));
+            self.app_hooks.root.pasting = true;
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            try std.testing.expect(self.app_info.standaloneOpen());
+            self.app_hooks.root.pasting = false;
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            try std.testing.expect(!self.app_info.standaloneOpen() and !self.info_open);
+            try std.testing.expectEqual(session_chrome.FooterFocus.input, self.footer.focus);
+            try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+            try std.testing.expectEqual(cursor, self.input.composition().cursor);
+            try std.testing.expect(self.info_edit == null);
+            try self.app_info.openStandaloneChoice(&ctx, row);
+            try held.keys("\x07");
+            try std.testing.expect(!self.app_info.standaloneOpen());
+        }
+        try self.app_info.openStandaloneChoice(&ctx, row);
+        _ = try held.draw();
+        const stale_footer = try self.app_screen.input.facts.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 1 }, .cell_size = .{} });
+        const close = for (stale_footer.children) |child| {
+            if (child.surface.widget.eql(self.chrome.close.widget())) break child;
+        } else return error.TestExpectedCloseTarget;
+        const pick = for (stale_footer.children) |child| {
+            if (child.surface.widget.eql(self.chrome.pick.widget())) break child;
+        } else return error.TestExpectedPickTarget;
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, stale_footer, .{ .row = 0, .col = @intCast(pick.origin.col), .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(!self.app_info.standaloneOpen());
+        const pending = self.app_info.pending;
+        try std.testing.expect(pending != null);
+        for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try @import("testing/app_events.zig").mouse(&ctx, stale_footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+        try std.testing.expect(self.app_info.standalone_row != null);
+        try std.testing.expectEqual(pending, self.app_info.pending);
+        try std.testing.expectEqualStrings("kept draft", self.input.composition().bytes);
+        try std.testing.expectEqual(cursor, self.input.composition().cursor);
     };
 }

@@ -21,6 +21,7 @@ const empty_marker: vxfw.Text = .{ .text = "" };
 /// The screen's actions a click runs.
 pub const Actions = struct {
     userdata: *anyopaque,
+    close: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
     pick: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
     model: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
     effort: ?*const fn (*anyopaque, *vxfw.EventContext) anyerror!void = null,
@@ -85,7 +86,7 @@ pub const View = struct {
     overview: ?[]const u8 = null,
     /// The screen's palette, or null.
     overlay: ?vxfw.Widget = null,
-    choice_open: bool = false,
+    choice: chrome.ChoiceState = .closed,
     width: u16,
 };
 
@@ -107,7 +108,8 @@ state: vxfw.Text = .{ .text = "", .softwrap = false, .overflow = .clip, .width_b
 unarchive: Chip,
 info: Chip,
 pick: Chip,
-keys: chrome.FooterKeys = chrome.footerKeys(false),
+close: Chip,
+keys: chrome.FooterKeys = chrome.footerKeys(.closed),
 details: Chip,
 list_visible: bool = false,
 stoppable: bool = false,
@@ -126,6 +128,7 @@ pub fn init(actions: Actions) Self {
         .unarchive = chip(actions.unarchive, actions.userdata),
         .info = chip(actions.status_page, actions.userdata),
         .pick = chip(actions.pick orelse actions.status_page, actions.userdata),
+        .close = chip(actions.close orelse actions.status_page, actions.userdata),
         .details = chip(actions.details orelse actions.key, actions.userdata),
     };
 }
@@ -144,7 +147,7 @@ pub fn place(self: *Self, screen: *AppScreen.Session, view: View) void {
     self.facts.identity = view.facts;
     self.list_visible = view.list_visible;
     self.stoppable = view.stoppable;
-    self.keys = chrome.footerKeys(view.choice_open);
+    self.keys = chrome.footerKeys(view.choice);
     self.details.label = if (view.details) "alt+d details" else "";
     self.state.text = stateText(self.status.bar.left, self.status.key.label);
     self.state.style = if (self.status.bar.tone == .attention) self.status.attention else self.status.quiet;
@@ -172,18 +175,20 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const self: *Self = @ptrCast(@alignCast(raw));
     self.unarchive.label = if (self.keys.other_actions and self.facts.identity.archive == .archived) "/unarchive" else "";
     self.status.stop.label = if (self.keys.other_actions and self.stoppable) chrome.stop_key else "";
-    const primary = switch (self.keys.action) {
+    const primary = if (self.keys.choice) |keys| self.choiceChip(keys.actions[0].action) else switch (self.keys.action) {
         .info => &self.info,
         .pick => &self.pick,
     };
+    const secondary = if (self.keys.choice) |keys| self.choiceChip(keys.actions[1].action) else &self.close;
     primary.label = self.keys.text;
+    secondary.label = if (self.keys.choice) |keys| keys.actions[1].text else "";
     if (!self.keys.other_actions) {
         self.status.key.label = "";
         self.details.label = "";
     }
     const primary_width = primary.width() + self.status.key.width() + self.unarchive.width() + self.status.stop.width() + 9;
     if (primary_width + self.details.width() > ctx.max.width.?) self.details.label = "";
-    const keys = [_]*Chip{ primary, &self.details, &self.status.key, &self.unarchive, &self.status.stop };
+    const keys = [_]*Chip{ primary, secondary, &self.details, &self.status.key, &self.unarchive, &self.status.stop };
     var right: std.ArrayList(u8) = .empty;
     for (keys) |key| if (key.label.len != 0) {
         if (right.items.len != 0) try right.appendSlice(ctx.arena, " · ");
@@ -247,6 +252,13 @@ fn drawFooter(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     return surface;
 }
 
+fn choiceChip(self: *Self, action: chrome.ChoiceAction) *Chip {
+    return switch (action) {
+        .pick => &self.pick,
+        .close => &self.close,
+    };
+}
+
 fn footerChip(chip: *Chip, style: vaxis.Style, method: vaxis.gwidth.Method, ctx: vxfw.DrawContext, col: u16, width: u16) !vxfw.SubSurface {
     chip.method = method;
     chip.style = style;
@@ -256,7 +268,7 @@ fn footerChip(chip: *Chip, style: vaxis.Style, method: vaxis.gwidth.Method, ctx:
 }
 
 const Recorder = struct {
-    const Action = enum { key, stop, back, latest, status_page, unarchive, model, effort, pick };
+    const Action = enum { key, stop, back, latest, status_page, unarchive, model, effort, pick, close };
     clicked: std.enums.EnumArray(Action, usize) = .initFill(0),
     fn on(comptime which: anytype) *const fn (*anyopaque, *vxfw.EventContext) anyerror!void {
         return struct {
@@ -267,7 +279,7 @@ const Recorder = struct {
         }.click;
     }
     fn actions(self: *Recorder) Actions {
-        return .{ .userdata = self, .key = on(.key), .stop = on(.stop), .back = on(.back), .latest = on(.latest), .status_page = on(.status_page), .unarchive = on(.unarchive), .model = on(.model), .effort = on(.effort), .pick = on(.pick) };
+        return .{ .userdata = self, .key = on(.key), .stop = on(.stop), .back = on(.back), .latest = on(.latest), .status_page = on(.status_page), .unarchive = on(.unarchive), .model = on(.model), .effort = on(.effort), .pick = on(.pick), .close = on(.close) };
     }
     fn event(_: *anyopaque, _: *vxfw.EventContext, _: vxfw.Event) !void {}
 };
@@ -628,10 +640,10 @@ test "SessionChrome footer text and button styling cover both widths applied eff
     };
 }
 
-test "SessionChrome standalone choice footer offers only the existing pick action" {
+test "SessionChrome standalone choice footer offers bounded existing pick and close actions" {
     var recorder: Recorder = .{};
     var self: Self = .init(recorder.actions());
-    self.keys = chrome.footerKeys(true);
+    self.keys = chrome.footerKeys(.pick);
     self.stoppable = true;
     self.status.key.label = "ctrl+r retries";
     self.details.label = "alt+d details";
@@ -641,10 +653,12 @@ test "SessionChrome standalone choice footer offers only the existing pick actio
     const footer = try drawFooter(&self, .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 1 }, .cell_size = .{} });
     var text: std.Io.Writer.Allocating = .init(arena.allocator());
     for (footer.buffer) |cell| try text.writer.writeAll(cell.char.grapheme);
-    try std.testing.expect(std.mem.endsWith(u8, text.written(), "enter pick"));
+    try std.testing.expect(std.mem.endsWith(u8, text.written(), "enter pick · esc close"));
     for ([_][]const u8{ "alt+i", "alt+d", "ctrl+r", "ctrl+x", "/unarchive" }) |blocked| try std.testing.expect(std.mem.indexOf(u8, text.written(), blocked) == null);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     try clickAt(footer, arena.allocator(), &ctx, 0, 45);
+    try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.close));
+    try clickAt(footer, arena.allocator(), &ctx, 0, 25);
     try std.testing.expectEqual(@as(usize, 1), recorder.clicked.get(.pick));
     try std.testing.expectEqual(@as(usize, 0), recorder.clicked.get(.status_page));
 }
