@@ -852,42 +852,10 @@ fn pauseHost(io: std.Io, selected: []const u8, explicit_instance: ?protocol.Inst
     }
 }
 
-/// One owned result, independent of both renderers. It is invocation-local;
-/// only its small semantic projection crosses the screen worker boundary.
-const HostLaunchResult = struct {
-    outcome: union(enum) { ready: Ready, failed: Failure },
-    warning: ?Overview.HostLaunch.Warning = null,
-    startup_bytes: [max_startup_bytes]u8 = undefined,
-    startup_len: usize = 0,
-    wait: ?HostStartupWait = null,
-
-    const max_startup_bytes = 8192;
-    const Cause = Overview.HostLaunch.Failure;
-    const Ready = struct {
-        facts: protocol_reply.HostInfoFacts,
-        diagnostics_directory: protocol.Bounded(protocol.max_store_bytes) = .{ .len = 0 },
-    };
-    const Failure = struct {
-        cause: Cause,
-        store: protocol.Bounded(protocol.max_store_bytes) = .{ .len = 0 },
-        os_error: ?c_int = null,
-    };
-
-    fn failed(kind: Cause.Kind, err: anyerror) HostLaunchResult {
-        return .{ .outcome = .{ .failed = .{ .cause = .{ .kind = kind, .err = err }, .store = .{ .len = 0 } } } };
-    }
-
-    fn summary(self: *const HostLaunchResult) Overview.HostLaunch {
-        return switch (self.outcome) {
-            .ready => .{ .ready = self.warning },
-            .failed => |failure| .{ .failed = failure.cause },
-        };
-    }
-
-    fn startup(self: *const HostLaunchResult) []const u8 {
-        return self.startup_bytes[0..self.startup_len];
-    }
-};
+/// One owned result, independent of both renderers. Activation retains it
+/// whole until the UI or departure reporter settles the worker outcome.
+const host_launch = @import("host_launch.zig");
+const HostLaunchResult = host_launch.Result;
 
 /// Progress synchronously borrows the owned startup transcript; it must not
 /// retain the bytes. The adapter alone chooses whether or where to show them.
@@ -1038,6 +1006,7 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
             if (ops.observe(ops.context, io, &paths, until) != .ready) {
                 if (result.startup_len == HostLaunchResult.max_startup_bytes) return launchFailure(result, .startup_full, error.HostReadinessUnconfirmed, paths.store.slice());
                 if (std.mem.endsWith(u8, result.startup(), "[store_identity_mismatch]\n")) return launchFailure(result, .store_identity, error.StoreIdentityMismatch, paths.store.slice());
+                if (std.mem.endsWith(u8, result.startup(), "[store_format_unsupported]\n")) return launchFailure(result, .store_format, error.HostStartupFailed, paths.store.slice());
                 return launchFailure(result, if (result.startup_len == 0) .child_closed else .child_refused, error.HostStartupFailed, paths.store.slice());
             }
         }
@@ -1063,44 +1032,13 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
 /// migration announcement its progress hook already showed. Screen callers
 /// receive the same value without installing an output hook.
 fn reportHostLaunch(io: std.Io, result: *const HostLaunchResult, quiet: bool, capacity: ?usize, shown: usize) !void {
-    if (result.warning != null) stderr.diagnostic(invalid_base_url ++ "; this Host starts without OpenAI.\n", .{});
+    var bytes: [host_launch.max_report_bytes]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try host_launch.writeDiagnostics(result, &writer, shown);
+    if (writer.buffered().len != 0) _ = stderr.write(writer.buffered());
     switch (result.outcome) {
-        .ready => |*ready| {
-            if (result.startup_len != 0 and std.mem.indexOf(u8, result.startup(), "[store_locked]\n") == null) _ = stderr.write(result.startup()[shown..]);
-            try reportStartedHost(io, ready, quiet, capacity);
-        },
-        .failed => |*failure| {
-            switch (failure.cause.kind) {
-                .os_launch => notice: {
-                    var bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
-                    var notice = std.Io.Writer.fixed(&bytes);
-                    notice.print("\nrui: detached Host launch reported OS error {d}. Execution and readiness are unconfirmed.\nCheck this Store: rui host status --store ", .{failure.os_error.?}) catch break :notice;
-                    TerminalText.writeShellWord(&notice, failure.store.slice()) catch break :notice;
-                    notice.writeByte('\n') catch break :notice;
-                    _ = stderr.write(notice.buffered());
-                },
-                .child_refused, .child_closed, .startup_full, .store_identity => {
-                    var bytes: [4 * protocol.max_store_bytes + 256]u8 = undefined;
-                    var header = std.Io.Writer.fixed(&bytes);
-                    try header.writeAll("\nrui: detached Host startup failed for Store ");
-                    var path_text: TerminalText = .{ .mode = .line };
-                    try path_text.feed(&header, failure.store.slice());
-                    try path_text.finish(&header);
-                    try header.writeAll(":\n");
-                    _ = stderr.write(header.buffered());
-                    _ = stderr.write(result.startup()[shown..]);
-                    if (failure.cause.kind == .child_closed) stderr.diagnostic("Child closed its startup channel before readiness; exit status unavailable.\n", .{});
-                    if (failure.cause.kind == .startup_full) stderr.diagnostic("Startup output reached 8 KiB; readiness and exit status remain unconfirmed.\n", .{});
-                },
-                .readiness_timeout => {
-                    if (result.startup_len != 0) _ = stderr.write(result.startup()[shown..]);
-                    stderr.diagnostic("rui: Host readiness unconfirmed after 10 seconds. Inspect rui host status and the selected Store's diagnostics/ startup records if present; do not kill or reclaim an uncertain owner.\n", .{});
-                },
-                .incompatible => stderr.diagnostic("rui: the Host serving this Store does not speak this rui's protocol, usually because another Rui version started it. Stop it with that version's rui host pause (rui host stop in older versions), then run this rui again; saved work is unchanged.\n", .{}),
-                .setup, .worker, .store_access, .mysql_unavailable, .interrupted => {},
-            }
-            return failure.cause.err;
-        },
+        .ready => |*ready| try reportStartedHost(io, ready, quiet, capacity),
+        .failed => |failure| return failure.cause.err,
     }
 }
 
@@ -1520,6 +1458,7 @@ fn newSession(init: std.process.Init, args: []const []const u8) !void {
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
     try prepareOverview(init, options, entry);
+    if (entry.launch) |*launch| try reportHostLaunch(init.io, launch, true, null, 0);
     return openOverview(init, .{
         .store = entry.store.slice(),
         .workspace = entry.workspace_buffer[0..entry.workspace_len],
@@ -1554,6 +1493,7 @@ const OverviewEntry = struct {
     workspace_len: usize,
     home: []const u8,
     binding: ?new_session_selection.Binding,
+    launch: ?HostLaunchResult = null,
     /// Set when this terminal just signed in.
     login_at: ?u64,
 };
@@ -1561,6 +1501,10 @@ const OverviewEntry = struct {
 /// Resolve once before opening the app. Missing sign-in is a screen, not a
 /// shell questionnaire; noninteractive Session commands keep their own path.
 fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *OverviewEntry) !void {
+    return prepareOverviewUsing(init, options, entry, .{});
+}
+
+fn prepareOverviewUsing(init: std.process.Init, options: NewSessionOptions, entry: *OverviewEntry, ops: HostLaunchOps) !void {
     if (options.model) |model| try admitModel(model);
     const intent: new_session_selection.Intent = .{ .store = options.store, .provider = options.provider, .model = options.model };
     var cwd = try std.Io.Dir.cwd().openDir(init.io, ".", .{});
@@ -1577,39 +1521,42 @@ fn prepareOverview(init: std.process.Init, options: NewSessionOptions, entry: *O
     const readiness = localReadiness(init);
     entry.binding = try snapshot.resolve(&readiness);
     entry.login_at = null;
-    if (entry.binding) |binding| try startSelectedOverviewHost(init, destination.path, binding, &readiness);
-    if (entry.binding != null) {
-        const paths = try platform.resolveClientPaths(init.io, destination.path);
-        entry.store = paths.store;
-    } else try entry.store.set(destination.path);
+    try entry.store.set(destination.path);
+    entry.launch = null;
+    if (entry.binding) |binding| {
+        entry.launch = .failed(.setup, error.HostLaunchFailed);
+        startSelectedOverviewHost(init, destination.path, binding, &readiness, ops, &entry.launch.?);
+        if (entry.launch.?.outcome == .ready) entry.store = entry.launch.?.outcome.ready.facts.store;
+    }
 }
 
 /// The sign-in worker reuses selection and Host startup whole, including
 /// refreshed saved selectors. Startup diagnostics belong to the input row.
 fn activateOverview(init: std.process.Init, intent: new_session_selection.Intent) !@import("SignIn.zig").Activation {
+    return activateOverviewUsing(init, intent, .{});
+}
+
+fn activateOverviewUsing(init: std.process.Init, intent: new_session_selection.Intent, ops: HostLaunchOps) !@import("SignIn.zig").Activation {
     const entry = try init.gpa.create(OverviewEntry);
     defer init.gpa.destroy(entry);
-    try prepareOverview(init, .{ .store = intent.store, .provider = intent.provider, .model = intent.model }, entry);
-    return .{ .binding = entry.binding orelse return error.HostModelUnavailable, .store = entry.store };
+    try prepareOverviewUsing(init, .{ .store = intent.store, .provider = intent.provider, .model = intent.model }, entry, ops);
+    return .{ .binding = entry.binding orelse return error.HostModelUnavailable, .store = entry.store, .launch = entry.launch };
 }
 
 fn overviewProviderReady(init: std.process.Init) provider_selection.Readinesses {
     return localReadiness(init);
 }
 
-fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses) !void {
-    var result: HostLaunchResult = .failed(.setup, error.HostLaunchFailed);
-    startHost(init, store, null, readiness, .{}, null, &result);
-    switch (result.outcome) {
-        .ready => {},
-        .failed => |failure| return failure.cause.err,
-    }
-    const ready = switch (client.hostStatus(init.io, store)) {
-        .ready => |current| current,
-        else => return error.HostReadinessUnconfirmed,
-    };
+fn startSelectedOverviewHost(init: std.process.Init, store: []const u8, binding: new_session_selection.Binding, readiness: *const provider_selection.Readinesses, ops: HostLaunchOps, result: *HostLaunchResult) void {
+    startHost(init, store, null, readiness, ops, null, result);
+    if (result.outcome == .failed) return;
+    // Readiness already belongs to this result. Do not re-observe and lose
+    // either the launch's transcript/warnings or the selected-provider check.
     const provider = std.meta.stringToEnum(protocol.Provider, binding.provider.slice()).?;
-    if (protocol.routeOf(ready.capabilities.providers, provider) == .unserved) return error.HostModelUnavailable;
+    if (protocol.routeOf(result.outcome.ready.facts.capabilities.providers, provider) == .unserved) {
+        const canonical = result.outcome.ready.facts.store;
+        launchFailure(result, .provider_unserved, error.HostModelUnavailable, canonical.slice());
+    }
 }
 
 fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
@@ -1617,16 +1564,11 @@ fn preflightNewSession(io: std.Io, destination: []const u8, saved: bool) !void {
     if (saved) {
         _ = platform.resolveClientPaths(io, destination) catch |err| return storeFailure(err);
     } else platform.validateStoreDestination(io, destination) catch |err| return storeFailure(err);
-    switch (client.hostStatus(io, destination)) {
-        .ready => |ready| if (!protocol.servesModel(ready.capabilities.providers)) return error.HostModelUnavailable,
-        .unavailable => {},
-        .owned_unavailable => return error.HostReadinessUnconfirmed,
-        .incompatible => return error.IncompatibleHost,
-        .access_failure => return error.StoreAccessFailed,
-    }
+    // Host observation and classification belong to the launch owner, so
+    // callers retain the same structured outcome for terminal or screen.
 }
 
-const invalid_base_url = "rui: " ++ providers.openai_base_url_variable ++ " must be an https:// URL with a host and no credentials, query or fragment";
+const invalid_base_url = host_launch.invalid_base_url;
 
 /// Whether an auto-started Host can serve OpenAI at its base URL. A bad one
 /// is OpenAI's alone to fail, so the Host still starts and serves Codex.
@@ -4161,7 +4103,7 @@ test "Host launch owner returns one result for terminal and screen across its wh
         .{ .scenario = .migration_eof, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = LaunchFixture.migrating },
         .{ .scenario = .migration_final, .success = true, .terminal = LaunchFixture.migrating },
         .{ .scenario = .os_error, .kind = .os_launch, .err = error.HostLaunchFailed, .words = "could not start", .terminal = "OS error 13" },
-        .{ .scenario = .refusal, .kind = .child_refused, .err = error.HostStartupFailed, .words = "refused to start", .terminal = LaunchFixture.refusal },
+        .{ .scenario = .refusal, .kind = .store_format, .err = error.HostStartupFailed, .words = "needs a compatible Rui", .terminal = LaunchFixture.refusal },
         .{ .scenario = .timeout, .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed, .words = "start timed out", .terminal = "readiness unconfirmed after 10 seconds" },
         .{ .scenario = .invalid_url, .success = true, .words = "OpenAI URL invalid", .terminal = invalid_base_url },
         .{ .scenario = .missing_key, .success = true, .terminal = LaunchFixture.note },
@@ -4769,4 +4711,96 @@ test "Sign-in activation does not borrow the terminal diagnostic channel" {
     try std.testing.expectError(error.HostModelUnavailable, activateOverview(init, .{ .store = store, .provider = "codex", .model = product_defaults.recommended_model }));
     try std.testing.expect(!stderr.tryAcquire()); // The caller still owns it.
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "store", .{}));
+}
+
+test "Host launch activation preserves refusal timeout warnings and an unserved selection for reporting" {
+    const Case = struct {
+        scenario: LaunchFixture.Scenario,
+        provider: protocol.Provider = .openai,
+        kind: ?HostLaunchResult.Cause.Kind = null,
+        terminal: []const u8,
+        words: []const u8,
+        retry: bool = true,
+        warning: bool = false,
+    };
+    const cases = [_]Case{
+        .{ .scenario = .refusal, .kind = .store_format, .terminal = LaunchFixture.refusal, .words = "Host needs a compatible Rui", .retry = false },
+        .{ .scenario = .timeout, .kind = .readiness_timeout, .terminal = "do not kill or reclaim an uncertain owner", .words = "Host start timed out" },
+        .{ .scenario = .invalid_url, .provider = .codex, .terminal = invalid_base_url, .words = "OpenAI URL invalid", .retry = false, .warning = true },
+        .{ .scenario = .already_ready, .kind = .provider_unserved, .terminal = "does not serve the selected provider", .words = "Host does not serve this provider", .retry = false },
+        .{ .scenario = .incompatible, .kind = .incompatible, .terminal = "does not speak this rui's protocol", .words = "Host different Rui version", .retry = false },
+    };
+    const io = std.testing.io;
+    for (cases) |case| {
+        errdefer std.debug.print("activation scenario={s}\n", .{@tagName(case.scenario)});
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var directory = try tmp.dir.createDirPathOpen(io, "store", .{ .permissions = .fromMode(0o700) });
+        defer directory.close(io);
+        var home_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_buffer[0..try tmp.dir.realPath(io, &home_buffer)];
+        var store_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const store = store_buffer[0..try directory.realPath(io, &store_buffer)];
+        var environment: std.process.Environ.Map = .init(std.testing.allocator);
+        defer environment.deinit();
+        try environment.put("HOME", home);
+        if (case.warning) try environment.put(providers.openai_base_url_variable, "http://invalid.example");
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const argv = [_][*:0]const u8{"rui"};
+        const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = io, .environ_map = &environment, .preopens = .empty };
+        // Real local credential owners make the explicit selection ready;
+        // only native Host effects are substituted at the existing seam.
+        try provider_login.key(init, "sk-launch-reporting-test");
+        var credentials_path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&credentials_path, "{s}/.config/rui/codex.json", .{home});
+        var record: codex_credentials.Record = .{ .generation = 0, .account_id = .{}, .id_token = .{}, .access_token = .{}, .refresh_token = .{}, .expires_at = 4_102_444_800, .refreshed_at = 1 };
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+        try record.account_id.set(codex_auth.fixture_account_id);
+        try record.id_token.set(codex_auth.fixture_id_token);
+        try record.access_token.set(codex_auth.fixture_access_token);
+        try record.refresh_token.set("fixture-refresh");
+        var scratch: codex_credentials.Scratch = undefined;
+        try codex_credentials.install(path, &record, null, &scratch);
+        var fixture: LaunchFixture = .{ .scenario = case.scenario };
+        const activation = try activateOverviewUsing(init, .{ .store = store, .provider = @tagName(case.provider), .model = product_defaults.recommended_model }, fixture.ops());
+        try std.testing.expectEqual(true, activation.launch != null);
+        const launch = &activation.launch.?;
+        try std.testing.expectEqual(case.kind == null, launch.outcome == .ready);
+        try std.testing.expectEqual(case.warning, launch.warning != null);
+        if (case.kind) |kind| {
+            try std.testing.expectEqual(kind, launch.outcome.failed.cause.kind);
+            if (kind != .incompatible) try std.testing.expectEqualStrings(store, launch.outcome.failed.store.slice());
+        }
+        if (case.scenario == .refusal) try std.testing.expectEqualStrings(LaunchFixture.refusal, launch.startup());
+        // The same reporter used by an already-configured bare launch must
+        // retain the child bytes, Store context and launch warning.
+        const diagnostic_file = try tmp.dir.createFile(io, "diagnostics", .{ .read = true });
+        defer diagnostic_file.close(io);
+        var reported_error: ?anyerror = null;
+        {
+            const saved = std.c.dup(2);
+            if (saved < 0) return error.TestDupFailed;
+            defer closeDescriptor(saved);
+            if (std.c.dup2(diagnostic_file.handle, 2) != 2) return error.TestRedirectFailed;
+            defer std.debug.assert(std.c.dup2(saved, 2) == 2);
+            reportHostLaunch(io, launch, true, null, 0) catch |err| {
+                reported_error = err;
+            };
+        }
+        if (case.kind != null) {
+            try std.testing.expectEqual(launch.outcome.failed.cause.err, reported_error.?);
+        } else try std.testing.expect(reported_error == null);
+        var bytes: [host_launch.max_report_bytes]u8 = undefined;
+        const n = try diagnostic_file.readPositionalAll(io, &bytes, 0);
+        try std.testing.expect(std.mem.indexOf(u8, bytes[0..n], case.terminal) != null);
+        if (case.scenario == .refusal) try std.testing.expect(std.mem.indexOf(u8, bytes[0..n], store) != null);
+        var line: std.Io.Writer.Allocating = .init(arena.allocator());
+        try host_launch.writeSignIn(&line.writer, launch.summary(), false, true);
+        try std.testing.expect(std.mem.indexOf(u8, line.written(), case.words) != null);
+        try std.testing.expectEqual(case.retry, std.mem.indexOf(u8, line.written(), "enter tries again") != null);
+        try std.testing.expect(std.mem.indexOfAny(u8, line.written(), "\r\n\x1b") == null);
+        try std.testing.expect(std.mem.indexOf(u8, line.written(), "[store_format_unsupported]") == null);
+        try std.testing.expectEqual(if (case.scenario == .already_ready or case.scenario == .incompatible) @as(usize, 0) else 1, fixture.launches);
+    }
 }

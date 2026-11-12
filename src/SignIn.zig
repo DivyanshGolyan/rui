@@ -14,11 +14,13 @@ const Footer = @import("widgets/Footer.zig");
 const choice_row = @import("choice_row.zig");
 const ConversationViewport = @import("ConversationViewport.zig");
 const Self = @This();
+const host_launch = @import("host_launch.zig");
 
 pub const Activation = struct {
     binding: selection.Binding,
     store: @import("protocol.zig").Bounded(@import("protocol.zig").max_store_bytes),
     default_failed: bool = false,
+    launch: ?host_launch.Result = null,
 };
 pub const Activate = *const fn (std.process.Init, selection.Intent) anyerror!Activation;
 pub const Ready = *const fn (std.process.Init) core.Readinesses;
@@ -44,8 +46,12 @@ task: ClientTask = .{},
 /// publication wins, Escape cannot claim that the saved sign-in was undone.
 gate: std.atomic.Value(enum(u8) { cancellable, cancelled, publishing }) = .init(.cancellable),
 code: @import("protocol.zig").Bounded(64) = .{},
+/// A pending publication wakes one UI frame, even after Connecting drew.
+/// Guarded with code by the task mutex; not another copy of the code.
+code_pending: bool = false,
 attempt: core.Attempt = .existing,
 outcome: ?Outcome = null,
+launch_report: ?host_launch.Summary = null,
 threadlocal var current: *Self = undefined;
 
 pub fn widget(self: *Self) vxfw.Widget {
@@ -57,7 +63,9 @@ pub fn reset(self: *Self) void {
     self.key.wipe();
     self.key_rejected = false;
     self.code.len = 0;
+    self.code_pending = false;
     self.state = .{};
+    self.launch_report = null;
 }
 
 pub fn cancel(self: *Self) void {
@@ -66,7 +74,7 @@ pub fn cancel(self: *Self) void {
 
 /// Every accepted attempt is joined before its input storage is released.
 pub fn stop(self: *Self) !void {
-    var bytes: [256]u8 = undefined;
+    var bytes: [host_launch.max_report_bytes + 256]u8 = undefined;
     var writer = std.Io.Writer.fixed(&bytes);
     const ended = self.stopTo(&writer);
     // The terminal is restored before the app calls stop. If stderr takes
@@ -95,6 +103,7 @@ fn display(code: []const u8) !void {
     self.task.mutex.lockUncancelable(init.io);
     defer self.task.mutex.unlock(init.io);
     try self.code.set(code);
+    self.code_pending = true;
 }
 
 fn work(raw: *anyopaque, _: *ClientTask) !void {
@@ -132,7 +141,9 @@ fn begin(self: *Self, ctx: *vxfw.EventContext, attempt: core.Attempt) void {
     if (attempt != .key) self.key.wipe();
     self.attempt = attempt;
     self.code.len = 0;
+    self.code_pending = false;
     self.outcome = null;
+    self.launch_report = null;
     self.gate.store(.cancellable, .release);
     const init = self.init orelse return; // UI-only rendering has no effects.
     self.task.start(init.io, self, work) catch {
@@ -144,7 +155,13 @@ fn begin(self: *Self, ctx: *vxfw.EventContext, attempt: core.Attempt) void {
 }
 
 fn advance(self: *Self, ctx: *vxfw.EventContext) !void {
-    if (self.task.thread == null or !self.task.completed()) return;
+    if (self.task.thread == null) return;
+    self.task.mutex.lockUncancelable(self.init.?.io);
+    const pending = self.code_pending;
+    self.code_pending = false;
+    self.task.mutex.unlock(self.init.?.io);
+    ctx.redraw = ctx.redraw or pending;
+    if (!self.task.completed()) return;
     try self.settle(.{ .screen = ctx });
 }
 
@@ -168,9 +185,18 @@ fn settle(self: *Self, presentation: Presentation) !void {
         .published => |published| {
             const default_error: ?anyerror = if (published.defaults) |_| null else |err| err;
             var activation = published.activation catch |err| {
+                self.launch_report = .{ .failed = host_launch.failureOf(err) };
                 try self.reportFailure(presentation, if (default_error != null) .defaults_and_host else .host, default_error orelse err);
                 return;
             };
+            if (activation.launch) |*launch| {
+                if (presentation == .departure) try host_launch.writeDiagnostics(launch, presentation.departure, 0);
+                if (launch.outcome == .failed) {
+                    self.launch_report = launch.summary();
+                    try self.reportFailure(presentation, if (default_error != null) .defaults_and_host else .host, default_error orelse launch.outcome.failed.cause.err);
+                    return;
+                }
+            }
             if (presentation == .departure) {
                 if (default_error) |err| try self.reportFailure(presentation, .defaults, err);
                 return;
@@ -191,7 +217,8 @@ fn reportFailure(self: *Self, presentation: Presentation, failure: core.Failure,
             ctx.redraw = true;
         },
         .departure => |writer| {
-            try writer.print("{s}\n", .{failureText(failure)});
+            try self.writeFailure(writer, failure, false);
+            try writer.writeByte('\n');
             return err;
         },
     }
@@ -258,6 +285,7 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     } else if (self.task.thread != null) {
         return;
     } else if (key.matches(vaxis.Key.enter, .{})) {
+        if (self.state.stage == .failed and self.launch_report != null and self.launch_report.? == .failed and self.launch_report.?.failed.next() == null) return;
         effect = if (self.state.stage == .key_entry or self.state.stage == .key_invalid)
             self.state.step(.{ .key = !self.key_rejected and api_key.valid(self.key.slice()) })
         else
@@ -284,6 +312,21 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
         .cancel, .none => {},
     }
     ctx.consumeAndRedraw();
+}
+
+fn writeFailure(self: *Self, writer: *std.Io.Writer, failure: core.Failure, retry_hint: bool) !void {
+    if (self.launch_report) |report| {
+        if (failure == .host or failure == .defaults_and_host)
+            return host_launch.writeSignIn(writer, report, failure == .defaults_and_host, retry_hint);
+    }
+    try writer.writeAll(failureText(failure));
+    if (retry_hint) try writer.writeAll(" · enter tries again");
+}
+
+fn failureLine(self: *Self, alloc: std.mem.Allocator) std.mem.Allocator.Error![]const u8 {
+    var writer: std.Io.Writer.Allocating = .init(alloc);
+    self.writeFailure(&writer.writer, self.state.failure, true) catch return error.OutOfMemory;
+    return writer.written();
 }
 
 fn failureText(failure: core.Failure) []const u8 {
@@ -338,7 +381,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .key_invalid => &.{.{ .text = "  Invalid API key · edit and enter", .style = self.style }},
         .saving => &.{.{ .text = "  Saving sign-in", .style = self.style }},
         .done => &.{.{ .text = "", .style = self.style }},
-        .failed => try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = try std.fmt.allocPrint(ctx.arena, "{s} · enter tries again", .{failureText(self.state.failure)}), .style = self.style }}),
+        .failed => try ctx.arena.dupe(vaxis.Cell.Segment, &.{.{ .text = try self.failureLine(ctx.arena), .style = self.style }}),
     };
     const rich = try ctx.arena.create(vxfw.RichText);
     rich.* = .{ .text = line, .softwrap = false, .width_basis = .parent };
@@ -411,6 +454,7 @@ test "Sign-in worker reports installation default activation and cancellation ou
     const Fixture = struct {
         done: bool = false,
         default_failed: bool = false,
+        launch: ?host_launch.Result = null,
         fn activate(init: std.process.Init, _: selection.Intent) !Activation {
             if (init.environ_map.get("FAIL_HOST") != null) return error.HostReadinessUnconfirmed;
             var answer: Activation = .{ .binding = .{}, .store = .{} };
@@ -595,7 +639,7 @@ test "Sign-in departure settles cancellation and every published default and act
                     try std.testing.expectEqual(.publishing, page.gate.load(.acquire));
                     if (default_failed) try std.testing.expectError(error.UnsupportedPreferencesVersion, ended) else if (host_failed) try std.testing.expectError(error.HostReadinessUnconfirmed, ended) else try ended;
                     try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, report.written(), if (host_failed) "default not saved" else "couldn't save default") != null);
-                    try std.testing.expectEqual(host_failed, std.mem.indexOf(u8, report.written(), "Host didn't start") != null);
+                    try std.testing.expectEqual(host_failed, std.mem.indexOf(u8, report.written(), "Host start timed out") != null);
                     if (!default_failed) try std.testing.expectEqualStrings("openai", (try preferences.load(home)).provider.slice());
                 }
                 var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -612,4 +656,171 @@ test "Sign-in departure settles cancellation and every published default and act
             }
         }
     }
+}
+
+test "Sign-in launch reporting settles structured outcomes on screen and departure with independent defaults" {
+    const Case = enum { refusal, timeout, warning, unserved, incompatible };
+    const Fixture = struct {
+        const refusal = "child explains its refusal\n[store_format_unsupported]\n";
+        warned: bool = false,
+        default_failed: bool = false,
+        fn activate(init: std.process.Init, _: selection.Intent) !Activation {
+            const case = std.meta.stringToEnum(Case, init.environ_map.get("CASE").?).?;
+            var answer: Activation = .{ .binding = .{}, .store = .{} };
+            try answer.binding.provider.set("openai");
+            try answer.binding.model.set(@import("product_defaults.zig").recommended_model);
+            try answer.store.set(init.environ_map.get("HOME").?);
+            answer.launch = switch (case) {
+                .refusal => .failed(.store_format, error.HostStartupFailed),
+                .timeout => .failed(.readiness_timeout, error.HostReadinessUnconfirmed),
+                .unserved => .failed(.provider_unserved, error.HostModelUnavailable),
+                .incompatible => .failed(.incompatible, error.IncompatibleHost),
+                .warning => .{ .outcome = .{ .ready = .{ .facts = .{ .store = answer.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved } } } } }, .warning = .invalid_openai_base_url },
+            };
+            if (case == .refusal) {
+                answer.launch.?.startup_len = refusal.len;
+                @memcpy(answer.launch.?.startup_bytes[0..refusal.len], refusal);
+                answer.launch.?.outcome.failed.store = answer.store;
+            }
+            return answer;
+        }
+        fn complete(raw: *anyopaque, _: *vxfw.EventContext, answer: Activation) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.warned = answer.launch.?.warning == .invalid_openai_base_url;
+            self.default_failed = answer.default_failed;
+        }
+        fn completed(page: *Self) bool {
+            return page.task.completed();
+        }
+    };
+    for (std.enums.values(Case)) |case| for ([_]bool{ false, true }) |leave| for ([_]bool{ false, true }) |default_failed| {
+        errdefer std.debug.print("launch={s} departure={} default_failed={}\n", .{ @tagName(case), leave, default_failed });
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var home_bytes: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = home_bytes[0..try tmp.dir.realPath(std.testing.io, &home_bytes)];
+        var env: std.process.Environ.Map = .init(std.testing.allocator);
+        defer env.deinit();
+        try env.put("HOME", home);
+        try env.put("CASE", @tagName(case));
+        if (default_failed) {
+            var config = try tmp.dir.createDirPathOpen(std.testing.io, ".config/rui", .{ .permissions = .fromMode(0o700) });
+            defer config.close(std.testing.io);
+            var file = try config.createFile(std.testing.io, "preferences", .{ .permissions = .fromMode(0o600) });
+            defer file.close(std.testing.io);
+            try file.writeStreamingAll(std.testing.io, "version=9\n");
+        }
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const argv = [_][*:0]const u8{"rui"};
+        const init: std.process.Init = .{ .minimal = .{ .args = .{ .vector = &argv }, .environ = .empty }, .arena = &arena, .gpa = std.testing.allocator, .io = std.testing.io, .environ_map = &env, .preopens = .empty };
+        var fixture: Fixture = .{};
+        var page: Self = .{ .init = init, .activate = Fixture.activate, .userdata = &fixture, .on_done = Fixture.complete };
+        defer page.stop() catch @panic("reporting outcome escaped settlement");
+        page.state = .{ .selected = .openai, .stage = .saving };
+        var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+        page.begin(&ctx, .existing);
+        const poll = @import("test_poll");
+        try poll.waitUntil(init.io, poll.after(init.io, .fromSeconds(5)), &page, Fixture.completed);
+        var report: std.Io.Writer.Allocating = .init(arena.allocator());
+        if (leave) {
+            const ended = page.stopTo(&report.writer);
+            const expected: ?anyerror = if (default_failed) error.UnsupportedPreferencesVersion else switch (case) {
+                .refusal => error.HostStartupFailed,
+                .timeout => error.HostReadinessUnconfirmed,
+                .unserved => error.HostModelUnavailable,
+                .incompatible => error.IncompatibleHost,
+                .warning => null,
+            };
+            if (expected) |err| try std.testing.expectError(err, ended) else try ended;
+            const text = report.written();
+            switch (case) {
+                .refusal => {
+                    try std.testing.expectEqual(true, std.mem.indexOf(u8, text, Fixture.refusal) != null);
+                    try std.testing.expect(std.mem.indexOf(u8, text, home) != null);
+                },
+                .timeout => try std.testing.expect(std.mem.indexOf(u8, text, "do not kill or reclaim an uncertain owner") != null),
+                .warning => try std.testing.expect(std.mem.indexOf(u8, text, host_launch.invalid_base_url) != null),
+                .unserved => try std.testing.expect(std.mem.indexOf(u8, text, "does not serve the selected provider") != null),
+                .incompatible => try std.testing.expect(std.mem.indexOf(u8, text, "does not speak this rui's protocol") != null),
+            }
+            try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, text, if (case == .warning) "couldn't save default" else "default not saved") != null);
+        } else {
+            try page.advance(&ctx);
+            if (case == .warning) {
+                try std.testing.expectEqual(core.Stage.done, page.state.stage);
+                try std.testing.expect(fixture.warned);
+                try std.testing.expectEqual(default_failed, fixture.default_failed);
+            } else {
+                const line = try page.failureLine(arena.allocator());
+                try std.testing.expectEqual(core.Stage.failed, page.state.stage);
+                try std.testing.expect(std.mem.indexOfAny(u8, line, "\r\n\x1b") == null);
+                try std.testing.expect(std.mem.indexOf(u8, line, Fixture.refusal) == null);
+                try std.testing.expectEqual(case == .timeout, std.mem.indexOf(u8, line, "enter tries again") != null);
+                try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, line, "default not saved") != null);
+                if (case == .refusal or case == .unserved or case == .incompatible) {
+                    try page.widget().handleEvent(&ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
+                    try std.testing.expect(page.task.thread == null);
+                    try std.testing.expectEqual(core.Stage.failed, page.state.stage);
+                }
+            }
+        }
+        try std.testing.expect(page.task.thread == null and page.outcome == null);
+        const reported = report.written().len;
+        try page.stopTo(&report.writer);
+        try std.testing.expectEqual(reported, report.written().len);
+    };
+}
+
+test "Sign-in device publication after Connecting wakes exactly one frame while the worker waits" {
+    const Gate = struct {
+        page: *Self,
+        publish_code: std.Io.Event = .unset,
+        published: std.Io.Event = .unset,
+        finish: std.Io.Event = .unset,
+        fn run(raw: *anyopaque, task: *ClientTask) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            current = self.page;
+            self.publish_code.waitUncancelable(task.io);
+            try display("BDL9-KI88H");
+            self.published.set(task.io);
+            self.finish.waitUncancelable(task.io);
+            self.page.outcome = .cancelled;
+        }
+    };
+    const io = std.testing.io;
+    var init: std.process.Init = undefined;
+    init.io = io;
+    var page: Self = .{ .init = init, .state = .{ .stage = .codex_waiting } };
+    var gate: Gate = .{ .page = &page };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try page.task.start(io, &gate, Gate.run);
+    defer {
+        gate.publish_code.set(io);
+        gate.finish.set(io);
+        page.stop() catch @panic("device publication escaped settlement");
+    }
+    var ctx: vxfw.EventContext = .{ .io = io, .alloc = arena.allocator(), .cmds = .empty, .redraw = false };
+    const draw_context: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 46, .height = 12 }, .cell_size = .{} };
+    // Guarantee the initial frame and tick precede publication, rather than
+    // letting worker scheduling decide which frame the test happened to see.
+    const connecting = try page.widget().draw(draw_context);
+    const initial: *vxfw.RichText = @ptrCast(@alignCast(connecting.children[1].surface.widget.userdata));
+    try std.testing.expectEqualStrings("  Connecting to ChatGPT", initial.text[0].text);
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expectEqual(false, ctx.redraw);
+    gate.publish_code.set(io);
+    gate.published.waitUncancelable(io);
+    try std.testing.expect(!page.task.completed());
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expectEqual(true, ctx.redraw);
+    const shown = try page.widget().draw(draw_context);
+    const line: *vxfw.RichText = @ptrCast(@alignCast(shown.children[1].surface.widget.userdata));
+    try std.testing.expectEqualStrings("auth.openai.com/codex/device", line.text[1].text);
+    try std.testing.expectEqualStrings(" · BDL9-KI88H", line.text[2].text);
+    try std.testing.expectEqualStrings("https://auth.openai.com/codex/device", line.text[1].link.uri);
+    ctx.redraw = false;
+    try page.widget().handleEvent(&ctx, .tick);
+    try std.testing.expectEqual(false, ctx.redraw);
 }

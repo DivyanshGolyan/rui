@@ -105,68 +105,7 @@ pub const Hooks = struct {
     start_host: *const fn (std.process.Init, []const u8) HostLaunch,
 };
 
-/// The screen's semantic projection of the shared launch result. It owns no
-/// terminal receipt or child bytes; kind, words and next action stay together.
-pub const HostLaunch = union(enum) {
-    ready: ?Warning,
-    failed: Failure,
-
-    pub const Next = enum {
-        start,
-        retry,
-
-        pub fn label(self: HostLaunch.Next) []const u8 {
-            return switch (self) {
-                .start => "r start",
-                .retry => "r retry",
-            };
-        }
-    };
-    pub const Failure = struct {
-        kind: Kind,
-        /// Terminal exit classification is retained, never shown as UI text.
-        err: anyerror,
-
-        pub const Kind = enum { setup, worker, os_launch, child_refused, child_closed, startup_full, readiness_timeout, incompatible, store_access, store_identity, mysql_unavailable, interrupted };
-
-        pub fn words(self: Failure) []const u8 {
-            return switch (self.kind) {
-                // The person can only retry these three, so they read alike.
-                .setup, .worker, .os_launch => "could not start",
-                .child_refused => "refused to start",
-                .child_closed => "quit on start",
-                .startup_full => "start unconfirmed",
-                .readiness_timeout => "start timed out",
-                .incompatible => "different Rui version",
-                .store_access => "can't read Store",
-                .store_identity => "not the same Store",
-                .mysql_unavailable => "can't start from here",
-                .interrupted => "start interrupted",
-            };
-        }
-
-        pub fn next(self: Failure) ?HostLaunch.Next {
-            return switch (self.kind) {
-                .incompatible, .store_identity, .mysql_unavailable => null,
-                else => .retry,
-            };
-        }
-    };
-    pub const Warning = enum {
-        invalid_openai_base_url,
-
-        pub fn words(_: Warning) []const u8 {
-            return "OpenAI URL invalid";
-        }
-    };
-
-    pub fn words(self: HostLaunch) []const u8 {
-        return switch (self) {
-            .ready => |warning| if (warning) |value| value.words() else "",
-            .failed => |failure| failure.words(),
-        };
-    }
-};
+pub const HostLaunch = @import("host_launch.zig").Summary;
 
 /// One discovery observation, not a UI phase or a launch outcome. A pause
 /// belongs only to a reachable Host; a free Store lease proves it stopped.
@@ -1234,11 +1173,14 @@ fn signedIn(raw: *anyopaque, ctx: *vxfw.EventContext, activation: SignIn.Activat
     try self.appNext(ctx, try self.event(.{ .defaults_saved = saved }));
     self.state.login_at = self.realMs() / 1000;
     self.state.next_list_ms = 0;
-    if (activation.default_failed) {
-        const text = "Sign-in saved; couldn't save default";
+    const warning = if (activation.launch) |*launch| launch.warning else null;
+    if (activation.default_failed or warning != null) {
         var notice: view.Notice = .{ .colour = .failure };
-        @memcpy(notice.bytes[0..text.len], text);
-        notice.len = text.len;
+        var writer = std.Io.Writer.fixed(&notice.bytes);
+        if (warning != null) {
+            try @import("host_launch.zig").writeSignIn(&writer, .{ .ready = warning }, activation.default_failed, false);
+        } else try writer.writeAll("Sign-in saved; couldn't save default");
+        notice.len = writer.buffered().len;
         self.state.notice = notice;
     }
     self.root.sign_in_open = false;
@@ -4686,6 +4628,8 @@ test "Host recovery renders the launch result cause without confusing failure an
         .{ .launch = .{ .failed = .{ .kind = .readiness_timeout, .err = error.HostReadinessUnconfirmed } }, .words = "start timed out", .retry = true },
         .{ .launch = .{ .failed = .{ .kind = .store_identity, .err = error.StoreIdentityMismatch } }, .words = "not the same Store" },
         .{ .launch = .{ .failed = .{ .kind = .incompatible, .err = error.IncompatibleHost } }, .words = "different Rui version" },
+        .{ .launch = .{ .failed = .{ .kind = .provider_unserved, .err = error.HostModelUnavailable } }, .words = "does not serve this provider" },
+        .{ .launch = .{ .failed = .{ .kind = .store_format, .err = error.HostStartupFailed } }, .words = "needs a compatible Rui" },
     };
     for (cases) |case| for ([_]HostRecovery.Availability{ .ready, .stopping, .stopped }) |after| {
         errdefer std.debug.print("after={s} words={s}\n", .{ @tagName(after), case.words });
@@ -7133,7 +7077,7 @@ test "App settings typed queued saves settle on departure and retain failures" {
 }
 
 test "Sign-in completion applies the core default and restores only a visible focus target" {
-    for ([_]bool{ false, true }) |session_open| {
+    for ([_]bool{ false, true }) |session_open| for ([_]bool{ false, true }) |warning| for ([_]bool{ false, true }) |default_failed| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
         var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -7151,9 +7095,18 @@ test "Sign-in completion applies the core default and restores only a visible fo
         try activation.binding.provider.set("openai");
         try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
         try activation.store.set("/store");
+        activation.default_failed = default_failed;
+        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved } } } } }, .warning = .invalid_openai_base_url };
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try signedIn(overview, &ctx, activation);
+        if (warning or default_failed) {
+            try std.testing.expectEqual(true, overview.state.notice != null);
+            const text = overview.state.notice.?.text();
+            try std.testing.expectEqual(warning, std.mem.indexOf(u8, text, "OpenAI URL invalid") != null);
+            try std.testing.expectEqual(default_failed, std.mem.indexOf(u8, text, if (warning) "default not saved" else "couldn't save default") != null);
+            try std.testing.expect(std.mem.indexOfAny(u8, text, "\r\n\x1b") == null);
+        }
         try std.testing.expectEqual(protocol.Provider.openai, overview.state.default.?.provider);
         try std.testing.expectEqualStrings(activation.binding.model.slice(), overview.state.default.?.model.slice());
         try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, .low), overview.state.default.?.effort);
@@ -7166,7 +7119,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
                 try std.testing.expect(command.request_focus.eql(session.widget()));
             };
         }
-    }
+    };
 }
 
 test "Sign-in admission waits for every pending default writer and Host upgrade" {
