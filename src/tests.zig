@@ -38,6 +38,7 @@ test {
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
+    _ = @import("host_coordinator.zig");
     _ = @import("HostLifecycle.zig");
     _ = @import("host_restart_all.zig");
     _ = @import("host_identity.zig");

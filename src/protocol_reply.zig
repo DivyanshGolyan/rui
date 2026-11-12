@@ -444,6 +444,15 @@ pub const HostInfoProfile = enum {
             .released_9 => "9",
         };
     }
+
+    /// The providers this profile's Host reports: version 9 knew only
+    /// Codex and OpenAI, and serves no other.
+    fn Providers(comptime self: HostInfoProfile) type {
+        return switch (self) {
+            .current => protocol.Routes,
+            .released_9 => struct { codex: protocol.Route, openai: protocol.Route },
+        };
+    }
 };
 
 pub const HostInfoFacts = @FieldType(HostStatus, "ready");
@@ -454,10 +463,16 @@ pub fn parseHostInfo(body: []const u8, store: []const u8) !HostStatus {
 
 /// Validates the complete known shape, not a compatible ordinary-client reply.
 pub fn parseHostInfoForProfile(body: []const u8, store: []const u8, profile: HostInfoProfile) !HostInfoFacts {
+    return switch (profile) {
+        inline else => |known| parseHostInfoShape(protocol.HostInfoWith(known.Providers()), body, store, known),
+    };
+}
+
+fn parseHostInfoShape(comptime Info: type, body: []const u8, store: []const u8, profile: HostInfoProfile) !HostInfoFacts {
     if (body.len > protocol.max_host_info_response_bytes) return error.InvalidHostInfo;
     var parse_storage: [protocol.max_host_info_response_bytes * 2]u8 = undefined;
     var arena = std.heap.FixedBufferAllocator.init(&parse_storage);
-    const info = try std.json.parseFromSliceLeaky(protocol.HostInfo, arena.allocator(), body, .{
+    const info = try std.json.parseFromSliceLeaky(Info, arena.allocator(), body, .{
         .ignore_unknown_fields = false,
         .allocate = .alloc_if_needed,
     });
@@ -498,7 +513,16 @@ pub fn parseHostInfoForProfile(body: []const u8, store: []const u8, profile: Hos
         .custody_occupied = custody_occupied,
         .paused = info.paused,
         .innodb_doublewrite = doublewrite,
-        .capabilities = info.capabilities,
+        .capabilities = .{
+            .bash = info.capabilities.bash,
+            .providers = routes: {
+                // A provider the reply does not name is one its Host does not serve.
+                var routes = protocol.routesAll(.unserved);
+                inline for (@typeInfo(@TypeOf(info.capabilities.providers)).@"struct".field_names) |name|
+                    @field(routes, name) = @field(info.capabilities.providers, name);
+                break :routes routes;
+            },
+        },
     };
 }
 
@@ -541,7 +565,7 @@ test "Host information parses omitted and bounded string diagnostics with one se
 }
 
 test "Host information is bounded and rejects ambiguous identities and capacity" {
-    const golden = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}";
+    const golden = "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"17\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}";
     const result = try parseHostInfo(golden, "/one");
     try std.testing.expect(result.ready.store.eql("/one"));
     try std.testing.expectEqual(@as(usize, 17), result.ready.active_capacity);
@@ -573,15 +597,15 @@ test "Host information is bounded and rejects ambiguous identities and capacity"
     }
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(golden, "/other"));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0F\",\"active_capacity\":\"17\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}",
         "/one",
     ));
     try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(
-        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\"}}}",
+        "{\"version\":\"" ++ protocol.wire_version ++ "\",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"01\",\"started_at\":\"1792918800\",\"custody_occupied\":\"0\",\"paused\":false,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"unserved\",\"openai\":\"unserved\",\"chatgpt\":\"unserved\"}}}",
         "/one",
     ));
     for ([_][]const u8{ "intake_capacity", "descriptor_limit" }) |field| {
@@ -616,10 +640,15 @@ test "upgrade Host information profiles retain the entire strict shape" {
     const old = "{" ++ legacy_field ++ ",\"type\":\"host_info\",\"store\":\"/one\",\"instance\":\"000102030405060708090a0b0c0d0e0f\",\"active_capacity\":\"17\",\"intake_capacity\":\"10\",\"descriptor_limit\":\"256\",\"started_at\":\"1792918800\",\"custody_occupied\":\"3\",\"paused\":true,\"capabilities\":{\"bash\":true,\"providers\":{\"codex\":\"endpoint\",\"openai\":\"unserved\"}}}";
     try std.testing.expectEqualStrings(protocol.wire_version, HostInfoProfile.current.wire());
     try std.testing.expectEqualStrings("9", HostInfoProfile.released_9.wire());
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfo(old, "/one"));
-    const current = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
+    // Version 9 names only Codex and OpenAI; the current shape adds ChatGPT,
+    // so neither profile reads the other's reply.
+    try std.testing.expectError(error.MissingField, parseHostInfo(old, "/one"));
+    const versioned = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, "\"version\":\"" ++ protocol.wire_version ++ "\"");
+    defer std.testing.allocator.free(versioned);
+    const current = try std.mem.replaceOwned(u8, std.testing.allocator, versioned, "\"openai\":\"unserved\"", "\"openai\":\"unserved\",\"chatgpt\":\"unserved\"");
     defer std.testing.allocator.free(current);
-    try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(current, "/one", .released_9));
+    try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(versioned, "/one", .released_9));
+    try std.testing.expectError(error.UnknownField, parseHostInfoForProfile(current, "/one", .released_9));
     inline for (std.meta.tags(HostInfoProfile)) |profile| {
         const body = if (profile == .released_9) old else current;
         const facts = try parseHostInfoForProfile(body, "/one", profile);
@@ -633,6 +662,7 @@ test "upgrade Host information profiles retain the entire strict shape" {
         try std.testing.expect(facts.paused and facts.capabilities.bash);
         try std.testing.expectEqual(protocol.Route.endpoint, facts.capabilities.providers.codex);
         try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.openai);
+        try std.testing.expectEqual(protocol.Route.unserved, facts.capabilities.providers.chatgpt);
         try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(body, "/other", profile));
         for ([_]struct { from: []const u8, to: []const u8, failure: anyerror }{
             .{ .from = "\"type\":\"host_info\"", .to = "\"type\":\"host_status\"", .failure = error.InvalidHostInfo },
@@ -656,10 +686,14 @@ test "upgrade Host information profiles retain the entire strict shape" {
     for ([_][]const u8{ "8", protocol.next_wire_version, "09", "unknown", "" }) |wire| {
         const version = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{wire});
         defer std.testing.allocator.free(version);
-        const bad = try std.mem.replaceOwned(u8, std.testing.allocator, old, legacy_field, version);
-        defer std.testing.allocator.free(bad);
-        inline for (std.meta.tags(HostInfoProfile)) |profile|
+        inline for (std.meta.tags(HostInfoProfile)) |profile| {
+            const body = if (profile == .released_9) old else current;
+            const field = try std.fmt.allocPrint(std.testing.allocator, "\"version\":\"{s}\"", .{profile.wire()});
+            defer std.testing.allocator.free(field);
+            const bad = try std.mem.replaceOwned(u8, std.testing.allocator, body, field, version);
+            defer std.testing.allocator.free(bad);
             try std.testing.expectError(error.InvalidHostInfo, parseHostInfoForProfile(bad, "/one", profile));
+        }
     }
 }
 

@@ -867,6 +867,12 @@ The discovery boundary covers missing socket paths, stale refused sockets withou
 Additional platform/client cases distinguish a refused socket with its Store lock held from a stale socket with its Store lock free, reject a mismatched hint and verify private publication and clean hint retirement.
 The native restart-all suite explicitly crashes a real Host before its empty-runtime assertion: discovery must silently skip that free-lease socket, retain it without deletion and start nothing. This also covers stale sockets left by earlier lifecycle cases.
 Both installer suites record the exact newly selected command's restart-all invocation, retain its output and require exit zero after a failed restart handoff.
+`tool_custody_cases` runs that same restart CLI inside a real Host Bash tool with the originating Host first in socket order, crossing an exec'd process-group leader / retained installer shell with open / already-broken stdout.
+Both Stores must retire their old native PIDs, become ready on the selected pinned executable and preserve capacity/environment; complete ordered restart receipts must survive through stderr diagnostics after the caller's output closes.
+It also exercises CLI Upgrade across both Bash process shapes, replacing both Stores and retaining the complete ordered batch receipt after the first restart closes the caller/event pipe. Upgrade's pre-publication warning still requires a report reader.
+The focused `custody` selector runs these cases; `restart-all` and `lifecycle` include their respective custody rows.
+Coordinator native tests round-trip every progress stage and ActivationOutcome (all limitations and failure stages), batch routing, pinned targets and per-Store discovery failures; the broken-pipe reporting test counts every outcome without requiring a report reader.
+The existing terminal selector exercises inline UpgradeJob through the same activation owner, including post-publication departure, cancellation guidance and relaunch.
 
 Only the fixture's build identity differs; installation eligibility, publication, Host lifecycle and terminal code are the production owners.
 Ordinary untagged builds still report `unreleased`.

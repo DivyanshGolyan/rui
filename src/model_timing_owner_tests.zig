@@ -89,7 +89,7 @@ test "model resolution owner captures timings for success failure interruption s
                 var used: std.atomic.Value(u64) = .init(0);
                 var reactor: provider.Reactor = undefined;
                 try reactor.init(std.testing.allocator, io, .{
-                    .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null }),
+                    .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = null }),
                     .capacity = 1,
                     .inactivity_seconds = 1,
                     .scratch_path = "/nonexistent",

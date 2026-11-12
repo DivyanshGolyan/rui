@@ -289,13 +289,17 @@ pub fn requestHeaders(settings: *const codec_abi.Settings, out: *codec_abi.Heade
 
 /// The provider codes that resending the same request cannot fix, from
 /// Codex 970111f6 codex-api/src/sse/responses_error.rs, each named by what
-/// the person can do about it. Any other code narrows nothing.
+/// the person can do about it, and the two OpenAI's API answers a ChatGPT
+/// plan sign-in whose plan usage is spent or not offered. Any other code
+/// narrows nothing.
 const RefusalCode = enum {
     insufficient_quota,
     credit_balance_exhausted,
     organization_spend_limit_exceeded,
     project_spend_limit_exceeded,
     usage_limit_reached,
+    subscription_sharing_usage_limit_exceeded,
+    subscription_sharing_usage_unavailable,
     usage_not_included,
     cyber_policy,
     bio_policy,
@@ -306,7 +310,7 @@ const RefusalCode = enum {
 
 fn refusalOf(code: []const u8) ?codec_abi.Refusal {
     return switch (std.meta.stringToEnum(RefusalCode, code) orelse return null) {
-        .insufficient_quota, .credit_balance_exhausted, .organization_spend_limit_exceeded, .project_spend_limit_exceeded, .usage_limit_reached => .quota,
+        .insufficient_quota, .credit_balance_exhausted, .organization_spend_limit_exceeded, .project_spend_limit_exceeded, .usage_limit_reached, .subscription_sharing_usage_limit_exceeded, .subscription_sharing_usage_unavailable => .quota,
         .usage_not_included => .plan,
         .cyber_policy, .bio_policy, .misalignment_policy_violation, .invalid_prompt => .policy,
         .model_not_found => .model_unavailable,

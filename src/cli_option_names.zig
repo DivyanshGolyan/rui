@@ -46,6 +46,7 @@ pub const names = [_][]const u8{
     "test-bash-scratch-limit-bytes",
     "test-before-launch-delay-ms",
     "test-before-result-delay-ms",
+    "test-chatgpt-fixture-endpoint",
     "test-client-send-buffer-bytes",
     "test-codex-fixture-endpoint",
     "test-control-gate-keys",

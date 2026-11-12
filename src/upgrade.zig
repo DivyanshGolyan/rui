@@ -178,7 +178,7 @@ pub fn install(init: std.process.Init, allocator: std.mem.Allocator, checked: *c
         waitAfterPublication(init, cancellation) catch |err| break :hosts .{ .failure = err };
         var target = restart_all.Target.init(init, allocator, checked.home, receipt.selected_after, cancellation) catch |err| break :hosts .{ .failure = err };
         defer target.deinit(allocator);
-        break :hosts restart_all.restart(init, allocator, .{
+        break :hosts @import("host_coordinator.zig").restart(init, allocator, .{
             .home = checked.home,
             .target = &target,
             .cancellation = cancellation,

@@ -29,7 +29,8 @@ download: upgrade.DownloadDiagnostic = .{},
 failure: ?anyerror = null,
 outcome: Outcome = .unchanged,
 /// A stop was asked for: an Esc that `gate` let through, or leaving the
-/// overview, which stops the run whatever `gate` says.
+/// overview, which requests a stop whatever `gate` says. Activation already
+/// handed to the independent coordinator still finishes before the join.
 cancelling: bool = false,
 started: bool = false,
 finished: bool = false,
@@ -124,7 +125,8 @@ pub fn cancel(self: *Self) void {
     if (self.started) self.task.cancel();
 }
 
-/// Leaving the overview: stops the run wherever it is, publication or not.
+/// Leaving the overview requests a stop, publication or not. The independent
+/// coordinator retains accepted activation custody; joining waits for its result.
 fn abandon(self: *Self) void {
     if (self.finished) return;
     self.cancelling = true;

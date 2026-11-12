@@ -107,6 +107,9 @@ fn run(init: std.process.Init) !void {
     const args = try allocator.alloc([]const u8, raw_args.len);
     defer allocator.free(args);
     for (raw_args, args) |raw, *arg| arg.* = raw;
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--host-coordinator")) {
+        return @import("host_coordinator.zig").run(init, allocator);
+    }
     if (args.len == 2 and (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h"))) {
         return std.Io.File.stdout().writeStreamingAll(init.io, usage_text);
     }
@@ -330,7 +333,7 @@ noinline fn clientCommand(init: std.process.Init, command: cli_args.Command, par
             try std.Io.File.stdout().writeStreamingAll(init.io, text);
         },
         .host_start, .host_pause, .host_status => try host(init, command, parsed),
-        .host_restart => try @import("host_restart_all.zig").run(init, init.gpa),
+        .host_restart => try @import("host_coordinator.zig").restartAll(init, init.gpa),
         .host_serve => unreachable,
         // Inspection has its own read-only operation; configure's grammar
         // requires an edit.
@@ -361,9 +364,11 @@ fn postCommandHoldDescriptors(ready: std.posix.fd_t, release: std.posix.fd_t) !v
     if (std.c.read(release, &acknowledgment, acknowledgment.len) != 1) return error.PostCommandHoldClosed;
 }
 
-fn credentialPath(init: std.process.Init, buffer: []u8, create: bool) ![]const u8 {
-    return provider_login.codexPath(init, buffer, create) catch |err| {
-        if (err == error.HomeRequired) return homeRequired("the Codex credential is HOME/.config/rui/codex.json unless RUI_CODEX_CREDENTIAL_FILE names it");
+/// A sign-in provider's credential file (`provider_login.credentialPath`),
+/// with HOME's absence reported as the terminal names that provider.
+fn credentialPath(init: std.process.Init, comptime provider: protocol.Provider, buffer: []u8, create: bool) ![]const u8 {
+    return provider_login.credentialPath(init, provider, buffer, create) catch |err| {
+        if (err == error.HomeRequired) return homeRequired("the " ++ providerPresentation(provider).name ++ " credential is HOME/.config/rui/" ++ @tagName(provider) ++ ".json unless " ++ comptime provider_login.credentialVariable(provider) ++ " names it");
         return err;
     };
 }
@@ -446,7 +451,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
     try std.Io.File.stdout().writeStreamingAll(init.io, switch (readiness.get(.openai)) {
         .configured, .renewal_due => "OpenAI API key: saved locally (remote acceptance not checked).\n",
         .missing => "OpenAI API key: missing.\n",
-        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login() ++ "`.\n",
+        .refresh_required, .credential_error => "OpenAI API key: unreadable, not owner-only or not one key; save it again with `" ++ comptime protocol.Provider.openai.login().? ++ "`.\n",
     });
     const selectable = model_capability.capabilities(&readiness);
     const selection: ?provider_selection.Selection = provider_selection.resolve(&selectable, null, null, if (values.provider.len != 0) values.provider.slice() else null, if (values.model.len != 0) values.model.slice() else null) catch |err| blk: {
@@ -458,7 +463,7 @@ fn setup(init: std.process.Init, parsed: *const cli_args.Parsed, reader: SetupRe
         break :blk null;
     };
     if (selection) |choice| switch (choice) {
-        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `" ++ comptime protocol.Provider.codex.login() ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login() ++ "`.\n"),
+        .chooser => try std.Io.File.stdout().writeStreamingAll(init.io, "Next Session: choose a provider with `rui defaults configure --provider " ++ provider_choices ++ "`; Codex login: `" ++ comptime protocol.Provider.codex.login().? ++ "`; OpenAI key: `" ++ protocol.Provider.openai.login().? ++ "`.\n"),
         .selected => |selected| {
             const note: []const u8 = switch (selected.readiness) {
                 .configured => "local credential configured; remote acceptance not checked",
@@ -975,9 +980,16 @@ fn startHost(init: std.process.Init, selected: []const u8, capacity: ?usize, rea
     // exec/error handoff. Only the serving Host claims the Store lease.
     var capacity_buffer: [std.fmt.count("{d}", .{std.math.maxInt(usize)}) + 1]u8 = undefined;
     var argv = [_:null]?[*:0]const u8{
-        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--provider", "codex", null, null, null, null,
+        @ptrCast(&executable_buffer), "host", "serve", "--store", store_z.ptr, "--provider", "codex", null, null, null, null, null, null,
     };
-    var argc: usize = argv.len - 4;
+    var argc: usize = argv.len - 6;
+    // A ChatGPT plan sign-in is served when its credential is usable here.
+    const chatgpt: provider_selection.Readiness = if (readiness) |known| known.get(.chatgpt) else providerReadiness(init, .chatgpt) catch .credential_error;
+    if (chatgpt.usable()) {
+        argv[argc] = "--provider";
+        argv[argc + 1] = "chatgpt";
+        argc += 2;
+    }
     const openai: provider_selection.Readiness = if (readiness) |known| known.get(.openai) else providerReadiness(init, .openai) catch .credential_error;
     if (openai.usable()) {
         result.warning = openAiBaseUrlDiagnostic(init);
@@ -1067,8 +1079,18 @@ fn reportStartedHost(io: std.Io, ready: *const HostLaunchResult.Ready, quiet: bo
 }
 
 fn login(init: std.process.Init, args: []const []const u8, comptime exchange: anytype) !void {
-    if (args.len == 1 and std.mem.eql(u8, args[0], "openai")) return saveApiKey(init);
-    if (args.len != 1 or !std.mem.eql(u8, args[0], "codex")) return usage();
+    if (args.len != 1) return usage();
+    const provider = std.meta.stringToEnum(protocol.Provider, args[0]) orelse return usage();
+    if (provider.login() == null) {
+        stderr.diagnostic("rui auth login: {s} has no terminal sign-in yet; nothing was changed.\n", .{providerPresentation(provider).name});
+        return usage();
+    }
+    switch (provider) {
+        .openai => return saveApiKey(init),
+        .codex => {},
+        // Its login fact is false, so the check above returned.
+        .chatgpt => unreachable,
+    }
     var interrupt = LoginInterrupt.init();
     defer interrupt.deinit();
     try provider_login.codex(init, exchange, struct {
@@ -1759,7 +1781,7 @@ fn openAiBaseUrlDiagnostic(init: std.process.Init) ?Overview.HostLaunch.Warning 
 noinline fn readServedKey(init: std.process.Init, key: *api_key.Key) ![]const u8 {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (try api_key.read(try openAiKeyPath(init, &path_buffer), key) == null) {
-        stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login() ++ "`, then start the Host again.\n", .{});
+        stderr.diagnostic("rui: no OpenAI API key; save one with `" ++ comptime protocol.Provider.openai.login().? ++ "`, then start the Host again.\n", .{});
         return error.ApiKeyMissing;
     }
     return key.slice();
@@ -1786,8 +1808,8 @@ fn localReadiness(init: std.process.Init) provider_selection.Readinesses {
 fn providerReadiness(init: std.process.Init, provider: protocol.Provider) !provider_selection.Readiness {
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     switch (provider) {
-        .codex => {
-            const path = try credentialPath(init, &path_buffer, false);
+        inline .codex, .chatgpt => |sign_in| {
+            const path = try credentialPath(init, sign_in, &path_buffer, false);
             return switch (try codex_auth.localStatus(path, codex_auth.nowSeconds(init.io))) {
                 .missing => .missing,
                 .configured => .configured,
@@ -1808,6 +1830,7 @@ fn providerPresentation(provider: protocol.Provider) ProviderPresentation {
     return switch (provider) {
         .codex => .{ .name = "Codex" },
         .openai => .{ .name = "OpenAI" },
+        .chatgpt => .{ .name = "ChatGPT" },
     };
 }
 
@@ -1822,10 +1845,29 @@ fn hostProvidersLine(routes: protocol.Routes, buffer: []u8) []const u8 {
         first = false;
     };
     line.writeAll(" (credentials checked locally, not by status)") catch unreachable;
-    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved)
-        line.print("; to add {s}, stop and restart it after `{s}`", .{ providerPresentation(provider).name, provider.login() }) catch unreachable;
+    for (std.enums.values(protocol.Provider)) |provider| if (protocol.routeOf(routes, provider) == .unserved) {
+        if (provider.login()) |command|
+            line.print("; to add {s}, stop and restart it after `{s}`", .{ providerPresentation(provider).name, command }) catch unreachable
+        else
+            line.print("; {s} needs a sign-in this terminal cannot make yet", .{providerPresentation(provider).name}) catch unreachable;
+    };
     line.writeAll(".\n") catch unreachable;
     return line.buffered();
+}
+
+test "the Host line names a login only for an unserved provider that has one" {
+    var buffer: [512]u8 = undefined;
+    const served_one: protocol.Routes = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved };
+    try std.testing.expectEqualStrings("Host: serves Codex (credentials checked locally, not by status); to add OpenAI, stop and restart it after `rui auth login openai`; ChatGPT needs a sign-in this terminal cannot make yet.\n", hostProvidersLine(served_one, &buffer));
+    inline for (comptime std.enums.values(protocol.Provider)) |unserved| {
+        var routes = protocol.routesAll(.endpoint);
+        @field(routes, @tagName(unserved)) = .unserved;
+        const said = hostProvidersLine(routes, &buffer);
+        if (unserved.login()) |command|
+            try std.testing.expect(std.mem.indexOf(u8, said, command) != null)
+        else
+            try std.testing.expect(std.mem.indexOf(u8, said, "rui auth login") == null and std.mem.indexOf(u8, said, "cannot make yet") != null);
+    }
 }
 
 fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
@@ -1845,6 +1887,11 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     const provider_endpoint = parsed.get("provider-endpoint");
     const provider_ca_file = parsed.get("provider-ca-file");
     const fixture_endpoint = parsed.get("test-codex-fixture-endpoint");
+    // Test only: a loopback that answers as OpenAI's API and, at
+    // BASE/oauth/token beside BASE/responses, as the plan's token issuer.
+    const chatgpt_fixture = parsed.get("test-chatgpt-fixture-endpoint");
+    if (chatgpt_fixture != null and init.environ_map.get("RUI_CHATGPT_CREDENTIAL_FILE") == null)
+        return error.FixtureCredentialPathRequired;
     const bash_path = parsed.get("bash-path") orelse server.default_bash_path;
     if (bash_path.len == 0) return error.InvalidBashPath;
     const bash_timeout_ms = try parsed.number(u64, "bash-timeout-ms") orelse server.default_bash_timeout_ms;
@@ -1854,6 +1901,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
     if (fixture_endpoint != null and init.environ_map.get("RUI_CODEX_CREDENTIAL_FILE") == null)
         return error.FixtureCredentialPathRequired;
     var credential_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var chatgpt_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     // Read once here and borrowed by the Host for its life.
     var openai_key: api_key.Key = .{ .len = 0 };
     defer openai_key.wipe();
@@ -1872,7 +1920,8 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         if (served.serves(named)) return error.DuplicateArgument;
         served.table.set(named, switch (named) {
-            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } } },
+            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, .codex, &credential_path_buffer, false) } } },
+            .chatgpt => .{ .endpoint = providers.endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = try credentialPath(init, .chatgpt, &chatgpt_path_buffer, false) } } },
             .openai => .{ .endpoint = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
                 if (err == error.InvalidBaseUrl) stderr.diagnostic(invalid_base_url ++ "; the Host did not start.\n", .{});
                 return err;
@@ -1891,7 +1940,13 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         if (served.serves(.openai)) return error.ConflictingArguments;
         served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key), .fixture = true } } });
     }
-    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .fixture = true } } });
+    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, .codex, &credential_path_buffer, false), .refresh = .synthetic } } });
+    if (chatgpt_fixture) |endpoint| {
+        if (served.serves(.chatgpt)) return error.ConflictingArguments;
+        const base = providers.responsesBase(endpoint) orelse return error.InvalidArguments;
+        const token = try std.fmt.allocPrint(init.arena.allocator(), "{s}/oauth/token", .{base});
+        served.table.set(.chatgpt, .{ .endpoint = endpoint, .credential = .{ .chatgpt_plan = .{ .path = try credentialPath(init, .chatgpt, &chatgpt_path_buffer, false), .refresh = .{ .fixture_endpoint = token } } } });
+    }
     if (provider_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .none });
     // The execution thread's fence would report this while startup still
     // holds stderr, so its cause could be dropped (#1093).
@@ -4126,7 +4181,7 @@ const LaunchFixture = struct {
             else => false,
         });
         if (!ready) return .unavailable;
-        return .{ .ready = .{ .store = paths.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai) .key_file else .unserved } } } };
+        return .{ .ready = .{ .store = paths.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = if (self.openai) .key_file else .unserved, .chatgpt = .unserved } } } };
     }
     fn launch(raw: ?*anyopaque, _: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, argc: usize, fd: *c_int) c_int {
         const self = cast(raw);
@@ -4480,7 +4535,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },
         .{ .err = error.InvalidRuiAddress, .code = .peer_context_invalid, .exit = 2, .phrase = "unset RUI_STORE RUI_ADDRESS RUI_SENDER_HANDLE" },
         .{ .err = error.InvalidSenderHandle, .code = .invalid_sender_handle, .exit = 2, .phrase = "Send from a live Rui Session" },
-        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: codex, openai." },
+        .{ .err = error.UnsupportedSelectionProvider, .code = .selection_provider_unsupported, .exit = 6, .phrase = "Accepted: codex, openai, chatgpt." },
         .{ .err = error.UnsupportedSelectionModel, .code = .selection_model_unsupported, .exit = 6, .phrase = "rui defaults configure --clear-model" },
         .{ .err = error.SavedPreferenceStoreInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "HOME/.config/rui/preferences" },
         .{ .err = error.SavedPreferenceProviderInvalid, .code = .preferences_invalid, .exit = 6, .phrase = "repair or remove that file" },
@@ -4491,7 +4546,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
         .{ .err = error.PreferencesUnavailable, .code = .preferences_unavailable, .exit = 6, .phrase = "preferences file (0600)" },
         .{ .err = error.InsecurePreferenceDirectory, .code = .preferences_unavailable, .exit = 6, .phrase = "HOME/.config/rui (0700)" },
         .{ .err = error.InvalidPreferenceStore, .code = .preference_store_invalid, .exit = 2, .phrase = "rui defaults configure --store PATH" },
-        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider codex or --provider openai" },
+        .{ .err = error.UnsupportedPreferenceProvider, .code = .preference_provider_invalid, .exit = 2, .phrase = "--provider codex, --provider openai or --provider chatgpt." },
         .{ .err = error.InvalidPreferenceModel, .code = .preference_model_invalid, .exit = 2, .phrase = "1-256 printable non-space ASCII bytes" },
         .{ .err = error.PreferenceProviderRequired, .code = .preference_provider_required, .exit = 2, .phrase = "Saving a default model requires a provider." },
         .{ .err = error.HomeUnavailable, .code = .home_unavailable, .exit = 6, .phrase = "Set HOME to your absolute home directory" },
