@@ -3316,6 +3316,31 @@ def main(selected="all"):
                         lambda: stop_process(entered, timeout=5),
                         lambda: proxy.close() if proxy is not None else None,
                         lambda: close_pty(master), lambda: close_pty(slave))
+        # SIGTERM and SIGINT to the Host are a stop someone asked for, as
+        # host-stop is: the open conversation says so and leaves it to r.
+        for stop_signal in (signal.SIGTERM, signal.SIGINT):
+            master, slave = open_pty()
+            entered = spawn([str(fixture.RUI), "session", "resume", "--store", str(store),
+                "--", empty_session], env={**os.environ, "HOME": str(home)},
+                stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            served, host = host, None
+            try:
+                read_terminal(master, "› ")
+                served.send_signal(stop_signal)
+                # The Host shuts down itself; the signal does not end it.
+                assert served.wait(timeout=10) >= 0, (stop_signal, served.returncode)
+                stopped = read_terminal(master, "Host stopped · r start")
+                assert "Host starting" not in stopped, stopped
+                assert entered.poll() is None, "the Host's stop ended the TUI"
+                os.write(master, b"\x03")
+                _, errors = terminal_exit(entered, master)
+                assert entered.returncode == 0, errors
+            finally:
+                dispose_all(lambda: stop_process(served),
+                            lambda: stop_process(entered, timeout=5),
+                            lambda: close_pty(master), lambda: close_pty(slave))
+            # The TUI started no Host, so the Store's lease is free again.
+            host = fixture.start_host(store, url)
         completed = True
         print("human CLI: saved recovery, one-shot observation/re-entry, exact PTY approval, bounded input and Host restart passed")
     finally:

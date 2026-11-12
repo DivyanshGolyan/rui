@@ -2444,7 +2444,7 @@ A running Host that does not serve the chosen provider is reported, not restarte
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
 When its Host goes away the overview stays open and says so on one Host line, `■ Host stopped · r start`; `r` on an empty draft, or a click on the line, starts it through the same launch owner.
-A Host that ended without being asked to stop (a crash or a kill) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap) or by its launcher closing stdin is not, nor while an Upgrade holds the Host.
+A Host that ended without being asked to stop (a crash or SIGKILL) is started once by itself, the line reading `Host starting` meanwhile; a Host stopped by `host-stop` (pause, stop or an Upgrade's swap), by its launcher closing stdin, or by SIGINT or SIGTERM (Ctrl-C on a foreground `host serve`, or `kill`) is not, nor while an Upgrade holds the Host.
 The stopping Host leaves a stop record beside its Store lease, which every Host start removes; an unreadable record counts as a stop someone asked for.
 At most one automatic start runs per overview: a failed start or a second crash leaves the line to `r`, with no retry or backoff.
 
@@ -4000,6 +4000,7 @@ A disconnected readiness pipe records startup failure instead of terminating on 
 
 Host startup establishes default SIGCHLD handling with `SA_NOCLDWAIT` cleared before Store ownership or child launch, including for direct `host serve`.
 This preserves waitable child identities until their signaling owners retire.
+It also catches SIGINT and SIGTERM before Store ownership: either one is the same asked stop as `host-stop`, applied on the intake loop, which the handler only wakes; a second one while stopping changes nothing. Bash children start with every signal at its default.
 Host startup then owns lease acquisition, recovery and readiness.
 Competing launchers may create candidates, but one holds the lease.
 All probe the winning Host for up to ten seconds from readiness-check start, without killing an unconfirmed owner.
