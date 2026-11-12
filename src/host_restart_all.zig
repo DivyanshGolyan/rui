@@ -60,6 +60,7 @@ const Totals = struct {
     }
 };
 
+/// Called only by the process-custody owner, never on a Host thread.
 pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
     const sockets = try platform.listHostSockets(allocator, init.io);
     defer {
@@ -67,8 +68,8 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
         allocator.free(sockets);
     }
     var buffer: [2048]u8 = undefined;
-    var output = std.Io.File.stdout().writerStreaming(init.io, &buffer);
-    const writer = &output.interface;
+    var output = OptionalOutput.init(init.io, std.Io.File.stdout(), &buffer);
+    const writer = &output.writer;
     var totals: Totals = .{};
     var target: ?Target = null;
     defer if (target) |value| value.deinit(allocator);
@@ -81,20 +82,20 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
             try field(writer, socket);
             try writer.writeAll("): failed at discovery: Host state is unconfirmed; inspect this socket and its Store with the owning client, then retry. A refused or missing socket alone does not prove the Host stopped.\n");
             totals.add(.failed);
-            try output.flush();
+            try output.writer.flush();
             continue;
         } orelse continue; // Only a trusted Store hint and free lease prove absence.
         const store = discovered.facts.store.slice();
         const home = init.environ_map.get("HOME") orelse {
             try writeFailure(writer, store, "selection", "HOME is unavailable; restore it and retry.");
             totals.add(.failed);
-            try output.flush();
+            try output.writer.flush();
             continue;
         };
         var observation = HostLifecycle.observe(allocator, init.io, home, store, null) catch {
             try writeFailure(writer, store, "observation", "could not confirm this Host; inspect with its owning client, then retry.");
             totals.add(.failed);
-            try output.flush();
+            try output.writer.flush();
             continue;
         };
         defer observation.deinit(allocator);
@@ -108,14 +109,14 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
         };
         if (inactive) |outcome| {
             totals.add(try writeOutcome(writer, store, outcome, null));
-            try output.flush();
+            try output.writer.flush();
             continue;
         }
         if (target == null) {
             target = Target.init(init, allocator, home) catch {
                 try writeFailure(writer, store, "selection", "selected installed build has no verified release version; install a managed release and retry.");
                 totals.add(.failed);
-                try output.flush();
+                try output.writer.flush();
                 continue;
             };
         }
@@ -132,12 +133,44 @@ pub fn run(init: std.process.Init, allocator: std.mem.Allocator) !void {
             break :outcome HostLifecycle.activate(init, allocator, &observation, target.?.build, target.?.version, null, null) catch .{ .unconfirmed = .starting };
         };
         totals.add(try writeOutcome(writer, store, outcome, target.?.version));
-        try output.flush();
+        try output.writer.flush();
     }
     try totals.write(writer);
-    try output.flush();
+    try output.writer.flush();
     if (totals.failed != 0) return error.HostRestartFailed;
 }
+
+/// Reports are not custody: a departed tool closes stdout, but all remaining
+/// Stores must still be processed. Retain each failed write at the existing
+/// optional diagnostic boundary, without turning output failure into a stop.
+const OptionalOutput = struct {
+    io: std.Io,
+    destination: std.Io.File,
+    writer: std.Io.Writer,
+
+    fn init(io: std.Io, destination: std.Io.File, buffer: []u8) OptionalOutput {
+        return .{ .io = io, .destination = destination, .writer = .{ .buffer = buffer, .vtable = &.{ .drain = drain } } };
+    }
+
+    fn emit(self: *OptionalOutput, bytes: []const u8) void {
+        self.destination.writeStreamingAll(self.io, bytes) catch {
+            @import("stderr.zig").diagnosticBytes(bytes);
+        };
+    }
+
+    fn drain(writer: *std.Io.Writer, parts: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        const self: *OptionalOutput = @alignCast(@fieldParentPtr("writer", writer));
+        self.emit(writer.buffered());
+        writer.end = 0;
+        var count: usize = 0;
+        for (parts[0 .. parts.len - 1]) |part| {
+            self.emit(part);
+            count += part.len;
+        }
+        for (0..splat) |_| self.emit(parts[parts.len - 1]);
+        return count + splat * parts[parts.len - 1].len;
+    }
+};
 
 fn field(writer: *std.Io.Writer, text: []const u8) !void {
     var terminal: TerminalText = .{ .mode = .line };
@@ -264,4 +297,25 @@ test "restart all totals distinguish no Hosts success skips and failures" {
     for ([_]Result{ .restarted, .current, .skipped, .failed }) |result| totals.add(result);
     try totals.write(&writer);
     try std.testing.expectEqualStrings("4 Hosts: 1 restarted, 1 already current, 1 left unchanged, 1 failed.\n", writer.buffered());
+}
+
+test "restart all counts every outcome even after its output reader closes" {
+    var fds: [2]c_int = undefined;
+    try std.testing.expectEqual(@as(c_int, 0), std.c.pipe(&fds));
+    _ = std.c.close(fds[0]);
+    const destination: std.Io.File = .{ .handle = fds[1], .flags = .{ .nonblocking = false } };
+    defer destination.close(std.testing.io);
+    // Small enough to drive both buffered flush and direct drain/splat paths.
+    var buffer: [16]u8 = undefined;
+    var output = OptionalOutput.init(std.testing.io, destination, &buffer);
+    var totals: Totals = .{};
+    const info = @typeInfo(HostLifecycle.ActivationOutcome).@"union";
+    inline for (info.field_names, info.field_types) |name, Payload| {
+        const outcome = @unionInit(HostLifecycle.ActivationOutcome, name, std.mem.zeroes(Payload));
+        totals.add(try writeOutcome(&output.writer, "/store", outcome, .{ .schema = 1, .patch = 2 }));
+        try output.writer.flush();
+    }
+    try totals.write(&output.writer);
+    try output.writer.flush();
+    try std.testing.expectEqual(info.field_names.len, totals.restarted + totals.current + totals.skipped + totals.failed);
 }

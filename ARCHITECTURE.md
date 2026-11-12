@@ -1628,6 +1628,11 @@ After publication it pauses only the exact observed Host instance, waits for lea
 A replacement race, failed stop or start, or unsupported or application-owned launch configuration must not blindly stop another process and is reported as installed but not activated or unconfirmed as appropriate.
 An already-installed target can still need activation of an older running Host.
 Source and release installers invoke the newly published command's `rui host restart --all` after publication; failure prints its receipt and a note without failing or undoing installation.
+`host_coordinator` owns restart-all and Upgrade activation in fresh processes that leave the inherited session before accepting a task, independent of the Bash tool (and Host) that launched the caller; no Host thread is added.
+Upgrade hands off its original checked Host observation, launch snapshot and selected target over a private bounded pipe, not a replacement observation or a persisted copy of the Host's environment.
+Cancellation is checked before handoff; once accepted, activation finishes retirement and pinned startup even if the caller departs or its report pipe closes.
+Restart-all similarly completes every discovered target after the originating Host stops, without identifying that Host or reordering it last.
+Closed stdout cannot abort remaining restarts: outcome counts are retained and receipts fall back to the existing optional stderr diagnostic boundary; closed diagnostics remain best-effort, not a new log registry.
 `--all` is required (`option_required` without it); per-Store restart selection is not exposed yet.
 `platform` alone owns per-user runtime naming and socket enumeration, without creating a runtime directory or Store.
 Socket discovery retries transient refusal for at most 200 ms inside the shared observation deadline; failed transport alone never establishes absence.
