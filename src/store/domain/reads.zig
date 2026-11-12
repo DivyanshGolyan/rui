@@ -32,6 +32,7 @@ const Store = store_core.Store;
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const report_domain = @import("report.zig");
+const session_list_domain = @import("session_list_read.zig");
 const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
@@ -157,7 +158,7 @@ pub const read_failures = .{
     .{ call_outcomes, error.CallReadFailed },
     .{ operation_outcome, error.CallReadFailed },
     .{ queued, error.ActivityReadFailed },
-} ++ report_domain.work_failures;
+} ++ report_domain.work_failures ++ session_list_domain.last_line_failures;
 
 /// Ends a round of per-row reads, naming a failed step by `read_failures`.
 fn runRows(a: *ReadAccess) !void {
@@ -1035,8 +1036,8 @@ const page_session = rsql.Read(.{
 /// row, and the first of them also reads the assistant check, the call
 /// activity and the queued Messages, which the page's last row bounds.
 /// The work footer is a report read (`report.WorkRead`): its latest Turn
-/// shares round 1 and its next stage round 2, and any later stage runs
-/// after the page's rounds.
+/// shares round 1 and its next stage round 2. Any later work stages finish
+/// before item decoding, so its first Action and preview share an item round.
 /// noinline: its row buffers (about 2.4 KB) stay out of the read's Queue.run
 /// frame, which also drains queued writes and so sits under the deepest
 /// write on every engine chain that reads a page (read_transcript).
@@ -1083,6 +1084,13 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
         };
     } else try runRows(a);
     try work.advance();
+    // Finish the independent work stages before item decoding, using the
+    // same rounds they previously took after it. The canonical first Action
+    // is then available to queue the preview into the first item round.
+    try report_domain.readWorks(a, (&work)[0..1]);
+    page.work.work = try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
+    var last_line: session_list_domain.LastLineRead = undefined;
+    last_line.queue(a, session_ref, page.work.work.first_action);
     page.count = @min(rows.len, limit);
     page.more = rows.len > limit;
     var at: [page.items.len]ItemAt = undefined;
@@ -1110,10 +1118,11 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     try readItems(page.items.len, a, session_ref, end, at[0..page.count], page.items[0..page.count], &calls, null);
     if (missing != null) return error.CorruptStore;
     page.queued = waiting.queued;
-    // Work as of this same read, so the footer, consent and first Action
-    // always describe the page they arrive with.
-    try report_domain.readWorks(a, (&work)[0..1]);
-    page.work.work = try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
+    // Work and its canonical preview describe this same read, including
+    // live facts beyond a pinned history end. Item decoding drained the
+    // preview query without adding a round.
+    try last_line.finish(&page.work.last_line);
+    page.work.read_version = .{ .instance = a.store.instance, .generation = a.store.commitGeneration() };
     page.work.revision = session.revision.get();
 }
 

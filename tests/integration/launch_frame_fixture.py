@@ -54,7 +54,8 @@ def wait_for_host(path, store, process):
 
 def refusal(process):
     out, err = output(process)
-    assert process.returncode != 0, (out, err)
+    assert process.returncode == 1, (out, err)
+    assert not err, (out, err)
     lines = out.decode().splitlines()
     assert len(lines) == 1, (out, err)
     return json.loads(lines[0])["rui_start_error"]

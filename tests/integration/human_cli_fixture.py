@@ -189,6 +189,29 @@ def composer_line(screen, y):
     return line
 
 
+def composer_bounds(screen):
+    """The input's last two rules, measured in the rendered compose pane.
+
+    Short replies replace the footer's keys, never changing input or feed
+    geometry. Persistent state can still take rows below the chat footer.
+    Return None while no complete input is drawn.
+    """
+    rules = [index for index in range(len(screen.split("\n")))
+             if set(composer_line(screen, index)) == {"─"}]
+    return tuple(rules[-2:]) if len(rules) >= 2 else None
+
+
+def chat_footer_row(screen):
+    """The chat's one facts/keys row follows the input's lower rule.
+
+    While quiet (including a transient reply or modal info) it is the last
+    row; persistent send/recovery state below it reduces the feed capacity.
+    """
+    bounds = composer_bounds(screen)
+    assert bounds is not None, ("composer rules", screen)
+    return bounds[1] + 1
+
+
 def composer_empty(screen, y):
     """The composer holds no draft: the cursor's row is its bare mark."""
     return composer_line(screen, y) in (" ›", " >")
@@ -289,10 +312,10 @@ def chat_info_geometry(screen):
 
 
 
-def footer_click(screen, *, column=None, marker=None, info=False):
+def footer_click(screen, *, column=None, marker=None):
     """An SGR mouse click in the visible Session identity/footer line."""
     content = screen.split("\n")
-    row = len(content) - (1 if info else 2)
+    row = chat_footer_row(screen)
     line = content[row]
     if marker is not None:
         column = line.index(marker)

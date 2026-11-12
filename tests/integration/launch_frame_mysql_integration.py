@@ -47,6 +47,8 @@ def main():
             "presets": {"review": preset},
             "provider": {"kind": "openai_key", "baseUrl": "https://api.openai.com/v1", "key": "sk-mysql-launch-test"}}
     children = []
+    limited_logins = [("rui_ro_" + secrets.token_hex(6), "SELECT"),
+                      ("rui_no_update_" + secrets.token_hex(6), "SELECT, INSERT")]
 
     def sql(text):
         return subprocess.run([admin], input=text, text=True, capture_output=True, check=True).stdout.strip()
@@ -203,6 +205,22 @@ def main():
         private(host)
         close(host)
         released()
+        # Post-login access checks cover both ownership writes: SELECT-only
+        # cannot INSERT, and SELECT+INSERT still cannot advance the epoch.
+        for user, privileges in limited_logins:
+            limited_password = secrets.token_hex(24)
+            sql(f"CREATE USER '{user}'@'localhost' IDENTIFIED BY '{limited_password}';"
+                f"GRANT {privileges} ON {database}.* TO '{user}'@'localhost'")
+            limited_url = f"mysql://{user}:{limited_password}@{quote(socket, safe='')}/{database}"
+            before = admission_snapshot()
+            refused_host = launch(dict(good, store=limited_url))
+            denied = frame_host.refusal(refused_host)
+            assert denied["code"] == "mysql_login", denied
+            assert "SELECT, INSERT, UPDATE" in denied["message"], denied
+            out, err = frame_host.output(refused_host)
+            assert limited_url.encode() not in out + err and limited_password.encode() not in out + err
+            released()
+            assert admission_snapshot() == before, f"limited login {privileges} changed durable state"
         for selector in (None, database):
             sql(f"DELETE FROM {database}.store_meta WHERE meta_key='store_selector'")
             if selector is not None:
@@ -246,6 +264,7 @@ def main():
         assert code == 1, f"a fenced MySQL Store exited {code}, not 1: {frame_host.output(host)!r}"
         out, err = frame_host.output(host)
         # stdout holds the readiness line, then exactly one named exit (D211).
+        assert b"internal_unexpected" not in err, f"a fenced Host was reported as an internal fault: {err!r}"
         lines = out.decode().splitlines()
         assert len(lines) == 2 and lines[0].startswith("ready ") and json.loads(lines[1])["rui_start_error"]["code"] == "store_fenced", \
             f"missing named store_fenced exit: stdout={out!r} stderr={err[-4000:]!r}"
@@ -258,6 +277,11 @@ def main():
                 if child.poll() is None:
                     child.kill()
                 frame_host.output(child)
+            except Exception as error:
+                cleanup_errors.append(error)
+        for user, _ in limited_logins:
+            try:
+                sql(f"DROP USER IF EXISTS '{user}'@'localhost'")
             except Exception as error:
                 cleanup_errors.append(error)
         try:
