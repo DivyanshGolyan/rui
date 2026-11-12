@@ -1111,8 +1111,10 @@ fn drawPart(self: *Self, ctx: vxfw.DrawContext, part: AppScreen.Overview.Part) s
         self.app_input.composer.caret = self.state.inputMode() != .frozen;
         self.state.commands = view.nextCommands(&self.state, self.composerDraft());
         const footer = try ctx.arena.create(@import("widgets/Footer.zig"));
-        const keys = view.footerRight(&self.state, self.composerDraft());
-        footer.* = .{ .left = try view.footerLeft(ctx.arena, &self.state, size.width -| @as(u16, @intCast(keys.len)), self.caps), .right = keys, .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = .bar }) };
+        footer.* = .{ .left = "", .right = view.footerRight(&self.state, self.composerDraft()), .notice = if (view.footerNotice(&self.state)) |notice| try @import("session_chrome.zig").noticeLine(ctx.arena, notice) else null, .style = @import("widget_style.zig").of(self.caps, .{ .colour = .quiet, .background = .bar }) };
+        if (self.state.notice) |notice| footer.right_style = @import("widget_style.zig").of(self.caps, .{ .colour = notice.colour, .background = .bar });
+        const right_width: u16 = @intCast(@min(ctx.stringWidth(footer.rightText()), size.width));
+        footer.left = try view.footerLeft(ctx.arena, &self.state, size.width -| right_width, self.caps);
         self.app_input.facts = footer.widget();
         self.app_input.status = if (try view.noticeSegments(ctx.arena, &self.state, size.width, self.caps)) |notice| try rich(ctx, self.caps, notice) else .{ .userdata = self, .drawFn = emptyStatus };
         self.app_screen.tail = null;
@@ -1837,7 +1839,7 @@ fn upgradeValue(raw: *anyopaque) session_upgrade.Upgrade {
 fn conversationLine(raw: *anyopaque, kind: view.Kind) SessionFrontend.Lender.Said {
     const self: *Self = @ptrCast(@alignCast(raw));
     const said = view.conversation(&self.state, self.opened, kind, self.caps, &self.conversation_said);
-    return .{ .text = said.text, .stoppable = said.stoppable };
+    return .{ .text = said.text, .notice = said.notice, .stoppable = said.stoppable };
 }
 
 /// Writes the core's departure to stderr in one write. Never inlined: its
@@ -4121,7 +4123,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     finished.overview.opened = "k7m2qx".*;
     try finished.lend();
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, .working).text.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(finished.overview, .working).notice.?);
 
     // A stop still queued when the conversation opened goes before the
     // listing queued ahead of it.
@@ -4137,7 +4139,7 @@ test "a stop answered under a conversation says so there, and goes before a list
     try queued.lend();
     try std.testing.expectEqual(@as(usize, 1), Seen.now.stops);
     try std.testing.expectEqual(@as(usize, 2), Seen.now.lists);
-    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, .working).text.?);
+    try std.testing.expectEqualStrings(unsure, conversationLine(queued.overview, .working).notice.?);
 }
 
 test "a failed terminal restore still prints the departure guidance" {
@@ -5404,7 +5406,7 @@ fn commandRig(pages: std.Io.Dir, cancellation: *client.Cancellation) !*Rig {
     return rig;
 }
 
-test "both lines of a two-line command result show under the input" {
+test "a two-line command result uses the Footer right side without an extra row" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cancellation: client.Cancellation = .{};
@@ -5415,10 +5417,10 @@ test "both lines of a two-line command result show under the input" {
     try std.testing.expect(try rig.settle() == null);
     var shown = try rig.shown(80, 24);
     defer shown.deinit();
-    try shown.expectLines(19, &.{ " › Type a task", "────────────────────────────────────────────────────────────────────────────────", " Configured.", " ! label saved locally only" });
     const footer = try shown.line(23);
     try std.testing.expect(std.mem.startsWith(u8, footer, " no model"));
-    try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
+    try std.testing.expect(std.mem.endsWith(u8, footer, "Configured. ! label saved locally only"));
+    try std.testing.expectEqual(@as(usize, 0), (try statusRowsShown(&shown, 24)).len);
 }
 
 /// The rows between the composer's bottom rule and the Footer, which ends
@@ -5436,7 +5438,7 @@ fn statusRowsShown(shown: *Shown, height: u16) ![]const []const u8 {
     return rows;
 }
 
-test "a notice keeps its own rows above the one Footer: every result line and a whole recover handle, at any width" {
+test "Footer notices fit or truncate on the right without adding rows; persistent recovery keeps its rows" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var cancellation: client.Cancellation = .{};
@@ -5461,16 +5463,17 @@ test "a notice keeps its own rows above the one Footer: every result line and a 
             var shown = try rig.shown(width, 24);
             defer shown.deinit();
             const rows = try statusRowsShown(&shown, 24);
-            // The rows hold the notice whole: its lines, a long one wrapped
-            // only at a space, with nothing cut.
-            const joined = try std.mem.join(shown.arena.allocator(), " ", rows);
-            const expected = try std.mem.replaceOwned(u8, shown.arena.allocator(), case.notice, "\n", " ");
-            try std.testing.expectEqualStrings(expected, joined);
-            try std.testing.expect(rows.len >= 1 + std.mem.count(u8, case.notice, "\n"));
             const footer = try shown.line(23);
-            try std.testing.expect(std.mem.indexOf(u8, footer, " no model") != null);
-            try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
-            try std.testing.expect(std.mem.indexOf(u8, footer, "!") == null);
+            if (case.printed != null) {
+                try std.testing.expectEqual(@as(usize, 0), rows.len);
+                const expected = try std.mem.replaceOwned(u8, shown.arena.allocator(), case.notice, "\n", " ");
+                try std.testing.expect(std.mem.endsWith(u8, footer, expected));
+                try std.testing.expect(std.mem.indexOf(u8, footer, "enter open") == null);
+            } else {
+                const joined = try std.mem.join(shown.arena.allocator(), " ", rows);
+                try std.testing.expectEqualStrings(case.notice, joined);
+                try std.testing.expect(std.mem.endsWith(u8, footer, "enter open"));
+            }
         }
     }
 }

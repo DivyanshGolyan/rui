@@ -1943,10 +1943,13 @@ def frame_expectations(state):
     return value
 
 
-def frame_absences(state):
+def frame_absences(state, sessions=None):
     value = state.get("absent", [])
     if not isinstance(value, list) or not all(isinstance(text, str) and text and "\0" not in text for text in value):
         raise ValueError(f"{state['name']}: absent must be a list of nonempty text markers")
+    if sessions is not None:
+        return [sessions[match.group(1)] if (match := re.fullmatch(r"\{session:(.+)\}", text)) else text
+                for text in value]
     return value
 
 
@@ -2028,6 +2031,10 @@ def validate_scenario(data, sizes=None):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
+        for text in frame_absences(state):
+            match = re.fullmatch(r"\{session:(.+)\}", text)
+            require(match is None or match.group(1) in labels,
+                    f"{name}: unknown cast label in absent: {text}")
         normalized_states.append({**state, "sizes": override or state_sizes, "expect": frame_expectations(state),
                                   "absent": frame_absences(state)})
     return {**data, "sizes": override or default_sizes, "states": normalized_states}
@@ -2199,7 +2206,7 @@ def frame_capture(run, target, out, state, size, reason):
     missing = next((text for text in frame_expectations(state) if text not in plain), None)
     if missing is not None and reason is None:
         reason = f"state left before capture: {missing}"
-    unexpected = next((text for text in frame_absences(state) if text in plain), None)
+    unexpected = next((text for text in frame_absences(state, run.meta.get("sessions", {})) if text in plain), None)
     if unexpected is not None and reason is None:
         reason = f"unexpected on screen: {unexpected}"
     info = run.tmux("display-message", "-p", "-t", target,
