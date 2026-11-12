@@ -924,6 +924,16 @@ while True:
                 data["states"][1]["absent"] = value
                 self.assertEqual(self.helper["validate_scenario"](data)["states"][1]["absent"], value)
 
+    def test_absent_session_marker_resolves_the_actual_cast_id(self):
+        data = self.scenario()
+        data["states"][1]["absent"] = ["[Archived]", "/unarchive", "{session:Fix it}"]
+        state = self.helper["validate_scenario"](data)["states"][1]
+        self.assertEqual(self.helper["frame_absences"](state, {"Fix it": "tz05sr"}),
+                         ["[Archived]", "/unarchive", "tz05sr"])
+        data["states"][1]["absent"] = ["{session:Missing}"]
+        with self.assertRaisesRegex(ValueError, "unknown cast label in absent"):
+            self.helper["validate_scenario"](data)
+
     def test_answer_choices_preserve_echo_and_realistic_prose(self):
         answer = self.helper["fixture_answer"]
         self.assertEqual(answer('a "quote"', 7), 'Fixture answer 7: received "a \\"quote\\""'.replace('\\\\', '\\'))
@@ -1217,6 +1227,9 @@ while True:
             ("stop-stale", {"steps": [{"wait": "■ Stopped"}], "absent": ["Stopping"]},
              ["■ Stopped  Stopping…", "■ Stopped  Stopping…"],
              ["unexpected on screen: Stopping", "unexpected on screen: Stopping"]),
+            ("raw-archive-id", {"steps": [], "absent": ["{session:Archive audit}"]},
+             ["Archived tz05sr", "Archived Archive audit"],
+             ["unexpected on screen: tz05sr", None]),
             ("stable", {"steps": [{"wait": "earlier"}, {"wait": "Ready"}]},
              ["Ready", "Ready"], [None, None]),
             ("transient", {"steps": [{"wait": "Working"}]},
@@ -1232,7 +1245,7 @@ while True:
             with self.subTest(case=name), tempfile.TemporaryDirectory() as temp:
                 out = Path(temp)
                 state = {"name": name, **policy}
-                run = types.SimpleNamespace(meta={"sha": "a" * 40})
+                run = types.SimpleNamespace(meta={"sha": "a" * 40, "sessions": {"Archive audit": "tz05sr"}})
                 records = []
                 for size, screen, reason in zip(((100, 30), (46, 30)), screens, reasons):
                     terminal = types.SimpleNamespace(frame=committed(screen, *size))

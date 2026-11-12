@@ -26,7 +26,13 @@ pub const Selection = union(enum) {
 };
 
 pub const Intent = enum { released_upgrade, released_install, intentional_source };
-pub const Receipt = struct { operation_build: []const u8, selected_after: []const u8 };
+pub const Receipt = struct {
+    operation_build: []const u8,
+    selected_after: []const u8,
+    /// Identity of selected_after, captured under the publication lock.
+    /// Intentional source builds need not have a released version.
+    selected_version: ?releases.Version = null,
+};
 pub const InstallationOutcome = union(enum) {
     installed: Receipt,
     unchanged: Receipt,
@@ -482,7 +488,7 @@ fn publishWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, prepar
                 if (std.mem.eql(u8, complete, selected.build)) prepared.published = true;
                 const operation = try allocator.dupe(u8, complete);
                 errdefer allocator.free(operation);
-                return .{ .unchanged = .{ .operation_build = operation, .selected_after = try allocator.dupe(u8, selected.build) } };
+                return .{ .unchanged = .{ .operation_build = operation, .selected_after = try allocator.dupe(u8, selected.build), .selected_version = selected.version } };
             },
         }
     }
@@ -508,7 +514,7 @@ fn publishWithCleanup(allocator: Allocator, io: std.Io, home: []const u8, prepar
         return primary;
     };
     prepared.published = true;
-    return .{ .installed = .{ .operation_build = operation, .selected_after = selected } };
+    return .{ .installed = .{ .operation_build = operation, .selected_after = selected, .selected_version = if (candidate == .released) candidate.released.version else null } };
 }
 
 test "release archive entries cannot leave their single root" {
@@ -545,20 +551,47 @@ test "installation native owner serializes release no-downgrade and intentional 
     var first = try publishExisting(allocator, io, home, newer, .released_install, null);
     defer first.deinit(allocator);
     try std.testing.expect(first == .installed);
+    try std.testing.expectEqualDeep(releases.Version{ .schema = 56, .patch = 10 }, first.receipt().selected_version.?);
     var second = try publishExisting(allocator, io, home, older, .released_upgrade, null);
     defer second.deinit(allocator);
     try std.testing.expect(second == .unchanged);
     try std.testing.expectEqualStrings(older, second.receipt().operation_build);
     try std.testing.expectEqualStrings(newer, second.receipt().selected_after);
+    try std.testing.expectEqualDeep(first.receipt().selected_version, second.receipt().selected_version);
     var equal = try publishExisting(allocator, io, home, newer, .released_upgrade, null);
     defer equal.deinit(allocator);
     try std.testing.expect(equal == .unchanged);
+    try std.testing.expectEqualDeep(first.receipt().selected_version, equal.receipt().selected_version);
     const source = try testBuild(allocator, io, home, "source", "unreleased");
     defer allocator.free(source);
     var explicit = try publishExisting(allocator, io, home, source, .intentional_source, null);
     defer explicit.deinit(allocator);
     try std.testing.expect(explicit == .installed);
     try std.testing.expectError(error.IneligibleInstallation, publishExisting(allocator, io, home, newer, .released_upgrade, null));
+}
+
+test "installation receipt keeps the selected version after its executable disappears" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    const home = try temporary.dir.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(home);
+    const newer = try testBuild(allocator, io, home, "winner", "0.56.10");
+    defer allocator.free(newer);
+    const older = try testBuild(allocator, io, home, "loser", "0.56.2");
+    defer allocator.free(older);
+    var installed = try publishExisting(allocator, io, home, newer, .released_install, null);
+    defer installed.deinit(allocator);
+    var unchanged = try publishExisting(allocator, io, home, older, .released_upgrade, null);
+    defer unchanged.deinit(allocator);
+    const executable = try std.fmt.allocPrint(allocator, "{s}/bin/rui", .{newer});
+    defer allocator.free(executable);
+    try Dir.cwd().deleteFile(io, executable);
+    for ([_]InstallationOutcome{ installed, unchanged }) |outcome| {
+        try std.testing.expectEqualStrings(newer, outcome.receipt().selected_after);
+        try std.testing.expectEqualDeep(releases.Version{ .schema = 56, .patch = 10 }, outcome.receipt().selected_version.?);
+    }
 }
 
 test "installation publication rechecks broken unmanaged and absent selections" {

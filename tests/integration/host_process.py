@@ -592,7 +592,7 @@ DARWIN_TEMPORARY_ROOT_BYTES = len("/private/var/folders/XX/" + "X" * 30 + "/T")
 def screen_fixture_root(prefix):
     """A new private root, resolved, at least as long as Darwin's would be.
 
-    Pages such as /status show the Store and Workspace, which wrap. Linux's
+    Chat info panels show the Workspace, which wraps. Linux's
     short /tmp would leave those pages rows that a Mac never has.
     """
     parent = pathlib.Path(tempfile.gettempdir()).resolve(strict=True)

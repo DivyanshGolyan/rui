@@ -710,8 +710,8 @@ pub const Store = struct {
             error.OutOfMemory => return error.OutOfMemory,
             else => .infrastructure_failure,
         };
-        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
-            reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, &command.configuration.tools);
+        if (reply == .rejected)
+            reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &command.configuration.tools);
         return reply;
     }
 
@@ -766,8 +766,10 @@ pub const Store = struct {
         var access: Access(.write, error{SessionUpdateFailed}) = .open(&entry);
         defer access.deinit();
         var reply = entry.finishTransaction(Ordinary.none, faults, access.end(faults, command_domain.submitMessage(&access, self.io, self.served, self.selector.slice(), command, committed, initial_skills, captured_skill, faults))) catch .infrastructure_failure;
-        if (reply == .rejected and reply.rejected.code == .mcp_server_unavailable)
-            reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, &command.configuration.?.tools);
+        if (reply == .rejected) {
+            if (command.configuration) |*configuration|
+                reply.rejected.message = configuration_domain.missingToolMessage(self.hostTools().host_tool_set, reply.rejected.code, &configuration.tools);
+        }
         return reply;
     }
 
