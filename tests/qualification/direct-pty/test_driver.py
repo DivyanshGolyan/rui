@@ -16,30 +16,73 @@ import host_process
 
 class NavigationTests(unittest.TestCase):
     @staticmethod
-    def check(screen, first, browsing):
+    def check(screen, first, browsing, feed_rows):
         # Model fixtures read the binary argument at import; these pure screen
         # checks do not start a fixture or require a terminal emulator.
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
             from scenarios import assert_navigation_history
-        assert_navigation_history(screen, first, browsing)
+        assert_navigation_history(screen, first, browsing, feed_rows)
 
     @staticmethod
     def screen(first, count, chip="↓"):
-        return "\n".join([f"History line {n:03d}" for n in range(first, first + count)] + [chip])
+        return "\n".join([f"History line {n:03d}" for n in range(first, first + count)]
+                         + [chip, "─" * 80, " › ", "─" * 80, " ‹ fixture"])
 
     def test_continuous_feed_ranges_and_reserved_chip(self):
-        self.check(self.screen(83, 17, "TD4 history end\n"), 83, False)
-        for first in (65, 74, 80, 81, 82):
-            with self.subTest(first=first):
-                self.check(self.screen(first, 18), first, True)
-                # Reject the old live-sized screen and any one-row
-                # distance/direction error, not merely marker presence.
-                for actual, count in ((first, 19), (first - 1, 18), (first + 1, 18)):
-                    with self.assertRaisesRegex(AssertionError, "navigation history anchor/distance"):
-                        self.check(self.screen(actual, count), first, True)
-        for chip in ("", "↓ 1 new"):
-            with self.assertRaisesRegex(AssertionError, "navigation marker"):
-                self.check(self.screen(74, 18, chip), 74, True)
+        # Cover both the old and reclaimed-row layouts, plus other pane sizes.
+        # Only the composer boundary supplies capacity; exact content and
+        # anchor/distance checks still reject missing/extra rows and keys.
+        for feed_rows in (8, 18, 19, 27):
+            live_first = 101 - feed_rows
+            self.check(self.screen(live_first, feed_rows - 1, "TD4 history end\n"), live_first, False, feed_rows)
+            for back in (1, 3, feed_rows // 2, 2 * (feed_rows // 2)):
+                first = live_first - back
+                with self.subTest(feed_rows=feed_rows, first=first):
+                    self.check(self.screen(first, feed_rows), first, True, feed_rows)
+                    for actual, count in ((first, feed_rows + 1), (first, feed_rows - 1),
+                                          (first - 1, feed_rows), (first + 1, feed_rows)):
+                        with self.assertRaisesRegex(AssertionError, "navigation (history anchor/distance|feed capacity changed)"):
+                            self.check(self.screen(actual, count), first, True, feed_rows)
+            for chip in ("", "↓ 1 new"):
+                with self.assertRaisesRegex(AssertionError, "navigation marker"):
+                    self.check(self.screen(live_first - 1, feed_rows, chip), live_first - 1, True, feed_rows)
+
+    def test_capacity_comes_from_composer_not_history_count(self):
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from scenarios import navigation_rows, navigation_first
+        for rows in (8, 18, 19, 27):
+            screen = self.screen(0, rows)
+            self.assertEqual(navigation_rows(screen.replace("History line", "Other output")), rows)
+            live_first = 101 - rows
+            self.assertEqual(navigation_first(live_first, rows, {"pages": 2, "lines": 1}),
+                             live_first - 2 * (rows // 2) - 1)
+            with self.assertRaisesRegex(AssertionError, "navigation composer rule"):
+                navigation_rows(screen.replace("─", " "))
+
+    def test_chrome_geometry_comes_from_input_rules_with_one_footer(self):
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from human_cli_fixture import composer_bounds, footer_click
+            from session_chrome_cases import composing, feed_bottom, status, transcript_rows
+        for persistent in ([], ["Sending…"], ["held line 1", "held line 2", "held line 3"]):
+            for draft in ("", "kept draft"):
+                for split in (False, True):
+                    for right in ("alt+i info", "! Unknown command /nosuch"):
+                        with self.subTest(persistent=persistent, draft=draft, split=split, right=right):
+                            feed = 24 - 1 - len(persistent) - 3 - 1
+                            lines = (["history"] * feed + ["", "─" * 46, " › " + draft, "─" * 46]
+                                     + [" ‹ Chat · Archived    " + right] + persistent)
+                            if split:
+                                lines = [" " * 40 + "│" + line for line in lines]
+                            screen = "\n".join(lines)
+                            self.assertEqual(composer_bounds(screen), (feed + 1, feed + 3))
+                            self.assertTrue(composing(screen, draft))
+                            self.assertFalse(composing(screen, draft + "x"))
+                            self.assertEqual(feed_bottom(screen), feed)
+                            self.assertEqual(len(transcript_rows(screen)), feed + 1)
+                            self.assertEqual(status(screen), "\n".join(persistent))
+                            self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, column=1))
+                            self.assertIn(f";{24 - len(persistent)}M".encode(), footer_click(screen, marker="Chat"))
+                            self.assertFalse(composing(screen.replace("─", " "), draft))
 
     def test_chat_info_observes_fields_footer_and_fitted_folder(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
@@ -89,8 +132,9 @@ class NavigationTests(unittest.TestCase):
                               ("key-end-ss3-f", b"\x1bOF"),
                               ("key-end-csi-4", b"\x1b[4~")):
             self.assertEqual(navigation[name]["return_chunks"][0]["hex"], encoded.hex())
-        self.assertEqual([step["first_history"] for step in navigation["key-pgdn"]["middle"]], [74])
-        self.assertEqual([step["first_history"] for step in navigation["wheel-alt-scroll"]["middle"]], [81, 82])
+        self.assertEqual([step["back"] for step in navigation["key-pgdn"]["middle"]], [{"pages": 1, "lines": 0}])
+        self.assertEqual([step["back"] for step in navigation["wheel-alt-scroll"]["middle"]],
+                         [{"pages": 0, "lines": 2}, {"pages": 0, "lines": 1}])
 
 
 class ExitTests(unittest.TestCase):

@@ -154,6 +154,29 @@ pub fn Notice(comptime capacity: usize) type {
     };
 }
 
+/// A notice's display-safe single line, owned by the draw arena.
+/// Footer owns alignment and clipping; this core owns notice text.
+pub fn noticeLine(arena: std.mem.Allocator, notice: []const u8) std.mem.Allocator.Error![]const u8 {
+    const capacity = std.math.mul(usize, notice.len, TerminalText.max_bytes_per_byte) catch return error.OutOfMemory;
+    var out: std.Io.Writer = .fixed(try arena.alloc(u8, capacity));
+    var text: TerminalText = .{ .mode = .label };
+    // The fixed buffer holds the sanitizer's worst-case expansion of every byte.
+    for (notice) |byte| {
+        if (byte == '\n' or byte == '\r') {
+            text.finish(&out) catch unreachable;
+            out.writeByte(' ') catch unreachable;
+        } else text.feed(&out, &.{byte}) catch unreachable;
+    }
+    text.finish(&out) catch unreachable;
+    return out.buffered();
+}
+test "notice text flattens result lines and escapes terminal controls before Footer draws it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings("Saved. ! warning\\x1b", try noticeLine(arena.allocator(), "Saved.\n! warning\x1b"));
+    try std.testing.expectEqualStrings("界e\u{301}", try noticeLine(arena.allocator(), "界e\u{301}"));
+}
+
 // --- Status bar -----------------------------------------------------------
 
 /// The stop key the last row offers while work can be stopped.
@@ -188,9 +211,8 @@ test "a send is progress while in flight, needs the person once unresolved, and 
     try same(.{}, send("", false));
     // No original held: accepted or idle, the status bar says nothing.
     for ([_]bool{ false, true }) |in_flight| try same(.{}, send(null, in_flight));
-    // A reply to the last key outranks progress, which outranks the
-    // overview's line, quietly; what needs the person outranks all three.
-    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Sending…", .notice = "! Unknown command /x", .width = 80 }).left);
+    // A reply goes to Footer; persistent progress and needs keep their own row.
+    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .progress = "Sending…", .notice = "! Unknown command /x", .width = 80 }).notice.?);
     const sending = bar(.{ .progress = "Sending…", .overview = "! Other Session failed", .width = 80 });
     try std.testing.expectEqualStrings("Sending…", sending.left);
     try std.testing.expectEqual(Tone.quiet, sending.tone);
@@ -333,8 +355,9 @@ pub fn needsKey(needs: []const u8) []const u8 {
 
 pub const Tone = enum { quiet, attention };
 
-/// What the status bar shows: `left` at column 0, `stop` right-aligned.
+/// Persistent status on the left, and the separate transient reply for Footer.
 pub const Bar = struct {
+    notice: ?[]const u8 = null,
     left: []const u8 = "",
     tone: Tone = .quiet,
     /// Whether `stop_key` shows at the right edge.
@@ -348,13 +371,10 @@ pub const Facts = struct {
     /// What needs the person, with its key (`! Not confirmed · ctrl+r
     /// retries`). Persists until resolved; outranks any notice.
     needs: ?[]const u8 = null,
-    /// Where a send stands while it is under way (`Opening…`,
-    /// `Sending…`): quiet, below what needs the person and a reply to the last
-    /// key, and above the overview's line. Enter's frame says it, since
-    /// Enter dismissed any reply before it.
+    /// Where a send stands while under way: below what needs the person,
+    /// above the overview's persistent line, independently of a Footer reply.
     progress: ?[]const u8 = null,
-    /// The reply to the person's last key that shows now
-    /// (`Notice.current`), if any. Until it goes, it outranks progress.
+    /// The reply to the last key for Footer, independent of persistent state.
     notice: ?[]const u8 = null,
     /// What the overview says while this Session shows, below progress.
     overview: ?[]const u8 = null,
@@ -378,16 +398,17 @@ test "a result of one line is a notice; one of two lines is a page" {
 /// Cells kept between the left text and the stop key.
 const gap = 2;
 
-/// The status bar. Left: what needs the person, else the reply to the last
-/// key, else a send's progress, else the overview's line, else nothing. Right: the stop key while work can be stopped.
+/// The status bar. Left: what needs the person, else a send's progress,
+/// else the overview's persistent line. Notices are passed separately to Footer.
+/// Right: the stop key while work can be stopped.
 /// When both don't fit, the left side wins and the stop key drops (Ctrl-X
 /// still works); the shell clips left text that is wider than the row.
 pub fn bar(facts: Facts) Bar {
-    var result: Bar = .{};
+    var result: Bar = .{ .notice = facts.notice };
     if (facts.needs) |needs| {
         result.left = needs;
         result.tone = .attention;
-    } else if (facts.notice orelse facts.progress orelse facts.overview) |left| {
+    } else if (facts.progress orelse facts.overview) |left| {
         result.left = left;
         result.tone = if (std.mem.startsWith(u8, left, "!")) .attention else .quiet;
     }
@@ -495,7 +516,7 @@ test "a notice goes after about five seconds or at the next key; the newest repl
     try std.testing.expectEqual(@as(usize, 256), notice.current(0).?.len);
 
     try std.testing.expectEqual(Tone.quiet, bar(.{ .notice = "Copied 12 lines", .width = 80 }).tone);
-    try std.testing.expectEqual(Tone.attention, bar(.{ .notice = "! Unknown command /x", .width = 80 }).tone);
+    try std.testing.expectEqualStrings("! Unknown command /x", bar(.{ .notice = "! Unknown command /x", .width = 80 }).notice.?);
     const unconfirmed = bar(.{ .needs = "! Not confirmed · ctrl+r retries", .notice = "Copied 12 lines", .width = 80 });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", unconfirmed.left);
     try std.testing.expectEqual(Tone.attention, unconfirmed.tone);

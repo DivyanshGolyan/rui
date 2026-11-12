@@ -562,9 +562,10 @@ test "list rows share every mark and script with the chat heading table" {
         var state: overview.State = undefined;
         try state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
         defer state.deinit();
+        _ = try overview.step(&state, .{ .host = .{ .instance = @splat(7), .started_at = 1, .slots = 1, .slots_in_use = 0 } });
         _ = try overview.step(&state, .{ .tick = 100_000 });
         _ = try overview.step(&state, .{ .list = .{ .page = .{
-            .rows = &.{.{ .reference = "k7m2qx".*, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state }},
+            .rows = &.{.{ .reference = "k7m2qx".*, .read_version = .{ .instance = @splat(7), .generation = 1 }, .workspace = "/work", .provider = .codex, .label = "Work", .state = case.state }},
             .answer = .{ .delta = .full, .since = .{ .instance = @splat(7), .generation = 1 } },
         } } });
         var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
