@@ -1719,15 +1719,22 @@ fn deliver(self: *Self, outcome: anyerror!void) !?Next {
     return null;
 }
 
-/// The default a fresh launch with this overview's selectors would take
-/// from the saved defaults now; null when they decide none, so the one in
-/// force stays. Readiness is the Host's to answer at the start, as for any
-/// caller that cannot ask, so every provider counts as ready here, and only
-/// a launch that named no provider and saved none needs the chooser.
+/// Read a confirmed saved snapshot, resolve it with the core's provider
+/// authority, then let .defaults_saved apply the complete result.
 fn savedDefault(self: *const Self) ?view.Default {
-    const selectors = self.options.selectors;
-    if (!selectors.needsPreferences() or self.options.home.len == 0) return null;
-    const snapshot: new_session_selection.Snapshot = .{ .intent = selectors, .defaults = preferences.load(self.options.home) catch return null };
+    if (!self.options.selectors.needsPreferences() or self.options.home.len == 0) return null;
+    return resolveDefault(&self.state, .{
+        .intent = self.options.selectors,
+        .defaults = preferences.load(self.options.home) catch return null,
+    });
+}
+
+/// Snapshot owns provider/model validation. The core supplies only the
+/// missing provider authority; this local enrichment cannot pin its model.
+fn resolveDefault(state: *const view.State, saved: new_session_selection.Snapshot) ?view.Default {
+    if (!saved.intent.needsPreferences()) return null;
+    var snapshot = saved;
+    snapshot.intent.provider = state.savedProvider(snapshot.intent.provider, if (snapshot.defaults.provider.len != 0) snapshot.defaults.provider.slice() else null);
     const binding = (snapshot.resolve(&.initFill(.configured)) catch return null) orelse return null;
     var result = view.Default.of(binding.provider.slice(), binding.model.slice()) orelse return null;
     result.effort = snapshot.defaults.reasoning_effort;
@@ -7689,4 +7696,128 @@ test "Overview footer routing preserves global exit and draft during frozen star
         try std.testing.expectEqual(view.FooterFocus.input, rig.overview.state.footer.focus);
         try std.testing.expect((try rig.press(exit_key)).? == .overview);
     }
+}
+
+test "Overview footer unpinned effort and model picks refresh defaults and the next start" {
+    for ([_]view.FooterField{ .effort, .model }) |field| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var path: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const home = path[0..try tmp.dir.realPath(std.testing.io, &path)];
+        var cancellation: client.Cancellation = .{};
+        const rig = try Rig.open(.{ .store = home, .workspace = "/work", .home = home, .directory = home, .provider = "codex", .model = "gpt-6.1-sol" }, fake_operations, &cancellation);
+        defer rig.close();
+        const overview = rig.overview;
+        const page = &overview.root.settings_page;
+        const before = try preferences.load(home);
+        try std.testing.expect(before.provider.len == 0 and before.model.len == 0);
+        try std.testing.expect(try rig.press("kept draft") == null);
+        var ctx = rig.context();
+        defer ctx.cmds.deinit(std.testing.allocator);
+        try appClick(overview, &ctx, .{ .footer = field });
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expect(page.standaloneOpen());
+        if (field == .model) {
+            try std.testing.expect(try rig.press("gpt-5.5\r") == null);
+        } else {
+            for (0..page.panel.choice.?.labels.len) |_| {
+                if (std.mem.eql(u8, page.panel.choice.?.labels[page.panel.choice.?.selected], "xhigh")) break;
+                try std.testing.expect(try rig.press("\x1b[B") == null);
+            }
+            try std.testing.expectEqualStrings("xhigh", page.panel.choice.?.labels[page.panel.choice.?.selected]);
+            try std.testing.expect(try rig.press("\r") == null);
+        }
+        try std.testing.expectEqual(AppSettings.SaveState.pending, overview.defaults_save);
+        try std.testing.expect(!page.standaloneOpen());
+        try std.testing.expectEqualStrings("gpt-6.1-sol", overview.state.default.?.model.slice());
+        try std.testing.expectEqual(@as(?model_capability.ReasoningEffort, null), overview.state.default.?.effort);
+        try std.testing.expect(try rig.settle() == null);
+        try page.widget().handleEvent(&ctx, .tick);
+        try std.testing.expectEqual(AppSettings.SaveState.saved, overview.defaults_save);
+        const saved = try preferences.load(home);
+        const model = if (field == .model) "gpt-5.5" else "gpt-6.1-sol";
+        const effort: ?model_capability.ReasoningEffort = if (field == .effort) .xhigh else null;
+        try std.testing.expectEqualStrings(model, overview.state.nextBinding().model.?);
+        try std.testing.expectEqual(effort, overview.state.default.?.effort);
+        try std.testing.expectEqual(effort, saved.reasoning_effort);
+        if (field == .effort) try std.testing.expect(saved.provider.len == 0 and saved.model.len == 0) else {
+            try std.testing.expectEqualStrings("codex", saved.provider.slice());
+            try std.testing.expectEqualStrings(model, saved.model.slice());
+        }
+        try overview.root.openSettings(&ctx);
+        try std.testing.expectEqual(effort, page.values.reasoning_effort);
+        try std.testing.expectEqualStrings(saved.model.slice(), page.values.model.slice());
+        try overview.root.showMain(&ctx);
+        try std.testing.expectEqualStrings("kept draft", overview.composerDraft().bytes);
+        try std.testing.expect(try rig.press("\r") == null);
+        try std.testing.expect(try rig.settle() == null);
+        try std.testing.expectEqualStrings(model, Seen.now.start.model.?.slice());
+        try std.testing.expectEqualStrings(if (field == .effort) "xhigh" else product_defaults.reasoning_effort, Seen.now.start.reasoning_effort.?.slice());
+        try std.testing.expectEqualStrings("kept draft", Seen.now.start.text.slice());
+    }
+}
+
+test "Overview saved defaults projection covers unpinned picks selectors and held overrides" {
+    const Case = struct {
+        current: ?protocol.Provider = .codex,
+        current_model: []const u8 = "gpt-6.1-sol",
+        intent: new_session_selection.Intent = .{},
+        provider: ?[]const u8 = null,
+        model: ?[]const u8 = null,
+        effort: ?model_capability.ReasoningEffort = .xhigh,
+        expected: ?protocol.Provider = .codex,
+        expected_model: []const u8 = "gpt-6.1-sol",
+    };
+    const cases = [_]Case{
+        .{}, // No saved pin: the effort is still a confirmed default.
+        .{ .effort = null },
+        .{ .provider = "codex", .model = "gpt-5.5", .expected_model = "gpt-5.5" },
+        .{ .provider = "openai", .model = "gpt-5.5", .expected = .openai, .expected_model = "gpt-5.5" },
+        .{ .intent = .{ .provider = "codex" }, .provider = "openai", .model = "gpt-5.5" },
+        .{ .intent = .{ .model = "gpt-6-sol" }, .provider = "codex", .model = "gpt-5.5", .expected_model = "gpt-6-sol" },
+        .{ .intent = .{ .provider = "openai" }, .expected = .openai },
+        .{ .intent = .{ .store = "/s", .provider = "codex", .model = "gpt-6-sol" }, .expected = null },
+        .{ .current = .openai, .expected = .openai }, // A later sign-in owns the committed provider.
+        .{ .current = null, .expected = null }, // No first-run authority is invented.
+        .{ .current = null, .provider = "codex", .model = "gpt-5.5", .expected_model = "gpt-5.5" },
+        .{ .provider = "missing-provider", .expected = null },
+        .{ .provider = "codex", .model = "bad model", .expected = null },
+        .{ .current_model = "gpt-5.5", .provider = "codex" }, // Clear model goes back to the recommendation.
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |held| {
+        var state: view.State = undefined;
+        try state.init(std.testing.allocator, .{ .cwd = "/work", .home = "/home" });
+        defer state.deinit();
+        state.default = if (case.current) |provider| view.Default.of(@tagName(provider), case.current_model) else null;
+        if (state.default) |*binding| binding.effort = .low;
+        const before = state.default;
+        if (held) _ = try view.step(&state, .{ .composed = .{ .input = .{ .composer = .submit }, .draft = .{ .bytes = "/configure --provider openai --model gpt-6-sol --reasoning-effort medium" } } });
+        var snapshot: new_session_selection.Snapshot = .{ .intent = case.intent, .defaults = .{ .reasoning_effort = case.effort } };
+        if (case.provider) |provider| try snapshot.defaults.provider.set(provider);
+        if (case.model) |model| try snapshot.defaults.model.set(model);
+        const refreshed = resolveDefault(&state, snapshot);
+        try std.testing.expectEqual(case.expected != null, refreshed != null);
+        if (case.expected) |provider| {
+            try std.testing.expectEqual(provider, refreshed.?.provider);
+            try std.testing.expectEqualStrings(case.expected_model, refreshed.?.model.slice());
+            try std.testing.expectEqual(case.effort, refreshed.?.effort);
+        }
+        try std.testing.expectEqual(@as(usize, 0), (try view.step(&state, .{ .defaults_saved = refreshed })).len);
+        const expected = refreshed orelse before;
+        if (expected) |binding| {
+            try std.testing.expect(binding.eql(&state.default.?));
+            const next = state.nextBinding();
+            try std.testing.expectEqualStrings(if (held) "openai" else @tagName(binding.provider), next.provider.?);
+            try std.testing.expectEqualStrings(if (held) "gpt-6-sol" else binding.model.slice(), next.model.?);
+            const effort = (view.StartEffort{ .held = if (held) "medium" else null, .model = next.model }).shown(binding.effort);
+            try std.testing.expectEqual(if (held) @as(?model_capability.ReasoningEffort, .medium) else binding.effort orelse .low, effort);
+        } else {
+            try std.testing.expect(state.default == null);
+            if (!held) try std.testing.expect(state.nextBinding().provider == null);
+        }
+        // The fallback enriched only a local value, never launch intent or
+        // persisted pins, and never used a Configure-held provider/model.
+        try std.testing.expectEqual(case.intent.provider, snapshot.intent.provider);
+        try std.testing.expectEqualStrings(case.provider orelse "", snapshot.defaults.provider.slice());
+    };
 }

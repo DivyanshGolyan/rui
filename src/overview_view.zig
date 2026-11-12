@@ -1148,6 +1148,13 @@ pub const State = struct {
         return self.settings.get(startOption("reasoning-effort").?);
     }
 
+    /// The provider for a confirmed defaults refresh. Keep explicit and
+    /// saved authority ahead of the committed choice; never use held
+    /// Configure here or invent a first-run provider.
+    pub fn savedProvider(self: *const State, explicit: ?[]const u8, saved: ?[]const u8) ?[]const u8 {
+        return explicit orelse saved orelse if (self.default) |binding| @tagName(binding.provider) else null;
+    }
+
     pub fn nextBinding(self: *const State) Binding {
         const default = if (self.default) |*binding| binding else null;
         return .{
@@ -7321,4 +7328,37 @@ test "new chat frozen footer leaves global keys with the existing frozen compose
         try std.testing.expectEqual(FooterFocus.input, state.footer.focus);
         try std.testing.expect(state.footer.pending == null);
     }
+}
+
+test "new chat saved provider and defaults outcomes preserve unpinned authority" {
+    const Case = struct { current: ?Provider = .codex, explicit: ?[]const u8 = null, saved: ?[]const u8 = null, expected: ?[]const u8 = "codex" };
+    const cases = [_]Case{
+        .{},
+        .{ .current = .openai, .expected = "openai" },
+        .{ .current = null, .expected = null },
+        .{ .saved = "openai", .expected = "openai" },
+        .{ .current = null, .saved = "codex" },
+        .{ .explicit = "openai", .saved = "codex", .expected = "openai" },
+        .{ .current = null, .explicit = "codex", .saved = "openai" },
+        .{ .saved = "invalid-provider", .expected = "invalid-provider" },
+    };
+    for (cases) |case| for ([_]bool{ false, true }) |held| {
+        var state = try opened(&.{});
+        defer state.deinit();
+        state.default = if (case.current) |provider| Default.of(@tagName(provider), "gpt-6.1-sol") else null;
+        if (held) try std.testing.expect(configure(&state, "--provider openai --model gpt-6-sol --reasoning-effort medium"));
+        const provider = state.savedProvider(case.explicit, case.saved);
+        if (case.expected) |expected| try std.testing.expectEqualStrings(expected, provider.?) else try std.testing.expect(provider == null);
+        // Confirmation carries an effective binding, not a saved pin.
+        // Both unpinned effort and first model picks update it completely.
+        for ([_][]const u8{ "gpt-6.1-sol", "gpt-5.5" }) |model| for ([_]?ReasoningEffort{ null, .low, .xhigh }) |effort| {
+            var confirmed = Default.of("codex", model).?;
+            confirmed.effort = effort;
+            try expectEffects(&.{}, try step(&state, .{ .defaults_saved = confirmed }));
+            try std.testing.expect(confirmed.eql(&state.default.?));
+            try std.testing.expectEqualStrings(if (held) "openai" else "codex", state.nextBinding().provider.?);
+            try std.testing.expectEqualStrings(if (held) "gpt-6-sol" else model, state.nextBinding().model.?);
+            try std.testing.expectEqualStrings(if (held) "medium" else if (effort) |value| @tagName(value) else "low", footerEffort(&state).?);
+        };
+    };
 }

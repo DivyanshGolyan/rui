@@ -105,7 +105,7 @@
         "Type a task",
         "Settings",
         "enter start",
-        "gpt-6.1-sol · high"
+        "gpt-6.1-sol · low"
       ]
     },
     {
@@ -594,7 +594,10 @@
           }
         },
         {
-          "wait": "gpt-6.1-sol · low"
+          "wait": "gpt-6.1-sol · low · 100% left"
+        },
+        {
+          "gone": "Configured."
         }
       ],
       "expect": [
@@ -605,6 +608,7 @@
         "gpt-6.1-sol · high",
         "Effort",
         "Copy last answer",
+        "Configured.",
         "click to change",
         "▾"
       ]
