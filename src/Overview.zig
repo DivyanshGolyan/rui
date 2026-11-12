@@ -7014,6 +7014,73 @@ test "chat omits New Session at every width and overview restores its pinned con
     }
 }
 
+test "chat omission preserves late-listed Sessions and the physical last-row footer" {
+    const Chat = struct {
+        var dir: std.Io.Dir = undefined;
+        var files: u8 = 0;
+        fn scratch(init: std.process.Init) !std.Io.File {
+            files += 1;
+            return dir.createFile(init.io, &.{'a' + files}, .{ .read = true });
+        }
+    };
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    Chat.dir = tmp.dir;
+    Chat.files = 0;
+    const rig = try openComposer();
+    defer rig.close();
+    const overview = rig.overview;
+    overview.hooks.scratch = Chat.scratch;
+    overview.ops.open = openSession;
+    try std.testing.expect(try rig.next(.{ .open = "k7m2qx".* }) == null);
+    defer {
+        if (overview.app_session) |left| {
+            if (left.frontend) |frontend| frontend.stop();
+            overview.disposeSession(left);
+            overview.app_session = null;
+        }
+        overview.retired.deinit(std.testing.allocator);
+    }
+    // The transcript may finish opening before the independent sidebar list.
+    overview.app_session.?.frontend.?.reading.opening = false;
+    for ([_]bool{ false, true }) |listed| {
+        if (listed) {
+            Seen.now.listed = listed_references.len;
+            try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 }) == null);
+            try std.testing.expect(try rig.settle() == null);
+        }
+        for ([_]vxfw.Size{ .{ .width = 140, .height = 40 }, .{ .width = 46, .height = 30 }, .{ .width = 140, .height = 30 } }) |size| {
+            var shown = try rig.shown(size.width, size.height);
+            defer shown.deinit();
+            try std.testing.expect(std.mem.indexOf(u8, try shown.text(), "+ New Session") == null);
+            try std.testing.expect(std.mem.indexOf(u8, try shown.line(size.height - 1), "alt+i info") != null);
+            if (size.width == 140) {
+                try std.testing.expectEqual(if (listed) listed_references.len else 0, overview.app_sessions.shown_at.len);
+                if (listed) {
+                    // No omitted control or spacer may consume the first row.
+                    try std.testing.expect(std.mem.indexOf(u8, try shown.line(0), "Fix the flaky test") != null);
+                    for (overview.app_sessions.shown_at, 0..) |span, index| {
+                        try std.testing.expectEqual(@as(i17, @intCast(index * 2)), span.row);
+                        try std.testing.expectEqual(@as(u16, 2), span.height);
+                    }
+                }
+            }
+        }
+    }
+    var ctx = rig.context();
+    defer ctx.cmds.deinit(std.testing.allocator);
+    _ = try overview.event(.{ .conversation = null });
+    try overview.root.closeSession(&ctx);
+    for ([_]u16{ 140, 46 }) |width| {
+        var shown = try rig.shown(width, 30);
+        defer shown.deinit();
+        try std.testing.expect(std.mem.startsWith(u8, try shown.line(0), "  + New Session"));
+        const gap = try shown.line(1);
+        try std.testing.expect(std.mem.trim(u8, gap, " │").len == 0);
+        try std.testing.expect(std.mem.indexOf(u8, try shown.line(2), "Fix the flaky test") != null);
+    }
+}
+
 test "pinned New Session wins the last header row over a provider band" {
     for ([_]u16{ 46, 140 }) |width| {
         const rig = try openListed();

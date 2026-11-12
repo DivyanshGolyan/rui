@@ -4920,6 +4920,9 @@ test "snapshot and listing rows render identical stopped failed and done endings
         // supplied it. Use the same clock, with no intervening refresh.
         var from_list = try opened(&.{initial});
         defer from_list.deinit();
+        // Compare the same sidebar presentation: the overview alone pins
+        // New Session, independently of which read supplied the row.
+        _ = try step(&from_list, .{ .conversation = ref });
         _ = try step(&from_list, .{ .tick = state.now_ms });
         var listed = session(&ref, case.state, .{ .label = "Same Session", .turn = 8 });
         listed.last_line = .{ .position = 4, .text = case.text };
