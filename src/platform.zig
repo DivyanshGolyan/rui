@@ -194,14 +194,7 @@ pub const StoreLease = struct {
         record.close(self.io);
     }
 
-    pub const LastStop = enum {
-        /// Someone asked the last Host to stop: `host-stop` or its launcher.
-        asked,
-        /// The last Host ended without being asked: a crash or a kill.
-        unasked,
-        /// The record could not be read, so neither is known.
-        unknown,
-    };
+    pub const LastStop = @import("host_restart.zig").LastStop;
 
     /// How the last Host of the Store at `supplied_path` ended, read from
     /// the record `recordStopAsked` leaves and every Host start removes.

@@ -21,6 +21,7 @@ const InputArea = @import("InputArea.zig");
 const GroupedList = @import("GroupedList.zig");
 const host_identity = @import("host_identity.zig");
 const platform = @import("platform.zig");
+const host_restart = @import("host_restart.zig");
 const OverviewLines = @import("OverviewLines.zig");
 const Palette = @import("Palette.zig");
 const skill_completion = @import("skill_completion.zig");
@@ -183,6 +184,14 @@ const HostObservation = union(enum) {
         return switch (self) {
             .ready => |ready| ready.facts,
             else => null,
+        };
+    }
+
+    fn restartSeen(self: HostObservation) host_restart.Seen {
+        return switch (self) {
+            .unread, .ready => .up,
+            .stopped => |stop| .{ .stopped = stop },
+            .unavailable, .incompatible, .unreadable => .held,
         };
     }
 };
@@ -521,8 +530,8 @@ host_process: ?struct { started_at: u64, pid: i32 } = null,
 host_observation: HostObservation = .unread,
 /// The last launch's typed summary, never a boolean standing in for a cause.
 host_launch: ?HostLaunch = null,
-/// Whether this run has spent its one automatic start after a crash.
-host_restarted: bool = false,
+/// This run's one automatic start after a crash (`host_restart`).
+restart_allowance: host_restart.Allowance = .unspent,
 upgrade_report: ?std.Io.Writer.Allocating = null,
 /// What the overview last said under the open conversation.
 conversation_said: [upgrade_status.max_line_bytes]u8 = undefined,
@@ -1854,12 +1863,20 @@ fn leave(self: *Self, left: Left, restored: anyerror!void) !void {
 
 /// The same observation feeds the notice, Session service and core counts.
 fn takeHostRead(self: *Self, read: HostRead) !?Next {
-    const was_stopped = self.host_observation == .stopped;
+    const previous = self.host_observation;
     self.host_observation = read.observation;
     // A ready Host outlives what the last start said: a failure lost to a
     // competing owner, and a warning once the next read has shown it.
     if (read.observation == .ready) self.host_launch = null;
-    if (!was_stopped) self.restartAfterCrash();
+    const restart = host_restart.decide(.{
+        .previous = previous.restartSeen(),
+        .next = read.observation.restartSeen(),
+        .allowance = self.restart_allowance,
+        .upgrade_holds = self.state.holdsHost(),
+        .start_available = !self.hostStarting() and self.launchNext() != null,
+    });
+    self.restart_allowance = restart.allowance;
+    if (restart.start) self.queueHostStart();
     if (read.memory) |memory| _ = try self.event(.{ .memory = memory });
     return self.event(.{ .host = read.observation.facts() });
 }
@@ -1933,29 +1950,20 @@ fn queueHost(self: *Self) void {
 /// One rule admits the gesture and supplies the exact key tail to the line.
 fn hostNext(self: *const Self) ?HostLaunch.Next {
     if (self.state.holdsHost() or self.hostStarting() or self.host_observation != .stopped) return null;
+    return self.launchNext();
+}
+
+/// The key the last launch leaves for a stopped Host: a start, a retry, or
+/// none when no start can mend its failure.
+fn launchNext(self: *const Self) ?HostLaunch.Next {
     return if (self.host_launch) |launch| switch (launch) {
         .failed => |cause| cause.next(),
         .ready => .start,
     } else .start;
 }
 
-/// A Host that ended without anyone asking is started once per run, through
-/// the job `r` queues; the loop's next dispatch runs it. A second crash, a
-/// failed start, a stop someone asked for and an Upgrade's custody leave the
-/// line to the person.
-fn restartAfterCrash(self: *Self) void {
-    if (self.host_restarted or self.host_observation != .stopped) return;
-    switch (self.host_observation.stopped) {
-        .unasked => {},
-        // An unreadable record cannot tell a crash from a stop someone
-        // asked for. Starting a Host the person stopped is the worse
-        // mistake, so only a record known to be absent restarts.
-        .asked, .unknown => return,
-    }
-    // The same rule that offers `r`: no Upgrade custody, no start already
-    // queued or running, and no failure a start cannot mend.
-    if (self.hostNext() == null) return;
-    self.host_restarted = true;
+/// Queues the one start job, `r`'s or a restart's; the loop's dispatch runs it.
+fn queueHostStart(self: *Self) void {
     self.host_launch = null;
     self.queue(.start_host);
 }
@@ -1963,8 +1971,7 @@ fn restartAfterCrash(self: *Self) void {
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
     const self: *Self = @ptrCast(@alignCast(raw));
     if (self.hostNext() == null) return false;
-    self.host_launch = null;
-    self.queue(.start_host);
+    self.queueHostStart();
     try self.dispatch(if (self.root.session == null) .all else .lent);
     ctx.redraw = true;
     return true;
