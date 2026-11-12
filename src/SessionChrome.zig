@@ -370,8 +370,9 @@ test "SessionChrome puts notices in Footer without a state row and preserves nee
         try std.testing.expectEqual(idle.size.height, noticed.size.height);
         const footer = try input.facts.draw(ctx);
         for ("Copied 3 lines", width - "Copied 3 lines".len..) |byte, col| try std.testing.expectEqual(byte, footer.readCell(col, 0).char.grapheme[0]);
-        // Back and the visible identity remain: no invisible key targets.
-        try std.testing.expectEqual(@as(usize, 2), footer.children.len);
+        // Only Back remains: the name is not a button, and a notice
+        // replaces the right keys without leaving invisible targets.
+        try std.testing.expectEqual(@as(usize, 1), footer.children.len);
     }
 
     self.place(&screen, .{ .width = 80 });
@@ -442,7 +443,7 @@ test "SessionChrome archive confirmation is one durable badge at both widths, wi
         for (footer.buffer) |cell| if (cell.char.width != 0) try text.writer.writeAll(cell.char.grapheme);
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Archived"));
         try std.testing.expect(std.mem.indexOf(u8, text.written(), " · Archived") != null);
-        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text.written(), "Archive audit"));
+        try std.testing.expectEqual(@as(usize, @intFromBool(width >= 99)), std.mem.count(u8, text.written(), "Archive audit"));
         try std.testing.expectEqualStrings("", self.state.text);
         try std.testing.expect(self.status.bar.notice == null);
     }
@@ -646,7 +647,7 @@ test "SessionChrome footer and new-entry chips underline on hover without acting
     defer arena.deinit();
     const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 1 }, .cell_size = .{} };
     const footer = try drawFooter(&self, draw_ctx);
-    try std.testing.expectEqual(@as(usize, 5), footer.children.len);
+    try std.testing.expectEqual(@as(usize, 4), footer.children.len);
     var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
     for ([_]*Chip{ &self.facts.back, &self.status.key, &self.status.stop, &self.marker }) |chip| {
         try chip.widget().handleEvent(&ctx, .mouse_enter);
