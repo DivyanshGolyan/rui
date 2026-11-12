@@ -18,6 +18,7 @@ const session_line = @import("session_line.zig");
 const attention = @import("attention.zig");
 const change_ring = @import("change_ring.zig");
 const cli_args = @import("cli_args.zig");
+const command_input = @import("command_input.zig");
 const command_value = @import("command_value.zig");
 const shortPath = @import("home_path.zig").shortPath;
 const draft_layout = @import("draft_layout.zig");
@@ -1114,6 +1115,8 @@ pub const State = struct {
     skill_rows: skill_completion.Rows = .{},
     /// The open picker's latest model lists, freed when it closes.
     menu: model_picker.Menu = .{},
+    /// Changes before a borrowed list is replaced or released.
+    menu_revision: u64 = 0,
     /// How the open picker's latest model-list read ended.
     menu_read: model_picker_view.Read = .unread,
     /// A model-list read is in flight.
@@ -1218,6 +1221,7 @@ pub const State = struct {
 
     fn closePicker(self: *State) void {
         self.picker = null;
+        self.menu_revision += 1;
         self.menu.deinit(self.gpa);
         self.menu_read = .unread;
     }
@@ -1907,6 +1911,7 @@ fn readModels(state: *State, read: ModelsRead) void {
             // them with this menu AND the current draft. A previously typed ID
             // must yield to listed matches, not become an extra row.
             picker.edits = null;
+            state.menu_revision += 1;
             state.menu.deinit(state.gpa);
             state.menu = owned;
             state.menu_read = .read;
@@ -2347,7 +2352,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
         if ((pressed == .archive or pressed == .stop) and state.selected != .session) return;
     }
     if (action) |pressed| switch (pressed) {
-        .archive => return archiveIntent(state, .{ .selected_archive = .keep }, effects),
+        .archive => return archiveIntent(state, .selected_archive, effects),
         .stop => return stopKey(state, null, effects),
         else => {},
     };
@@ -2379,7 +2384,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
             // Esc closes the picker; else it cancels an Upgrade that can
             // still change nothing, as the status row offers, even while the
             // draft still lists `Upgrade`; else a shown command list closes,
-            // then a panel, each keeping the draft.
+            // restoring the empty composition; then it closes a panel.
             .clear => if (picker != null) {
                 state.closePicker();
                 effects.add(.clear_draft);
@@ -2387,6 +2392,7 @@ fn compose(state: *State, value: Composed, effects: *Effects) error{OutOfMemory}
                 effects.add(.cancel_upgrade);
             } else if (shownCommands(state, value.draft)) |shown| {
                 shown.close();
+                if (command_input.consumesDraft(value.draft.bytes, .cancelled)) effects.add(.clear_draft);
             } else if (state.panel != null) state.closePanel() else if (value.draft.bytes.len != 0) effects.add(.clear_draft) else {
                 state.settings = .{};
             },
@@ -2621,7 +2627,17 @@ fn enter(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!
 
 /// Runs the slash command `text`.
 fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
-    const command = switch (commands.parse(text)) {
+    const parsed = commands.parse(text);
+    const held = switch (parsed) {
+        .command => |command| switch (command.name) {
+            .rename, .setup => waitForCommand(state),
+            else => false,
+        },
+        else => false,
+    };
+    if (!command_input.consumesDraft(text, if (held) .held else .submitted)) return;
+    effects.add(.clear_draft);
+    const command = switch (parsed) {
         .unknown => {
             var buffer: [slash_commands.unknown_bytes]u8 = undefined;
             return state.say(.attention, "{s}", .{slash_commands.unknown(&buffer, text)});
@@ -2630,19 +2646,17 @@ fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMem
         .command => |command| command,
     };
     switch (command.name) {
-        .archive => archiveIntent(state, .{ .selected_archive = .submitted }, effects),
+        .archive => archiveIntent(state, .selected_archive, effects),
         .unarchive => archiveIntent(state, .selected_restore, effects),
         .sessions => {
             const filter: ArchiveFilter = if (std.mem.eql(u8, command.argument, "archived")) .archived else if (std.mem.eql(u8, command.argument, "all")) .all else if (std.mem.eql(u8, command.argument, "unarchived")) .active else {
                 state.say(.quiet, "Sessions: {s}. /sessions unarchived|archived|all", .{archiveViewName(state.archive)});
-                effects.add(.clear_draft);
                 return;
             };
-            effects.add(.clear_draft);
             try changeArchiveView(state, filter, effects);
         },
         .model => unreachable, // The draft-backed picker takes /model before submission.
-        .configure => if (configure(state, command.argument)) effects.add(.clear_draft),
+        .configure => configure(state, command.argument),
         .rename => {
             // As a key that acts on a Session, it acts where the Sessions
             // show, so the list shows the row it names.
@@ -2654,9 +2668,8 @@ fn runCommand(state: *State, text: []const u8, effects: *Effects) error{OutOfMem
     }
 }
 
-const ArchiveDraft = enum { keep, submitted };
 const ArchiveIntent = union(enum) {
-    selected_archive: ArchiveDraft,
+    selected_archive,
     selected_restore,
     ask: struct { reference: Reference, work: Kind, archive: ArchiveState },
     restore: Reference,
@@ -2668,18 +2681,17 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
     if (!admitHostRequest(state)) return;
     state.notice = null;
     switch (intent) {
-        .selected_archive => |draft| {
+        .selected_archive => {
             state.closePanel();
             const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
-            askArchive(state, row.reference, state.stateOf(row).asOf(state.now_ms), row.archive_state, draft, effects);
+            askArchive(state, row.reference, state.stateOf(row).asOf(state.now_ms), row.archive_state, effects);
         },
         .selected_restore => {
             state.closePanel();
             const row = state.selectedRow() orelse return state.say(.attention, no_selection, .{});
             archiveSession(state, .{ .reference = row.reference, .archived = false }, effects);
-            effects.add(.clear_draft);
         },
-        .ask => |target| askArchive(state, target.reference, target.work, target.archive, .keep, effects),
+        .ask => |target| askArchive(state, target.reference, target.work, target.archive, effects),
         .restore => |ref| archiveSession(state, .{ .reference = ref, .archived = false }, effects),
     }
 }
@@ -2687,7 +2699,7 @@ fn archiveIntent(state: *State, intent: ArchiveIntent, effects: *Effects) void {
 /// Slash commands consume their submitted line; a key leaves its draft alone.
 /// A working Session archives at once too: the Host stops its work first,
 /// and `/unarchive` restores it, so nothing is asked.
-fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, draft: ArchiveDraft, effects: *Effects) void {
+fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, effects: *Effects) void {
     _ = work;
     if (archive == .archiving) {
         state.say(.attention, "{s}: Stopping and archiving; waiting for work to settle.", .{&ref});
@@ -2697,7 +2709,6 @@ fn askArchive(state: *State, ref: Reference, work: Kind, archive: ArchiveState, 
         state.say(.quiet, "{s} is already archived. /unarchive restores it.", .{&ref});
         return;
     }
-    if (draft == .submitted) effects.add(.clear_draft);
     archiveSession(state, .{ .reference = ref }, effects);
 }
 
@@ -2740,9 +2751,7 @@ fn changeArchiveView(state: *State, filter: ArchiveFilter, effects: *Effects) er
 /// Asks the shell to run `text`, the line of command `name`, once no other
 /// command runs.
 fn requestCommand(state: *State, name: commands.Name, ref: ?Reference, text: []const u8, effects: *Effects) error{OutOfMemory}!void {
-    if (waitForCommand(state)) return;
     state.command = .{ .name = name, .session = ref, .text = try state.gpa.dupe(u8, text) };
-    effects.add(.clear_draft);
     effects.add(.{ .command = state.command.? });
 }
 
@@ -2858,27 +2867,27 @@ const configure_usage = blk: {
 
 /// Holds `/configure` start settings, the live /configure grammar limited to
 /// the options of `session start`. Later values replace earlier ones.
-fn configure(state: *State, arguments: []const u8) bool {
+fn configure(state: *State, arguments: []const u8) void {
     var buffer: [StartSettings.max_bytes + 512]u8 = undefined;
     var tokens: [20][]const u8 = undefined;
     const count = split(arguments, &buffer, &tokens) catch {
         state.say(.attention, configure_usage, .{});
-        return false;
+        return;
     };
     var nothing = std.heap.FixedBufferAllocator.init(&.{});
     var problem: cli_args.Refusal = undefined;
     const parsed = cli_args.live_configure.parse(tokens[0..count], nothing.allocator(), &problem) catch {
         state.say(.attention, configure_usage, .{});
-        return false;
+        return;
     };
     if (parsed.help or parsed.seen == 0) {
         state.say(.attention, configure_usage, .{});
-        return false;
+        return;
     }
     inline for (cli_args.live_configure.options) |option| {
         if (parsed.has(option.name) and startOption(option.name) == null) {
             state.say(.attention, "! Set --{s} after the start", .{option.name});
-            return false;
+            return;
         }
     }
     // The Host admits any model name, so the client checks its syntax, as
@@ -2886,7 +2895,7 @@ fn configure(state: *State, arguments: []const u8) bool {
     const unlisted: ?[]const u8 = if (parsed.get("model")) |model| blk: {
         if (!model_capability.validModelSyntax(model)) {
             state.say(.attention, "! Not a model ID; session configure -h", .{});
-            return false;
+            return;
         }
         break :blk if (model_capability.supportsModel(model_catalog.shipped, model)) null else model;
     } else null;
@@ -2894,12 +2903,11 @@ fn configure(state: *State, arguments: []const u8) bool {
     inline for (start_options, 0..) |name, option| {
         if (parsed.get(name) orelse state.settings.get(option)) |value| next.put(option, value) catch {
             state.say(.attention, "! Settings over {d} bytes", .{StartSettings.max_bytes});
-            return false;
+            return;
         };
     }
     state.settings = next;
     if (unlisted) |model| state.say(.quiet, "This client's catalog does not list {s}; client defaults use estimated limits", .{model});
-    return true;
 }
 
 fn startOption(name: []const u8) ?usize {
@@ -3066,11 +3074,11 @@ fn hex(comptime text: *const [7]u8) Rgb {
 pub const palettes = std.enums.EnumArray(Skin, Palette).init(.{
     .day = .{
         .colours = .init(.{ .strong = hex("#121a44"), .ink = hex("#1d2a63"), .normal = hex("#3a4677"), .quiet = hex("#535c86"), .mark = hex("#7d84a6"), .rule = hex("#d8cfbb"), .attention = hex("#7a5200"), .failure = hex("#9e2328"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#f3eee2"), .bar = hex("#e7dfcc"), .selection = hex("#dcdcec"), .band = hex("#f2c200") }),
+        .backgrounds = .init(.{ .ground = hex("#f3eee2"), .bar = hex("#e7dfcc"), .selection = hex("#dcdcec"), .hover = hex("#e1dddc"), .band = hex("#f2c200") }),
     },
     .night = .{
         .colours = .init(.{ .strong = hex("#f6f1e4"), .ink = hex("#e2dccb"), .normal = hex("#bdb8a9"), .quiet = hex("#9d9bb0"), .mark = hex("#6e7396"), .rule = hex("#2a3157"), .attention = hex("#f2c200"), .failure = hex("#ff8f7d"), .on_band = hex("#141414") }),
-        .backgrounds = .init(.{ .ground = hex("#121833"), .bar = hex("#1a2142"), .selection = hex("#2b3568"), .band = hex("#f2c200") }),
+        .backgrounds = .init(.{ .ground = hex("#121833"), .bar = hex("#1a2142"), .selection = hex("#2b3568"), .hover = hex("#222b55"), .band = hex("#f2c200") }),
     },
 });
 
@@ -4956,7 +4964,7 @@ test "the composer starts text with one slash from //, as a conversation does" {
     var state = try opened(&mixed);
     defer state.deinit();
     draft = try typeText(&state, "/home/me/project needs investigating");
-    try expectEffects(&.{}, try submit(&state, draft));
+    try expectEffects(&.{.clear_draft}, try submit(&state, draft));
     try expectNoticeWithData(&state, "! Unknown command /home/me/project");
     draft = try typeText(&state, "//home/me/project needs investigating");
     const empty: StartSettings = .{};
@@ -5013,7 +5021,7 @@ test "Enter takes a row only from a list the latest frame drew, and a long line 
     var draft = try typeText(&state, "/set");
     state.commands.?.drew(false);
     const unlisted = try submit(&state, draft);
-    for (unlisted.slice()) |effect| try std.testing.expect(effect != .clear_draft);
+    try expectEffects(&.{.clear_draft}, unlisted);
     draft = try typeText(&state, "/set");
     try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &setup_line } } }, try submit(&state, draft));
     // A value that completes a line longer than any scratch line runs it.
@@ -5045,8 +5053,8 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try expectEffects(&.{}, try press(&state, erased, .next));
     try std.testing.expectEqual(selected, state.selected);
     try std.testing.expectEqual(@as(usize, 1), state.commands.?.highlight);
-    // Esc closes that list and keeps the draft.
-    try expectEffects(&.{}, try press(&state, erased, .clear));
+    // Esc ends that command and restores the empty composition.
+    try expectEffects(&.{.clear_draft}, try press(&state, erased, .clear));
     try std.testing.expectEqual(.closed, state.commands.?.seen);
 }
 
@@ -5089,12 +5097,12 @@ test "arrows move the command list's highlight, and Enter takes it: a word anoth
 test "Enter runs a command by the overview's table and names its usage when misused" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/sessions now")));
+    try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, "/sessions now")));
     try expectNotice(&state, "! Usage: /sessions [VIEW]");
     try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, "/configure --permission-mode ask")));
 }
 
-test "Esc closes a shown command list and keeps the draft; a change opens it again" {
+test "Esc closes a shown command list and consumes its command draft" {
     var state = try opened(&mixed);
     defer state.deinit();
     try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
@@ -5102,10 +5110,10 @@ test "Esc closes a shown command list and keeps the draft; a change opens it aga
     try expectEffects(&.{}, try step(&state, .{ .composed = .{ .input = .{ .composer = .redraw }, .draft = draft } }));
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.drawn, state.commands.?.seen);
-    try expectEffects(&.{}, try press(&state, draft, .clear));
+    try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
     try std.testing.expectEqual(.closed, state.commands.?.seen);
     try expectLastLine(&state, draft, "enter run");
-    // With the list closed, Esc clears the draft.
+    // The shell applies clear_draft. A subsequent command gets a fresh list.
     drawWithRoom(&state, draft);
     try std.testing.expectEqual(.closed, state.commands.?.seen);
     try expectEffects(&.{.clear_draft}, try press(&state, draft, .clear));
@@ -5168,7 +5176,7 @@ test "/configure holds start settings for the Session the next Enter starts" {
         .{ "/status", "! Unknown command /status" },
     }) |case| {
         draft = try typeText(&state, case[0]);
-        try expectEffects(&.{}, try submit(&state, draft));
+        try expectEffects(&.{.clear_draft}, try submit(&state, draft));
         try if (case[1].ptr == configure_usage.ptr) expectNoticeWithData(&state, case[1]) else expectNotice(&state, case[1]);
         try std.testing.expect(state.settings.empty());
     }
@@ -6096,9 +6104,9 @@ test "overview sender does not change ended title styling" {
 }
 
 test "the overview indexed palettes retain every colour" {
-    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [4]u8 }{
-        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 214 } },
-        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 238, 214 } },
+    const expected = [_]struct { skin: Skin, colours: [9]u8, backgrounds: [5]u8 }{
+        .{ .skin = .day, .colours = .{ 235, 17, 239, 60, 103, 187, 94, 124, 233 }, .backgrounds = .{ 255, 253, 254, 253, 214 } },
+        .{ .skin = .night, .colours = .{ 255, 188, 249, 247, 60, 237, 214, 210, 233 }, .backgrounds = .{ 234, 235, 238, 237, 214 } },
     };
     for (expected) |case| {
         for (std.enums.values(Colour), case.colours) |role, value| try std.testing.expectEqual(value, indexed.get(case.skin).colours.get(role));
@@ -6767,7 +6775,7 @@ fn ranWith(state: *State, ran: Ran) !void {
 test "/rename names the selected Session through the shell, as a conversation does, one command at a time" {
     var empty = try opened(&.{});
     defer empty.deinit();
-    try expectEffects(&.{}, try submit(&empty, try typeText(&empty, "/rename lane four")));
+    try expectEffects(&.{.clear_draft}, try submit(&empty, try typeText(&empty, "/rename lane four")));
     try expectNotice(&empty, "! Select a Session first.");
     try std.testing.expectEqual(Colour.attention, empty.notice.?.colour);
     try expectEffects(&.{}, try press(&empty, .{}, .stop));
@@ -6778,7 +6786,7 @@ test "/rename names the selected Session through the shell, as a conversation do
     const selected = state.selected.session;
     var line = "/rename lane four".*;
     try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .rename, .session = selected, .text = &line } } }, try submit(&state, try typeText(&state, &line)));
-    try expectEffects(&.{}, try submit(&state, try typeText(&state, "/rename ")));
+    try expectEffects(&.{.clear_draft}, try submit(&state, try typeText(&state, "/rename ")));
     try expectNotice(&state, "! Usage: /rename NAME");
     // One runs at a time, and the Session it names does not open under it.
     try expectEffects(&.{}, try submit(&state, try typeText(&state, "/setup")));
@@ -7733,9 +7741,9 @@ test "overview single footer keeps the working Enter key for every selection and
 
 test "the Footer names the Enter action submission takes, over every composer state" {
     // How the composer stands before Enter: as typed (a slash draft's list
-    // drawn), its list dismissed with Esc, the model picker open, a start
-    // in flight, or Host requests held after an Upgrade (its list dismissed).
-    const Setup = enum { typed, dismissed, picker, frozen, held };
+    // drawn), its list not drawn, the model picker open, a start in flight,
+    // or Host requests held after an Upgrade (its list not drawn).
+    const Setup = enum { typed, unlisted, picker, frozen, held };
     const Tag = std.meta.Tag(Effect);
     const k7: Selection = .{ .session = "k7m2qx".* };
     const cases = [_]struct { setup: Setup, selection: Selection = .new_session, draft: []const u8, action: EnterAction, right: []const u8, effects: []const Tag }{
@@ -7751,10 +7759,10 @@ test "the Footer names the Enter action submission takes, over every composer st
         // Command completion open: Enter takes the highlighted entry.
         .{ .setup = .typed, .draft = "/conf", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.replace} },
         .{ .setup = .typed, .draft = "/configure", .action = .pick_command, .right = "enter pick / esc close", .effects = &.{.replace} },
-        // Completion dismissed, or none for a command with its argument:
+        // Completion not drawn, or none for a command with its argument:
         // Enter runs the draft as written.
-        .{ .setup = .dismissed, .draft = "/conf", .action = .run, .right = "enter run", .effects = &.{} },
-        .{ .setup = .dismissed, .draft = "/setup", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
+        .{ .setup = .unlisted, .draft = "/conf", .action = .run, .right = "enter run", .effects = &.{.clear_draft} },
+        .{ .setup = .unlisted, .draft = "/setup", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
         .{ .setup = .typed, .selection = k7, .draft = "/rename NAME", .action = .run, .right = "enter run", .effects = &.{ .clear_draft, .command } },
         // The model picker saves the highlighted default.
         .{ .setup = .picker, .draft = "/model gpt-6-luna", .action = .pick_model, .right = "enter pick / esc close", .effects = &.{ .clear_draft, .save_default } },
@@ -7776,16 +7784,15 @@ test "the Footer names the Enter action submission takes, over every composer st
         try expectEffects(&.{}, try step(&state, .{ .resized = .{ .width = 80, .height = 24 } }));
         state.selected = case.selection;
         switch (case.setup) {
-            .typed, .dismissed => {},
+            .typed, .unlisted => {},
             .picker => try openPicker(&state, &.{chatgpt}),
             .frozen => try expectEffects(&.{.{ .start = .{ .settings = &state.settings, .text = "first" } }}, try submit(&state, try typeText(&state, "first"))),
             .held => state.upgrade.after = .reobserving,
         }
         const draft: Draft = if (case.setup == .frozen) .{ .bytes = case.draft } else try typeText(&state, case.draft);
-        if (case.setup == .dismissed or (case.setup == .held and state.commands != null)) {
+        if (case.setup == .unlisted or (case.setup == .held and state.commands != null)) {
             try std.testing.expectEqual(.drawn, state.commands.?.seen);
-            try expectEffects(&.{}, try press(&state, draft, .clear));
-            drawWithRoom(&state, draft);
+            state.commands = null;
         }
         const listed = if (state.commands) |shown| shown.seen == .drawn else false;
         try std.testing.expectEqual(case.action, enterAction(&state, listed, draft.bytes));
@@ -7964,13 +7971,14 @@ fn drawnCommandList(state: *State, skills: ?[]const []const u8) !Draft {
 }
 
 test "overview command list click takes the drawn row only from the list the frame drew, as arrows and Enter do" {
-    const Case = enum { unchanged, unchanged_skill, edited, replaced, closed };
+    const Case = enum { unchanged, unchanged_skill, choice, run, edited, replaced, closed, closed_skill };
     const Mode = enum { editable, frozen, pasting };
     const first_page = [_][]const u8{ "refactor", "review" };
+    var setup_line = "/setup".*;
     for (std.enums.values(Case)) |case| for (std.enums.values(Mode)) |mode| {
         errdefer std.debug.print("case={s} mode={s}\n", .{ @tagName(case), @tagName(mode) });
-        const skill = case == .unchanged_skill or case == .replaced;
-        const index: usize = if (skill or case == .edited) 1 else 3;
+        const skill = case == .unchanged_skill or case == .replaced or case == .closed_skill;
+        const index: usize = if (skill or case == .edited or case == .choice) 1 else if (case == .run) 5 else 3;
         var clicked = try opened(&mixed);
         defer clicked.deinit();
         var keyed = try opened(&mixed);
@@ -7978,14 +7986,14 @@ test "overview command list click takes the drawn row only from the list the fra
         var drafts: [2]Draft = undefined;
         var pressed: slash_commands.Shown.Pick = undefined;
         for ([_]*State{ &clicked, &keyed }, &drafts) |state, *draft| {
-            draft.* = try drawnCommandList(state, if (skill) &first_page else null);
+            draft.* = if (case == .choice) try typeText(state, "/configure --permission-mode ") else try drawnCommandList(state, if (skill) &first_page else null);
             // The frame drew the row; the press names it in that list.
             if (state == &clicked) pressed = state.commands.?.pick(index);
             // What changed after the frame drew the list and before the
             // click: the draft gained `s`, a new skills page replaced the
             // rows of the same draft, or Esc closed the list.
             switch (case) {
-                .unchanged, .unchanged_skill => {},
+                .unchanged, .unchanged_skill, .choice, .run => {},
                 .edited => {
                     draft.* = .{ .bytes = "/s", .cursor = 2, .edits = draft.edits +% 1 };
                     try expectEffects(&.{}, try step(state, .{ .composed = .{ .input = .{ .composer = .append }, .draft = draft.* } }));
@@ -8000,7 +8008,15 @@ test "overview command list click takes the drawn row only from the list the fra
                     for (entries, [_][]const u8{ "release", "rename" }) |*entry, name| entry.* = .{ .name = try state.gpa.dupe(u8, name), .description = try state.gpa.dupe(u8, "a skill") };
                     skillsRead(state, read.read, .{ .entries = entries, .total = 2 }, draft.*);
                 },
-                .closed => try expectEffects(&.{}, try press(state, draft.*, .clear)),
+                .closed => {
+                    // Esc consumes a command through command_input.consumesDraft.
+                    // Apply the shell's clear before delivering the stale press.
+                    try expectEffects(&.{.clear_draft}, try press(state, draft.*, .clear));
+                    draft.* = .{ .edits = draft.edits +% 1 };
+                },
+                // Closing skill suggestions keeps the Message, so this also
+                // checks a closed list while its nonempty draft still matches.
+                .closed_skill => try expectEffects(&.{}, try press(state, draft.*, .clear)),
             }
             if (mode == .frozen) {
                 // A start begins; the shell keeps the list its frame drew.
@@ -8013,12 +8029,20 @@ test "overview command list click takes the drawn row only from the list the fra
         const before = clicked.commands;
         const selected = clicked.selected;
         const effects = try step(&clicked, .{ .clicked = .{ .target = .{ .command = pressed }, .draft = drafts[0], .pasting = mode == .pasting } });
-        if ((case == .unchanged or case == .unchanged_skill) and mode == .editable) {
+        if ((case == .unchanged or case == .unchanged_skill or case == .choice or case == .run) and mode == .editable) {
             // Independent expectation: the arrows to that row, then Enter.
             for (0..index) |_| _ = try press(&keyed, drafts[1], .next);
             const entered = try submit(&keyed, drafts[1]);
             try std.testing.expect(entered.len != 0);
             try expectEffects(entered.slice(), effects);
+            // Completed commands consume their draft, not just their list.
+            // These are independent expectations, in addition to key parity.
+            if (case == .choice) {
+                try expectEffects(&.{.clear_draft}, effects);
+                try std.testing.expectEqualStrings("bypass", clicked.settings.get(startOption("permission-mode").?).?);
+            } else if (case == .run) {
+                try expectEffects(&.{ .clear_draft, .{ .command = .{ .name = .setup, .text = &setup_line } } }, effects);
+            }
             try std.testing.expectEqual(keyed.selected, clicked.selected);
             try std.testing.expectEqual(keyed.panel, clicked.panel);
             try std.testing.expectEqual(keyed.commands != null, clicked.commands != null);

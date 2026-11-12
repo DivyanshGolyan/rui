@@ -2192,6 +2192,7 @@ CLI failures cross one catalog boundary and render a stable code with accepted i
 Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
 The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (`host_not_serving`, exit 6); the latter prints the exact `rui host start --store PATH` command.
 An unreachable Host is absent only when the Store lock is free; a missing or refused control socket while that lock is held is `host_stopping` (exit 5), with advice to wait for shutdown before restarting and retrying.
+A Host from another Rui version that does not speak this rui's protocol is `host_incompatible` (exit 6); pause it with the Rui version that started it, then start it again with this rui.
 Other transport failures while the lock is held, or a failed lock probe, do not establish either condition and retain their original classification.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
@@ -2358,7 +2359,14 @@ Inspection creates neither directory nor file.
 On a terminal, bare `rui` (optionally `--store`, `--provider`, `--model`) opens the **Session overview** of unarchived Sessions in the Store; each row shows its Workspace.
 The overview is Rui's primary terminal surface: a client view over Session listing and host information, not a Host entity, registry or report.
 It neither creates nor resumes a Session.
-It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice offers each provider (Codex login, an OpenAI API key, or saving a ready one as the default) or deferral, without creating a Session.
+It captures canonical cwd before starting/attaching the selected Host (default Active Capacity 100), and resolves only a locally usable supported provider for Sessions it may start; an unavailable or ambiguous choice opens the app with ChatGPT and API key choices on the input row, without creating a Session.
+The same screen opens from app settings Sign-in; it drives the credential owners on a cancellable UI worker, shows a clickable device-login link or masked key entry, and keeps failures on that row.
+While it is open it takes every key and click, so nothing behind it opens or navigates.
+Esc leaves it, except the first-run screen, which stays until sign-in gives a default; a screen opened from Settings always returns there.
+Its choice uses the approval row's prompt and background-only selection, including with NO_COLOR; the device row always reads `auth.openai.com/codex/device · CODE`, using the answer view's terminal hyperlink boundary.
+Either locally ready provider is selected without reinstalling its credential. Credential publication, default saving and Host activation settle once through the same owner on completion or departure, so leaving after publication cannot hide a failed default save.
+After credential publication it saves the provider default through `saveProviderAfterLogin` and uses the existing Host start path before enabling task input.
+The shared `host_launch` result retains startup output, failure context and warnings across activation. Its reporting policy supplies terminal diagnostics after screen restoration and one plain sign-in-row line; only retryable failures offer Enter. Successful activation warnings remain a single overview notice, independently of default-save failure.
 A running Host that does not serve the chosen provider is reported, not restarted.
 When all three selectors are explicit, unreadable future defaults cannot block the overview, even after login fails to save them; otherwise the post-login choice rereads future defaults.
 A ready existing Host retains its actual capacity/capabilities; no model capability prevents opening the overview without restarting it.
@@ -2807,7 +2815,7 @@ This display bound does not cap execution.
 While work is under way, the conversation says what it is doing now, and says nothing once the work ends.
 Call rows keep their places, in issue order.
 While the work is a running Bash call, that call's own row carries the clock, `• Run zig build test-store · 42s`, found by the call's Operation and ordinal, never by its text.
-Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Waiting · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
+Any other work is the conversation's last line: `• Queued · 3s` while the Session waits for a model slot, `• Thinking · 12s` while a model Attempt is in flight, `! Rate limited · retry 2 in 18s` (another retry cause reads `Provider error`) and `Stopping…`; so is a running call whose row is not shown, which reads `Running a command` without a description.
 The time counts from the state's `since`, against the terminal's clock.
 The activity tail remains part of the feed's measured height while scrolled away; inspection and Message panels show their own documents instead.
 The `↓` chip uses a permanently reserved row. Its count names newly rendered Activity entries arriving beyond the scan's starting cursor, not invisible Activity positions or replayed provisional entries.
@@ -2904,7 +2912,8 @@ App enables mouse reporting, and wheel events scroll the visible widget.
 Every visible chooseable row or control has a click action matching its keyboard activation, including Session and Settings rows, editable status fields, command and skill choices, model controls and transcript links.
 New Session starts an existing task draft as Enter does; with a blank draft it selects the composer without creating a Session.
 Hover never changes keyboard selection or focus.
-Rows and fields take the selection background or monochrome reverse while preserving their foreground; chips and peer links underline and show the pointer shape.
+Under the pointer, rows and fields take the hover background, the per-channel midpoint of the selvedge and selection colours, or a monochrome underline, while preserving their foreground; reverse stays the keyboard selection's mark.
+A row that is both selected and hovered keeps the selection look; chips and peer links underline and show the pointer shape.
 Only drawn, clipped action regions take clicks, and their existing paste, consent, stale-content and availability guards still apply.
 Headings, fixed status fields and unkeyed summary aggregates remain inert.
 Rui does not enable alternate scroll mode 1007.
@@ -2985,9 +2994,11 @@ Tab adds the rest of the highlighted word, and a space when another word may fol
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
 Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
-Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
+Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
+Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
+`command_input.zig` owns that ending rule for both screens; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G cancel a command whose list the latest frame showed, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
 Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
 There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
 The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
@@ -3020,7 +3031,7 @@ Rui cannot see whether the terminal took the bytes.
 `/copy file` writes the last answer as it arrives to an exclusively created mode 0600 temporary file beside `rui-ID-answer.md` in the directory Rui runs in, then renames it over that name, so an earlier file or a link there is replaced and a link's target is never followed or changed.
 If the read fails the temporary file is removed and the name keeps what it had.
 It says `Saved to ./rui-ID-answer.md`.
-Before the first answer each says `No answer to copy yet.`; `/copy code` on an answer with no complete fenced block says `No code block in the last answer.` A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
+Before the first answer each says `No answer to copy`; `/copy code` on an answer with no complete fenced block says `No code block`. A failed copy says `! Copy unavailable; draft retained.`, or `! This directory is not writable; draft retained.` when `/copy file` cannot write there.
 Non-TTY conversation invocation is refused; one-shot and pipe commands keep their existing contracts.
 
 Approval requires the whole choice on the input row (`› Allow once` and `Deny`, shortened to `Allow` and then `A` and `D` only when narrower than 25 and 20 columns) and its hint under it (`←→ choose · enter confirms`, shortened to `←→ · enter` when it does not fit).

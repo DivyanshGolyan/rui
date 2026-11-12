@@ -49,6 +49,7 @@ const empty_app_text: vxfw.Text = .{ .text = "" };
 
 const reads = @import("session_reads.zig");
 const session_line = @import("session_line.zig");
+const command_input = @import("command_input.zig");
 const slash_commands_shared = @import("slash_commands.zig");
 const skill_completion = @import("skill_completion.zig");
 const skill_suggestions = @import("skill_suggestions.zig");
@@ -852,6 +853,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     const quiet = style.of(self.app_caps, .{ .colour = .quiet });
     const attention = style.of(self.app_caps, .{ .colour = .attention });
     const failure = style.of(self.app_caps, .{ .colour = .failure });
+    const hover = style.of(self.app_caps, .{ .background = .hover });
     const colours: viewport.Colours = .{
         .quiet = quiet.fg,
         .user = style.of(self.app_caps, .{ .colour = .ink }).fg,
@@ -868,17 +870,20 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
     self.app_input.composer.editor = &self.input.editors[self.input.active];
     self.app_card.style = normal;
     self.app_card.quiet = quiet;
+    self.app_card.hover_style = hover;
     self.app_card.description = self.action_summary.description.slice();
     self.app_card.method = self.app_caps.width;
     self.app_preview.style = normal;
     self.app_preview.colours = colours;
+    self.app_preview.hover_style = hover;
     self.app_preview.method = self.app_caps.width;
     self.app_content.style = normal;
-    self.app_content.hover_style = style.of(self.app_caps, .{ .background = .selection });
+    self.app_content.hover_style = hover;
     self.app_content.colours = colours;
     self.app_content.method = self.app_caps.width;
     self.app_document.style = normal;
     self.app_document.colours = colours;
+    self.app_document.hover_style = hover;
     self.app_document.method = self.app_caps.width;
     self.app_document.document = if (screen.view == .message) &screen.staging else &screen.browsing;
     self.app_body.shown = if (screen.view == .feed) self.app_content.widget() else self.app_document.widget();
@@ -889,6 +894,7 @@ fn appDraw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.
         self.app_palette.method = self.app_caps.width;
         self.app_palette.style = normal;
         self.app_palette.quiet = quiet;
+        self.app_palette.hover_style = hover;
         self.app_palette.userdata = self;
         self.app_palette.on_select = appSelectCommand;
         palette = self.app_palette.widget();
@@ -2318,6 +2324,7 @@ fn perform(self: *Self, action: ConversationAction) !void {
             // Esc closes only a list the person saw.
             if (action == .close) if (self.shownCommands()) |shown| {
                 shown.close();
+                if (command_input.consumesDraft(self.input.composition().bytes, .cancelled)) self.input.clear();
                 self.dirty = true;
                 return;
             };
@@ -2567,8 +2574,8 @@ fn commandLine(self: *Self) !void {
 /// stays until the hold lifts.
 fn runLine(self: *Self) !void {
     const text = self.input.composition().bytes;
-    const takes = !self.upgradeHeld();
-    defer if (takes) self.input.clear();
+    const end: command_input.DraftEnd = if (self.upgradeHeld()) .held else .submitted;
+    defer if (command_input.consumesDraft(text, end)) self.input.clear();
     try self.slashCommand(text);
 }
 
@@ -3152,8 +3159,8 @@ fn showInspection(self: *Self) !void {
 fn showCopy(self: *Self) !void {
     self.dirty = true;
     self.notice = switch (self.job.result.copied) {
-        .no_answer => "No answer to copy yet.",
-        .no_code => "No code block in the last answer.",
+        .no_answer => "No answer to copy",
+        .no_code => "No code block",
         .too_large => TerminalText.clipboard_too_large,
         // Rui cannot see whether the clipboard took it.
         .clipboard => |range| sent: {
@@ -3463,6 +3470,25 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                     var ctx = held.context();
                     const preview = &held.self.app_preview;
                     const row: i16 = @intCast(preview.drawn.height);
+                    // The continuation row hovers in the hover role at every depth.
+                    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+                        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+                        held.self.app_caps = .{ .depth = depth };
+                        _ = try held.draw();
+                        try preview.widget().handleEvent(&ctx, .mouse_enter);
+                        try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .none, .type = .motion, .mods = .{} } });
+                        const hovered = try preview.widget().draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = preview.size.width, .height = preview.size.height }, .cell_size = .{} });
+                        const role = style.of(held.self.app_caps, .{ .background = .hover });
+                        for (0..hovered.size.width) |col| {
+                            const cell = hovered.readCell(@intCast(col), @intCast(row)).style;
+                            try std.testing.expectEqual(role.bg, cell.bg);
+                            try std.testing.expectEqual(role.ul_style, cell.ul_style);
+                            try std.testing.expectEqual(role.reverse, cell.reverse);
+                        }
+                        try preview.widget().handleEvent(&ctx, .mouse_leave);
+                    }
+                    held.self.app_caps = .{ .depth = .none };
+                    _ = try held.draw();
                     for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
                         try preview.widget().handleEvent(&ctx, .{ .mouse = .{ .col = 2, .row = row, .button = .left, .mods = .{}, .type = kind } });
                     }
@@ -3482,6 +3508,31 @@ test "App Session request overflow opens in place with Ctrl-O or a continuation 
                 try std.testing.expect(std.mem.indexOf(u8, try held.shown(), "row 000") != null);
             }
         }
+    }
+}
+
+test "App Session binds the hover role to every widget it owns with a hover style at every depth" {
+    for ([_]overview_view.Caps.Depth{ .direct, .indexed, .none }) |depth| {
+        errdefer std.debug.print("depth={s}\n", .{@tagName(depth)});
+        const held = try HeldFrontend.create();
+        defer held.destroy();
+        held.self.app_caps = .{ .depth = depth };
+        // A shown palette binds too; it draws only without a request.
+        try held.keys("/c");
+        _ = try held.draw();
+        try std.testing.expect(held.screen.commands != null);
+        const role = style.of(held.self.app_caps, .{ .background = .hover });
+        var bound: usize = 0;
+        const info = @typeInfo(Self).@"struct";
+        inline for (info.field_names, info.field_types) |name, Field| {
+            if (@typeInfo(Field) == .@"struct" and @hasField(Field, "hover_style")) {
+                errdefer std.debug.print("field={s}\n", .{name});
+                try std.testing.expectEqualDeep(role, @field(held.self, name).hover_style);
+                bound += 1;
+            }
+        }
+        // app_card, app_preview, app_content, app_document and app_palette.
+        try std.testing.expectEqual(5, bound);
     }
 }
 
@@ -3935,11 +3986,12 @@ test "a key on a draft changed since the latest frame acts on that draft's list 
     try held.settle();
     try std.testing.expectEqualStrings("c", held.screen.commands.?.list.typed);
     try std.testing.expectEqual(@as(usize, 1), held.screen.commands.?.highlight);
-    // Esc on `/co`, typed after the frame drew `/c`'s list, closes the list.
+    // Esc on `/co`, typed after the frame drew `/c`'s list, cancels the command.
     try stepKeys(held, "o\x07");
     try std.testing.expectEqualStrings("", try barShows(held));
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
+    try std.testing.expect(held.screen.commands == null);
 }
 
 test "Tab completes from the draft's own list, however many keys arrive before a frame" {
@@ -3976,19 +4028,21 @@ test "Esc closes the command list first only when the latest frame drew it" {
     const held = try HeldFrontend.create();
     defer held.destroy();
     try held.settle();
-    // Drawn: the first Esc closes only the list, the next one acts as Esc.
-    try stepKeys(held, "/st");
+    held.self.line.read = .{ .revision = 1, .end = 1 };
+    try held.self.line.model.set("gpt-6.1-sol");
+    // The first Esc consumes a drawn command; it does not leave the chat.
+    try stepKeys(held, "/effort ");
     try held.settle();
     try std.testing.expectEqual(.drawn, held.screen.commands.?.seen);
     try stepKeys(held, "\x07");
+    try std.testing.expectEqualStrings("", held.self.input.composition().bytes);
+    try std.testing.expect(held.self.leaving == null);
     try std.testing.expect((try barShows(held)).len == 0);
     try held.settle();
-    try std.testing.expectEqual(.closed, held.screen.commands.?.seen);
-    try stepKeys(held, "\x07");
-    try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
-    // The latest frame drew no list, the first being closed: Esc acts at
-    // once.
-    try stepKeys(held, "\x15/st\x07");
+    try std.testing.expect(held.screen.commands == null);
+    // A command the latest frame did not list is not cancelled by Esc.
+    try stepKeys(held, "/st\x07");
+    try std.testing.expectEqualStrings("/st", held.self.input.composition().bytes);
     try std.testing.expectEqualStrings("Esc returns to the overview once the draft is empty.", try barShows(held));
 }
 
@@ -5737,12 +5791,12 @@ test "App Session shows running calls in order above the input, with +N more run
     try std.testing.expectEqualStrings("⠹ Read docs/using-rui.md", shown[first + 2]);
     try std.testing.expectEqualStrings("+2 more running · /status", shown[first + 3]);
     // No shown call carries the clock, so the work line follows, once.
-    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Waiting · 13s"));
+    try std.testing.expect(std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 12s") or std.mem.eql(u8, shown[first + 4], "⠹ Thinking · 13s"));
     // The chip always reserves a row between the tail and the input rule.
     try std.testing.expectEqualStrings("", shown[first + 5]);
     try std.testing.expect(std.mem.startsWith(u8, shown[first + 6], "─"));
     var waiting: usize = 0;
-    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Waiting"));
+    for (shown) |line| waiting += @intFromBool(std.mem.startsWith(u8, line, "⠹ Thinking"));
     try std.testing.expectEqual(@as(usize, 1), waiting);
     // Work ends: the tail goes, and history reaches the rule again.
     self.live.view = .{};
@@ -5764,7 +5818,7 @@ test "App Session shows the newest waiting Message as ◌ [N ·] its first line,
     const row = ChromeFixture.find(&three, "◌").?;
     try std.testing.expectEqualStrings("◌ 3 · also update docs/using-rui.md", three[row]);
     // The waiting row is the tail's last, under the work line.
-    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Waiting"));
+    try std.testing.expect(std.mem.startsWith(u8, three[row - 1], "⠹ Thinking"));
     try std.testing.expectEqualStrings("", three[row + 1]);
     try std.testing.expect(std.mem.startsWith(u8, three[row + 2], "─"));
     for (three) |line| try std.testing.expect(std.ascii.findIgnoreCase(line, "queued") == null);
@@ -6056,6 +6110,26 @@ test "App Session question mark encodings append ordinary text to empty and none
             try std.testing.expect(self.app_screen.overlay == null);
             try std.testing.expectEqualStrings(if (has_draft) "a??" else "??", self.input.composition().bytes);
         }
+    }
+}
+
+test "App Session copy notices are compact state phrases" {
+    var fixture: ChromeFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const self = fixture.self;
+    for ([_]struct { result: reads.Copied, words: []const u8 }{
+        .{ .result = .no_answer, .words = "No answer to copy" },
+        .{ .result = .no_code, .words = "No code block" },
+        .{ .result = .too_large, .words = TerminalText.clipboard_too_large },
+        .{ .result = .saved, .words = "Saved to ./rui-k7m2qx-answer.md" },
+        .{ .result = .{ .clipboard = .{ .start = 0, .length = 0 } }, .words = "Sent to clipboard" },
+    }) |case| {
+        self.dirty = false;
+        self.job.result.copied = case.result;
+        try self.showCopy();
+        try std.testing.expectEqualStrings(case.words, self.notice.?);
+        try std.testing.expect(self.dirty);
     }
 }
 
@@ -8218,7 +8292,13 @@ test "App Session palette clicks follow Enter for command words options and valu
         _ = try held.draw();
         try std.testing.expect(held.self.app_palette.hover.pointing);
         const palette = try widget_.draw(.{ .arena = held.arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 20 }, .cell_size = .{} });
-        try std.testing.expect(palette.readCell(2, @intCast(row)).style.reverse);
+        const cell = palette.readCell(2, @intCast(row));
+        if (selected == index) try std.testing.expect(cell.style.reverse) else {
+            try std.testing.expect(!cell.style.reverse);
+            try std.testing.expectEqual(held.self.app_palette.hover_style.bg, cell.style.bg);
+            try std.testing.expectEqual(held.self.app_palette.hover_style.ul_style, cell.style.ul_style);
+            try std.testing.expect(palette.readCell(2, @intCast(selected - held.self.app_palette.first)).style.reverse);
+        }
         try std.testing.expectEqual(selected, held.screen.commands.?.highlight);
         try std.testing.expectEqualStrings(case.draft, held.self.input.composition().bytes);
         for (events.cmds.items) |command| try std.testing.expect(command != .request_focus);
@@ -8394,8 +8474,9 @@ test "App Session status mouse targets every editable field including wrapped ro
             const hovered = try panel.widget().draw(ctx);
             try std.testing.expectEqual(case.draft != null, panel.hover.pointing);
             if (case.draft != null) {
-                try std.testing.expectEqual(panel.colours.selection, hovered.readCell(col, row).style.bg);
-                try std.testing.expectEqual(panel.colours.selection == .default, hovered.readCell(col, row).style.reverse);
+                try std.testing.expectEqual(panel.hover_style.bg, hovered.readCell(col, row).style.bg);
+                try std.testing.expectEqual(panel.hover_style.ul_style, hovered.readCell(col, row).style.ul_style);
+                try std.testing.expect(!hovered.readCell(col, row).style.reverse);
                 try std.testing.expectEqual(plain.readCell(col, row).style.fg, hovered.readCell(col, row).style.fg);
             }
             try std.testing.expectEqual(before, held.self.inspection.selected);
