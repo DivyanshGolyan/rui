@@ -2977,9 +2977,11 @@ Tab adds the rest of the highlighted word, and a space when another word may fol
 A word Tab or Enter adds that the draft cannot hold is refused as a typed one is.
 Enter in a shown list takes the highlighted row: a command with nothing more to say, or a fixed value, runs the line it completes; a command that needs a word (`/effort`, `/rename`, `/configure` alone, which only states its usage) or an option that takes a value only gets its word and the space, so the next list shows.
 So `/copy` alone, taken from the list, copies the answer, and `/copy ` then Enter copies its highlighted choice, `code` first.
-Esc or Ctrl-G, when the latest frame showed the list, closes only the list until the draft changes, and Enter then runs the line as typed; otherwise they do what they always did.
+Esc or Ctrl-G, when the latest frame showed a command list, cancels the command and clears its draft; a skill or recovery list closes without consuming Message text.
+Submitting a command consumes its draft whether it is unknown, succeeds or fails; a command refused by a hold keeps its draft.
+`command_input.zig` owns that ending rule for both screens; otherwise Esc and Ctrl-G do what they always did.
 While the list shows, Up and Down move its highlight; otherwise they scroll the conversation.
-The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G close only a list the latest frame showed, Tab still takes a word after, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
+The overview lists its own commands, `/archive`, `/configure`, `/model`, `/rename`, `/sessions`, `/setup` and `/unarchive`, the same way, giving the list rows the Sessions above can spare, and its Up and Down move the highlight while the list shows (Home and End stay the draft's); there too Esc and Ctrl-G cancel a command whose list the latest frame showed, and the line under its input says what Enter and Esc do to the draft (Divyansh, 2026-10-31: the two screens behave the same).
 Both screens share `/rename` and `/setup`, and both answer a name no command has with `! Unknown command /NAME` (Divyansh, 2026-11-02: "Same commands both screens").
 There is no `/help` command or `?` shortcut: a question mark is ordinary draft text, including on an empty draft.
 The footer shows the keys available now; the full reference opens from **Settings › Keys**, the last row after Version, on either screen.
