@@ -76,8 +76,8 @@
         }
       ],
       "expect": [
-        "Type a task",
-        "Settings"
+        "Settings",
+        "Draft lifecycle"
       ],
       "absent": [
         "› /configure",
@@ -103,7 +103,7 @@
       ],
       "expect": [
         "Unknown command /nope",
-        "Type a task"
+        "Settings"
       ],
       "absent": [
         "› /nope"
