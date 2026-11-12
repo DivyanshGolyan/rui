@@ -626,6 +626,27 @@ fn runReport(a: *ReadAccess) !void {
 /// (`operation_code`). Many reads share each round (`readWorks`). List
 /// rows, activity pages, Message progress and the Current report read
 /// work here. Each stage reads one row, stepped once, as main did.
+/// Live work walks upward through the saved parent key, never downward through
+/// finished Session history. The result is one fact per requested Session.
+/// UNION deduplicates shared ancestors (and terminates even a corrupt cycle).
+const work_descendants = rsql.Read(.{
+    .sql = "WITH RECURSIVE live_work(session_ref,admitted_at) AS (" ++
+        "SELECT t.session_ref,m.admitted_at FROM turn t @index(turn_one_active_per_session) " ++
+        "JOIN message_admission m ON m.admission_id=t.first_admission_id " ++
+        "WHERE t.outcome_code IS NULL AND (CASE WHEN t.outcome_code IS NULL THEN t.session_ref END) IS NOT NULL " ++
+        "UNION SELECT m.session_ref,m.admitted_at FROM message_admission m @index(message_admission_pending) " ++
+        "WHERE m.turn_id IS NULL AND (CASE WHEN m.turn_id IS NULL THEN m.admission_id END) IS NOT NULL AND m.admission_id>coalesce((SELECT admission_cutoff FROM session_stop " ++
+        "WHERE session_ref=m.session_ref ORDER BY admission_cutoff DESC LIMIT 1),0))," ++
+        "live_ancestors(session_ref,admitted_at) AS (" ++
+        "SELECT s.parent_ref,w.admitted_at FROM live_work w JOIN session s ON s.session_ref=w.session_ref WHERE s.parent_ref IS NOT NULL " ++
+        "UNION SELECT s.parent_ref,w.admitted_at FROM live_ancestors w JOIN session s ON s.session_ref=w.session_ref WHERE s.parent_ref IS NOT NULL) " ++
+        "SELECT min(admitted_at) AS descendant_since FROM live_ancestors WHERE session_ref=?1",
+    .Args = struct { session: []const u8 },
+    .Row = struct { descendant_since: ?rsql.Positive },
+    .cardinality = .each,
+    .compound = true,
+});
+
 pub const WorkRead = struct {
     /// Read in place when each stage's pass steps it.
     session: []const u8,
@@ -645,7 +666,7 @@ pub const WorkRead = struct {
     description: ?Bounded(tool_presentation.max_description_bytes) = null,
     cutoff: u64 = 0,
 
-    const Stage = enum { latest, actions, oldest, cutoff, queued, excluded, stop, done };
+    const Stage = enum { latest, actions, oldest, cutoff, queued, excluded, stop, descendants, done };
 
     /// Queues this stage's read; false once the work is read.
     pub fn queue(w: *WorkRead, a: *ReadAccess) bool {
@@ -658,6 +679,7 @@ pub const WorkRead = struct {
             .queued => reads_domain.readFirst(a, work_queued, .{ .session = w.session, .cutoff = w.cutoff }, w),
             .excluded => reads_domain.readFirst(a, work_excluded, .{ .session = w.session, .cutoff = w.cutoff }, w),
             .stop => reads_domain.readFirst(a, work_stop, .{ .session = w.session, .admission = w.inputs.excluded.?.admission }, w),
+            .descendants => reads_domain.readFirst(a, work_descendants, .{ .session = w.session }, w),
             .done => return false,
         }
         return true;
@@ -710,10 +732,12 @@ pub const WorkRead = struct {
             .latest => if (found and w.inputs.latest.?.terminal == null) .actions else .cutoff,
             // An aggregate always has a row.
             .actions => if (!found) return error.ActionReadFailed else if (w.inputs.latest.?.actions.running != 0) .oldest else .done,
-            .oldest, .stop => if (!found) return error.CorruptStore else .done,
+            .oldest => if (!found) return error.CorruptStore else .done,
+            .stop => if (!found) return error.CorruptStore else .descendants,
             .cutoff => .queued,
-            .queued => if (found or w.cutoff == 0) .done else .excluded,
-            .excluded => if (found) .stop else .done,
+            .queued => if (found) .done else if (w.cutoff == 0) .descendants else .excluded,
+            .excluded => if (found) .stop else .descendants,
+            .descendants => if (!found) return error.CorruptStore else .done,
             .done => .done,
         };
     }
@@ -747,6 +771,8 @@ pub const WorkRead = struct {
             const excluded = &w.inputs.excluded.?;
             excluded.stop_position = row.position.get();
             excluded.stop_at = row.stopped_at.get();
+        } else if (Row == work_descendants.Row) {
+            w.inputs.descendant_since = optional(row.descendant_since);
         } else @compileError("WorkRead reads no " ++ @typeName(Row));
     }
 

@@ -2674,6 +2674,57 @@ test "Current, activity pages and Message progress report one work in each state
     }.run);
 }
 
+test "Session work includes only attached descendants with unfinished work" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Descendant = enum { absent, working, approval, grandchild, finished, standalone, queued, excluded };
+            inline for (std.enums.values(Descendant)) |descendant| {
+                for ([_]bool{ false, true }) |root_finished| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    const root = try configureTestSession(&storage, "tree-root");
+                    _ = try expectOneWork(&storage, &tmp, root.slice(), "idle");
+                    if (root_finished) {
+                        const answer = [_]TestingAnswerPart{.{ .encoded = "root done", .decoded = "root done" }};
+                        try answerTestTurn(&storage, &tmp, root.slice(), "tree-root-answer", &answer);
+                    }
+                    if (descendant != .absent) {
+                        const child = try configureTestSessionAsk(&storage, "tree-child");
+                        if (descendant != .standalone) try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ root.slice(), child.slice() });
+                        const target = if (descendant == .grandchild) grandchild: {
+                            const grandchild = try configureTestSession(&storage, "tree-grandchild");
+                            try store_testing.exec(&storage, "UPDATE session SET parent_ref=?1 WHERE session_ref=?2", .{ child.slice(), grandchild.slice() });
+                            break :grandchild grandchild;
+                        } else child;
+                        if (descendant == .finished) {
+                            const answer = [_]TestingAnswerPart{.{ .encoded = "done", .decoded = "done" }};
+                            try answerTestTurn(&storage, &tmp, target.slice(), "tree-answer", &answer);
+                        } else {
+                            try submitTestMessage(&storage, &tmp, "tree-task", "tree-message", target.slice(), "work");
+                            if (descendant == .excluded) {
+                                var stop = try completeSessionStop("tree-stop", target.slice());
+                                try std.testing.expect(storage.stopSession(&stop, .{}) == .accepted);
+                            } else if (descendant != .queued) {
+                                const model = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                                if (descendant == .approval) try settleTwoActionsForTesting(&storage, &tmp, model, "tree-actions");
+                            }
+                        }
+                    }
+                    const busy = switch (descendant) {
+                        .working, .approval, .grandchild, .queued => true,
+                        .absent, .finished, .standalone, .excluded => false,
+                    };
+                    _ = try expectOneWork(&storage, &tmp, root.slice(), if (busy) "working" else if (root_finished) "finished" else "idle");
+                    try std.testing.expect(!storage.isFenced());
+                }
+            }
+        }
+    }.run);
+}
+
 test "a stop that selected no Turn decides work only through the input it excluded" {
     try store_testing.forEachEngine(struct {
         fn run(case: *store_testing.Case) !void {
@@ -10810,13 +10861,13 @@ const round_budgets: std.EnumArray(EntryPoint, u32) = .init(.{
     .inspectSession = 3,
     .publicConversationPage = 4,
     .openPublicConversationContent = 2,
-    .activityPage = 7,
+    .activityPage = 8,
     .searchActivity = 5,
     .openActivityContent = 4,
     .activityTool = 4,
     .failedResponseBinding = 1,
-    .readSessionReport = 5,
-    .readSessionList = 6,
+    .readSessionReport = 6,
+    .readSessionList = 7,
     .actionContent = 2,
     .admitModelAttempt = 2,
     .admitNextActionAttempt = 2,

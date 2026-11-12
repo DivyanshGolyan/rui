@@ -3565,12 +3565,25 @@ Each state carries `since`, the Host Unix second the Session entered it, read fr
 | Every unresolved Action the active Turn's Operation proposed awaits a Permission Decision | `approval` | the group's latest change, else the proposing resolution |
 | Otherwise, with an active Turn | `pending` | the group's latest change, else the Operation's resolution |
 | No active Turn, and an eligible Message is queued | `pending` | the oldest queued admission, or the latest outcome when that Message was queued before it |
+| No own unfinished work, but an attached descendant has an active Turn or eligible queued Message | `working` | the later of the own settled state and the earliest descendant work admission |
 | No active Turn, and a stop excluded input newer than the latest Turn's input, after its outcome | `stopped`, cause `stop` | that stop |
 | The latest Turn completed | `finished` | its outcome |
 | The latest Turn was cancelled | `stopped`, cause `stop` when a stop selected it, else `interruption` | its outcome |
 | The latest Turn failed | `failed`, with its code and, for a quota code, the saved `resets_at` | its outcome |
 | No Turn | `idle` | Session creation |
 
+- **Attached tree work (D239)** reuses `working`; no client derives descendant state.
+  Own unfinished work keeps its more specific state and facts. When only descendants
+  remain unfinished (including a Permission Request), the Session is `working`;
+  its Turn, Operation and first Action still identify only its own work.
+  Standalone agents do not count. Current, Session listing and Activity pages share
+  `session_work.derive` and the Store-owned inputs under the same read lock.
+  The descendant read returns one aggregate fact per requested Session, seeded from
+  the indexed live Turns and pending admissions, following saved parent keys upward.
+  It never walks finished descendant history downward; cost follows live work and
+  its ancestor edges, not the number of past Turns or finished descendants.
+  A stopped, excluded admission is not live work. The existing TypeScript follow
+  loop keeps busy-polling for `working`, including after the root's own Turn ended.
 - **Latest** and **before** follow the Session's order, never the clock, which can step back.
   A tool group's changes follow its proposal, and its resolutions follow one another by acceptance position; a queued admission and an outcome compare by position.
   An `allow_once` decision and a Bash launch claim no position: a decision is ordered against a resolution by time, and `bash` dates from the earliest launch time among running Actions.
