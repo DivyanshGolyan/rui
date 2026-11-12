@@ -601,12 +601,38 @@ def keys_case():
                 gesture = b"\x1b[F\r"
             chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
             keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
-            for index, expected in enumerate(('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave')):
-                assert expected in keys, (width, expected, keys)
-                if width == 46:
-                    assert rows(keys)[index].rstrip() == " " + expected, (index, keys)
-            if width == 140:
-                assert " enter    send              esc      back" in rows(keys)[0], keys
+            expected = (
+                ("enter", "send"), ("esc", "back"), ("⇧enter", "new line"),
+                ("tab", "next footer field"), ("⇧tab", "previous footer field"),
+                ("ctrl+x", "stop"), ("↑↓", "scroll"), ("ctrl+o", "tool output"),
+                ("ctrl+p", "earlier message"), ("ctrl+r", "retry"),
+                ("/", "skills"), ("alt+a", "archive"), ("ctrl+c", "leave"),
+            )
+            # Judge actual row-major content independently of padding. The
+            # shared KeyList aligns each column after its widest key; a longer
+            # meaning (such as previous footer field) expands the left column.
+            columns = 2 if width == 140 else 1
+            key_widths = [max(len(key) for key, _ in expected[column::columns])
+                          for column in range(columns)]
+            pane_rows = conversation_text(keys).split("\n")
+            positions = [[] for _ in range(columns)]
+            for start in range(0, len(expected), columns):
+                entries = expected[start:start + columns]
+                line = pane_rows[start // columns]
+                assert line.split() == [word for key, meaning in entries
+                                        for word in (key + " " + meaning).split()], (width, start, keys)
+                after = 0
+                for column, (key, meaning) in enumerate(entries):
+                    label = line.index(key, after)
+                    value = line.index(meaning, label + len(key))
+                    positions[column].append((label, value))
+                    assert value - label == key_widths[column] + 3, (width, key, keys)
+                    after = value + len(meaning)
+            for column in positions:
+                assert len(set(column)) == 1, (width, positions, keys)
+            assert positions[0][0][0] == 0, keys
+            used_rows = (len(expected) + columns - 1) // columns
+            assert all(not line.strip() for line in pane_rows[used_rows:]), keys
             for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
                 assert absent not in keys, (width, absent, keys)
             # Enter and typing do not edit a setting or the hidden draft.
@@ -619,7 +645,7 @@ def keys_case():
             else:
                 chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
             chrome.leave(master, caller)
-    print("session chrome: Settings > Keys has eleven aligned entries, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+    print("session chrome: Settings > Keys has thirteen aligned entries including Tab and Shift+Tab, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
 
 
 def notice_case():
