@@ -332,7 +332,8 @@ def footer_click(screen, *, column=None, marker=None):
 def chat_info_open(master, timeout=15):
     """Open ready chat info through the footer; Context is optional."""
     screen = panel_frame(master, lambda screen: "unavailable" not in screen and all(word in screen for word in
-                         ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive", "Copy last answer")),
+                         ("Effort", "Permissions", "Tools", "Folder", "Model", "Rename", "Archive"))
+                         and ("Copy last answer" in screen or "Copy: couldn't copy" in screen),
                          b"\x1bi", timeout)
     assert_chat_info_layout(screen)
     return screen
@@ -341,7 +342,7 @@ def chat_info_open(master, timeout=15):
 def chat_info_frame(master, timeout=15):
     """Inspect chat info, then restore chat focus for the next interaction."""
     screen = chat_info_open(master, timeout)
-    panel_frame(master, lambda frame: "Copy last answer" not in frame, b"\x1b", timeout)
+    panel_frame(master, lambda frame: " · info" not in frame, b"\x1b", timeout)
     return screen
 
 
@@ -659,7 +660,9 @@ def terminal_step(master, command, marker, *, composer=False):
 
 def saved_result(master, key, marker):
     """Read a saved answer by choosing its drawn recovery-page row."""
-    listing = terminal_step(master, "/requests", "Local recovery handles", composer=True)
+    terminal_step(master, "/requests", "Local recovery handles", composer=True)
+    listing = keyed_frame(master, b"", lambda screen, x, y: any(
+        key in row and "read this Message's saved answer" in row for row in screen.splitlines()))
     rows = [line.strip() for line in listing.splitlines()
             if "read this Message's saved answer" in line or "retry this unconfirmed original" in line]
     index = next((i for i, row in enumerate(rows) if row.split()[0] == key), None)

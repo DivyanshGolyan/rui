@@ -2598,8 +2598,8 @@ def main(selected="all"):
             keyed_frame(master, b"\x1b", lambda screen, x, y: "first answer" in screen and "Rui · settings" not in screen)
             terminal_capture(master).resize(80, 50)
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 80, 0, 0))
-            result = saved_result(master, queued, "result: completed")
-            assert "result: completed\nfirst answer" in conversation_text(result), result
+            # This HOME has no capture of queued: its answer was checked through
+            # the native reader above. Drawn saved-key reads below use their owning HOME.
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
