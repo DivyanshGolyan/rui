@@ -215,25 +215,54 @@ const insert_message_skill = rsql.Write(.{
 /// `admission_id`, in order. A Turn that takes the Message projects each
 /// one as its own entry right after the Message's (`model_admission`).
 pub fn saveBound(a: anytype, admission_id: u64, bound: []const BoundSkill, faults: store_core.Faults) !void {
-    // One lookup round per skill keeps no per-skill state on this frame;
-    // the bytes of a Message's skills are bounded together (1 MiB). A
-    // Message may bind more skills than the Access's table of imported
-    // rows holds, so new rows go in as model settlement's batches do
-    // (`content.insertRow`). Distinct skills never share bytes: each
-    // invocation starts with its own path.
-    for (bound, 1..) |skill, position| {
-        var body: content.Import = .ofBytes(skill.bytes, false);
-        content.lookup(a, &body);
+    var saving: SavingBound = .{ .admission_id = admission_id, .bound = bound };
+    while (saving.lookupNext(a)) {
         try a.run();
+        try saving.save(a, faults);
+    }
+}
+
+/// `saveBound`, one skill a round: `lookupNext` queues the lookup of the
+/// next skill's body, and `save`, after that round, saves the skill. A
+/// transition keeps it in its value, so the lookup's row lands there.
+///
+/// One lookup round per skill keeps no per-skill state beyond one body;
+/// the bytes of a Message's skills are bounded together (1 MiB). A Message
+/// may bind more skills than the Access's table of imported rows holds, so
+/// new rows go in as model settlement's batches do (`content.insertRow`).
+/// Distinct skills never share bytes: each invocation starts with its own
+/// path.
+pub const SavingBound = struct {
+    admission_id: u64 = 0,
+    bound: []const BoundSkill = &.{},
+    /// The skills saved so far.
+    saved: usize = 0,
+    body: content.Import = undefined,
+
+    /// Queues the lookup of the next skill's body; false when every skill
+    /// is saved.
+    pub fn lookupNext(saving: *SavingBound, a: anytype) bool {
+        if (saving.saved == saving.bound.len) return false;
+        saving.body = .ofBytes(saving.bound[saving.saved].bytes, false);
+        content.lookup(a, &saving.body);
+        return true;
+    }
+
+    /// After `lookupNext`'s round: queues the skill's body, when new, and
+    /// its row.
+    pub fn save(saving: *SavingBound, a: anytype, faults: store_core.Faults) !void {
         if (faults.content_import) return error.InjectedContentImportFailure;
+        const skill = saving.bound[saving.saved];
+        const body = &saving.body;
         const content_id: u64 = if (body.found) |row| row.content_id.get() else a.insertedContent(&body.digest, body.length, false) orelse id: {
-            const id = try content.insertRow(a, &body);
+            const id = try content.insertRow(a, body);
             a.writeContent(id, skill.bytes);
             break :id id;
         };
-        a.write(insert_message_skill, .{ .admission_id = admission_id, .position = position, .name = skill.name, .content_id = content_id });
+        saving.saved += 1;
+        a.write(insert_message_skill, .{ .admission_id = saving.admission_id, .position = saving.saved, .name = skill.name, .content_id = content_id });
     }
-}
+};
 
 pub const MessageFailure = struct {
     code: enum { skill_file_unavailable, skill_file_too_large, skill_text_invalid },
