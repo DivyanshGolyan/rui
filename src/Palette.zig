@@ -11,6 +11,9 @@ shown: *commands.Shown,
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
+/// The pointer's row: only its background, reverse and underline apply, and the highlighted
+/// row keeps its reverse under the pointer.
+hover_style: vaxis.Style = .{ .ul_style = .single },
 userdata: ?*anyopaque = null,
 /// Receives the pressed row as the latest frame drew it: its absolute entry
 /// index and that frame's list identity. The screen's owner decides what it
@@ -73,14 +76,17 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const column = list.descriptionColumn();
     for (list.shown()[first..][0..count], first..) |entry, index| {
         var style = self.style;
-        style.reverse = index == self.shown.highlight or (self.on_select != null and self.hover.contains(.{ .row = @intCast(index - first), .width = width }));
         const row: u16 = @intCast(index - first);
-        if (style.reverse) @memset(surface.buffer[@as(usize, row) * width ..][0..width], .{ .style = style });
+        const hovered = index != self.shown.highlight and self.on_select != null and self.hover.contains(.{ .row = row, .width = width });
+        style.reverse = index == self.shown.highlight;
+        if (hovered) hovering(&style, self.hover_style);
+        if (style.reverse or hovered) @memset(surface.buffer[@as(usize, row) * width ..][0..width], .{ .style = style });
         const line = window.child(.{ .y_off = row, .height = 1 });
         _ = line.printSegment(.{ .text = entry.shown, .style = style }, .{ .wrap = .none });
         if (column < width) {
             var description = self.quiet;
             description.reverse = style.reverse;
+            if (hovered) hovering(&description, self.hover_style);
             _ = line.child(.{ .x_off = @intCast(column) }).printSegment(.{ .text = entry.description, .style = description }, .{ .wrap = .none });
         }
     }
@@ -89,6 +95,12 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         _ = window.child(.{ .y_off = @intCast(count), .height = 1 }).printSegment(.{ .text = label, .style = self.quiet }, .{ .wrap = .none });
     }
     return surface;
+}
+
+fn hovering(style: *vaxis.Style, hover: vaxis.Style) void {
+    style.bg = hover.bg;
+    style.reverse = hover.reverse;
+    style.ul_style = hover.ul_style;
 }
 
 test "Palette keeps the selected command visible at one row and hides closed or clipped choices" {
@@ -142,8 +154,15 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     const motion: vaxis.Mouse = .{ .row = 1, .col = 0, .button = .none, .mods = .{}, .type = .motion };
     try palette.widget().handleEvent(&ctx, .{ .mouse = motion });
     const hovered = try palette.widget().draw(draw_ctx);
-    try std.testing.expect(hovered.readCell(0, 1).style.reverse);
+    // Hover takes the quieter look; the keyboard's row keeps its reverse.
+    try std.testing.expect(!hovered.readCell(0, 1).style.reverse);
+    try std.testing.expectEqual(vaxis.Style.Underline.single, hovered.readCell(0, 1).style.ul_style);
+    try std.testing.expect(hovered.readCell(0, 0).style.reverse);
     try std.testing.expectEqual(palette.style.fg, hovered.readCell(0, 1).style.fg);
+    palette.hover_style = .{ .bg = .{ .index = 5 } };
+    const coloured = try palette.widget().draw(draw_ctx);
+    for (0..80) |col| try std.testing.expectEqual(vaxis.Color{ .index = 5 }, coloured.readCell(@intCast(col), 1).style.bg);
+    try std.testing.expect(coloured.readCell(0, 0).style.reverse);
     try std.testing.expectEqual(@as(usize, 0), shown.highlight);
     try std.testing.expect(selected.index == null);
     try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
@@ -159,7 +178,7 @@ test "Palette hover is transient and clicks activate only visible command rows" 
     shown.revision = 7;
     try palette.widget().handleEvent(&ctx, .mouse_leave);
     const left = try palette.widget().draw(draw_ctx);
-    try std.testing.expect(!left.readCell(0, 1).style.reverse);
+    try std.testing.expectEqual(initial.readCell(0, 1).style, left.readCell(0, 1).style);
     try std.testing.expectEqual(vaxis.Mouse.Shape.default, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
     // One-row viewport maps to the selected absolute index, not row zero.
     shown.highlight = shown.list.count - 1;

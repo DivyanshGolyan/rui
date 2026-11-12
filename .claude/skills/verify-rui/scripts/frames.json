@@ -5,6 +5,98 @@
   ],
   "states": [
     {
+      "name": "first-run",
+      "note": "No credentials: sign-in choice occupies the input row",
+      "open": "overview",
+      "first_run": true,
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        }
+      ],
+      "expect": [
+        "› ChatGPT    API key",
+        "API key",
+        "Sign in"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "Host stopped",
+        "Type a task",
+        "[ChatGPT]",
+        "[API key]"
+      ]
+    },
+    {
+      "name": "first-run-codex",
+      "note": "Fake device login: clickable link and code, no network",
+      "open": "overview",
+      "first_run": true,
+      "env": {
+        "RUI_TEST_LOGIN": "waiting"
+      },
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        },
+        {
+          "keys": [
+            "Enter"
+          ]
+        },
+        {
+          "wait": "BDL9-KI88H"
+        }
+      ],
+      "expect": [
+        "auth.openai.com/codex/device · BDL9-KI88H",
+        "Waiting for ChatGPT"
+      ],
+      "absent": [
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]",
+        "Open auth.openai.com",
+        "and enter"
+      ]
+    },
+    {
+      "name": "first-run-key",
+      "note": "API key entry is masked before publication",
+      "open": "overview",
+      "first_run": true,
+      "steps": [
+        {
+          "wait": "› ChatGPT    API key"
+        },
+        {
+          "keys": [
+            "Right",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "API key"
+        },
+        {
+          "text": "sk-secret"
+        },
+        {
+          "wait": "•••••••••"
+        }
+      ],
+      "expect": [
+        "•••••••••",
+        "esc back"
+      ],
+      "absent": [
+        "sk-secret",
+        "Provider: [c]",
+        "[ChatGPT]",
+        "[API key]"
+      ]
+    },
+    {
       "name": "start-empty",
       "note": "01-overview-empty",
       "open": "overview",
