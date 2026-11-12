@@ -105,7 +105,8 @@ Each `--provider LABEL` serves one built-in provider at its own endpoint with it
 A Host reads the key once when it starts and refuses to start `openai` without one, so after saving a key, pause a running Host and start it again to add it.
 An auto-started Host serves `openai` whenever a key is saved.
 To use an OpenAI-compatible server that speaks the Responses API, such as Azure OpenAI or a company proxy, set `RUI_OPENAI_BASE_URL` to its `https://` base URL (for example `https://example.openai.azure.com/openai/v1`) in the environment that starts the Host; the key is then sent only to that URL's `/responses` and `/models`.
-A Host with a key reads the key's model list from `/models` once as it starts, for the model picker; if that fails, the picker shows the models Rui knows.
+A Host with a key reads the key's model list from `/models` as it starts and again each time the model picker asks; if that fails, the picker shows the models Rui knows.
+A Host serving a ChatGPT plan sign-in (`chatgpt`) reads that plan's list the same way, from `https://api.openai.com/v1/models`; without a usable sign-in it does not ask, and the picker shows the models Rui knows.
 An auto-started Host takes it from the command that starts it, and a running Host keeps the URL it started with.
 An invalid one stops `host serve --provider openai`; an auto-started Host reports it and starts serving Codex only.
 Sessions of a provider the Host does not serve wait until a Host that serves it starts.

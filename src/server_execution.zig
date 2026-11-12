@@ -406,6 +406,13 @@ const ListingWork = struct {
     fetch: provider.ListingFetch,
     credential: ?*provider.SharedCredential,
     response: ?[]u8,
+    /// Where this kind's GET goes, borrowed from `executionMain` for the
+    /// Host's life; null when this Host does not fetch it.
+    url: ?[]const u8 = null,
+    /// A listing whose credential is leased waits for the sign-in worker
+    /// before it starts: `waiting` for the worker, `requested` once its lease
+    /// job is the worker's (`advanceCredentialWork`).
+    auth: enum { none, waiting, requested } = .none,
 };
 
 /// The codec whose headers the Reactor observes: every codec's, so far,
@@ -486,19 +493,29 @@ pub fn executionMain(host: *Host) void {
     const budget = host.retention.sharedBudget().narrowed(
         if (host.hooks.fails(.request_scratch_acquire)) 0 else host.limits.request_scratch_limit_bytes,
     );
-    const model_list_url: ?[]const u8 = if (host.providers.modelListKey()) |served|
-        std.fmt.allocPrint(host.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| failed: {
-            host.model_lists.publish(err);
-            break :failed null;
-        }
-    else
-        null;
-    defer if (model_list_url) |url| host.allocator.free(url);
+    // Each live list sits beside its provider's Responses endpoint.
+    var listing_urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
+    defer for (listing_urls.values, std.enums.values(provider.ListingKind)) |url, kind| {
+        if (kind != .catalog) if (url) |owned| host.allocator.free(owned);
+    };
+    for (std.enums.values(provider.ListingKind)) |kind| {
+        const name = provider.listedProvider(kind) orelse continue;
+        const served = host.providers.liveList(name) orelse continue;
+        listing_urls.set(kind, std.fmt.allocPrint(host.allocator, "{s}/models", .{providers.responsesBase(served.endpoint).?}) catch |err| {
+            host.model_lists.publish(name, err);
+            continue;
+        });
+    }
     const catalog_url = host.hooks.models_dev_url orelse "https://models.dev/api.json";
+    listing_urls.set(.catalog, if (catalog_url.len == 0) null else catalog_url);
+    for (listing_urls.values, &workspace.listings.values) |url, *work| work.url = url;
     var reactor_storage: provider.Reactor = undefined;
     // Listings have their own capacity even when no model can run.
     const reactor: ?*provider.Reactor = reactor: {
-        if (slots.len == 0 and model_list_url == null and catalog_url.len == 0) break :reactor null;
+        const any_listing = for (listing_urls.values) |url| {
+            if (url != null) break true;
+        } else false;
+        if (slots.len == 0 and !any_listing) break :reactor null;
         var endpoints: std.EnumArray(protocol.Provider, ?[]const u8) = .initFill(null);
         for (host.providers.table.values, &endpoints.values) |served, *endpoint| {
             if (served) |value| endpoint.* = value.endpoint;
@@ -514,7 +531,7 @@ pub fn executionMain(host: *Host) void {
             },
             .scratch_path = host.lease.paths.scratch.slice(),
             .budget = budget,
-            .listing_urls = .init(.{ .provider = model_list_url, .catalog = if (catalog_url.len == 0) null else catalog_url }),
+            .listing_urls = listing_urls,
         }) catch |err| {
             // Engine setup precedes endpoint registration (including proxy
             // validation). With no served provider, only optional discovery
@@ -891,6 +908,7 @@ const NativeTurn = struct {
             self.reactor,
             self.slots,
             &self.workspace.model_preparation,
+            &self.workspace.listings,
             byte_allowance,
             item_allowance,
         );
@@ -899,62 +917,75 @@ const NativeTurn = struct {
 
 const max_catalog_response_bytes = 16 * 1024 * 1024;
 
-/// Both discovery GETs share capacity, buffer and completion ownership.
+/// Every discovery GET shares capacity, buffer and completion ownership. A
+/// listing whose credential is leased waits for the sign-in worker instead
+/// of starting here (`advanceCredentialWork`).
 noinline fn startListings(host: *Host, reactor: *provider.Reactor, works: *std.EnumArray(provider.ListingKind, ListingWork)) void {
     for (std.enums.values(provider.ListingKind)) |kind| {
-        if (reactor.listings.get(kind) != null or reactor.listing_endpoints.get(kind) == null) continue;
-        startListing(host, reactor, kind, works.getPtr(kind)) catch |err| {
-            endListing(reactor, kind, works.getPtr(kind));
-            listingFailed(host, kind, err);
+        const work = works.getPtr(kind);
+        if (reactor.listings.get(kind) != null or work.auth != .none or reactor.listing_endpoints.get(kind) == null) continue;
+        if (listingCredential(host, kind)) |credential| if (credential.leased()) {
+            work.auth = .waiting;
+            continue;
         };
+        startLeasedListing(host, reactor, kind, work, null);
     }
 }
 
-noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) !void {
+/// The credential `kind`'s GET carries, or null for the catalog's, which
+/// carries none.
+fn listingCredential(host: *Host, kind: provider.ListingKind) ?providers.Credential {
+    const name = provider.listedProvider(kind) orelse return null;
+    return host.providers.liveList(name).?.credential;
+}
+
+/// Starts `kind`'s GET with `lease` when its credential is leased; a
+/// failure ends it and is reported as its answer.
+fn startLeasedListing(host: *Host, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork, lease: ?*const providers.Lease) void {
+    startListing(host, reactor, kind, work, lease) catch |err| {
+        endListing(reactor, kind, work);
+        listingFailed(host, kind, err);
+    };
+}
+
+noinline fn startListing(host: *Host, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork, lease: ?*const providers.Lease) !void {
     var headers: providers.Headers = .{};
     defer headers.deinit();
     var source: ?store_module.ModelCatalogSource = null;
     var fields: [1]@import("h2").Field = undefined;
-    const request_fields: []const @import("h2").Field = switch (kind) {
-        .provider => fields: {
-            const served = host.providers.modelListKey() orelse return;
-            try served.credential.fields(served.endpoint, host.providers.ca_file, null, &reactor.credentials, &headers);
-            work.credential = headers.takeCredential();
-            break :fields headers.fields();
-        },
-        .catalog => fields: {
-            source = try host.store.readModelCatalogSource();
-            if (source) |*saved| if (saved.etag) |*etag| {
-                fields[0] = @import("h2").Field{ .name = "if-none-match", .value = etag.slice() };
-                break :fields &fields;
-            };
-            break :fields &.{};
-        },
+    const request_fields: []const @import("h2").Field = if (listingCredential(host, kind)) |credential| fields: {
+        // The credential checks the list's own address, where it goes.
+        try credential.fields(work.url.?, host.providers.ca_file, lease, &reactor.credentials, &headers);
+        work.credential = headers.takeCredential();
+        break :fields headers.fields();
+    } else fields: {
+        source = try host.store.readModelCatalogSource();
+        if (source) |*saved| if (saved.etag) |*etag| {
+            fields[0] = @import("h2").Field{ .name = "if-none-match", .value = etag.slice() };
+            break :fields &fields;
+        };
+        break :fields &.{};
     };
-    work.response = try std.heap.page_allocator.alloc(u8, switch (kind) {
-        .provider => model_list.max_response_bytes,
-        .catalog => max_catalog_response_bytes,
-    });
+    work.response = try std.heap.page_allocator.alloc(u8, if (kind == .catalog) max_catalog_response_bytes else model_list.max_response_bytes);
     try reactor.startListing(kind, &work.fetch, request_fields, work.response.?);
 }
 
+/// A live list's failure settles its provider's list as the catalog
+/// fallback; the catalog's keeps the saved catalog.
 fn listingFailed(host: *Host, kind: provider.ListingKind, err: anyerror) void {
-    switch (kind) {
-        .provider => host.model_lists.publish(err),
-        .catalog => stderr.print("rui: models.dev catalog unavailable ({s}); the saved catalog stands\n", .{@errorName(err)}),
-    }
+    if (provider.listedProvider(kind)) |name| return host.model_lists.publish(name, err);
+    stderr.print("rui: models.dev catalog unavailable ({s}); the saved catalog stands\n", .{@errorName(err)});
 }
 
 noinline fn finishListing(host: *Host, reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) void {
     defer endListing(reactor, kind, work);
     const stream = &reactor.finishedListing(kind).?.stream;
     if (stream.end().?.cause != .complete) return listingFailed(host, kind, error.ListingTransportFailed);
+    // A 401 settles as refused: a listing never forces a refresh.
     if (stream.status() != 200 and !(kind == .catalog and stream.status() == 304)) return listingFailed(host, kind, error.ListingRefused);
     const body = work.response.?[0..@intCast(stream.responseLength())];
-    switch (kind) {
-        .provider => host.model_lists.publish(body),
-        .catalog => saveCatalogAnswer(host.store, work, stream.status().?, body) catch |err| listingFailed(host, kind, err),
-    }
+    if (provider.listedProvider(kind)) |name| return host.model_lists.publish(name, body);
+    saveCatalogAnswer(host.store, work, stream.status().?, body) catch |err| listingFailed(host, kind, err);
 }
 
 /// Scratch and the 16 MiB body live off the Host stack. Release the raw
@@ -972,6 +1003,7 @@ noinline fn saveCatalogAnswer(store: *store_module.Store, work: *ListingWork, st
 
 fn endListing(reactor: *provider.Reactor, kind: provider.ListingKind, work: *ListingWork) void {
     reactor.endListing(kind);
+    work.auth = .none;
     if (work.credential) |shared| reactor.credentials.release(shared);
     work.credential = null;
     if (work.response) |response| std.heap.page_allocator.free(response);
@@ -1926,11 +1958,12 @@ fn advanceModelPreparation(
     reactor: ?*provider.Reactor,
     slots: []ExecutionSlot,
     preparation: *model_adapter.Preparation,
+    listings: *std.EnumArray(provider.ListingKind, ListingWork),
     byte_allowance: usize,
     item_allowance: usize,
 ) bool {
     if (host.auth_worker) |worker| {
-        if (advanceCredentialWork(host, reactor.?, slots, worker, &preparation.request)) return true;
+        if (advanceCredentialWork(host, reactor.?, slots, worker, &preparation.request, listings)) return true;
         for (slots) |*slot| if (slot.* == .model_authenticating) return false;
     }
     const slot = for (slots) |*candidate| switch (candidate.*) {
@@ -1965,7 +1998,7 @@ fn advanceModelPreparation(
             switch (execution.modelDecision(.{ .prepared = .{ .authentication_required = leased } })) {
                 .authenticate => {
                     moveSlot(host, slot, .model_authenticating, .{ .owner = owner });
-                    _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?, request);
+                    _ = advanceCredentialWork(host, reactor.?, slots, host.auth_worker.?, request, listings);
                 },
                 .launch => launchPreparedRequest(host, reactor.?, slot, owner, request, null),
                 else => unreachable,
@@ -1975,15 +2008,20 @@ fn advanceModelPreparation(
     return true;
 }
 
-/// The one worker serves one job at a time: first the slot whose job it
-/// holds, then, once idle, the next waiting lease or refresh job.
+/// The one worker serves one job at a time: first the requester whose job
+/// it holds, a slot or a listing (at most one holds it), then, once idle,
+/// the next waiting slot's lease or refresh job, and only when no slot
+/// waits, a waiting listing's lease. A listing never outranks a model slot.
 /// `request` is the authenticating slot's prepared request.
-fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker, request: *provider.PreparedRequest) bool {
+fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []ExecutionSlot, worker: *AuthWorker, request: *provider.PreparedRequest, listings: *std.EnumArray(provider.ListingKind, ListingWork)) bool {
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| if (active.requested) return advanceAuthentication(host, reactor, slot, request),
         .model_refreshing => |*active| if (active.requested) return advanceRefresh(host, slot),
         else => {},
     };
+    for (&listings.values, std.enums.values(provider.ListingKind)) |*work, kind| {
+        if (work.auth == .requested) return advanceListingAuthentication(host, reactor, worker, kind, work);
+    }
     if (!worker.idle()) return false;
     for (slots) |*slot| switch (slot.*) {
         .model_authenticating => |*active| {
@@ -2007,7 +2045,30 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
         },
         else => {},
     };
+    for (&listings.values, std.enums.values(provider.ListingKind)) |*work, kind| {
+        if (work.auth != .waiting) continue;
+        work.auth = .requested;
+        worker.request(listingCredential(host, kind).?.signIn().?);
+        return true;
+    }
     return false;
+}
+
+/// Starts a listing with its lease, which goes back to the worker as soon
+/// as the GET holds its own copy of the token; a failed lease is the
+/// listing's answer.
+noinline fn advanceListingAuthentication(host: *Host, reactor: *provider.Reactor, worker: *AuthWorker, kind: provider.ListingKind, work: *ListingWork) bool {
+    const result = worker.take() orelse return false;
+    work.auth = .none;
+    switch (result) {
+        .ready => |lease| {
+            defer worker.finish();
+            startLeasedListing(host, reactor, kind, work, lease);
+        },
+        .failed => |err| listingFailed(host, kind, err),
+        .refreshed => unreachable,
+    }
+    return true;
 }
 
 /// Settles the claimed Attempt from its refresh: a committed refresh grants
@@ -2749,6 +2810,139 @@ test "authentication handoff borrows the sole credential lease and releases it o
         try std.testing.expect(!host.custody.claimTerminalDelivery(token));
         try host.custody.releaseUnused(reused);
     }
+}
+
+test "a leased model list waits behind every model slot, and its lease always goes back" {
+    const credentials = @import("codex_credentials.zig");
+    const credential_policy = @import("codex_credential_policy.zig");
+    const io = std.Io.Threaded.global_single_threaded.io();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var private = try tmp.dir.createDirPathOpen(io, "private", .{ .permissions = .fromMode(0o700) });
+    private.close(io);
+    var root: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const root_len = try tmp.dir.realPath(io, &root);
+    var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buffer, "{s}/private/chatgpt.json", .{root[0..root_len]});
+    var record = credentials.Record{
+        .generation = 0,
+        .account_id = .{},
+        .id_token = .{},
+        .access_token = .{},
+        .refresh_token = .{},
+        .expires_at = 4_102_444_800,
+        .refreshed_at = 1_750_000_000,
+    };
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&record));
+    try record.account_id.set("test-subject");
+    try record.id_token.set("aaa.bbb.ccc");
+    try record.access_token.set("test-plan-access");
+    try record.refresh_token.set("test-refresh");
+    try record.client_id.set(credential_policy.fixture_client_id);
+    var worker = AuthWorker{ .io = io };
+    try credentials.install(path, &record, null, &worker.work.credentials);
+    defer if (worker.state == .ready or worker.state == .in_use) worker.credential.release();
+
+    // A device sign-in's slots and a plan sign-in's live list, both at loopback.
+    const models_url = "http://127.0.0.1:1/v1/models";
+    var served: providers.Providers = .{};
+    served.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .{ .chatgpt_device = .{ .path = path, .refresh = .synthetic } } });
+    served.table.set(.chatgpt, .{ .endpoint = "http://127.0.0.1:1/v1/responses", .credential = .{ .chatgpt_plan = .{ .path = path, .refresh = .{ .fixture_endpoint = "http://127.0.0.1:1/token" } } } });
+    const plan_source = served.get(.chatgpt).?.credential.signIn().?;
+    const device_source = served.get(.codex).?.credential.signIn().?;
+    var records: [1]execution.CustodyRecord = @splat(.{});
+    var host = Host{
+        .io = io,
+        .allocator = std.testing.allocator,
+        .lease = undefined,
+        .store = undefined,
+        .custody = execution.CustodyPool.initialize(&records),
+        .auth_worker = &worker,
+        .providers = &served,
+        .model_lists = .init(io, std.testing.allocator, &served),
+    };
+    defer host.model_lists.deinit();
+    var used: std.atomic.Value(u64) = .init(0);
+    var urls: std.EnumArray(provider.ListingKind, ?[]const u8) = .initFill(null);
+    urls.set(provider.providerListing(.chatgpt).?, models_url);
+    var reactor: provider.Reactor = undefined;
+    try reactor.init(std.testing.allocator, io, .{
+        .endpoints = .init(.{ .codex = "http://127.0.0.1:1/responses", .openai = null, .chatgpt = "http://127.0.0.1:1/v1/responses" }),
+        .capacity = 1,
+        .inactivity_seconds = 1,
+        .scratch_path = "/nonexistent",
+        .budget = .{ .used = &used, .limit = 1 },
+        .listing_urls = urls,
+    });
+    defer reactor.deinit();
+    var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
+    for (urls.values, &listings.values) |url, *work| work.url = url;
+    const kind = provider.providerListing(.chatgpt).?;
+    const work = listings.getPtr(kind);
+    defer endListing(&reactor, kind, work);
+    // Only a slot's provider is read from its request until it launches.
+    var request: provider.PreparedRequest = undefined;
+    request.provider = .codex;
+    const waiting: ExecutionSlot = .{ .model_authenticating = .{ .owner = .{ .token = undefined, .binding = undefined } } };
+    var slots = [_]ExecutionSlot{waiting};
+
+    // A leased list starts nothing until the worker leases its token.
+    startListings(&host, &reactor, &listings);
+    try std.testing.expect(work.auth == .waiting and !reactor.listingPending());
+    // A waiting slot takes the idle worker first, and the list waits behind it.
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(slots[0].model_authenticating.requested and work.auth == .waiting);
+    try std.testing.expectEqual(device_source, worker.state.requested.acquire);
+    try std.testing.expect(!advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(work.auth == .waiting);
+    // Once no slot waits, the list's lease is the idle worker's next job.
+    worker.state = .idle;
+    slots[0] = .free;
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(work.auth == .requested);
+    try std.testing.expectEqual(plan_source, worker.state.requested.acquire);
+    // A slot that comes to wait meanwhile is not flagged while the list
+    // holds the job, and is served next.
+    slots[0] = waiting;
+    try std.testing.expect(!advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(!slots[0].model_authenticating.requested);
+    // A failed lease is the list's answer: the catalog stands in, and the
+    // worker is free for the slot.
+    worker.state = .{ .failed = error.FileNotFound };
+    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .pending);
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(work.auth == .none and worker.state == .idle and !reactor.listingPending());
+    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .catalog_fallback);
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(slots[0].model_authenticating.requested);
+    worker.state = .idle;
+    slots[0] = .free;
+
+    // A leased token starts the GET with its own copy, and goes back at once.
+    host.model_lists.set(.chatgpt, .pending);
+    startListings(&host, &reactor, &listings);
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try credentials.leaseInto(path, &worker.credential, &worker.work.credentials);
+    worker.state = .ready;
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(worker.state == .idle and work.auth == .none);
+    try std.testing.expect(reactor.listings.get(kind) != null and work.credential != null);
+    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .pending);
+    // A request to refresh while it runs starts no second one.
+    startListings(&host, &reactor, &listings);
+    try std.testing.expect(work.auth == .none);
+    endListing(&reactor, kind, work);
+
+    // A lease whose GET cannot start still goes back, and the list falls back.
+    work.url = "https://api.openai.com/v1/models";
+    startListings(&host, &reactor, &listings);
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try credentials.leaseInto(path, &worker.credential, &worker.work.credentials);
+    worker.state = .ready;
+    try std.testing.expect(advanceCredentialWork(&host, &reactor, &slots, &worker, &request, &listings));
+    try std.testing.expect(worker.state == .idle and work.auth == .none and !reactor.listingPending());
+    try std.testing.expect(work.credential == null and work.response == null);
+    try std.testing.expect(host.model_lists.live.get(.chatgpt) == .catalog_fallback);
 }
 
 test "authentication worker answers each job with that job's result" {
@@ -3941,11 +4135,13 @@ test "Host fences dispose admitted preparation without touching canonical state"
             .binding = binding,
         } }};
         _ = host.advance(phase);
+        var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
         try std.testing.expect(advanceModelPreparation(
             &host,
             null,
             &slots,
             &preparation,
+            &listings,
             host.limits.request_preparation_byte_allowance,
             host.limits.request_preparation_item_allowance,
         ));
@@ -4028,10 +4224,11 @@ test "an encode failure settles unanswered and releases request scratch" {
         &retained,
     );
     defer if (preparation.state.active) preparation.cancel();
+    var listings: std.EnumArray(provider.ListingKind, ListingWork) = .initFill(.{ .fetch = undefined, .credential = null, .response = null });
     var advances: usize = 0;
     while (slots[0] != .free) : (advances += 1) {
         try std.testing.expect(advances < 4096);
-        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, 64, 4));
+        try std.testing.expect(advanceModelPreparation(&host, null, &slots, &preparation, &listings, 64, 4));
     }
     try std.testing.expect(advances > 1);
     try std.testing.expect(!preparation.state.active and !preparation.view.active);

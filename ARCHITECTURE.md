@@ -1183,7 +1183,7 @@ A 401 on the key is final, `provider_api_key_rejected`, with no refresh or resen
 An auto-started Host adds `--provider openai` whenever a usable key is saved.
 
 `--provider chatgpt` serves a ChatGPT plan sign-in from an owner-only `~/.config/rui/chatgpt.json`, or the absolute path `RUI_CHATGPT_CREDENTIAL_FILE` names, in the same credential format and custody as Codex; its record carries the issued client id and its account is the ID token's `sub`.
-It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses`, with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
+It speaks `openai-responses/3` and sends the access token as `authorization: Bearer` with user-agent only to `https://api.openai.com/v1/responses` and the model list beside it (`https://api.openai.com/v1/models`), with no account or FedRAMP header; its route is `chatgpt_plan`, and it accepts structured output.
 Its token must carry `exp`, so it refreshes within 300 seconds of expiry and never on the eight-day opaque clock; a 401 forces one refresh over the plan's token wire, as Codex's does over its own.
 Its provider fact names `rui auth login chatgpt`, so the Host line and the overview's notices name that command; an expired sign-in's band names it too when the line holds it whole, and otherwise reads only "ChatGPT sign-in expired." so the 40-column list pane keeps it whole.
 The Host's one sign-in worker serves both sign-ins; each lease or forced refresh names the sign-in it is for.
@@ -2766,7 +2766,8 @@ This keeps 244,800 tokens for large windows but uses 115,200 for a 128,000-token
 Other providers default to 90% of the catalog window, or 115,200 tokens for a missing or null window.
 These client choices do not change existing Sessions, the Host's fixed fallback for stored null thresholds, or frozen Operations.
 
-The only fetched live list is a Host's OpenAI key list behind [`/v1/model-list`](#public-session-activity); ChatGPT uses the selected catalog's OpenAI IDs because it has no public list.
+The fetched live lists are a Host's OpenAI key list and its ChatGPT plan list behind [`/v1/model-list`](#public-session-activity); the ChatGPT device sign-in uses the selected catalog's OpenAI IDs because its backend publishes no list.
+A live list supplies model IDs only: context windows and efforts always come from the selected catalog.
 The Host refreshes the models.dev fact catalog and saves it across Host runs.
 Host Session configuration admission uses operation-scoped selected facts for effort support and known-window bounds; successful refreshes affect later configuration admissions, not existing Session settings or frozen Operations.
 Each new model Operation freezes the selected catalog's effective context window on its own row (D238).
@@ -3487,14 +3488,17 @@ Search adds no Store format, index or SQL text-matching dependency.
 
 `POST /v1/model-list` takes `kind:"model_list"` and returns `providers`: for each provider the Host serves, in Provider order, its `provider`, `source` and `models`, each an `id` with `known`, whether Rui's model catalog knows its facts.
 A model the catalog does not list runs with default limits (see compaction).
-ChatGPT has no public list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.
-At Host start and on every model-list request, the execution owner's HTTP/2 Client starts both an OpenAI key's `GET BASE/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, unless that fetch is already in flight.
+The ChatGPT device sign-in (`codex`) has no list, so its `source` is always `catalog` and its models are the catalog's OpenAI IDs in catalog order.
+At Host start and on every model-list request, the execution owner's HTTP/2 Client starts an OpenAI key's `GET BASE/models` (when served), a ChatGPT plan's `GET https://api.openai.com/v1/models` (when served) and an unauthenticated `GET https://models.dev/api.json`, each unless that fetch is already in flight.
 Each has its own endpoint and stream beyond Active Capacity, including a catalog-only Host with no model slots.
-Neither fetch waits behind or reserves a model slot.
-The provider IDs (at most 512, 16 KiB together) stay in Host memory and are replaced on refresh.
-While that fetch runs the source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it failed, answered with something else or listed more than that bound.
+No fetch reserves a model slot.
+The plan's GET carries a lease from the Host's one sign-in worker, which serves it only when no model slot waits for that worker, and returns the lease as soon as the GET holds its own copy of the token; it never waits for a refresh, and a 401 on it forces none.
+Without a usable sign-in the lease fails and `/v1/models` is never contacted.
+The plan's list keeps only entries whose `visibility` is `list`, by `slug`, in server order.
+Each provider's IDs (at most 512, 16 KiB together, per provider) stay in Host memory and are replaced on refresh.
+While a provider's fetch runs its source is `pending` with the catalog's OpenAI IDs; after it, `live` with the provider's IDs in its order (IDs Rui cannot select are dropped), or `catalog_fallback` with the catalog's OpenAI IDs when it or its sign-in lease failed, answered with something else or listed more than that bound.
 A refresh keeps the previous provider source while in flight; the initial provider fetch alone starts `pending`.
-The reply signals refresh, then reads one selected fact generation from the Store and renders it with the independently retained provider list; it does not wait for the network.
+The reply signals refresh, then reads one selected fact generation from the Store and renders it with the independently retained provider lists; it does not wait for the network.
 Its operation-owned facts and reply storage are released after the request; the Host retains no fact snapshot between requests.
 Reply capacity derives from that selected generation, not the shipped snapshot's model count or ID bytes; the independent live-provider bounds remain unchanged.
 

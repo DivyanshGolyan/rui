@@ -124,9 +124,40 @@ pub const Options = struct {
     listing_urls: std.EnumArray(ListingKind, ?[]const u8) = .initFill(null),
 };
 
-/// Independent discovery streams beyond Active Capacity. Each has one owner,
-/// no response file or request scratch charge, and at most one live GET.
-pub const ListingKind = enum { provider, catalog };
+/// Independent discovery streams beyond Active Capacity: the models.dev
+/// catalog, and one live model list for each provider whose list is live
+/// (`Facts.model_list`), named for that provider. Each has one owner, no
+/// response file or request scratch charge, and at most one live GET.
+pub const ListingKind = blk: {
+    var count = 1;
+    for (std.enums.values(protocol.Provider)) |served| count += @intFromBool(served.facts().model_list == .live);
+    var names: [count][]const u8 = undefined;
+    var values: [count]u8 = undefined;
+    names[0] = "catalog";
+    var at = 1;
+    for (std.enums.values(protocol.Provider)) |served| if (served.facts().model_list == .live) {
+        names[at] = @tagName(served);
+        at += 1;
+    };
+    for (&values, 0..) |*value, index| value.* = index;
+    break :blk @Enum(u8, .exhaustive, &names, &values);
+};
+
+/// The listing that fetches `served`'s live list, or null when its list is
+/// the catalog.
+pub fn providerListing(served: protocol.Provider) ?ListingKind {
+    return switch (served) {
+        inline else => |name| if (@hasField(ListingKind, @tagName(name))) @field(ListingKind, @tagName(name)) else null,
+    };
+}
+
+/// The provider whose live list `kind` fetches, or null for the catalog.
+pub fn listedProvider(kind: ListingKind) ?protocol.Provider {
+    return switch (kind) {
+        .catalog => null,
+        inline else => |name| @field(protocol.Provider, @tagName(name)),
+    };
+}
 pub const ListingFetch = struct {
     stream: h2.Stream,
     finished: bool,
@@ -997,7 +1028,12 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
         .inactivity_seconds = 1,
         .scratch_path = "/nonexistent",
         .budget = .{ .used = &used, .limit = 1 },
-        .listing_urls = .init(.{ .provider = "http://127.0.0.1:1/models", .catalog = "https://models.dev/api.json" }),
+        .listing_urls = listing_urls: {
+            var urls: std.EnumArray(ListingKind, ?[]const u8) = .initFill(null);
+            urls.set(.openai, "http://127.0.0.1:1/models");
+            urls.set(.catalog, "https://models.dev/api.json");
+            break :listing_urls urls;
+        },
     };
     try reactor.init(std.testing.allocator, std.testing.io, options);
     {
@@ -1007,8 +1043,8 @@ test "catalog endpoint setup failure leaves HTTP provider and listing usable" {
         try std.testing.expect(reactor.listing_endpoints.get(.catalog) == null);
         var fetch: ListingFetch = undefined;
         var response: [1]u8 = undefined;
-        try reactor.startListing(.provider, &fetch, &.{}, &response);
-        defer reactor.endListing(.provider);
+        try reactor.startListing(.openai, &fetch, &.{}, &response);
+        defer reactor.endListing(.openai);
         try std.testing.expectEqual(@as(?Completion, null), try reactor.nextCompletion(false));
     }
     // A served HTTPS provider still requires working trust; only the optional
@@ -1236,6 +1272,20 @@ const TurnStateRecord = struct {
     }
 };
 
+test "each live-list provider has its own listing beside the catalog's" {
+    var kinds: usize = 0;
+    for (std.enums.values(protocol.Provider)) |served| {
+        const live = served.facts().model_list == .live;
+        try std.testing.expectEqual(live, providerListing(served) != null);
+        if (providerListing(served)) |kind| {
+            try std.testing.expectEqual(served, listedProvider(kind).?);
+            kinds += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(?protocol.Provider, null), listedProvider(.catalog));
+    try std.testing.expectEqual(kinds + 1, std.enums.values(ListingKind).len);
+}
+
 test "catalog listing captures a bounded ETag and rejects duplicates without observing provider headers" {
     var reactor: Reactor = undefined;
     reactor.listings = .initFill(null);
@@ -1258,7 +1308,7 @@ test "catalog listing captures a bounded ETag and rejects duplicates without obs
     } }));
     try std.testing.expect(fetch.etag == null);
     reactor.listings.set(.catalog, null);
-    reactor.listings.set(.provider, &fetch);
+    reactor.listings.set(.openai, &fetch);
     try std.testing.expectEqual(h2.Verdict.accept, reactor.observe(&fetch.stream, head));
     try std.testing.expect(fetch.etag == null);
 }

@@ -858,7 +858,7 @@ fn setNonblocking(fd: std.posix.fd_t) !void {
 }
 
 fn descriptorTransport(served: *const providers.Providers) descriptor_capacity.Transport {
-    return if (served.modelListKey() != null) .listings else .catalog;
+    return .{ .listings = served.liveLists() };
 }
 
 extern "c" fn rui_write_readiness(fd: c_int, bytes: [*]const u8, length: usize) c_int;
@@ -1161,7 +1161,7 @@ fn serveOpened(
     host.started_at = @intCast(started_at);
     // Freed after intake and execution are joined: they read and fill it.
     // Pending from the start: execution launches the fetch, or settles it.
-    host.model_lists = .{ .io = io, .allocator = allocator, .providers = served, .live = if (served.modelListKey() != null) .pending else .catalog };
+    host.model_lists = .init(io, allocator, served);
     defer host.model_lists.deinit();
     var intake: Intake = undefined;
     try intake.init(&host);

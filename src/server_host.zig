@@ -399,7 +399,8 @@ pub const Host = struct {
     /// Named creation specs, borrowed from the launch frame for the Host's life.
     /// Never part of the Store or any Session after resolution (D22).
     presets: []const core_tools.Preset = &.{},
-    /// The OpenAI API key's model list, refreshed by the execution owner.
+    /// Each served provider's model list; the execution owner refreshes
+    /// the live ones.
     model_lists: ModelLists = .{},
     listings_requested: std.atomic.Value(bool) = .init(false),
     auth_worker: ?*AuthWorker = null,
@@ -502,54 +503,66 @@ pub const Host = struct {
     }
 };
 
-/// The live model list of the provider whose list is live
-/// (`Facts.model_list`): execution refreshes at Host start and on each
-/// model-list request. Intake only signals refresh and renders known IDs.
-/// Every other provider uses the shipped catalog.
+/// Each served provider's model list. A provider whose list is live
+/// (`Providers.liveList`) has its own, which execution fetches at Host start
+/// and on each model-list request; intake only signals refresh and renders
+/// known IDs. Every other provider shows the shipped catalog.
 pub const ModelLists = struct {
     io: std.Io = undefined,
     allocator: std.mem.Allocator = undefined,
     providers: *const providers_module.Providers = &providers_module.none,
     mutex: std.Io.Mutex = .init,
-    /// A live list's IDs are exact length, from `allocator`.
-    /// `Provider.onlyLiveList()`'s, the one provider with a live list.
-    live: model_list.List = .catalog,
+    /// Each provider's list, under `mutex`. A live list's IDs are exact
+    /// length, from `allocator`.
+    live: std.EnumArray(protocol.Provider, model_list.List) = .initFill(.catalog),
+
+    /// Pending for each provider whose live list execution will fetch, or
+    /// settle as unavailable; the catalog for every other.
+    pub fn init(io: std.Io, allocator: std.mem.Allocator, providers: *const providers_module.Providers) ModelLists {
+        var lists: ModelLists = .{ .io = io, .allocator = allocator, .providers = providers };
+        for (std.enums.values(protocol.Provider)) |name| {
+            if (providers.liveList(name) != null) lists.live.set(name, .pending);
+        }
+        return lists;
+    }
 
     pub fn deinit(self: *ModelLists) void {
-        switch (self.live) {
+        for (self.live.values) |list| switch (list) {
             .live => |ids| self.allocator.free(ids.bytes),
             .catalog, .pending, .catalog_fallback => {},
-        }
+        };
         self.* = .{};
     }
 
     /// Under the lock: intake renders while execution sets.
-    pub fn set(self: *ModelLists, list: model_list.List) void {
+    pub fn set(self: *ModelLists, name: protocol.Provider, list: model_list.List) void {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
-        switch (self.live) {
+        switch (self.live.get(name)) {
             .live => |ids| self.allocator.free(ids.bytes),
             else => {},
         }
-        self.live = list;
+        self.live.set(name, list);
     }
 
-    /// Publishes a fetched answer: its IDs, kept, or why there are none.
-    pub fn publish(self: *ModelLists, body: anyerror![]const u8) void {
-        const list: model_list.List = if (keep(self.allocator, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
-            stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ comptime protocol.Provider.onlyLiveList().shown(), @errorName(err) });
+    /// Publishes `name`'s fetched answer: its IDs, kept, or why there are
+    /// none. Only a provider with a live list has an answer to publish.
+    pub fn publish(self: *ModelLists, name: protocol.Provider, body: anyerror![]const u8) void {
+        const listing = self.providers.liveList(name).?.credential.listing().?;
+        const list: model_list.List = if (keep(self.allocator, listing, body)) |bytes| .{ .live = .{ .bytes = bytes } } else |err| failed: {
+            stderr.print("rui: {s} model list unavailable ({s}); the picker shows Rui's models\n", .{ name.shown(), @errorName(err) });
             break :failed .catalog_fallback;
         };
-        self.set(list);
+        self.set(name, list);
     }
 
-    /// The IDs of `body`, exact length from `allocator`. Its scratch is
-    /// mapped for the call, off the caller's stack.
-    noinline fn keep(allocator: std.mem.Allocator, body: anyerror![]const u8) ![]const u8 {
+    /// The IDs of `body` as `listing` reads them, exact length from
+    /// `allocator`. Its scratch is mapped for the call, off the caller's stack.
+    noinline fn keep(allocator: std.mem.Allocator, listing: providers_module.Listing, body: anyerror![]const u8) ![]const u8 {
         var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         defer arena.deinit();
         const ids = try arena.allocator().create(model_list.IdBuffer);
-        const parsed = try model_list.parseOpenAi(arena.allocator(), try body, ids);
+        const parsed = try listing.parse(arena.allocator(), try body, ids);
         return allocator.dupe(u8, parsed.bytes);
     }
 
@@ -561,10 +574,7 @@ pub const ModelLists = struct {
         var count: usize = 0;
         for (std.enums.values(protocol.Provider)) |name| {
             if (!self.providers.serves(name)) continue;
-            entries[count] = .{ .provider = name, .list = switch (name.facts().model_list) {
-                .catalog => .catalog,
-                .live => self.live,
-            } };
+            entries[count] = .{ .provider = name, .list = self.live.get(name) };
             count += 1;
         }
         try model_list.writeProviders(out, facts, entries[0..count]);
@@ -1512,4 +1522,46 @@ test "an asked stop leaves the stop record only when it is what stops the Host, 
         try lease.prepareForServing(false);
         try std.testing.expectEqual(platform.StoreLease.LastStop.unasked, platform.StoreLease.lastStop(io, path));
     }
+}
+
+test "each provider's model list is published and rendered on its own" {
+    const catalog = @import("model_catalog.zig");
+    var served: providers_module.Providers = .{};
+    served.table.set(.codex, .{ .endpoint = providers_module.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
+    served.table.set(.openai, .{ .endpoint = providers_module.endpoint(.openai), .credential = .{ .key_file = .{ .key = "sk-test" } } });
+    served.table.set(.chatgpt, .{ .endpoint = providers_module.endpoint(.chatgpt), .credential = .{ .chatgpt_plan = .{ .path = "/p" } } });
+    var lists: ModelLists = .init(std.testing.io, std.testing.allocator, &served);
+    defer lists.deinit();
+    const facts: []const catalog.Entry = &.{.{ .id = "gpt-6-sol", .context_window = null, .efforts = .{}, .openai_listed = true }};
+    var bytes: [4096]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    // Until each fetch answers, each live list is pending; the device
+    // sign-in shows the catalog.
+    try lists.render(&out, facts);
+    try std.testing.expectEqualStrings(
+        "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
+            "{\"provider\":\"openai\",\"source\":\"pending\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
+            "{\"provider\":\"chatgpt\",\"source\":\"pending\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}]",
+        out.buffered(),
+    );
+    // Each answer is read in its own route's shape, in the server's order,
+    // and settles only its own provider; a failure falls back alone.
+    lists.publish(.chatgpt, "{\"models\":[{\"slug\":\"gpt-6-terra\",\"visibility\":\"list\"},{\"slug\":\"secret\",\"visibility\":\"hide\"},{\"slug\":\"gpt-6-sol\",\"visibility\":\"list\"}]}");
+    lists.publish(.openai, error.ListingRefused);
+    out = std.Io.Writer.fixed(&bytes);
+    try lists.render(&out, facts);
+    try std.testing.expectEqualStrings(
+        "[{\"provider\":\"codex\",\"source\":\"catalog\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
+            "{\"provider\":\"openai\",\"source\":\"catalog_fallback\",\"models\":[{\"id\":\"gpt-6-sol\",\"known\":true}]}," ++
+            "{\"provider\":\"chatgpt\",\"source\":\"live\",\"models\":[{\"id\":\"gpt-6-terra\",\"known\":false},{\"id\":\"gpt-6-sol\",\"known\":true}]}]",
+        out.buffered(),
+    );
+    // An OpenAI-shaped answer is not a plan's list; a later answer replaces
+    // the kept one, freeing it.
+    lists.publish(.chatgpt, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
+    try std.testing.expect(lists.live.get(.chatgpt) == .catalog_fallback);
+    lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-luna\"}]}");
+    lists.publish(.openai, "{\"data\":[{\"id\":\"gpt-6-mare\"}]}");
+    try std.testing.expectEqualStrings("gpt-6-mare\n", lists.live.get(.openai).live.bytes);
+    try std.testing.expect(lists.live.get(.codex) == .catalog);
 }
