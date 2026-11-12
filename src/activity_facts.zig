@@ -1,6 +1,7 @@
 //! What an activity page and an activity search read, as plain values: the
 //! Store fills them and the Host writes them (`activity_reply.zig`).
 const std = @import("std");
+const session_list = @import("session_list.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const activity_read = @import("activity_read.zig");
 const change_ring = @import("change_ring.zig");
@@ -112,6 +113,7 @@ pub const Queued = struct {
 /// Workspace a permission prompt shows.
 pub const PageWork = struct {
     work: session_work.Work = .{ .state = .{ .idle = .{ .since = 0 } } },
+    last_line: ?session_list.SavedLastLine = null,
     revision: u64 = 0,
     workspace: Bounded(workspace_path.max_bytes) = .{},
 };

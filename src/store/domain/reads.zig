@@ -32,6 +32,7 @@ const Store = store_core.Store;
 const configuration_domain = @import("configuration.zig");
 const content_domain = @import("content.zig");
 const report_domain = @import("report.zig");
+const session_list_domain = @import("session_list_read.zig");
 const store_schema = @import("../schema.zig");
 const rsql = @import("../rsql.zig");
 const store_access = @import("../access.zig");
@@ -1114,6 +1115,7 @@ pub noinline fn activityPage(a: *ReadAccess, request: *const activity_read.Activ
     // always describe the page they arrive with.
     try report_domain.readWorks(a, (&work)[0..1]);
     page.work.work = try work.work(session.created_at.get(), std.math.cast(u64, try store_core.readUnixMilliseconds(a.store.io)) orelse return error.IntegerOutOfRange);
+    try session_list_domain.readLastLine(a, session_ref, page.work.work.first_action, &page.work.last_line);
     page.work.revision = session.revision.get();
 }
 

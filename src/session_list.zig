@@ -70,6 +70,18 @@ pub const Row = struct {
 /// answers have no text.
 pub const LastLine = struct { position: u64, text: ?[]const u8 };
 
+/// Owned form of the same Store projection, retained with a completed read.
+pub const SavedLastLine = struct {
+    position: u64,
+    text: ?Bounded(max_last_line_bytes) = null,
+};
+
+/// All work-dependent facts a list row presents, from one Store read.
+pub const Snapshot = struct {
+    work: session_work.Work,
+    last_line: ?SavedLastLine = null,
+};
+
 /// A Session's first admitted Message.
 pub const FirstMessage = struct {
     position: u64,

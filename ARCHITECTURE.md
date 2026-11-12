@@ -3461,6 +3461,8 @@ A `turn_ended` row names how its Turn ended: `done`, `context_full`, `provider_r
 The ending is read from the saved outcome, so it is no Store format: `completed` is `done`; `cancelled` is `stopped` when a Session stop selected the Turn and otherwise `interrupted` (a Model Interruption); `retry_exhausted` and a provider that could not be reached are `provider_unavailable`; `ResourceExceeded` is `context_full`; a refusal resending meets again (policy, quota, plan, model, sign-in, API key or a permanent HTTP status, by `failure_class`) is `provider_refused`; any other failure is `failed`.
 An assistant row is `final` exactly when it is its done Turn's answer: the message the causing Operation selected by answer selection's rule (its last `final_answer` message, or with no phased message its last message), read from the saved items' phases rather than matched by text, so a repeated or blank answer still marks its own row, and only on a page whose end reaches the Turn's `turn_ended` row.
 Stop selection/cutoff and pending/completed status are likewise evaluated at end.
+The page's live work also carries `last_line`, the same bounded public last-line projection as a Session listing, read under that work's Store Access.
+An open conversation's list row takes work, last line and age from that snapshot together; listing rows remain intact for return to the list.
 This is a logical inventory prefix, not a historical transaction snapshot: immutable call classification remains attached to its item even at an interior end before the rejection-result position.
 Call fields are in `name`, `call_id`, `arguments` order.
 Content references carry exact decimal-string bytes and SHA-256; no preview truncation or private provider content enters activity.

@@ -1,6 +1,7 @@
 //! One persistent caller owns drafts, terminal and joined Client borrowers.
 //! No worker writes the terminal; canonical activity supplies live output.
 const std = @import("std");
+const session_list = @import("session_list.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const AppScreen = @import("AppScreen.zig");
@@ -401,7 +402,7 @@ pub const Lender = struct {
     /// Hands the overview each read of the Session's work; the read the
     /// conversation opens on is an outcome the person has seen. Its failure
     /// is the overview's and ends the conversation.
-    observed: *const fn (context: *anyopaque, work: protocol.session_work.Work, opening: bool) anyerror!void,
+    observed: *const fn (context: *anyopaque, snapshot: session_list.Snapshot, opening: bool) anyerror!void,
 
     /// The Upgrade, the overview's one value: its run, and what the last
     /// run left Host requests.
@@ -3020,7 +3021,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         return;
     }
     if (end != .complete) return;
-    var observed: ?struct { work: protocol.session_work.Work, opening: bool } = null;
+    var observed: ?struct { snapshot: session_list.Snapshot, opening: bool } = null;
     const phase = self.reading.phase;
     if (phase == .message or phase == .tool) {
         self.notice = null; // Clears "Opening message…" or "Opening tool output…".
@@ -3029,7 +3030,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
         // Filtered fills never overwrite current work or move the scan cursor.
         if (read == .opening or read == .scan or phase == .permission) {
             const result = &self.job.result;
-            observed = .{ .work = result.work.work, .opening = read == .opening };
+            observed = .{ .snapshot = .{ .work = result.work.work, .last_line = result.work.last_line }, .opening = read == .opening };
             self.live.work = .fromCore(result.work.work);
             self.live.queued = result.queued;
             if (result.queued_line) |shown| self.live.queued_line = shown;
@@ -3050,7 +3051,7 @@ fn applyReader(self: *Self, end: ReadEnd) !void {
             if (self.reading.prepared_action == null) self.reading.phase = .activity;
         }
     }
-    if (observed) |read| try self.lender.observed(self.lender.context, read.work, read.opening);
+    if (observed) |read| try self.lender.observed(self.lender.context, read.snapshot, read.opening);
     self.dirty = true;
 }
 
@@ -4284,7 +4285,7 @@ const quiet_overview: Lender = .{ .context = undefined, .step = struct {
         return .{};
     }
 }.line, .observed = struct {
-    fn observed(_: *anyopaque, _: protocol.session_work.Work, _: bool) !void {}
+    fn observed(_: *anyopaque, _: session_list.Snapshot, _: bool) !void {}
 }.observed, .upgrade = struct {
     fn upgrade(_: *anyopaque) session_upgrade.Upgrade {
         return .{};
@@ -4743,9 +4744,9 @@ const ArchiveOverview = struct {
         return self.state.upgrade;
     }
 
-    fn observed(raw: *anyopaque, work: protocol.session_work.Work, opening: bool) !void {
+    fn observed(raw: *anyopaque, snapshot: session_list.Snapshot, opening: bool) !void {
         const self: *ArchiveOverview = @ptrCast(@alignCast(raw));
-        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .work = work, .opening = opening } });
+        const effects = try overview_view.step(&self.state, .{ .observed = .{ .reference = "k7m2qx".*, .work = snapshot.work, .last_line = snapshot.last_line, .opening = opening } });
         try std.testing.expectEqual(@as(usize, 0), effects.len);
     }
 
@@ -4767,7 +4768,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const stopped: protocol.session_work.Work = .{ .state = .{ .stopped = .{ .since = 2, .cause = .stop } }, .turn = 7 };
     _ = try overview_view.step(&overview.state, .{ .tick = 1000 });
     _ = try overview_view.step(&overview.state, .{ .list = .{ .page = .{
-        .rows = &.{.{ .reference = ref, .workspace = "/work", .label = "Stop the slow job", .state = stopping, .turn = 7 }},
+        .rows = &.{.{ .reference = ref, .workspace = "/work", .label = "Stop the slow job", .state = stopping, .turn = 7, .last_line = .{ .position = 1, .text = "Old completed answer" } }},
         .answer = .{ .delta = .full, .since = .{ .instance = @splat(0xab), .generation = 1 } },
     } } });
     _ = try overview_view.step(&overview.state, .{ .conversation = ref });
@@ -4779,7 +4780,7 @@ test "one settled stop read updates the chat and its list row without a listing"
     const text = "■ Stopped\n";
     try fixture.file.writePositionalAll(std.testing.io, text, 0);
     job.result = .{
-        .work = .{ .work = stopped },
+        .work = .{ .work = stopped, .last_line = .{ .position = 2 } },
         .row_count = 1,
         .new_rows = 1,
         .at_start = true,
@@ -4800,6 +4801,8 @@ test "one settled stop read updates the chat and its list row without a listing"
     const row = overview.state.find(ref).?;
     try std.testing.expectEqualDeep(stopped.state, overview.state.workOf(row).state);
     try std.testing.expectEqual(stopped.turn, overview.state.workOf(row).turn);
+    var detail: [overview_view.max_second_line_bytes]u8 = undefined;
+    try std.testing.expectEqualStrings("Stopped", overview_view.secondLine(&overview.state, row, &detail));
     try std.testing.expect(!ArchiveOverview.line(&overview, .stopped).stoppable);
     try std.testing.expectEqual(@as(usize, 0), overview.state.summary.counts.working);
 }

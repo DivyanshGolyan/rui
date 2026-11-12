@@ -10,6 +10,7 @@
 //! asked for. An opened Session borrows the terminal through
 //! `SessionFrontend`, with ticks paused, and gives it back on Esc.
 const std = @import("std");
+const session_list = @import("session_list.zig");
 const model_catalog = @import("model_catalog.zig");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
@@ -1767,10 +1768,10 @@ fn conversed(raw: *anyopaque, kind: view.Kind, input: view.ConversationInput) !v
 
 /// A read the opened Session's conversation applied: the outcome it opened
 /// on is one the person has seen.
-fn observed(raw: *anyopaque, read: protocol.session_work.Work, opening: bool) !void {
+fn observed(raw: *anyopaque, read: session_list.Snapshot, opening: bool) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
     errdefer self.lent_failed = true;
-    const next = try self.event(.{ .observed = .{ .reference = self.opened, .work = read, .opening = opening } });
+    const next = try self.event(.{ .observed = .{ .reference = self.opened, .work = read.work, .last_line = read.last_line, .opening = opening } });
     std.debug.assert(next == null);
 }
 
@@ -3848,7 +3849,7 @@ test "a terminal that answers the program status probe gets each Session's recor
     try std.testing.expect(std.mem.startsWith(u8, written, "\x1b]7501;state=done:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
     // The conversation reading it first writes nothing.
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, false);
+    try observed(overview, .{ .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     // Opening the Session shows the person its outcome.
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
@@ -4022,7 +4023,7 @@ test "a later Turn's finish the conversation read first is still a record when t
     try std.testing.expect(std.mem.indexOf(u8, rig.signalled(), "\x1b]7501;") == null);
     // Turn 2 finishes and its conversation reads that before any listing.
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 }, false);
+    try observed(overview, .{ .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 2, .operation = 2 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
     Listing.finished_turn = 2;
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 120_000 }) == null);
@@ -4060,7 +4061,7 @@ test "a finish the conversation opened on is no done record when a listing reads
     Listing.finished_turn = 1;
     try std.testing.expect(try overview.event(.{ .open = "k7m2qx".* }) != null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, true);
+    try observed(overview, .{ .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, true);
     try std.testing.expect(try overview.event(.{ .tick = test_now_s * 1000 + 60_000 }) == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(std.mem.startsWith(u8, rig.signalled(), "\x1b]7501;state=idle:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\"));
@@ -4095,7 +4096,7 @@ test "records go out though the terminal never answered the probe, and nothing e
     try std.testing.expect(std.mem.indexOf(u8, written, "\x1b]7501;state=working:id=rui/k7m2qx:app=rui:msg=Rml4IHRoZSBmbGFreSB0ZXN0\x1b\\") != null);
     try std.testing.expect(std.mem.indexOfScalar(u8, written, 0x07) == null);
     overview.opened = "k7m2qx".*;
-    try observed(overview, .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 }, false);
+    try observed(overview, .{ .work = .{ .state = .{ .finished = .{ .since = test_now_s } }, .turn = 1, .operation = 1 } }, false);
     try std.testing.expectEqualStrings("", rig.signalled());
 }
 

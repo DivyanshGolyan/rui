@@ -663,7 +663,7 @@ pub const Saved = union(enum) {
 
 /// A read the open conversation of `reference` applied, which showed its
 /// work as `work`; `opening` when it is the read the conversation opened on.
-pub const Observed = struct { reference: Reference, work: session_work.Work, opening: bool };
+pub const Observed = struct { reference: Reference, work: session_work.Work, last_line: ?session_list.SavedLastLine = null, opening: bool };
 
 /// An input in the open conversation of `reference`, whose work it shows as
 /// `work`: Ctrl-X there stops it as Ctrl-X on the Session's row does, and
@@ -1004,7 +1004,7 @@ pub const Row = struct {
     first_action: ?u64,
     first: ?First,
     from_person_at: ?u64,
-    last_line: ?struct { position: u64, text: ?Bounded(session_list.max_last_line_bytes) } = null,
+    last_line: ?session_list.SavedLastLine = null,
     line: Line = .unread,
     /// The command of the Action `first_action` names, while the row
     /// needs you.
@@ -1071,7 +1071,7 @@ pub const State = struct {
         reference: Reference,
         /// One open conversation's completed activity snapshot. Listings
         /// retain their own rows, so closing reveals their latest read.
-        work: ?session_work.Work = null,
+        snapshot: ?session_list.Snapshot = null,
     } = null,
     notice: ?Notice = null,
     settings: StartSettings = .{},
@@ -1252,19 +1252,35 @@ pub const State = struct {
         return &self.rows.items[at];
     }
 
-    fn observedWork(self: *const State, row: *const Row) ?*const session_work.Work {
-        const open = if (self.conversing) |*open| open else return null;
-        if (!std.mem.eql(u8, &open.reference, &row.reference)) return null;
-        return if (open.work) |*work| work else null;
+    /// Both listing and conversation snapshots enter the row through this
+    /// projection: work, preview and age must never borrow different reads.
+    const RowFacts = struct {
+        state: *const WorkState,
+        turn: ?u64,
+        operation: ?u64 = null,
+        first_action: ?u64,
+        last_line: ?*const session_list.SavedLastLine,
+    };
+
+    fn rowFacts(self: *const State, row: *const Row) RowFacts {
+        if (self.conversing) |*open| if (std.mem.eql(u8, &open.reference, &row.reference)) if (open.snapshot) |*snapshot| return .{
+            .state = &snapshot.work.state,
+            .turn = snapshot.work.turn,
+            .operation = snapshot.work.operation,
+            .first_action = snapshot.work.first_action,
+            .last_line = if (snapshot.last_line) |*line| line else null,
+        };
+        return .{ .state = &row.state, .turn = row.turn, .first_action = row.first_action, .last_line = if (row.last_line) |*line| line else null };
     }
 
     /// The open row reads the chat's work; every other row reads its listing.
     pub fn workOf(self: *const State, row: *const Row) session_work.Work {
-        return if (self.observedWork(row)) |work| work.* else row.work();
+        const facts = self.rowFacts(row);
+        return .{ .state = facts.state.*, .turn = facts.turn, .operation = facts.operation, .first_action = facts.first_action };
     }
 
     fn stateOf(self: *const State, row: *const Row) *const WorkState {
-        return if (self.observedWork(row)) |work| &work.state else &row.state;
+        return self.rowFacts(row).state;
     }
 
     /// The first line read for `row`, if any. It borrows the state until the
@@ -1363,7 +1379,7 @@ pub const State = struct {
     /// listings still own program status records.
     fn observe(self: *State, read: Observed) error{OutOfMemory}!void {
         if (self.conversing) |*open| if (std.mem.eql(u8, &open.reference, &read.reference)) {
-            open.work = read.work;
+            open.snapshot = .{ .work = read.work, .last_line = read.last_line };
             try arrange(self);
         };
         if (!read.opening or attention.Attention.of(read.work) == null) return;
@@ -1965,10 +1981,10 @@ pub fn writeDeparture(state: *const State, saved_effort: ?ReasoningEffort, write
 fn tick(state: *State, now_ms: u64, effects: *Effects) error{OutOfMemory}!void {
     state.now_ms = now_ms;
     var changed = false;
-    if (state.conversing) |*open| if (open.work) |*work| {
-        const next = work.state.asOf(now_ms);
-        changed = std.meta.activeTag(next) != std.meta.activeTag(work.state);
-        work.state = next;
+    if (state.conversing) |*open| if (open.snapshot) |*snapshot| {
+        const next = snapshot.work.state.asOf(now_ms);
+        changed = std.meta.activeTag(next) != std.meta.activeTag(snapshot.work.state);
+        snapshot.work.state = next;
     };
     for (state.rows.items) |*row| {
         const next = row.state.asOf(now_ms);
@@ -3777,10 +3793,11 @@ pub const max_second_line_bytes = @max(work_line.max_words_bytes + work_line.max
 
 pub fn secondLine(state: *const State, row: *const Row, buffer: *[max_second_line_bytes]u8) []const u8 {
     if (state.openStop(row.reference) != null) return "Stopping";
-    if (needsDecision(state.stateOf(row))) {
+    const facts = state.rowFacts(row);
+    if (needsDecision(facts.state)) {
         // Command text belongs to the listed Action, not a newer one the
         // chat read. The conversation renders that Action's own card.
-        if (state.observedWork(row)) |work| if (work.first_action != row.first_action) return "";
+        if (facts.first_action != row.first_action) return "";
         return switch (row.command) {
             .read => |index| state.lines.items[index].slice(),
             else => "",
@@ -3797,7 +3814,7 @@ pub fn secondLine(state: *const State, row: *const Row, buffer: *[max_second_lin
         return std.fmt.bufPrint(buffer, "{s}{s}", .{ line.words, work_line.clockText(&clock, line.clock, .row, .unicode) }) catch unreachable;
     }
     if (kind == .pending) return "Queued";
-    if (row.last_line) |*last| if (last.text) |*text| return text.slice();
+    if (facts.last_line) |last| if (last.text) |*text| return text.slice();
     return switch (state.stateOf(row).*) {
         .failed => |*failed| causeOf(failed.code.slice()),
         .stopped => "Stopped",
@@ -4738,6 +4755,38 @@ test "conversation work derives from its read while listings survive departure u
         _ = try step(&state, .{ .conversation = ref });
         try std.testing.expectEqualDeep(listed.state, state.workOf(state.find(ref).?).state);
     };
+}
+
+test "snapshot and listing rows render identical stopped failed and done endings" {
+    const ref = "k7m2qx".*;
+    const cases = [_]struct { state: WorkState, text: ?[]const u8, detail: []const u8 }{
+        .{ .state = .{ .stopped = .{ .since = test_now_s - 5, .cause = .stop } }, .text = null, .detail = "Stopped" },
+        .{ .state = .{ .failed = .{ .since = test_now_s - 5, .code = bounded(session_work.max_code_bytes, "malformed_provider_output"), .resets_at = null } }, .text = null, .detail = "Model reply unreadable" },
+        .{ .state = .{ .finished = ago(5) }, .text = "New completed answer", .detail = "New completed answer" },
+    };
+    for (cases) |case| {
+        var initial = session(&ref, .{ .working = ago(10) }, .{ .label = "Same Session", .turn = 7 });
+        initial.last_line = .{ .position = 2, .text = "Old completed answer" };
+        var state = try opened(&.{initial});
+        defer state.deinit();
+        _ = try step(&state, .{ .conversation = ref });
+        _ = try step(&state, .{ .tick = state.now_ms + list_interval_ms });
+        const line: session_list.SavedLastLine = .{ .position = 4, .text = if (case.text) |text| bounded(session_list.max_last_line_bytes, text) else null };
+        _ = try step(&state, .{ .observed = .{ .reference = ref, .work = .{ .state = case.state, .turn = 8 }, .last_line = line, .opening = false } });
+        var detail: [max_second_line_bytes]u8 = undefined;
+        try std.testing.expectEqualStrings(case.detail, secondLine(&state, state.find(ref).?, &detail));
+        const snapshot = try screenText(&state, 80, 24, .{});
+        defer std.testing.allocator.free(snapshot);
+        // Neither row's mark, detail nor age can depend on which read
+        // supplied it. Use the same clock, with no intervening refresh.
+        _ = try step(&state, .{ .conversation = null });
+        var listed = session(&ref, case.state, .{ .label = "Same Session", .turn = 8 });
+        listed.last_line = .{ .position = 4, .text = case.text };
+        _ = try respond(&state, .changed, testToken(2), &.{listed});
+        const listing = try screenText(&state, 80, 24, .{});
+        defer std.testing.allocator.free(listing);
+        try std.testing.expectEqualStrings(listing, snapshot);
+    }
 }
 
 test "conversation permissions never borrow another Action's listed command" {

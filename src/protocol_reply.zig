@@ -199,7 +199,7 @@ pub const ActivityPage = struct {
                 return result;
             }
         };
-        const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
+        const Work = struct { state: JsonWorkState, turn: ?JsonString(20), operation: ?JsonString(20), first_action: ?JsonString(20), last_line: ?struct { position: JsonString(20), text: ?JsonString(session_list.max_last_line_bytes) } = null, revision: JsonString(20), workspace: JsonString(protocol.max_workspace_bytes) };
         const Queued = struct { count: JsonString(20), oldest_position: JsonString(20), newest_admission: JsonString(20), newest_position: JsonString(20) };
         const Wire = struct { version: JsonString(8), type: JsonString(32), delta: JsonEnum(enum { full }), since: ?JsonString(SessionToken.max_bytes), end: JsonString(20), direction: JsonEnum(@FieldType(ActivityCursor, "direction")), items: Items, more: bool, call_activity: struct { total: JsonString(20), entries: Calls }, queued: Queued, work: Work };
         var storage: [2 * activity_reply.max_page_bytes]u8 = undefined;
@@ -349,6 +349,7 @@ pub const ActivityPage = struct {
         }
         // An operation belongs to its Turn; an Action to the active one.
         if ((work.turn == null) != (work.operation == null) or (work.first_action != null and work.turn == null)) return error.InvalidActivityPage;
+        if (wire.work.last_line) |line| facts.last_line = .{ .position = try id(line.position, false), .text = if (line.text) |text| text.value else null };
         facts.revision = try id(wire.work.revision, false);
         // The permission prompt shows this Workspace, so it keeps Current's rule.
         if (!std.fs.path.isAbsolute(wire.work.workspace.slice())) return error.InvalidActivityPage;
@@ -2059,6 +2060,24 @@ test "canonical presentation typed ingress owns escaped labels and closed facts"
         try std.testing.expectEqual(@as(usize, 200), item.value.tool_result.presentation.description.?.slice().len);
         try std.testing.expectEqual(item.position, item.value.tool_result.presentation.publication_position.?);
         try std.testing.expectEqual(std.math.maxInt(i64) + 1 - item.position, item.at);
+    }
+}
+
+test "activity page preserves the canonical row preview with its work" {
+    var facts: protocol.ActivityFacts = .{ .end = 4, .work = .{
+        .revision = 1,
+        .work = .{ .state = .{ .finished = .{ .since = 2 } }, .turn = 1, .operation = 1 },
+        .last_line = .{ .position = 4, .text = .{} },
+    } };
+    try facts.work.workspace.set("/work");
+    try facts.work.last_line.?.text.?.set("New completed answer");
+    var buffer: [activity_reply.max_page_bytes]u8 = undefined;
+    for ([_]bool{ true, false }) |has_text| {
+        if (!has_text) facts.work.last_line.?.text = null;
+        var out = std.Io.Writer.fixed(&buffer);
+        try activity_reply.writePage(&out, &facts);
+        const parsed = try ActivityPage.parse(out.buffered(), .{});
+        try std.testing.expectEqualDeep(facts.work, parsed.facts.work);
     }
 }
 

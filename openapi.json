@@ -10267,6 +10267,16 @@
               }
             ]
           },
+          "last_line": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LastLineFields"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "revision": {
             "$ref": "#/components/schemas/Decimal"
           },
@@ -10281,6 +10291,7 @@
           "turn",
           "operation",
           "first_action",
+          "last_line",
           "revision",
           "workspace"
         ],

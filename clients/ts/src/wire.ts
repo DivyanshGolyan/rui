@@ -2547,6 +2547,7 @@ export interface components {
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
+            last_line: components["schemas"]["LastLineFields"] | null;
             revision: components["schemas"]["Decimal"];
             workspace: string;
         };

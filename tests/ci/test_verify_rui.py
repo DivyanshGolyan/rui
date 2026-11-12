@@ -321,13 +321,17 @@ class FramesTest(unittest.TestCase):
         self.assertEqual(state["open"], "Stop the slow job")
         self.assertEqual(state["cast"][0]["label"], state["open"])
         self.assertEqual(state["cast"][0]["messages"], ["Ready."])
-        self.assertEqual(state["sizes"], [(140, 40), (46, 30)])
+        self.assertEqual(state["sizes"], [(140, 40)])
         self.assertEqual(state["steps"], [
             {"send": {"to": state["open"], "text": "long bash", "wait": False}},
             {"wait": "⠹ Sleep eight seconds"}, {"keys": ["C-x"]},
             {"wait": "■ Stopped", "timeout": 60},
         ])
-        self.assertEqual(state["expect"], ["■ Stopped"])
+        self.assertEqual(state["expect"], ["■ Stopped", "   Stopped"])
+        narrow = states["stop-narrow"]
+        self.assertEqual(narrow["sizes"], [(46, 30)])
+        self.assertEqual(narrow["steps"], state["steps"])
+        self.assertEqual(narrow["expect"], ["■ Stopped"])
         self.assertEqual(state["absent"], ["Stopping"])
         stopped = states["stopped"]
         self.assertEqual(stopped["open"], "Profile the Host under load")
@@ -728,7 +732,7 @@ class FramesTest(unittest.TestCase):
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
                      if state["name"] == "stop")
-        stale = "■ Stopped  Stopping…\n"
+        stale = "■ Stopped\n   Stopped\n   Stopping…\n"
         run = types.SimpleNamespace(meta={"sha": "a" * 40}, store="/unused/store", sid=lambda _label: "session",
                                     rui_cmd=lambda *_args, **_kw: types.SimpleNamespace(returncode=0))
         run.tmux = lambda *argv, **_kw: types.SimpleNamespace(

@@ -229,10 +229,13 @@ fn readChangedSessions(a: *ReadAccess, request: *const session_list.ListSessions
 const settings_columns = "session.session_ref,session.parent_ref,session.workspace,session.provider,session.model," ++ tool_set.namesSql("session.tool_set_id") ++ " AS tools,session.permission_mode,session.label,session.created_at,session.revision,session.next_position," ++
     command_domain.archive_state_sql ++ " AS archive_state," ++
     "(" ++ report_domain.person_message_sql ++ ") AS from_person_at," ++
+    last_line_columns ++ ",";
+
+const last_line_columns =
     "last_turn.outcome_position AS last_turn_position," ++
     "(SELECT substr(@payload(content),1,1024) FROM content WHERE content_id=last_turn.outcome_content_id " ++
     "AND private=0 AND last_turn.outcome_code='completed') AS last_answer," ++
-    "awaiting.approval_position AS last_approval_position,awaiting_call.description AS last_approval_text,";
+    "awaiting.approval_position AS last_approval_position,awaiting_call.description AS last_approval_text";
 
 /// Only the newest Turn can be active: this seek visits at most two Turns.
 /// Work already selected the oldest pending approval: ?2 is its first_action,
@@ -406,7 +409,7 @@ fn rowValues(rows: []const ShownRow, index: usize, now_ms: u64, row: *const List
 /// The newest thing the Session said to its person. A decision removes an
 /// approval from the candidates, leaving the newest ended Turn again. Text
 /// borrows the decoded row or `text`, only until this row's visitor returns.
-fn lastLine(row: *const ListRow, text: *Bounded(session_list.max_last_line_bytes)) ?session_list.LastLine {
+fn lastLine(row: anytype, text: *Bounded(session_list.max_last_line_bytes)) ?session_list.LastLine {
     const ended = if (row.last_turn_position) |position| position.get() else 0;
     if (row.last_approval_position) |position| if (position.get() > ended) return .{
         .position = position.get(),
@@ -434,4 +437,33 @@ fn lastLine(row: *const ListRow, text: *Bounded(session_list.max_last_line_bytes
         }
     }
     return .{ .position = ended, .text = answer };
+}
+
+/// Activity snapshots and listings use the same last-line columns and
+/// projection, under their existing read Access. No frontend reconstructs
+/// this value from rendered or partially resident conversation text.
+const last_line = rsql.Read(.{
+    .sql = "SELECT " ++ last_line_columns ++ " FROM session" ++ last_line_joins ++ " WHERE session.session_ref=?1",
+    .Args = struct { session: []const u8, first_action: ?u64 },
+    .Row = struct {
+        last_turn_position: ?rsql.Positive,
+        last_answer: ?rsql.Blob(1024),
+        last_approval_position: ?rsql.Positive,
+        last_approval_text: ?Bounded(tool_presentation.max_description_bytes),
+    },
+    .cardinality = .optional,
+});
+
+pub noinline fn readLastLine(a: *ReadAccess, session: []const u8, first_action: ?u64, out: *?session_list.SavedLastLine) !void {
+    var row: last_line.Row = undefined;
+    var found: store_access.Found = undefined;
+    a.readInto(last_line, .{ .session = session, .first_action = first_action }, &row, &found);
+    try store_access.runAs(a, error.SessionReadFailed);
+    if (!found.get()) return error.CorruptStore;
+    var text: Bounded(session_list.max_last_line_bytes) = undefined;
+    out.* = if (lastLine(&row, &text)) |line| .{ .position = line.position, .text = if (line.text) |bytes| blk: {
+        var owned: Bounded(session_list.max_last_line_bytes) = .{};
+        try owned.set(bytes);
+        break :blk owned;
+    } else null } else null;
 }
