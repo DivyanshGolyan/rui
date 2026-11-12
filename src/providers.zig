@@ -18,27 +18,25 @@ const Provider = protocol.Provider;
 /// account's token goes to (a fixture's loopback aside).
 pub const managed_endpoint = "https://chatgpt.com/backend-api/codex/responses";
 
-/// A ChatGPT sign-in's credential file, and whether it is the test fixture.
-/// The Host's sign-in worker runs its jobs: a launch lease, or the one
-/// forced refresh after a model 401.
-pub const Authentication = struct {
-    path: []const u8,
-    fixture: bool = false,
+/// A sign-in the Host serves: its credential file, the token wire its
+/// refresh speaks and where that refresh goes. The Host's sign-in worker runs
+/// each job for the source the job names: a launch lease, or the one forced
+/// refresh after a model 401.
+pub const Authentication = codex_auth.Source;
 
-    /// The storage an acquisition reads through, which the worker keeps.
-    pub const Work = codex_auth.Work;
+/// The storage an acquisition reads through, which the worker keeps.
+pub const Work = codex_auth.Work;
 
-    /// Leases the current token into `lease`, refreshing it first when due.
-    pub fn acquire(self: Authentication, io: std.Io, work: *Work, lease: *Lease) !void {
-        try codex_auth.acquireInto(io, self.path, self.fixture, work, lease);
-    }
+/// Leases `source`'s current token into `lease`, refreshing it first when due.
+pub fn acquire(source: Authentication, io: std.Io, work: *Work, lease: *Lease) !void {
+    try codex_auth.acquireInto(io, source, work, lease);
+}
 
-    /// Refreshes the token a 401 rejected at `generation`; false when another
-    /// refresh already replaced it.
-    pub fn refresh(self: Authentication, io: std.Io, generation: u64) !bool {
-        return codex_auth.forceRefresh(io, self.path, self.fixture, generation);
-    }
-};
+/// Refreshes `source`'s token a 401 rejected at `generation`; false when
+/// another refresh already replaced it.
+pub fn refresh(source: Authentication, io: std.Io, generation: u64) !bool {
+    return codex_auth.forceRefresh(io, source, generation);
+}
 
 /// A sign-in's current token, which the Host's sign-in worker leases.
 pub const Lease = codex_credentials.Lease;
@@ -113,17 +111,28 @@ pub const Credential = union(enum) {
         /// The answer settles as it is.
         settle,
         /// The Operation may spend its one forced refresh of the lease
-        /// generation the transfer presented.
-        refresh_once: u64,
+        /// generation the transfer presented, from the sign-in that leased it.
+        refresh_once: Refresh,
         /// The answer saves `failure_class.api_key_rejected`: only a new
         /// key resolves it.
         key_rejected,
     };
 
+    /// A forced refresh: which sign-in, and the generation a 401 rejected.
+    pub const Refresh = struct { source: Authentication, generation: u64 };
+
     /// Whether a request waits for the sign-in worker's lease before it
     /// launches, and its launch then passes that lease to `fields`.
     pub fn leased(self: Credential) bool {
-        return self == .chatgpt_device;
+        return self.signIn() != null;
+    }
+
+    /// The sign-in the worker leases this credential from, if it is one.
+    pub fn signIn(self: Credential) ?Authentication {
+        return switch (self) {
+            .none, .key_file => null,
+            .chatgpt_device => |authentication| authentication,
+        };
     }
 
     /// Refuses an endpoint this credential may not go to, at Host start.
@@ -153,7 +162,7 @@ pub const Credential = union(enum) {
     pub fn rejection(self: Credential, lease: ?*const Lease) Rejection {
         return switch (self) {
             .none => .settle,
-            .chatgpt_device => .{ .refresh_once = lease.?.record.generation },
+            .chatgpt_device => |authentication| .{ .refresh_once = .{ .source = authentication, .generation = lease.?.record.generation } },
             .key_file => .key_rejected,
         };
     }
@@ -192,7 +201,7 @@ fn fixtureEndpoint(target: []const u8, ca_file: ?[]const u8) bool {
 }
 
 fn validateAuthenticationEndpoint(target: []const u8, ca_file: ?[]const u8, authentication: Authentication) !void {
-    if (authentication.fixture and !fixtureEndpoint(target, ca_file))
+    if (authentication.fixture() and !fixtureEndpoint(target, ca_file))
         return error.InvalidCodexFixtureEndpoint;
 }
 
@@ -221,7 +230,7 @@ pub const Headers = struct {
     fn initSignIn(self: *Headers, target: []const u8, ca_file: ?[]const u8, authentication: Authentication, credential: *const Lease, shared_credentials: *provider_transport.Credentials) !void {
         const access = credential.record.access_token.slice();
         const account_id = credential.record.account_id.slice();
-        if (authentication.fixture) {
+        if (authentication.fixture()) {
             if (!fixtureEndpoint(target, ca_file) or
                 !std.mem.eql(u8, access, codex_auth.fixture_access_token) or
                 !std.mem.eql(u8, account_id, codex_auth.fixture_account_id))
@@ -320,14 +329,11 @@ pub const Providers = struct {
         return null;
     }
 
-    /// The one leased sign-in whose leases and refreshes this Host's
-    /// sign-in worker serves, if any.
-    pub fn leasedSignIn(self: *const Providers) ?Authentication {
-        for (self.table.values) |served| if (served) |value| switch (value.credential) {
-            .chatgpt_device => |authentication| return authentication,
-            else => {},
-        };
-        return null;
+    /// Whether any served provider signs in, so this Host runs the sign-in
+    /// worker that leases and refreshes every served sign-in.
+    pub fn anySignIn(self: *const Providers) bool {
+        for (self.table.values) |served| if (served) |value| if (value.credential.leased()) return true;
+        return false;
     }
 
     pub fn routes(self: *const Providers) protocol.Routes {
@@ -402,7 +408,7 @@ test "ChatGPT headers carry the credential, user-agent and FedRAMP fields" {
         {
             var headers: Headers = .{};
             defer headers.deinit();
-            try headers.initSignIn("http://127.0.0.1:1/responses", null, .{ .path = "unused", .fixture = true }, &credential, &credentials);
+            try headers.initSignIn("http://127.0.0.1:1/responses", null, .{ .path = "unused", .wire = .codex_device, .refresh = .synthetic }, &credential, &credentials);
             const entries = headers.fields();
             var fedramp_found = false;
             for (entries) |entry| {
@@ -437,11 +443,12 @@ test "ChatGPT headers carry the credential, user-agent and FedRAMP fields" {
 test "each sign-in source says whether it waits for a lease and what a 401 means" {
     var lease: Lease = undefined;
     lease.record = try testRecord(codex_auth.fixture_account_id, false, codex_auth.fixture_access_token, 7);
-    const signed_in: Credential = .{ .chatgpt_device = .{ .path = "/c", .fixture = true } };
+    const source: Authentication = .{ .path = "/c", .wire = .codex_device, .refresh = .synthetic };
+    const signed_in: Credential = .{ .chatgpt_device = source };
     const keyed: Credential = .{ .key_file = .{ .key = "sk-test" } };
     try std.testing.expect(signed_in.leased() and !keyed.leased() and !Credential.leased(.none));
     // A sign-in may refresh the generation it presented; a key names its remedy.
-    try std.testing.expectEqual(Credential.Rejection{ .refresh_once = 7 }, signed_in.rejection(&lease));
+    try std.testing.expectEqual(Credential.Rejection{ .refresh_once = .{ .source = source, .generation = 7 } }, signed_in.rejection(&lease));
     try std.testing.expectEqual(Credential.Rejection.key_rejected, keyed.rejection(null));
     try std.testing.expectEqual(Credential.Rejection.settle, Credential.rejection(.none, null));
     // Each refuses an endpoint it may not go to.
@@ -464,14 +471,15 @@ test "a Host's routes name each provider it serves and its credential" {
     providers.table.set(.codex, .{ .endpoint = "http://127.0.0.1:1/responses", .credential = .none });
     try std.testing.expect(providers.any() and providers.serves(.codex));
     try std.testing.expectEqual(protocol.Route.endpoint, providers.routes().codex);
-    try std.testing.expectEqual(@as(?Authentication, null), providers.leasedSignIn());
-    providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c" } } });
+    try std.testing.expect(!providers.anySignIn());
+    providers.table.set(.codex, .{ .endpoint = endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = "/c", .wire = .codex_device } } });
     try std.testing.expectEqual(protocol.Route.chatgpt_device, providers.routes().codex);
-    try std.testing.expectEqualStrings("/c", providers.leasedSignIn().?.path);
+    try std.testing.expect(providers.anySignIn());
+    try std.testing.expectEqualStrings("/c", providers.get(.codex).?.credential.signIn().?.path);
 }
 
 test "a sign-in's routing owner is its account and FedRAMP binding, which a refresh keeps" {
-    const signed_in: Credential = .{ .chatgpt_device = .{ .path = "/c" } };
+    const signed_in: Credential = .{ .chatgpt_device = .{ .path = "/c", .wire = .codex_device } };
     var owners: [4]turn_states.TurnStates.Owner = undefined;
     for ([_][]const u8{ "acct", "acct", "other", "acct" }, [_]bool{ false, false, false, true }, [_][]const u8{ "token-1", "token-2", "token-1", "token-1" }, &owners) |account, fedramp, access, *owner| {
         var lease: Lease = undefined;

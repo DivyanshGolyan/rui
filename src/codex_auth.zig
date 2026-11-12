@@ -2,6 +2,7 @@ const std = @import("std");
 const credentials = @import("codex_credentials.zig");
 const policy = @import("codex_credential_policy.zig");
 const wire = @import("codex_token_wire.zig");
+const plan_wire = @import("chatgpt_plan_wire.zig");
 const pages = @import("os/pages.zig");
 
 const h2 = @import("h2");
@@ -42,6 +43,57 @@ pub const Login = struct {
     record: credentials.Record = undefined,
 };
 
+/// The token wire a sign-in refreshes through: a Codex device login's, or a
+/// ChatGPT plan sign-in's. Each builds its own request and reads its own
+/// answer; this is the one place that chooses between them.
+pub const Wire = enum {
+    codex_device,
+    chatgpt_plan,
+
+    fn refreshRequest(self: Wire, current: *const credentials.Record, buffer: []u8) !wire.Request {
+        return switch (self) {
+            .codex_device => wire.refreshRequest(current, buffer),
+            .chatgpt_plan => plan_wire.refreshRequest(current, buffer),
+        };
+    }
+
+    fn parseRefreshResponse(self: Wire, current: *const credentials.Record, status: u16, json: []const u8, refreshed_at: i64, replacement: *credentials.Record, scratch: *wire.Scratch) !void {
+        return switch (self) {
+            .codex_device => wire.parseRefreshResponse(current, status, json, refreshed_at, replacement, scratch),
+            .chatgpt_plan => plan_wire.parseRefreshResponse(current, status, json, refreshed_at, replacement, scratch),
+        };
+    }
+};
+
+/// A sign-in the Host serves: its credential file, the wire its refresh
+/// speaks, and where that refresh goes. Custody, selection and the refresh
+/// claim are the same for every source; only the wire differs.
+pub const Source = struct {
+    path: []const u8,
+    wire: Wire,
+    refresh: RefreshTarget = .issuer,
+
+    pub const RefreshTarget = union(enum) {
+        /// The wire's own issuer.
+        issuer,
+        /// Test only: the synthetic Codex credential, which cannot reach an
+        /// issuer, so its refresh republishes the same tokens.
+        synthetic,
+        /// Test only: a loopback token endpoint that answers as the issuer.
+        fixture_endpoint: []const u8,
+    };
+
+    /// Whether this is a test fixture, which goes only to loopback.
+    pub fn fixture(self: Source) bool {
+        return self.refresh != .issuer;
+    }
+
+    /// Whether selection must accept only the synthetic credential.
+    fn synthetic(self: Source) bool {
+        return self.refresh == .synthetic;
+    }
+};
+
 /// Reads a snapshot without a refresh lock and applies the runtime's routing
 /// and expiry checks to it.
 pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
@@ -56,27 +108,27 @@ pub fn localStatus(path: []const u8, now_seconds: i64) !LocalStatus {
 
 /// Selects on the lease it holds; a due refresh releases it, exchanges, and
 /// leases the replacement.
-pub fn acquireInto(io: std.Io, path: []const u8, fixture: bool, work: *Work, destination: *credentials.Lease) !void {
-    try credentials.leaseInto(path, destination, &work.credentials);
-    const selection = policy.select(&destination.record, fixture, nowSeconds(io), &work.claims) catch |err| {
+pub fn acquireInto(io: std.Io, source: Source, work: *Work, destination: *credentials.Lease) !void {
+    try credentials.leaseInto(source.path, destination, &work.credentials);
+    const selection = policy.select(&destination.record, source.synthetic(), nowSeconds(io), &work.claims) catch |err| {
         destination.release();
         return err;
     };
     if (selection == .refresh) {
         const generation = destination.record.generation;
         destination.release();
-        _ = try exchangeAt(io, path, fixture, generation);
-        try credentials.leaseInto(path, destination, &work.credentials);
+        _ = try exchangeAt(io, source, generation);
+        try credentials.leaseInto(source.path, destination, &work.credentials);
     }
     errdefer destination.release();
-    try policy.launchCheck(&destination.record, fixture, nowSeconds(io), &work.claims);
+    try policy.launchCheck(&destination.record, source.synthetic(), nowSeconds(io), &work.claims);
 }
 
 /// After a model 401, refreshes once if the committed credential generation
 /// still equals the rejected lease's. Returns false when another Host or a
 /// login already advanced the generation; the caller then fails as before.
-pub fn forceRefresh(io: std.Io, path: []const u8, fixture: bool, expected_generation: u64) !bool {
-    return exchangeAt(io, path, fixture, expected_generation);
+pub fn forceRefresh(io: std.Io, source: Source, expected_generation: u64) !bool {
+    return exchangeAt(io, source, expected_generation);
 }
 
 /// Storage for one refresh: the records it claims and builds, the request,
@@ -95,19 +147,19 @@ const Refresh = struct {
 /// lock. The synthetic fixture credential cannot reach the real issuer, so
 /// its exchange republishes the same tokens; generation, claim and
 /// replacement admission still follow the production owner.
-fn exchangeAt(io: std.Io, path: []const u8, fixture: bool, expected_generation: u64) !bool {
+fn exchangeAt(io: std.Io, source: Source, expected_generation: u64) !bool {
     const mapped = try pages.Mapped(Refresh).map();
     defer mapped.unmap();
     const room = mapped.value;
-    const Context = struct { io: std.Io, fixture: bool, room: *Refresh };
-    return credentials.exchangeRefresh(path, expected_generation, &room.credentials, &room.replacement, Context{ .io = io, .fixture = fixture, .room = room }, struct {
+    const Context = struct { io: std.Io, source: Source, room: *Refresh };
+    return credentials.exchangeRefresh(source.path, expected_generation, &room.credentials, &room.replacement, Context{ .io = io, .source = source, .room = room }, struct {
         fn exchange(context: Context, current: *const credentials.Record, replacement: *credentials.Record) !void {
-            try policy.validateSelected(current, context.fixture, &context.room.wire.claims);
-            if (context.fixture) {
+            try policy.validateSelected(current, context.source.synthetic(), &context.room.wire.claims);
+            if (context.source.synthetic()) {
                 replacement.* = current.*;
                 replacement.state = .ready;
                 replacement.refreshed_at = nowSeconds(context.io);
-            } else try refresh(context.io, current, replacement, context.room);
+            } else try refresh(context.io, context.source, current, replacement, context.room);
         }
     }.exchange);
 }
@@ -142,14 +194,15 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
     try std.testing.expectEqual(@as(u64, 1), committed.generation);
 
     // Unchanged generation: one exchange advances it and leaves it ready.
-    try std.testing.expect(try forceRefresh(io, path, true, 1));
+    const source: Source = .{ .path = path, .wire = .codex_device, .refresh = .synthetic };
+    try std.testing.expect(try forceRefresh(io, source, 1));
     try credentials.loadInto(path, committed, &scratch);
     try std.testing.expectEqual(@as(u64, 2), committed.generation);
     try std.testing.expectEqual(policy.State.ready, committed.state);
     try std.testing.expectEqualStrings(fixture_account_id, committed.account_id.slice());
     // A second Host holding the same stale lease sees the advanced
     // generation and performs no exchange.
-    try std.testing.expect(!try forceRefresh(io, path, true, 1));
+    try std.testing.expect(!try forceRefresh(io, source, 1));
     try credentials.loadInto(path, committed, &scratch);
     try std.testing.expectEqual(@as(u64, 2), committed.generation);
 
@@ -160,7 +213,7 @@ test "a forced refresh runs only for the rejected lease's unchanged generation" 
     var serialized: [policy.max_file_bytes]u8 = undefined;
     try pending_file.writeStreamingAll(io, try policy.encode(&record, &serialized));
     pending_file.close(io);
-    try std.testing.expectError(error.RefreshRequiresLogin, forceRefresh(io, path, true, 2));
+    try std.testing.expectError(error.RefreshRequiresLogin, forceRefresh(io, source, 2));
     try std.testing.expectEqualStrings("provider_sign_in_required", failureCode(error.RefreshRequiresLogin));
 }
 
@@ -390,15 +443,21 @@ pub fn login(io: std.Io, callback: anytype, cancelled: *const fn () bool, tokens
     }
 }
 
-/// Exchanges the claimed record's refresh token and builds its replacement.
-fn refresh(io: std.Io, current: *const credentials.Record, replacement: *credentials.Record, room: *Refresh) !void {
+/// Exchanges the claimed record's refresh token over its source's wire and
+/// builds its replacement.
+fn refresh(io: std.Io, source: Source, current: *const credentials.Record, replacement: *credentials.Record, room: *Refresh) !void {
     defer std.crypto.secureZero(u8, &room.body);
     const answer = &room.response;
     defer std.crypto.secureZero(u8, std.mem.asBytes(answer));
-    const request = wire.refreshRequest(current, &room.body) catch return error.RefreshRequestNotSent;
+    var request = source.wire.refreshRequest(current, &room.body) catch return error.RefreshRequestNotSent;
+    switch (source.refresh) {
+        .issuer => {},
+        .fixture_endpoint => |url| request.url = url,
+        .synthetic => unreachable,
+    }
     const status = post(io, request, answer, null) catch |err| {
         if (answer.request_not_sent) return error.RefreshRequestNotSent;
         return err;
     };
-    try wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len], nowSeconds(io), replacement, &room.wire);
+    try source.wire.parseRefreshResponse(current, status, answer.bytes[0..answer.len], nowSeconds(io), replacement, &room.wire);
 }

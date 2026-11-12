@@ -139,7 +139,8 @@ const ModelAuthenticatingSlot = struct {
 /// forced refresh. The Attempt stays uncertain until the refresh settles it.
 const ModelRefreshingSlot = struct {
     owner: AttemptOwner,
-    rejected_generation: u64,
+    /// The sign-in that leased the rejected token, and its generation.
+    refresh: providers.Credential.Refresh,
     request_id: protocol.Bounded(256),
     requested: bool = false,
     cancelled: bool = false,
@@ -428,8 +429,8 @@ pub fn executionMain(host: *Host) void {
     };
     defer mapped_workspace.unmap();
     const workspace = mapped_workspace.value;
-    const auth_worker: ?*AuthWorker = if (host.providers.leasedSignIn()) |authentication| worker: {
-        workspace.auth_worker = .{ .io = host.io, .authentication = authentication };
+    const auth_worker: ?*AuthWorker = if (host.providers.anySignIn()) worker: {
+        workspace.auth_worker = AuthWorker{ .io = host.io };
         break :worker &workspace.auth_worker;
     } else null;
     const auth_thread: ?std.Thread = if (auth_worker) |worker|
@@ -1987,7 +1988,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
                 finishCustodyNow(host, slot);
             } else {
                 active.requested = true;
-                worker.request();
+                worker.request(host.providers.get(request.provider).?.credential.signIn().?);
             }
             return true;
         },
@@ -1996,7 +1997,7 @@ fn advanceCredentialWork(host: *Host, reactor: *provider.Reactor, slots: []Execu
                 finishCustodyNow(host, slot);
             } else {
                 active.requested = true;
-                worker.requestRefresh(active.rejected_generation);
+                worker.requestRefresh(active.refresh);
             }
             return true;
         },
@@ -2026,7 +2027,7 @@ fn advanceRefresh(host: *Host, slot: *ExecutionSlot) bool {
 /// Durably claims the Operation's one forced refresh for a managed 401.
 /// Returns false when the claim is unavailable and the answer settles as
 /// before; otherwise this owner has disposed the transfer.
-fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, rejected_generation: u64) bool {
+fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const AnsweredAttempt, refresh: providers.Credential.Refresh) bool {
     const owner = answered.owner;
     const claimed = host.store.claimModelAuthRefresh(owner.binding) catch |err| {
         if (err != error.SupersededByControl) fenceDispatch(host, "credential refresh claim", err);
@@ -2038,7 +2039,7 @@ fn beginForcedRefresh(host: *Host, slot: *ExecutionSlot, answered: *const Answer
     slot.provider.transfer.deinit();
     moveSlot(host, slot, .model_refreshing, .{
         .owner = owner,
-        .rejected_generation = rejected_generation,
+        .refresh = refresh,
         .request_id = answered.request_id,
     });
     return true;
@@ -2262,7 +2263,7 @@ fn completeTransfer(
             if (failure.answered) {
                 const answered: AnsweredAttempt = .init(host, owner, &active.transfer);
                 if (execution.rejectsCredential(failure)) switch (active.rejection) {
-                    .refresh_once => |generation| if (beginForcedRefresh(host, slot, &answered, generation)) return,
+                    .refresh_once => |refresh| if (beginForcedRefresh(host, slot, &answered, refresh)) return,
                     .settle, .key_rejected => {},
                 };
                 if (diagnostic) |detail| {
@@ -2665,7 +2666,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
     try record.id_token.set("aaa.bbb.ccc");
     try record.access_token.set("aaa.bbb.ccc");
     try record.refresh_token.set("test-refresh");
-    var worker = AuthWorker{ .io = io, .authentication = .{ .path = path } };
+    var worker = AuthWorker{ .io = io };
     try credentials.install(path, &record, null, &worker.work.credentials);
     try credentials.leaseInto(path, &worker.credential, &worker.work.credentials);
     worker.state = .ready;
@@ -2676,7 +2677,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
     try std.testing.expectEqualStrings("test-refresh", borrowed.record.refresh_token.slice());
     worker.finish();
     try std.testing.expect(worker.state == .idle);
-    worker.request();
+    worker.request(.{ .path = path, .wire = .codex_device });
     try std.testing.expect(worker.state == .requested);
     // The released lock can be acquired again for the next generation.
     var next: credentials.Lease = undefined;
@@ -2725,7 +2726,7 @@ test "authentication handoff borrows the sole credential lease and releases it o
         } };
         defer if (slot == .model_authenticating) request.deinit(io, host.scratch_budget.?);
         var reactor: provider.Reactor = undefined;
-        worker.state = .{ .requested = .acquire };
+        worker.state = .{ .requested = .{ .acquire = .{ .path = path, .wire = .codex_device } } };
         try std.testing.expect(!advanceAuthentication(&host, &reactor, &slot, &request));
         try std.testing.expect(slot == .model_authenticating);
         try std.testing.expectEqual(@as(u64, 4), host.scratch_used.load(.acquire));
@@ -2771,8 +2772,15 @@ test "authentication worker answers each job with that job's result" {
     try record.id_token.set(codex_auth.fixture_id_token);
     try record.access_token.set(codex_auth.fixture_access_token);
     try record.refresh_token.set("synthetic-refresh");
-    var worker = AuthWorker{ .io = io, .authentication = .{ .path = path, .fixture = true } };
+    var worker = AuthWorker{ .io = io };
     try credentials.install(path, &record, null, &worker.work.credentials);
+    // A second sign-in, two generations on: each job runs for the one it names.
+    var other_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const other_path = try std.fmt.bufPrint(&other_buffer, "{s}/other.json", .{std.fs.path.dirname(path).?});
+    try credentials.install(other_path, &record, null, &worker.work.credentials);
+    try credentials.install(other_path, &record, null, &worker.work.credentials);
+    const source: providers.Authentication = .{ .path = path, .wire = .codex_device, .refresh = .synthetic };
+    const other: providers.Authentication = .{ .path = other_path, .wire = .codex_device, .refresh = .synthetic };
     const thread = try std.Thread.spawn(.{}, AuthWorker.run, .{&worker});
     defer worker.stop(thread);
     const answered = struct {
@@ -2783,22 +2791,34 @@ test "authentication worker answers each job with that job's result" {
         }
     }.check;
 
-    worker.request();
+    worker.request(source);
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expect(worker.take().?.ready == &worker.credential);
     try std.testing.expectEqualStrings("synthetic-refresh", worker.credential.record.refresh_token.slice());
+    try std.testing.expectEqual(@as(u64, 1), worker.credential.record.generation);
     worker.finish();
+    worker.request(other);
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expectEqual(@as(u64, 2), worker.take().?.ready.record.generation);
+    worker.finish();
+    // Generation 2 is the other sign-in's alone.
+    worker.requestRefresh(.{ .source = source, .generation = 2 });
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expect(!worker.take().?.refreshed);
+    worker.requestRefresh(.{ .source = other, .generation = 2 });
+    try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
+    try std.testing.expect(worker.take().?.refreshed);
     // The installed generation 1 refreshes; the same stale generation then
     // finds it replaced; a missing file fails. Each answer is taken once.
-    worker.requestRefresh(1);
+    worker.requestRefresh(.{ .source = source, .generation = 1 });
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expect(worker.take().?.refreshed);
     try std.testing.expect(worker.take() == null);
-    worker.requestRefresh(1);
+    worker.requestRefresh(.{ .source = source, .generation = 1 });
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expect(!worker.take().?.refreshed);
     try tmp.dir.deleteFile(io, "private/codex.json");
-    worker.requestRefresh(2);
+    worker.requestRefresh(.{ .source = source, .generation = 2 });
     try test_poll.waitUntil(io, test_poll.after(io, .fromSeconds(5)), &worker, answered);
     try std.testing.expectEqual(error.FileNotFound, worker.take().?.failed);
     try std.testing.expect(worker.take() == null);

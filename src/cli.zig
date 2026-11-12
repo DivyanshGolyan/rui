@@ -1917,7 +1917,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         };
         if (served.serves(named)) return error.DuplicateArgument;
         served.table.set(named, switch (named) {
-            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false) } } },
+            .codex => .{ .endpoint = providers.endpoint(.codex), .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .wire = .codex_device } } },
             .openai => .{ .endpoint = providers.openAiEndpoint(init.environ_map, init.arena.allocator()) catch |err| {
                 if (err == error.InvalidBaseUrl) stderr.diagnostic(invalid_base_url ++ "; the Host did not start.\n", .{});
                 return err;
@@ -1936,7 +1936,7 @@ fn serve(init: std.process.Init, parsed: *const cli_args.Parsed) !void {
         if (served.serves(.openai)) return error.ConflictingArguments;
         served.table.set(.openai, .{ .endpoint = endpoint, .credential = .{ .key_file = .{ .key = try readServedKey(init, &openai_key), .fixture = true } } });
     }
-    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .fixture = true } } });
+    if (fixture_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .{ .chatgpt_device = .{ .path = try credentialPath(init, &credential_path_buffer, false), .wire = .codex_device, .refresh = .synthetic } } });
     if (provider_endpoint) |endpoint| served.table.set(.codex, .{ .endpoint = endpoint, .credential = .none });
     // The execution thread's fence would report this while startup still
     // holds stderr, so its cause could be dropped (#1093).
