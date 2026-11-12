@@ -307,7 +307,13 @@ def scroll_marker_case():
         master, caller, _ = chrome.open(session, lambda screen: "second row 07" in screen)
         requests = len(chrome.endpoint.requests)
         os.write(master, b"keep")
-        end = chrome.frame(master, b"", lambda screen: composing(screen, "keep"))
+        # Opening can show the newest answer before older pages fill the
+        # feed's blank prefix. Scrolling that short window drops its top pad,
+        # so it is not yet a full-screen reference. These alternating content
+        # and gap rows fill this odd-height feed with content in its first row;
+        # wait for that rendered fact, not for time or just the draft echo.
+        end = chrome.frame(master, b"", lambda screen:
+                           composing(screen, "keep") and bool(transcript_rows(screen)[0].strip()))
         bottom = feed_bottom(end)
         assert not rows(end)[bottom].strip(), end
         for keys in (b"\x1b[1;2A", b"\x1b[5~"):
