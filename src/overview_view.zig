@@ -384,10 +384,14 @@ pub const Event = union(enum) {
 };
 
 /// What a click names, as the widget under it drew it: a Session to open,
-/// New Session, Settings, or the counts line's view name, which shows
-/// only off the default view. A click names the thing and never a place,
+/// New Session, Settings, or an owned model choice. A click names the thing and never a place,
 /// so it means what the person saw whatever the list has become since.
-pub const Click = union(enum) { open: Reference, new_session, settings };
+pub const Click = union(enum) {
+    open: Reference,
+    new_session,
+    settings,
+    model: struct { choice: model_picker_view.Choice, target: model_picker_view.Click.Target = .model },
+};
 
 /// What a click on a list item names; an empty slot takes none.
 pub fn clickOf(state: *const State, item: Item) ?Click {
@@ -1657,6 +1661,17 @@ pub fn step(state: *State, event: Event) error{OutOfMemory}!Effects {
         // no click, wherever it lands.
         .clicked => |clicked| if (state.inputMode() != .frozen) switch (clicked) {
             .open => |reference| try clickOpen(state, reference, &effects),
+            .model => |model| model: {
+                if (state.shownPicker() == null) break :model;
+                // Resolve the identity the frame captured, never a stale menu
+                // index. A refresh may change positions or offered controls.
+                const words = model.choice.id.slice();
+                const defaults = pickerDefaults(state);
+                const current = model_picker_view.select(&state.menu, words, defaults, state.menu.find(words)) orelse break :model;
+                if (!current.id.eql(words)) break :model;
+                state.picker.?.choice = model_picker_view.retain(current, state.picker.?.choice orelse model.choice);
+                if (model_picker_view.step(&state.menu, words, defaults, &state.picker.?.choice, .{ .click = .{ .index = current.index(&state.menu), .target = model.target } }) != null) pick(state, &effects);
+            },
             .new_session => state.selected = .new_session,
             .settings => {
                 state.selected = .settings;
@@ -5528,8 +5543,11 @@ test "a click on a Session while a panel shows opens it and closes the panel, as
 }
 
 test "every click obeys the input mode: a frozen screen takes none, whatever it names" {
+    var menu = try model_picker.testMenu(&both);
+    defer menu.deinit(std.testing.allocator);
+    const choice = model_picker_view.open(&menu, "", .{}).?;
     const ref = "b2c3d4";
-    for ([_]bool{ false, true }) |frozen| for ([_]Click{ .{ .open = ref.* }, .new_session, .settings }) |clicked| {
+    for ([_]bool{ false, true }) |frozen| for ([_]Click{ .{ .open = ref.* }, .new_session, .settings, .{ .model = .{ .choice = choice } } }) |clicked| {
         var state = try opened(&mixed);
         defer state.deinit();
 
@@ -5548,6 +5566,7 @@ test "every click obeys the input mode: a frozen screen takes none, whatever it 
             .open => try expectEffects(&.{.{ .open = ref.* }}, effects),
             .new_session => try std.testing.expectEqual(Selection.new_session, state.selected),
             .settings => try expectEffects(&.{.open_settings}, effects),
+            .model => try expectEffects(&.{}, effects), // A closed picker takes no captured model click.
         }
     };
 }
@@ -7676,5 +7695,60 @@ test "overview Footer reserves the Upgrade cancellation key before clipping prog
     for (cases) |case| {
         state.upgrade.run = case.run;
         try std.testing.expectEqualStrings(case.right, footerRight(&state, .{}));
+    }
+}
+
+test "overview model mouse choices match Enter and control keys without changing Session selection" {
+    const Case = struct { target: model_picker_view.Click.Target, key: model_picker_view.Action };
+    for ([_]Case{
+        .{ .target = .model, .key = .save },
+        .{ .target = .lower_effort, .key = .lower_effort },
+        .{ .target = .higher_effort, .key = .higher_effort },
+        .{ .target = .{ .sign_in = .openai }, .key = .{ .choose_sign_in = .openai } },
+    }) |case| {
+        var clicked = try pickerState(Default.of("codex", "gpt-5.5"));
+        defer clicked.deinit();
+        var keyed = try pickerState(Default.of("codex", "gpt-5.5"));
+        defer keyed.deinit();
+        try openPicker(&clicked, &both);
+        try openPicker(&keyed, &both);
+        _ = try typeText(&clicked, "/model gpt-6-luna");
+        const draft = try typeText(&keyed, "/model gpt-6-luna");
+        const selection = clicked.selected;
+        const choice = clicked.picker.?.choice.?;
+        const effects = try step(&clicked, .{ .clicked = .{ .model = .{ .choice = choice, .target = case.target } } });
+        if (case.key == .save) {
+            _ = try submit(&keyed, draft);
+            try std.testing.expectEqual(@as(usize, 2), effects.len);
+            try std.testing.expect(effects.items[0] == .clear_draft);
+            try std.testing.expect(effects.items[1] == .save_default);
+            try std.testing.expectEqualStrings("gpt-6-luna", effects.items[1].save_default.model.slice());
+            try std.testing.expect(clicked.default.?.eql(&keyed.default.?));
+            try std.testing.expect(clicked.picker == null);
+        } else {
+            try expectEffects(&.{}, effects);
+            _ = try step(&keyed, .{ .picker_action = .{ .action = case.key, .draft = draft } });
+            try std.testing.expect(std.meta.eql(keyed.picker.?.choice.?.row, clicked.picker.?.choice.?.row));
+            try std.testing.expectEqualStrings(keyed.picker.?.choice.?.id.slice(), clicked.picker.?.choice.?.id.slice());
+            try std.testing.expectEqual(null, clicked.save.running);
+        }
+        try std.testing.expectEqual(selection, clicked.selected);
+    }
+}
+
+test "overview model mouse choice keeps its identity across menu reorder and supports typed IDs" {
+    for ([_][]const u8{ "gpt-6-luna", "private-mouse-model" }) |id| {
+        var state = try pickerState(Default.of("codex", "gpt-5.5"));
+        defer state.deinit();
+        try openPicker(&state, &both);
+        var bytes: [128]u8 = undefined;
+        _ = try typeText(&state, try std.fmt.bufPrint(&bytes, "/model {s}", .{id}));
+        const choice = state.picker.?.choice.?;
+        try answerModels(&state, &.{ chatgpt, .{ .provider = .openai, .list = .{ .live = .{ .bytes = "aaa-mouse\ngpt-6-luna\ngpt-5.5\n" } } } });
+        const effects = try step(&state, .{ .clicked = .{ .model = .{ .choice = choice } } });
+        try std.testing.expectEqual(@as(usize, 2), effects.len);
+        try std.testing.expectEqualStrings(id, effects.items[1].save_default.model.slice());
+        // A captured target cannot reopen a picker after the pick closed it.
+        try expectEffects(&.{}, try step(&state, .{ .clicked = .{ .model = .{ .choice = choice } } }));
     }
 }

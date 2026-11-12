@@ -5,11 +5,17 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const commands = @import("slash_commands.zig");
 const Self = @This();
+const Hover = @import("widgets/Hover.zig");
 
 shown: *commands.Shown,
 method: vaxis.gwidth.Method = .unicode,
 style: vaxis.Style = .{},
 quiet: vaxis.Style = .{ .dim = true },
+userdata: ?*anyopaque = null,
+/// Receives the absolute entry index, exactly as the screen selects with Enter.
+on_select: ?*const fn (*anyopaque, *vxfw.EventContext, usize) anyerror!void = null,
+hover: Hover = .{},
+first: usize = 0,
 
 pub fn widget(self: *Self) vxfw.Widget {
     return .{ .userdata = self, .eventHandler = event, .drawFn = draw };
@@ -17,11 +23,20 @@ pub fn widget(self: *Self) vxfw.Widget {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.hover.handleEvent(ctx, input);
     if (input != .mouse) return;
     // Never let a click through to a covered transcript or Session row.
     ctx.consumeEvent();
     if (self.shown.seen != .drawn) return;
     switch (input.mouse.button) {
+        .left => if (input.mouse.type == .press) {
+            const callback = self.on_select orelse return;
+            for (self.hover.targets, 0..) |rect, index| {
+                if (rect.contains(input.mouse.col, input.mouse.row)) {
+                    return callback(self.userdata.?, ctx, self.first + index);
+                }
+            }
+        },
         .wheel_up, .wheel_down => {
             self.shown.move(input.mouse.button == .wheel_down);
             ctx.redraw = true;
@@ -34,6 +49,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const self: *Self = @ptrCast(@alignCast(raw));
     const height: u16 = @intCast(@min(self.shown.rows(), ctx.max.height.?));
     const width = ctx.max.width.?;
+    self.hover.targets = &.{};
     self.shown.drew(width > 2 and height != 0);
     if (self.shown.seen != .drawn) return .empty(self.widget());
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = width, .height = height });
@@ -43,10 +59,14 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
     const list = &self.shown.list;
     const count = commands.named(list.count, height);
     const first = list.firstShown(self.shown.highlight, height);
+    self.first = first;
+    const targets = try ctx.arena.alloc(Hover.Rect, if (self.on_select != null) count else 0);
+    for (targets, 0..) |*rect, index| rect.* = .{ .row = @intCast(index), .width = width };
+    self.hover.targets = targets;
     const column = list.descriptionColumn();
     for (list.shown()[first..][0..count], first..) |entry, index| {
         var style = self.style;
-        style.reverse = index == self.shown.highlight;
+        style.reverse = index == self.shown.highlight or (self.on_select != null and self.hover.contains(.{ .row = @intCast(index - first), .width = width }));
         const row: u16 = @intCast(index - first);
         if (style.reverse) @memset(surface.buffer[@as(usize, row) * width ..][0..width], .{ .style = style });
         const line = window.child(.{ .y_off = row, .height = 1 });
@@ -90,4 +110,59 @@ test "Palette keeps the selected command visible at one row and hides closed or 
     const closed = try palette.widget().draw(ctx);
     try std.testing.expectEqual(@as(usize, 0), closed.buffer.len);
     try std.testing.expectEqual(.closed, shown.seen);
+}
+
+test "Palette hover is transient and clicks activate only visible command rows" {
+    const Selected = struct {
+        index: ?usize = null,
+        fn select(raw: *anyopaque, _: *vxfw.EventContext, index: usize) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.index = index;
+        }
+    };
+    var selected: Selected = .{};
+    var shown = commands.Shown.next(null, 7, commands.conversation.suggest("/", .{})).?;
+    var palette: Self = .{ .shown = &shown, .userdata = &selected, .on_select = Selected.select, .style = .{ .fg = .{ .index = 3 } } };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 3 }, .cell_size = .{} };
+    const initial = try palette.widget().draw(draw_ctx);
+    try std.testing.expect(!initial.readCell(0, 1).style.reverse);
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    try palette.widget().handleEvent(&ctx, .mouse_enter);
+    const motion: vaxis.Mouse = .{ .row = 1, .col = 0, .button = .none, .mods = .{}, .type = .motion };
+    try palette.widget().handleEvent(&ctx, .{ .mouse = motion });
+    const hovered = try palette.widget().draw(draw_ctx);
+    try std.testing.expect(hovered.readCell(0, 1).style.reverse);
+    try std.testing.expectEqual(palette.style.fg, hovered.readCell(0, 1).style.fg);
+    try std.testing.expectEqual(@as(usize, 0), shown.highlight);
+    try std.testing.expect(selected.index == null);
+    try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
+    var press = motion;
+    press.button = .left;
+    press.type = .press;
+    try palette.widget().handleEvent(&ctx, .{ .mouse = press });
+    try std.testing.expectEqual(@as(?usize, 1), selected.index);
+    try palette.widget().handleEvent(&ctx, .mouse_leave);
+    const left = try palette.widget().draw(draw_ctx);
+    try std.testing.expect(!left.readCell(0, 1).style.reverse);
+    try std.testing.expectEqual(vaxis.Mouse.Shape.default, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
+    // One-row viewport maps to the selected absolute index, not row zero.
+    shown.highlight = shown.list.count - 1;
+    _ = try palette.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 80, .height = 1 }));
+    press.row = 0;
+    try palette.widget().handleEvent(&ctx, .{ .mouse = press });
+    try std.testing.expectEqual(@as(?usize, shown.highlight), selected.index);
+    // Closed, clipped, and callback-free overlays expose no targets.
+    selected.index = null;
+    _ = try palette.widget().draw(draw_ctx.withConstraints(.{}, .{ .width = 2, .height = 1 }));
+    try palette.widget().handleEvent(&ctx, .{ .mouse = press });
+    try std.testing.expect(selected.index == null);
+    palette.on_select = null;
+    _ = try palette.widget().draw(draw_ctx);
+    try std.testing.expectEqual(@as(usize, 0), palette.hover.targets.len);
+    shown.close();
+    _ = try palette.widget().draw(draw_ctx);
+    try palette.widget().handleEvent(&ctx, .{ .mouse = press });
+    try std.testing.expect(selected.index == null);
 }

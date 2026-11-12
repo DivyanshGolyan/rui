@@ -10,6 +10,7 @@ const selecting = @import("transcript_selection.zig");
 const TerminalText = @import("TerminalText.zig");
 const Spot = selecting.Spot;
 const Self = @This();
+const Hover = @import("widgets/Hover.zig");
 
 document: *const viewport.Document,
 first: viewport.Position = .{},
@@ -18,6 +19,7 @@ size: vxfw.Size = .{},
 method: vaxis.gwidth.Method = .unicode,
 colour: bool = true,
 style: vaxis.Style = .{},
+hover: Hover = .{},
 colours: viewport.Colours = .{},
 /// Report the rows below this viewport without prescribing input.
 more: bool = false,
@@ -42,6 +44,8 @@ pub const Handler = struct {
     /// A click anywhere but a peer's name: the drawn row it landed on, as
     /// its logical line's origin-relative offset and wrapped row.
     on_click: ?*const fn (*anyopaque, *vxfw.EventContext, viewport.Position) anyerror!void = null,
+    /// Caller-owned eligibility for actionable rows (ordinary prose stays inert).
+    action_at: ?*const fn (*anyopaque, viewport.Position) bool = null,
 };
 
 pub const Selection = struct {
@@ -85,6 +89,11 @@ pub fn continuation(self: *const Self) ?viewport.Position {
     return self.drawn.continuation;
 }
 
+/// Whether mouse geometry still names this exact retained document frame.
+pub fn drawnNow(self: *const Self) bool {
+    return self.drawn.document == self.document and self.drawn.replacements == self.document.replacements and self.drawn.width != 0 and self.drawn.height != 0;
+}
+
 /// Whether a press or drag is under way.
 pub fn dragging(self: *const Self) bool {
     return self.selection != null;
@@ -92,6 +101,7 @@ pub fn dragging(self: *const Self) bool {
 
 fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
+    try self.hover.handleEvent(ctx, input);
     switch (input) {
         .mouse => |value| try self.mouse(ctx, value),
         // vxfw sends no release once the pointer has left: a press or drag
@@ -118,10 +128,51 @@ fn event(raw: *anyopaque, ctx: *vxfw.EventContext, input: vxfw.Event) anyerror!v
 
 const edge_interval_ms = 50;
 
+/// Source-cell peer links, caller-approved rows and the explicit continuation.
+fn drawHover(self: *Self, arena: std.mem.Allocator, surface: vxfw.Surface) !void {
+    self.hover.targets = &.{};
+    const handler = self.handler orelse return;
+    var targets: std.ArrayList(Hover.Rect) = .empty;
+    if (handler.on_open != null) for (0..self.drawn.height) |row| {
+        const cells = surface.buffer[row * surface.size.width ..][0..surface.size.width];
+        for (try selecting.peers(self.document, cells, arena)) |span| {
+            const rect: Hover.Rect = .{ .row = @intCast(row), .col = span.start, .width = span.end - span.start };
+            try targets.append(arena, rect);
+            if (self.hover.contains(rect)) for (cells[span.start..span.end]) |*cell| {
+                cell.style.ul_style = .single;
+            };
+        }
+    };
+    if (handler.on_click != null) if (handler.action_at) |action_at| {
+        for (0..self.drawn.height) |row| {
+            const position = self.rowPosition(self.laidFirst(), @intCast(row)) orelse continue;
+            if (!action_at(handler.userdata, position)) continue;
+            const rect: Hover.Rect = .{ .row = @intCast(row), .width = surface.size.width };
+            try targets.append(arena, rect);
+            if (self.hover.contains(rect)) for (surface.buffer[row * surface.size.width ..][0..surface.size.width]) |*cell| {
+                cell.style.bg = self.colours.selection;
+                cell.style.reverse = self.colours.selection == .default;
+            };
+        }
+    };
+    if (handler.on_click != null and self.continuation() != null) {
+        const rect: Hover.Rect = .{ .row = self.drawn.height, .width = surface.size.width };
+        try targets.append(arena, rect);
+        if (self.hover.contains(rect)) for (surface.buffer[@as(usize, self.drawn.height) * surface.size.width ..]) |*cell| {
+            cell.style.bg = self.colours.selection;
+            cell.style.reverse = self.colours.selection == .default;
+        };
+    }
+    self.hover.targets = targets.items;
+}
+
 /// One mouse event in this widget's coordinates.
 fn mouse(self: *Self, ctx: *vxfw.EventContext, value: vaxis.Mouse) anyerror!void {
     const handler = self.handler orelse return;
-    if (self.drawn.document != self.document or self.drawn.width == 0 or self.drawn.height == 0) return;
+    if (!self.drawnNow()) {
+        self.selection = null;
+        return;
+    }
     const at: Point = .{ .row = value.row, .col = value.col };
     switch (value.type) {
         .press => {
@@ -216,6 +267,7 @@ fn spotAt(self: *const Self, gpa: std.mem.Allocator, at: Point) !Spot {
 
 fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const self: *Self = @ptrCast(@alignCast(raw));
+    self.hover.targets = &.{};
     const surface = try vxfw.Surface.init(ctx.arena, self.widget(), ctx.max.size());
     self.size = surface.size;
     const shape: viewport.Layout = .{ .width = @max(1, self.size.width), .method = self.method };
@@ -259,6 +311,7 @@ fn draw(raw: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Sur
         .row = self.first.row,
         .continuation = if (below > self.size.height) drawn.next else null,
     };
+    try self.drawHover(ctx.arena, surface);
     if (self.selection) |*selection| if (selection.dragging and surface.buffer.len != 0) {
         const width = surface.size.width;
         const height = text.height;
@@ -733,4 +786,57 @@ test "a drag over cells drawn before the text changed copies the text they showe
     try h.send(.drag, 4, 1);
     try h.send(.release, 4, 1);
     try std.testing.expectEqualStrings("third", h.copies(&copied));
+}
+
+test "DocumentView peer links and continuation hover only painted actionable spans" {
+    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "Plan" ++ TerminalText.link_close;
+    const h = try Harness.init("See " ++ peer ++ " today\nsecond\nthird\nfourth\n", .{ .width = 24, .height = 3 });
+    defer h.deinit();
+    h.document.top = .{};
+    h.transcript.more = true;
+    h.transcript.colours.selection = .{ .index = 2 };
+    _ = try h.frame();
+    try std.testing.expectEqual(@as(usize, 2), h.transcript.hover.targets.len);
+    try std.testing.expectEqual(Hover.Rect{ .row = 0, .col = 4, .width = 4 }, h.transcript.hover.targets[0]);
+    try h.transcript.widget().handleEvent(&h.ctx, .mouse_enter);
+    try h.send(.motion, 5, 0);
+    const peer_hover = try h.frame();
+    for (4..8) |col| try std.testing.expectEqual(.single, peer_hover.readCell(col, 0).style.ul_style);
+    try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
+    try std.testing.expect(h.transcript.selection == null and h.opened.items.len == 0 and h.clicks.items.len == 0);
+    try h.send(.motion, 8, 0);
+    try std.testing.expectEqual(vaxis.Mouse.Shape.default, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
+    try h.send(.motion, 3, 2);
+    const continuation_hover = try h.frame();
+    for (0..24) |col| try std.testing.expectEqual(h.transcript.colours.selection, continuation_hover.readCell(col, 2).style.bg);
+    try std.testing.expect(h.transcript.selection == null and h.clicks.items.len == 0);
+    const next = h.transcript.continuation().?;
+    try h.send(.press, 3, 2);
+    try h.send(.release, 3, 2);
+    try std.testing.expectEqualSlices(viewport.Position, &.{next}, h.clicks.items);
+    try h.transcript.widget().handleEvent(&h.ctx, .mouse_leave);
+    const left = try h.frame();
+    try std.testing.expectEqual(h.transcript.style.bg, left.readCell(0, 2).style.bg);
+    h.transcript.handler.?.on_open = null;
+    h.transcript.handler.?.on_click = null;
+    _ = try h.frame();
+    try std.testing.expectEqual(@as(usize, 0), h.transcript.hover.targets.len);
+}
+
+test "DocumentView wide peer glyph continuation cells share hover and click geometry" {
+    const peer = TerminalText.link_open ++ TerminalText.session_link ++ "k7m2qx" ++ TerminalText.link_end ++ "設計" ++ TerminalText.link_close;
+    const h = try Harness.init("See " ++ peer ++ " end\n", .{ .width = 16, .height = 1 });
+    defer h.deinit();
+    try std.testing.expectEqualSlices(Hover.Rect, &.{.{ .row = 0, .col = 4, .width = 4 }}, h.transcript.hover.targets);
+    try h.transcript.widget().handleEvent(&h.ctx, .mouse_enter);
+    try h.send(.motion, 5, 0);
+    try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
+    const hovered = try h.frame();
+    for (4..8) |col| try std.testing.expectEqual(.single, hovered.readCell(col, 0).style.ul_style);
+    try std.testing.expect(h.transcript.selection == null and h.opened.items.len == 0);
+    try h.send(.press, 5, 0);
+    try h.send(.release, 5, 0);
+    try std.testing.expectEqualStrings("k7m2qx", h.opened.items);
+    try h.transcript.widget().handleEvent(&h.ctx, .mouse_leave);
+    try std.testing.expectEqual(vaxis.Mouse.Shape.default, h.ctx.cmds.items[h.ctx.cmds.items.len - 1].set_mouse_shape);
 }

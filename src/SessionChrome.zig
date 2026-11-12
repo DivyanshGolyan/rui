@@ -418,3 +418,33 @@ test "Session chrome back control exists only while the shell hides the list" {
         try std.testing.expectEqual(before + @intFromBool(!list_visible), recorder.clicked.get(.back));
     }
 }
+
+test "SessionChrome footer and new-entry chips underline on hover without acting" {
+    var recorder: Recorder = .{};
+    var self: Self = .init(recorder.actions());
+    self.facts.identity.archive = .archived;
+    self.status.key.label = "ctrl+r retries";
+    self.stoppable = true;
+    self.marker.label = "↓ 3 new";
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const draw_ctx: vxfw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 1 }, .cell_size = .{} };
+    const footer = try drawFooter(&self, draw_ctx);
+    try std.testing.expectEqual(@as(usize, 4), footer.children.len);
+    var ctx: vxfw.EventContext = .{ .io = std.testing.io, .alloc = arena.allocator(), .cmds = .empty };
+    for ([_]*Chip{ &self.facts.back, &self.status.key, &self.unarchive, &self.status.stop, &self.marker }) |chip| {
+        try chip.widget().handleEvent(&ctx, .mouse_enter);
+        const hovered = try chip.widget().draw(draw_ctx);
+        try std.testing.expectEqual(.single, hovered.readCell(0, 0).style.ul_style);
+        try std.testing.expectEqual(vaxis.Mouse.Shape.pointer, ctx.cmds.items[ctx.cmds.items.len - 1].set_mouse_shape);
+        const press: vaxis.Mouse = .{ .col = 0, .row = 0, .button = .left, .mods = .{}, .type = .press };
+        try chip.widget().handleEvent(&ctx, .{ .mouse = press });
+        try chip.widget().handleEvent(&ctx, .mouse_leave);
+        var release = press;
+        release.type = .release;
+        try chip.widget().handleEvent(&ctx, .{ .mouse = release });
+        const left = try chip.widget().draw(draw_ctx);
+        try std.testing.expectEqual(.off, left.readCell(0, 0).style.ul_style);
+    }
+    for (recorder.clicked.values) |count| try std.testing.expectEqual(@as(usize, 0), count);
+}

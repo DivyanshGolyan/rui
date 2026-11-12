@@ -135,11 +135,19 @@ const EndingLine = struct {
     /// words are not part of the retry link.
     fn hit(self: *const EndingLine, row: u16, cells: []vaxis.Cell, col: usize) bool {
         if (col >= cells.len) return false;
+        self.paint(row, cells);
+        return self.linked(cells[col]);
+    }
+
+    fn paint(self: *const EndingLine, row: u16, cells: []vaxis.Cell) void {
         @memset(cells, .{});
         var screen: vaxis.Screen = .{ .width = @intCast(cells.len), .height = 1, .width_method = self.document.width_method, .buf = cells };
         const window: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = screen.width, .height = 1, .screen = &screen };
         _ = self.document.draw(window, .{ .row = row }, true, false, .{}, .{});
-        const offset = self.document.cellOffset(cells[col]) orelse return false;
+    }
+
+    fn linked(self: *const EndingLine, cell: vaxis.Cell) bool {
+        const offset = self.document.cellOffset(cell) orelse return false;
         return offset >= self.key_start and offset < self.key_end;
     }
 };
@@ -349,6 +357,24 @@ pub const Window = struct {
         if (ending.hit(position.row, cells, col)) return .{ .link = entry.key };
         const layout: viewport.Layout = .{ .width = @intCast(cells.len), .method = self.document.width_method };
         return if (position.row >= self.document.lineRows(layout, position.offset)) .padding else null;
+    }
+
+    /// The painted retry suffix's columns, shared by hover and the click query.
+    /// `cells` is one pane-width scratch row; no resident offsets are invented.
+    pub fn retryColumns(self: *const Window, position: viewport.Position, cells: []vaxis.Cell, presentation: Presentation) ?struct { start: u16, end: u16 } {
+        if (cells.len == 0) return null;
+        const point = self.pointAt(position.offset) orelse return null;
+        const entry = self.entries[self.indexOf(point.key) orelse return null];
+        var ending: EndingLine = .{};
+        if (!ending.init(self, entry, position.offset, presentation)) return null;
+        ending.paint(position.row, cells);
+        var start: ?u16 = null;
+        var end: u16 = 0;
+        for (cells, 0..) |cell, col| if (ending.linked(cell)) {
+            if (start == null) start = @intCast(col);
+            end = @intCast(col + 1);
+        };
+        return .{ .start = start orelse return null, .end = end };
     }
 
     /// Logical text row beneath the pointer, excluding adjacency gaps/tail.
