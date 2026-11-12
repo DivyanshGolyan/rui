@@ -2708,7 +2708,8 @@
             "type": "string",
             "enum": [
               "codex",
-              "openai"
+              "openai",
+              "chatgpt"
             ]
           },
           "workspace": {
@@ -4074,7 +4075,8 @@
                       "unserved",
                       "endpoint",
                       "chatgpt_device",
-                      "key_file"
+                      "key_file",
+                      "chatgpt_plan"
                     ]
                   },
                   "openai": {
@@ -4083,13 +4085,25 @@
                       "unserved",
                       "endpoint",
                       "chatgpt_device",
-                      "key_file"
+                      "key_file",
+                      "chatgpt_plan"
+                    ]
+                  },
+                  "chatgpt": {
+                    "type": "string",
+                    "enum": [
+                      "unserved",
+                      "endpoint",
+                      "chatgpt_device",
+                      "key_file",
+                      "chatgpt_plan"
                     ]
                   }
                 },
                 "required": [
                   "codex",
-                  "openai"
+                  "openai",
+                  "chatgpt"
                 ],
                 "additionalProperties": false
               }
@@ -5673,7 +5687,8 @@
             "type": "string",
             "enum": [
               "codex",
-              "openai"
+              "openai",
+              "chatgpt"
             ]
           },
           "source": {
@@ -10897,7 +10912,8 @@
             "type": "string",
             "enum": [
               "codex",
-              "openai"
+              "openai",
+              "chatgpt"
             ]
           },
           "model": {
@@ -11918,7 +11934,8 @@
             "type": "string",
             "enum": [
               "codex",
-              "openai"
+              "openai",
+              "chatgpt"
             ]
           },
           "model": {
@@ -12979,7 +12996,8 @@
             "type": "string",
             "enum": [
               "codex",
-              "openai"
+              "openai",
+              "chatgpt"
             ]
           },
           "model": {

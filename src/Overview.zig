@@ -2929,7 +2929,7 @@ test "/model keeps unread and unanswered lists empty without shell instructions"
             for ([_][]const u8{ "Loading models", "Models unavailable", "Known to Rui", "From your API key" }) |prose|
                 try std.testing.expect(std.mem.indexOf(u8, text, prose) == null);
             for (std.enums.values(model_picker.Provider)) |provider|
-                try std.testing.expect(std.mem.indexOf(u8, text, provider.login()) == null);
+                if (provider.login()) |command| try std.testing.expect(std.mem.indexOf(u8, text, command) == null);
         }
     };
     var cancellation: client.Cancellation = .{};
@@ -3582,7 +3582,7 @@ test "the departure names the effort saved now, even after a launch that named i
     var buffer: [1024]u8 = undefined;
     const guidance = try finishedGuidance(rig, &buffer);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.saves);
-    try std.testing.expectEqualStrings("rui: New Sessions use gpt-6-luna · max · ChatGPT; durability unconfirmed, inspect ~/.config/rui/preferences.\n", guidance);
+    try std.testing.expectEqualStrings("rui: New Sessions use gpt-6-luna · max · Codex; durability unconfirmed, inspect ~/.config/rui/preferences.\n", guidance);
 }
 
 test "a failed save from unreadable preferences keeps the local pick for the next start" {
@@ -3603,7 +3603,7 @@ test "a failed save from unreadable preferences keeps the local pick for the nex
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expect(try rig.press("\x1b[B\r") == null);
     try std.testing.expect(try rig.settle() == null);
-    try std.testing.expectEqualStrings("Default not saved (check ~/.config/rui/preferences); new Sessions here still use gpt-6-luna · low · ChatGPT", rig.overview.state.notice.?.text());
+    try std.testing.expectEqualStrings("Default not saved (check ~/.config/rui/preferences); new Sessions here still use gpt-6-luna · low · Codex", rig.overview.state.notice.?.text());
     try std.testing.expect(try rig.press("/configure --permission-mode bypass\rhello\r") == null);
     try std.testing.expect(try rig.settle() == null);
     try std.testing.expectEqual(@as(usize, 1), Seen.now.starts);
@@ -7614,7 +7614,7 @@ test "Sign-in completion applies the core default and restores only a visible fo
         try activation.binding.model.set(@import("product_defaults.zig").recommended_model);
         try activation.store.set("/store");
         activation.default_failed = default_failed;
-        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved } } } } }, .warning = .invalid_openai_base_url };
+        if (warning) activation.launch = .{ .outcome = .{ .ready = .{ .facts = .{ .store = activation.store, .instance = @splat(1), .active_capacity = 4, .started_at = 1, .custody_occupied = 0, .paused = false, .capabilities = .{ .bash = true, .providers = .{ .codex = .chatgpt_device, .openai = .unserved, .chatgpt = .unserved } } } } }, .warning = .invalid_openai_base_url };
         var ctx = rig.context();
         defer ctx.cmds.deinit(std.testing.allocator);
         try signedIn(overview, &ctx, activation);

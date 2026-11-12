@@ -210,6 +210,12 @@ fn RoundOf(comptime R: type, comptime commit: Commit, comptime Guards: type, com
             r.get().writer.recordContentRow(content_id);
         }
 
+        /// `Access.attemptTimings`.
+        pub fn attemptTimings(r: *Self, operation: u64) @import("../model_timing.zig").Values {
+            writes("ends no Attempt");
+            return r.get().writer.attemptTimings(operation);
+        }
+
         /// The faults this run injects; a step checks its own.
         pub fn faults(r: *Self) Faults {
             return r.get().faults;

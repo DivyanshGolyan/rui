@@ -1667,7 +1667,7 @@ test "frontend answers local and unknown commands in place and keeps Host comman
 test "frontend /model shows the Session's model and sign-in within 60 columns and offers no pick" {
     var self: Self = .{ .init = undefined, .store = "unused", .session = "unused", .directory = "unused", .files = undefined, .command = undefined, .colour = false };
     self.input.init();
-    for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |id| for ([_]?protocol.Provider{ .codex, .openai, null }) |provider| {
+    for ([_][]const u8{ "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5" }) |id| for ([_]?protocol.Provider{ .codex, .openai, .chatgpt, null }) |provider| {
         self.line = .{ .read = .{ .revision = 1, .end = 1 }, .provider = provider };
         try self.line.model.set(id);
         self.notice = null;
@@ -1678,7 +1678,9 @@ test "frontend /model shows the Session's model and sign-in within 60 columns an
         const rest = said[id.len..];
         if (provider) |known| {
             try std.testing.expect(std.mem.indexOf(u8, rest, known.signIn()) != null);
-            try std.testing.expect(std.unicode.utf8CountCodepoints(said) catch unreachable <= 60);
+            // Only the tail may run past 60 columns, where a narrow screen cuts it.
+            const facts = said[0 .. std.mem.indexOf(u8, said, model_tail) orelse said.len];
+            try std.testing.expect(std.unicode.utf8CountCodepoints(facts) catch unreachable <= 60);
         } else for (std.enums.values(protocol.Provider)) |other| try std.testing.expect(std.mem.indexOf(u8, rest, other.signIn()) == null);
         // A sign-in is never dropped silently: something stands in its place.
         try std.testing.expect(!std.mem.startsWith(u8, std.mem.trimStart(u8, rest[" · ".len..], " "), "new Session"));
