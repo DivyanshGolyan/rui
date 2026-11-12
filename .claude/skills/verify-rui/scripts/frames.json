@@ -1314,10 +1314,10 @@
     {
       "name": "chat-no-new-session",
       "note": "51d-chat-no-new-session",
-      "open": "Batch job 1",
+      "open": "Sidebar chat",
       "steps": [
         {
-          "wait": "Complete this batch job."
+          "wait": "Check this sidebar."
         }
       ],
       "sizes": [
@@ -1325,10 +1325,19 @@
         "140x40"
       ],
       "expect": [
-        "Complete this batch job."
+        "Check this sidebar."
       ],
       "absent": [
         "+ New Session"
+      ],
+      "cast": [
+        {
+          "label": "Sidebar chat",
+          "workspace": "code/rui",
+          "messages": [
+            "Check this sidebar."
+          ]
+        }
       ]
     },
     {
