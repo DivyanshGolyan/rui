@@ -1,4 +1,4 @@
-//! Inline /upgrade: where an Upgrade run stands and what the status bar
+//! Inline Upgrade: where its run stands and what the status bar
 //! says about it, on the overview and in a conversation alike. Values in,
 //! words out; the worker that runs the check and the install says where
 //! the run stands. Whether Host requests wait is `session_upgrade`'s decision.
@@ -77,7 +77,7 @@ pub const Run = union(enum) {
 pub const Tone = enum { normal, attention };
 
 /// How long the status bar keeps a line: while the run goes on, as a
-/// notice (until the next key or about 5 s), or until another /upgrade.
+/// notice (until the next key or about 5 s), or until another Upgrade.
 pub const Lasts = enum { until_done, notice, persistent };
 
 pub const Line = struct { text: []const u8, tone: Tone, lasts: Lasts };
@@ -196,7 +196,7 @@ test "a run's line: the check, what the restart will do, each step, and a stop" 
     }
 }
 
-test "how a run ended: a notice, or held until another /upgrade when the client cannot go on" {
+test "how a run ended: a notice, or held until another Upgrade when the client cannot go on" {
     const v: Version = .{ .schema = 60, .patch = 1 };
     for ([_]struct { Ended, []const u8, Tone, Lasts }{
         .{ .{ .up_to_date = .{ .schema = 59, .patch = 7 } }, "Rui is up to date (0.59.7)", .normal, .notice },

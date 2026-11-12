@@ -3219,7 +3219,7 @@ test "persisted settings survive reopen and corrupt canonical provider fences cu
 test "a Session pinned to a codec this Host cannot build fences its settings" {
     for ([_]?[:0]const u8{
         null,
-        "UPDATE session SET codec='openai-responses/3' WHERE session_ref=?1",
+        "UPDATE session SET codec='unknown-codec/1' WHERE session_ref=?1",
         "UPDATE session SET codec_options=x'00' WHERE session_ref=?1",
     }) |fault| {
         var tmp = std.testing.tmpDir(.{});

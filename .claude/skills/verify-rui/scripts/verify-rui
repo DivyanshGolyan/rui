@@ -1007,6 +1007,8 @@ def term_record(run, name):
     return json.loads(path.read_text())
 
 
+EXIT_KEY = "C-c"
+
 KEYS = {"Enter": b"\r", "Esc": b"\x1b", "C-c": b"\x03", "C-g": b"\x07", "C-o": b"\x0f", "C-r": b"\x12", "C-x": b"\x18", "BSpace": b"\x7f",
         "PgUp": b"\x1b[5~", "PgDn": b"\x1b[6~", "Up": b"\x1b[A", "Down": b"\x1b[B", "Right": b"\x1b[C", "Left": b"\x1b[D", "End": b"\x1b[F", "Home": b"\x1b[H",
         "Tab": b"\t", "S-Up": b"\x1b[1;2A", "S-PgUp": b"\x1b[5;2~",
@@ -1218,7 +1220,7 @@ def cmd_evidence(args):
 
 def cmd_journey(args):
     """compose-submit: open demo, type a draft, verify draft cells, submit once,
-    verify the answer, one provider request with the exact text, one new capture, then /exit restores."""
+    verify the answer, one provider request with the exact text, one new capture, then Ctrl-C restores."""
     run = Run(args.run)
     name = args.name
     text = args.text
@@ -1281,14 +1283,13 @@ def cmd_journey(args):
              and observed.get("kind") == "message" and observed.get("result", {}).get("status") == "completed",
              new_keys=new_keys, captured_text=captured.get("text"), input=observed and observed.get("input"),
              result=observed and observed.get("result", {}).get("status"))
-        helper("send", str(run.root), name, "--text", "/exit")
-        helper("send", str(run.root), name, "--keys", "Enter")
+        helper("send", str(run.root), name, "--keys", EXIT_KEY)
         deadline = time.monotonic() + 10
         exit_path = run.term_dir(name) / "exit.json"
         while not exit_path.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
         exited = json.loads(exit_path.read_text()) if exit_path.exists() else None
-        step("/exit: Rui exits 0 with termios restored and alternate screen left",
+        step("Ctrl-C: Rui exits 0 with termios restored and alternate screen left",
              exited and exited["target_rc"] == "0" and exited["termios_restored"] and exited["alternate_screen_active_at_exit"] is False,
              exit=exited and {k: exited[k] for k in ("target_rc", "termios_restored", "alternate_screen_active_at_exit")},
              resume_hint=exited and (exited["main_screen_plain_tail"] or "")[-300:])
@@ -2426,9 +2427,9 @@ def frame_steps(run, terminal, steps, exiting=False):
     for step in steps:
         if "text" in step:
             terminal.write(step["text"].encode())
-            exiting = exiting or step["text"] == "/exit"
         elif "keys" in step:
             for key in step["keys"]:
+                exiting = exiting or key == EXIT_KEY
                 terminal.write(KEYS[key])
                 if key == "Esc":
                     # Rui itself waits for lone Esc to expire, otherwise the

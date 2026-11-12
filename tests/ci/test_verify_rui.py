@@ -850,6 +850,14 @@ while True:
                 self.assertEqual([r["ok"] for r in json.loads((out / "frames.json").read_text())],
                                  [reason is None for reason in reasons])
 
+    def test_frame_exit_key_allows_dead_pane_but_text_does_not(self):
+        steps = self.helper["frame_steps"]
+        # A Rui that has already exited: only the exit key expects that.
+        terminal = types.SimpleNamespace(status=0, write=lambda _data: None)
+        self.assertTrue(steps(None, terminal, [{"keys": [steps.__globals__["EXIT_KEY"]]}]))
+        with self.assertRaises(self.helper["FrameFailure"]):
+            steps(None, terminal, [{"text": "/exit"}])
+
     def test_delayed_stop_ending_with_stale_stopping_fails_saved_captures(self):
         state = next(state for state in self.helper["load_scenario"](SCRIPT.with_name("frames.json"))["states"]
                      if state["name"] == "stop")

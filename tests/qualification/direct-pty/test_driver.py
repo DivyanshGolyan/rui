@@ -98,6 +98,20 @@ class NavigationTests(unittest.TestCase):
         self.assertEqual([step["first_history"] for step in navigation["wheel-alt-scroll"]["middle"]], [81, 82])
 
 
+class ExitTests(unittest.TestCase):
+    def test_leave_sends_ctrl_c_then_checks_restoration(self):
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            from scenarios import leave
+        calls = []
+        class Terminal:
+            def send(self, data):
+                calls.append(("send", data))
+            def finish(self):
+                calls.append(("finish",))
+        leave(Terminal())
+        self.assertEqual(calls, [("send", b"\x03"), ("finish",)])
+
+
 class DriverTests(unittest.TestCase):
     def test_master_bytes_and_restoration(self):
         # Includes NUL, invalid UTF-8, CR, control, escape and paste bytes. A

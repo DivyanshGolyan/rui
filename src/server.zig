@@ -626,7 +626,7 @@ const Intake = struct {
         self.stdin = null;
         traceSubject(self.host, "launch_stdin_closed", "host", "launch");
         self.armShutdownDeadline();
-        _ = self.host.advance(.stopping);
+        _ = self.host.stopAsked();
     }
 
     /// A launched Host's shutdown, however it began (stdin close or
@@ -1727,7 +1727,7 @@ fn prepareReply(host: *Host, fd: *Reply, socket: std.posix.fd_t, header: Header,
             try fd.json(200, comptime protocol.shapeBytes(protocol.host_pause_reply), host_reply.renderHostPause, .{pause.paused});
         },
         .host_stop => {
-            if (host.advance(.stopping) != .stopping) wakeListener(host);
+            if (host.stopAsked()) wakeListener(host);
             if (header.drop != .after_commit) try fd.json(200, protocol.host_stop_ack.len, protocol.JsonOut.append, .{protocol.host_stop_ack});
         },
         .configure => |*command| {
@@ -3955,6 +3955,10 @@ test "blocked ingress file work leaves controls discovery and shutdown responsiv
         try lease.paths.store.set("s");
         try lease.paths.scratch.set(root);
         try lease.paths.socket.set(socket_path);
+        // The host-stop below leaves its stop record beside the lease.
+        lease.io = std.testing.io;
+        lease.store_dir = try std.Io.Dir.cwd().openDir(std.testing.io, root, .{});
+        defer lease.store_dir.close(std.testing.io);
         var database_buffer: [platform.max_database_path_bytes]u8 = undefined;
         const database = try std.fmt.bufPrint(&database_buffer, "{s}/{s}.sqlite", .{ root, @tagName(phase) });
         var storage: store_module.Store = undefined;
