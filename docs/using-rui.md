@@ -103,6 +103,8 @@ Rui calls a saved conversation a **Session**.
 Bare `rui` opens the overview of unarchived Sessions in this Store; each row shows its project.
 Select the pinned **+ New Session** at the top with Home, then Enter, or click it, to create an empty Session and open its focused chat input.
 Creating it sends configuration only: it has no Messages until you type and send one in the chat.
+Sessions without a first Message are omitted from the list, except for the currently open chat’s row in a wide sidebar.
+Leaving an empty chat hides its row even after changing its model or effort; the configured Session stays stored and remains available to CLI list, inspect and resume.
 The empty chat footer shows its model, effort and folder; model and effort are buttons for changing that Session’s settings.
 An existing populated chat keeps its usual footer.
 Enter on a Session row opens it, and Esc returns to the overview.

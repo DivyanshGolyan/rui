@@ -675,6 +675,82 @@ while True:
         self.assertEqual(default["sizes"], [(140, 40), (46, 30)])
         self.assertGreater(len(default["states"]), 25)
 
+    def test_regex_absences_validate_and_roundtrip_before_launch(self):
+        pattern = r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+        data = self.scenario()
+        data["states"][0]["absent_regex"] = [pattern]
+        validated = self.helper["validate_scenario"](data)
+        self.assertEqual(validated["states"][0]["absent_regex"], [pattern])
+        self.assertEqual(self.helper["validate_scenario"](self.helper["scenario_snapshot"](validated)), validated)
+        for invalid in (None, "pattern", [""], [12], ["nul\0"], ["("], ["(?q)"]):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "absent_regex"):
+                data["states"][0]["absent_regex"] = invalid
+                self.helper["validate_scenario"](data)
+
+    def test_regex_absences_reject_dynamic_rows_in_readiness_and_saved_captures(self):
+        state = {"name": "no-empty-rows", "steps": [], "expect": ["Settings"],
+                 "absent_regex": [r"^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"]}
+        clean = "  + New Session\n ✓ Existing conversation  3h\n  Settings\nenter open"
+        run = types.SimpleNamespace(meta={"sha": "a" * 40})
+        for size in ((140, 40), (46, 30)):
+            for sid, age in (("9xt4vy", "42s"), ("emged6", "7m"), ("000000", "3h"), ("zzzzzz", "12d")):
+                with self.subTest(size=size, sid=sid, age=age), tempfile.TemporaryDirectory() as temp:
+                    bad = f"{clean}\n ○ {sid}                  {age}"
+
+                    def wait(predicate, description, **_kwargs):
+                        self.assertIn("absent_regex", description)
+                        self.assertFalse(predicate(types.SimpleNamespace(completed=bad)))
+                        self.assertTrue(predicate(types.SimpleNamespace(completed=clean)))
+
+                    self.helper["frame_ready"](types.SimpleNamespace(wait=wait), state)
+                    for frame, expected in ((bad, False), (clean, True)):
+                        terminal = types.SimpleNamespace(frame=committed(frame, *size))
+                        record = self.helper["frame_capture"](run, terminal, Path(temp), state, size, None)
+                        self.assertEqual(record["ok"], expected)
+                        if not expected:
+                            self.assertIn("unexpected row matching", record["reason"])
+                            self.assertIn(sid, record["reason"])
+                        self.assertEqual((Path(temp) / record["files"]["txt"]).read_text(), frame + "\n")
+                    # Transition captures may skip readiness, never the saved oracle.
+                    terminal = types.SimpleNamespace(wait=unittest.mock.Mock(), frame=committed(bad, *size))
+                    transition = {**state, "first_frame": True}
+                    self.helper["frame_ready"](terminal, transition)
+                    terminal.wait.assert_not_called()
+                    self.assertFalse(self.helper["frame_capture"](run, terminal, Path(temp), transition, size, None)["ok"])
+        for row in (" ○ Existing 9xt4vy  2m", " ○ 9xt4vy extra  2m", " ○ 9xt4vy  text  2m",
+                    " ○ 9xt4vy", "text mentions ○ 9xt4vy  2m"):
+            with self.subTest(named_or_nonrow=row):
+                self.assertIsNone(self.helper["frame_row_failure"](state, clean + "\n" + row))
+        # Regex absence is opt-in: a current empty chat may own its sidebar row.
+        self.assertIsNone(self.helper["frame_row_failure"]({"name": "current-chat"}, " ○ 9xt4vy  0s"))
+
+    def test_empty_chat_roundtrips_exclude_abandoned_rows_without_rejecting_current_chat(self):
+        scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
+        states = {state["name"]: state for state in scenario["states"]}
+        for name in ("start-empty", "day-start", "start-busy", "overview-printable-ignored", "many-sessions",
+                     "many-sessions-middle", "many-sessions-end", "many-sessions-pinned-end",
+                     "empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
+            with self.subTest(state=name):
+                state = states[name]
+                self.assertEqual(set(state["sizes"]), {(140, 40), (46, 30)})
+                self.assertIsNotNone(self.helper["frame_row_failure"](state, " ○ 9xt4vy                  2m"))
+        for name in ("chat-empty", "start-model", "start-effort", "start-picked"):
+            self.assertNotIn("absent_regex", states[name], "the currently open empty sidebar row is allowed")
+        for name in ("empty-chat-left", "empty-chat-model-left", "empty-chat-two-left"):
+            state = states[name]
+            self.assertTrue(state["first_frame"])
+            self.assertIn("Type a task", state["absent"])
+            self.assertIn("Existing conversation", state["expect"])
+            self.assertEqual(state["steps"][-1], {"wait": "enter open"})
+        model = states["empty-chat-model-left"]["steps"]
+        self.assertIn({"mouse": {"at": "gpt-6.1-terra", "do": "click"}}, model)
+        self.assertIn({"wait": "gpt-6.1-terra ·"}, model)
+        self.assertIn({"gone": "Model"}, model)
+        self.assertEqual(sum(step == {"keys": ["Home", "Enter"]} for step in states["empty-chat-two-left"]["steps"]), 2)
+        self.assertIn("Existing second conversation", states["empty-chat-two-left"]["expect"])
+        self.assertTrue(states["empty-chat-left"]["cast"][0]["messages"])
+        self.assertTrue(states["empty-chat-two-left"]["cast"][0]["messages"])
+
     def test_settings_frame_opens_the_list_row_and_waits_for_the_page(self):
         scenario = self.helper["load_scenario"](SCRIPT.with_name("frames.json"))
         state = next(state for state in scenario["states"] if state["name"] == "settings")

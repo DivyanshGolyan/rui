@@ -1,6 +1,7 @@
 """Overview pointer behavior: Session rows and New Session open chats,
 and panels never open rows.
-The flat list exposes every Session without group headings or folds.
+The flat list exposes admitted conversations without group headings or folds;
+empty Configure-created Sessions appear only while currently open.
 """
 import json
 import pathlib
@@ -184,40 +185,55 @@ def flat_list():
 
 
 def empty_list():
-    with world("clicks-empty", {"first task": answer("new", "first task answered")}) as w, w.overview(columns=WIDTH, rows=30) as screen:
-        frame = screen.contains("+ New Session")
-        assert "No unarchived Sessions" not in frame and "Type a task" not in frame, frame
-        known = set()
-        for gesture in ("click", "Enter"):
-            before = set((w.home / ".config/rui/requests").glob("*.json"))
-            if gesture == "click":
-                screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
-            else:
-                screen.keys(b"\x1b[H\r")
-            chat = screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
-            sessions = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
-            current = {row["reference"] for row in sessions}
-            created, = current - known
-            assert len(current) == len(known) + 1, sessions
-            known = current
-            report = w.inspect(created)
-            assert report["selected_message"] is None and report["recent_messages"] == [], report
-            assert report["session"]["model"] == MODEL, report
-            assert MODEL in chat and w.endpoint.requests == [], chat
-            captured, = set((w.home / ".config/rui/requests").glob("*.json")) - before
-            assert json.loads(captured.read_bytes())["kind"] == "configure", captured.read_text()
-            if gesture == "Enter":
-                screen.keys(b"first task")
-                screen.contains("› first task")
-                screen.keys(b"\r")
-                screen.contains("first task answered")
-                wait_for_host(w, [created], finished, "the chat Message finishes")
-                assert len(w.endpoint.requests) == 1, w.endpoint.requests
+    for columns in (46, 140):
+        with world("clicks-empty", {"first task": answer("new", "first task answered")}) as w, w.overview(columns=columns, rows=30) as screen:
+            frame = screen.contains("+ New Session")
+            assert "No unarchived Sessions" not in frame and "Type a task" not in frame, frame
+            known = set()
+            abandoned = set()
+            for gesture in ("click", "Enter"):
+                before = set((w.home / ".config/rui/requests").glob("*.json"))
+                if gesture == "click":
+                    screen.click(4, line_of(frame, lambda line: "+ New Session" in line, "New Session"))
+                else:
+                    screen.keys(b"\x1b[H\r")
+                chat = screen.wait(lambda frame: "Type a task" in frame and not is_overview(frame), f"{gesture} opens an empty chat")
+                sessions = json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]
+                current = {row["reference"] for row in sessions}
+                created, = current - known
+                assert len(current) == len(known) + 1, sessions
+                known = current
                 report = w.inspect(created)
-                sent, = report["recent_messages"]
-                assert sent["outcome"] == "completed", report
-            frame = back_to_overview(screen)
-    print("overview clicks: click and Enter each Configure one empty Session; only chat typing sends a Message", flush=True)
+                assert report["selected_message"] is None and report["recent_messages"] == [], report
+                assert report["session"]["model"] == MODEL, report
+                assert MODEL in chat and w.endpoint.requests == [], chat
+                assert all(reference not in chat for reference in abandoned), (abandoned, chat)
+                captured, = set((w.home / ".config/rui/requests").glob("*.json")) - before
+                assert json.loads(captured.read_bytes())["kind"] == "configure", captured.read_text()
+                if gesture == "Enter":
+                    screen.keys(b"first task")
+                    screen.contains("› first task")
+                    screen.keys(b"\r")
+                    screen.contains("first task answered")
+                    wait_for_host(w, [created], finished, "the chat Message finishes")
+                    assert len(w.endpoint.requests) == 1, w.endpoint.requests
+                    report = w.inspect(created)
+                    sent, = report["recent_messages"]
+                    assert sent["outcome"] == "completed", report
+                else:
+                    abandoned.add(created)
+                frame = back_to_overview(screen)
+                frame = screen.wait(lambda frame: is_overview(frame)
+                                    and all(reference not in frame for reference in abandoned)
+                                    and (gesture != "Enter" or "first task" in frame),
+                                    "only the same Session with an admitted Message becomes a named list row")
+                # Visibility is derived, not destructive: abandoned Configure
+                # outcomes remain inspectable with no Messages or provider turn.
+                for reference in abandoned:
+                    report = w.inspect(reference)
+                    assert report["selected_message"] is None and report["recent_messages"] == [], report
+                assert set(row["reference"] for row in json.loads(w.run("session", "list", "--store", w.store, "--all"))["sessions"]) == known
+        print(f"overview clicks: {columns} columns: empty chats stay stored but vanish on leave; only the original sent Session becomes a named row", flush=True)
 
 
 def new_chat_aliases():

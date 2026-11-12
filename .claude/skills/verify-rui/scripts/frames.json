@@ -387,6 +387,9 @@
         "Type a task",
         "enter start",
         "gpt-6.1-sol · low"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {
@@ -757,6 +760,206 @@
       ]
     },
     {
+      "name": "empty-chat-left",
+      "note": "Creating and leaving without a Message keeps the Session stored but leaves no empty overview row",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Existing conversation",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Keep this conversation visible."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Existing conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "empty-chat-model-left",
+      "note": "Picking a different model without sending a Message still leaves no empty overview row",
+      "open": "overview",
+      "steps": [
+        {
+          "wait": "Existing conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "mouse": {
+            "at": "gpt-6.1-sol",
+            "do": "click"
+          }
+        },
+        {
+          "wait": "✓"
+        },
+        {
+          "text": "ter"
+        },
+        {
+          "wait": "Model           ter"
+        },
+        {
+          "mouse": {
+            "at": "gpt-6.1-terra",
+            "do": "click"
+          }
+        },
+        {
+          "gone": "Model"
+        },
+        {
+          "wait": "gpt-6.1-terra ·"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
+    },
+    {
+      "name": "empty-chat-two-left",
+      "note": "Two abandoned empty chats leave both existing conversations visible and no raw-ID rows",
+      "open": "overview",
+      "cast": [
+        {
+          "label": "Existing second conversation",
+          "workspace": "code/rui",
+          "mode": "bypass",
+          "messages": [
+            "Keep this second conversation visible."
+          ]
+        }
+      ],
+      "steps": [
+        {
+          "wait": "Existing second conversation"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        },
+        {
+          "keys": [
+            "Home",
+            "Enter"
+          ]
+        },
+        {
+          "wait": "Type a task"
+        },
+        {
+          "keys": [
+            "Esc"
+          ]
+        },
+        {
+          "wait": "enter open"
+        }
+      ],
+      "expect": [
+        "+ New Session",
+        "Settings",
+        "enter open",
+        "Existing conversation",
+        "Existing second conversation"
+      ],
+      "absent": [
+        "Type a task",
+        "enter start"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
+      ],
+      "sizes": [
+        "140x40",
+        "46x30"
+      ],
+      "first_frame": true
+    },
+    {
       "name": "mouse-settings",
       "note": "Click the pinned Settings row using terminal mouse modes",
       "open": "overview",
@@ -984,6 +1187,9 @@
       ],
       "absent": [
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {
@@ -2036,6 +2242,9 @@
         "/sessions",
         "/archive",
         "/configure"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {
@@ -2370,6 +2579,9 @@
         "↑",
         "↓ 0 more",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {
@@ -2423,6 +2635,9 @@
         "↑ 0 more",
         "↓ 0 more",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {
@@ -2458,6 +2673,9 @@
         "↓",
         "↑ 0 more",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {
@@ -2495,6 +2713,9 @@
         "↓",
         "↑ 0 more",
         "Type a task"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {
@@ -2571,6 +2792,9 @@
         "Type a task",
         "enter start",
         "gpt-6.1-sol · low"
+      ],
+      "absent_regex": [
+        "^ *○ [0123456789abcdefghjkmnpqrstvwxyz]{6} +[0-9]+[smhd] *$"
       ]
     },
     {

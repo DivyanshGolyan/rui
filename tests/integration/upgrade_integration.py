@@ -687,6 +687,24 @@ class TerminalScreen:
         assert not re.search(r"(?m)(?:^|│)\s*[›>](?: |$)", frame), ("overview has a composer", frame)
         return frame
 
+    def empty_session(self, case, session):
+        """Exactly this accepted empty Session still exists; projection is separate."""
+        report = case.json("session", "inspect", "--store", case.store, "--session", session)
+        facts = report["session"]
+        assert facts["reference"] == session, report
+        assert report["selected_message"] is None and report["recent_messages"] == [], report
+        listing = case.json("session", "list", "--store", case.store, "--all")
+        assert {row["reference"] for row in listing["sessions"]} == {session}, listing
+        return facts
+
+    def empty_overview(self, case, session, *, ready=False):
+        """An accepted no-Message Session is stored, not an overview row."""
+        frame = self.overview(ready=ready)
+        assert not shown(session, frame), ("empty Session leaked into overview", frame)
+        assert "alt+i info" not in frame, ("overview reopened as a conversation", frame)
+        self.empty_session(case, session)
+        return frame
+
     def empty_chat(self, case, session, *, expected_notice=None):
         """The sole accepted Session is open with its empty-chat facts.
 
@@ -697,17 +715,12 @@ class TerminalScreen:
         A proven relaunch can retain a reply instead of the info action; its
         caller must name that exact outcome rather than skip footer readiness.
         """
-        report = case.json("session", "inspect", "--store", case.store, "--session", session)
-        facts = report["session"]
-        assert facts["reference"] == session, report
-        assert report["selected_message"] is None and report["recent_messages"] == [], report
+        facts = self.empty_session(case, session)
         footer = "alt+i info" if expected_notice is None else expected_notice
         assert footer, "empty chat requires an info action or an exact retained notice"
         frame = wait_for(self.observe, "empty chat model facts and expected footer", timeout=15,
                          ready=lambda screen: shown(f"│ {facts['model']} · ", screen)
                          and shown(footer, screen))
-        listing = case.json("session", "list", "--store", case.store, "--all")
-        assert {row["reference"] for row in listing["sessions"]} == {session}, listing
         return frame
 
     def ignored_overview_input(self, text, *markers):
@@ -1113,10 +1126,8 @@ def conversation_case(root, binary, releases, artifacts):
         published = c.root / "after-publication.gate"
         published.touch()
         c.env["RUI_TEST_UPGRADE_AFTER_PUBLICATION_GATE"] = str(published)
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
+        with terminal_process([str(binary), "session", "resume", "--store", str(c.store), session], env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains(session)
-            screen.send("\r")
             # The empty chat footer carries model facts; the public Session
             # boundaries retain its exact accepted identity.
             screen.empty_chat(c, session)
@@ -1134,10 +1145,8 @@ def conversation_case(root, binary, releases, artifacts):
             receipt = exit_on_sigint(screen, process, "conversation cancellation report after restoration")
             assert b"Upgrade installation failed:" in receipt, receipt.decode()
             assert screen.entries == screen.restorations == 1, "cancelled Upgrade relaunched"
-        with terminal_process(overview_args(binary, c), env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
+        with terminal_process([str(binary), "session", "resume", "--store", str(c.store), session], env=c.env, cwd=c.root, columns=TERMINAL_COLUMNS) as (process, master):
             screen = TerminalScreen(master, process)
-            screen.contains(session)
-            screen.send("\r")
             screen.empty_chat(c, session)
             screen.start_upgrade()
             screen.contains(" · publishing")
@@ -1164,6 +1173,11 @@ def conversation_case(root, binary, releases, artifacts):
                          "ready chat info reads the relaunched Host")
             screen.contains("› conXversation β draft")
             screen.save(artifacts, "conversation-returned")
+            # The draft/caret survived above. Clear it deliberately only now,
+            # so Esc can leave; stored empty identity must outlive its row.
+            screen.send("\x1b\x01\x0b\x1b")
+            screen.empty_overview(c, session)
+            screen.save(artifacts, "conversation-left-empty-hidden")
         after = c.json("session", "inspect", "--store", c.store, "--session", session)
         assert after["session"] == before["session"], "Upgrade submitted work or changed the open Session"
         assert (c.home / ".config/rui/codex.json").read_bytes() == credential
@@ -1322,8 +1336,7 @@ def startup_cases(root, binary, releases, artifacts):
                     if screen_kind == "resume":
                         screen.empty_chat(c, session)
                     else:
-                        screen.overview()
-                        screen.contains(session)
+                        screen.empty_overview(c, session, ready=True)
                     screen.start_upgrade()
                     screen.contains(" · publishing")
                     screen.close_settings()
@@ -1356,9 +1369,7 @@ def startup_cases(root, binary, releases, artifacts):
                         screen.draft("staXrtup α draft", 6)
                     else:
                         # proof_relaunched already observed the retained Footer reply.
-                        screen.overview(ready=False)
-                        screen.contains(session)
-                        assert "alt+i info" not in screen.observe(), "overview opened a conversation"
+                        screen.empty_overview(c, session)
                         screen.ignored_overview_input("/xreturned γ ignored\x1b[200~returned δ paste\x1b[201~",
                                                       "returned γ ignored", "returned δ paste")
                     screen.save(artifacts, name)

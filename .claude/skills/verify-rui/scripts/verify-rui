@@ -2047,6 +2047,19 @@ def frame_absences(state, sessions=None):
     return value
 
 
+def frame_absent_regex(state):
+    value = state.get("absent_regex", [])
+    if not isinstance(value, list) or not all(
+            isinstance(pattern, str) and pattern and "\0" not in pattern for pattern in value):
+        raise ValueError(f"{state['name']}: absent_regex must be a list of nonempty regular expressions")
+    for pattern in value:
+        try:
+            re.compile(pattern)
+        except re.error as error:
+            raise ValueError(f"{state['name']}: invalid absent_regex {pattern!r}: {error}") from error
+    return value
+
+
 def cast_entries(entries):
     for entry in entries:
         for n in range(1, entry.get("count", 1) + 1):
@@ -2146,6 +2159,7 @@ def validate_scenario(data, sizes=None):
             else:
                 require(isinstance(value, dict) and isinstance(value.get("to"), str) and value["to"] in labels and isinstance(value.get("text"), str)
                         and type(value.get("wait", True)) is bool, f"{name}: invalid send or unknown cast label")
+        frame_absent_regex(state)
         for text in frame_absences(state):
             match = re.fullmatch(r"\{session:(.+)\}", text)
             require(match is None or match.group(1) in labels,
@@ -2483,6 +2497,9 @@ def frame_row_failure(state, plain):
         at = next((i for i, line in enumerate(lines) if row in line), None)
         if at is None or at + 1 >= len(lines) or detail not in lines[at + 1]:
             return f"row {row!r} must be followed by {detail!r}"
+    for pattern in frame_absent_regex(state):
+        if match := re.search(pattern, plain, re.MULTILINE):
+            return f"unexpected row matching {pattern!r}: {match.group(0)!r}"
     return None
 
 
@@ -2495,7 +2512,8 @@ def frame_ready(terminal, state, allow_exit=False, sessions=None):
     terminal.wait(lambda c: all(text in c.completed for text in expected)
                   and all(text not in c.completed for text in absent)
                   and frame_row_failure(state, c.completed) is None,
-                  "state expectations: " + repr({"expect": expected, "absent": absent}),
+                  "state expectations: " + repr({
+                      "expect": expected, "absent": absent, "absent_regex": frame_absent_regex(state)}),
                   allow_exit=allow_exit)
 
 
