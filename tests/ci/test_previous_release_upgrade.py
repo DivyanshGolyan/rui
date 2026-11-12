@@ -1,10 +1,14 @@
 """Upgrade grammar detection must follow installed help, not checkout layout."""
+from contextlib import ExitStack, redirect_stdout
+import io
+import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tests/integration"))
@@ -121,6 +125,93 @@ class SupportedRangeTest(unittest.TestCase):
             self.assertEqual(calls[1], [Path("/current-native-rui"), "--publish-install", str(home),
                                        calls[0][4], "intentional-source"])
             self.assertFalse(any("install.sh" in str(argument) for call in calls for argument in call))
+
+
+class RunningUpgradeTest(unittest.TestCase):
+    def check_activation(self, *, status="ready", instance="candidate-instance", store="/store",
+                         pid=12, executable=Path("/candidate/bin/rui"), version="0.69.10000",
+                         output="/store: restarted on 0.69.10000\n", retired=True):
+        binary = Path("/candidate/bin/rui")
+        previous = {"store": "/store", "instance": "previous-instance"}
+        dialect = Mock()
+        dialect.host_status.return_value = status, json.dumps({
+            "store": store, "instance": instance,
+        })
+        seed = SimpleNamespace(pid=11, poll=lambda: 1 if retired else None)
+
+        def wait(predicate, description, **kwargs):
+            self.assertTrue(predicate(), description)
+            self.assertEqual(kwargs, {"timeout": 10})
+
+        with ExitStack() as stack:
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(patch.object(upgrade.os_semantics, "unix_stream"))
+            stack.enter_context(patch.object(upgrade.os_semantics, "socket_peer_pid", return_value=pid))
+            stack.enter_context(patch.object(upgrade.os_semantics, "process_executable", return_value=executable))
+            stack.enter_context(patch.object(upgrade, "release_version", return_value=version))
+            stack.enter_context(patch.object(upgrade, "wait_for", side_effect=wait))
+            # Activation evidence may never start or repair the Host itself.
+            stack.enter_context(patch.object(upgrade.subprocess, "run", side_effect=AssertionError("no explicit restart")))
+            upgrade.assert_running_upgrade(dialect, binary, Path("/store"), seed,
+                {"socket": "/host.sock"}, previous, "0.69.10000", output)
+        dialect.host_status.assert_called_once_with(binary, Path("/store"), 5)
+
+    def test_candidate_instance_image_version_and_restart_report(self):
+        self.check_activation()
+
+    def test_rejects_installer_leaving_previous_instance_running(self):
+        with self.assertRaisesRegex(AssertionError, "left the old Host running"):
+            self.check_activation(instance="previous-instance")
+
+    def test_rejects_incomplete_or_misdirected_activation(self):
+        for changes in (
+            {"status": "unavailable"}, {"store": "/another-store"}, {"pid": 11},
+            {"executable": Path("/previous/bin/rui")}, {"version": "0.69.1"},
+            {"output": "Installed Rui; no restart performed"}, {"retired": False},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(AssertionError):
+                self.check_activation(**changes)
+
+    def test_running_host_does_not_use_unrestartable_hidden_test_flags(self):
+        dialect = upgrade.Dialect.__new__(upgrade.Dialect)
+        dialect.resource_first = True
+        with patch.object(upgrade.fixture, "RUI", Path("/previous/bin/rui")):
+            args = dialect.host_arguments(Path("/store"), "http://127.0.0.1/responses", retry_waits=False)
+        self.assertEqual(args, ["/previous/bin/rui", "host", "serve", "--store", "/store",
+                               "--active-capacity", "1", "--provider-endpoint", "http://127.0.0.1/responses"])
+
+    def test_release_installer_uses_real_template_and_local_archive_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            binary = root / "native-actor"
+            binary.write_bytes(b"archive construction fixture, never executed")
+            with patch.object(upgrade, "release_version", return_value="0.69.10000"), \
+                 patch.object(upgrade.subprocess, "run", return_value=subprocess.CompletedProcess(
+                     [], 0, "installer transcript", "")) as run:
+                _, output = upgrade.install_candidate_release(ROOT, binary, root)
+            self.assertEqual(output, "installer transcript")
+            script = (root / "install.sh").read_text()
+            self.assertNotIn("@PUBLISH@", script)
+            self.assertNotIn("@VERSION@", script)
+            self.assertIn('"$prefix/bin/rui" host restart --all', script)
+            self.assertIn("actual=$(digest", script)
+            command = run.call_args
+            self.assertEqual(command.args[0], ["sh", root / "install.sh"])
+            self.assertEqual(command.kwargs["timeout"], 60)
+            env = command.kwargs["env"]
+            self.assertTrue(env["RUI_UPGRADE_LOCAL_ARCHIVE"].startswith("file://"))
+            self.assertEqual(env["RUI_NO_MODIFY_PATH"], "1")
+
+    def test_release_installer_nonzero_exit_is_not_masked_by_transcript(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            binary = root / "native-actor"
+            binary.write_bytes(b"not executed")
+            with patch.object(upgrade, "release_version", return_value="0.69.10000"), \
+                 patch.object(upgrade.subprocess, "run", return_value=subprocess.CompletedProcess(
+                     [], 1, "/store: restarted on 0.69.10000", "")), \
+                 self.assertRaises(AssertionError):
+                upgrade.install_candidate_release(ROOT, binary, root)
 
 
 if __name__ == "__main__":

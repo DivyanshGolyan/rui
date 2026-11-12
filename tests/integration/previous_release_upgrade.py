@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Verify supported startup migrations and preserving unsupported-format refusal."""
+"""Gate stopped-Store compatibility and installer activation of a running release."""
+import argparse
 import contextlib
 import hashlib
 import json
@@ -11,31 +12,127 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
 
 import model_fixture as fixture
 import host_process
+import os_semantics
 from host_process import canonical_fixture_root, dispose_all, start_ready_process, stop_process, wait_for, wait_for_execution_release
 
 
-def install(checkout, publisher=None):
-    revision = subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
+def install(checkout, publisher=None, *, released=False):
     if publisher is None:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
         print(f"Installing current {revision} through ./install.sh", flush=True)
         subprocess.run(["bash", "./install.sh"], cwd=checkout, check=True, timeout=1200)
     else:
         prefix = pathlib.Path(os.environ["HOME"], ".local/lib/rui")
+        prefix.mkdir(parents=True, exist_ok=True)
         stage = pathlib.Path(tempfile.mkdtemp(prefix="install.", dir=prefix))
-        subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--prefix", str(stage)],
-                       cwd=checkout, check=True, timeout=1200)
-        subprocess.run([publisher, "--publish-install", os.environ["HOME"], str(stage), "intentional-source"],
+        if released:
+            (stage / "bin").mkdir()
+            shutil.copy2(checkout / "bin/rui", stage / "bin/rui")
+            shutil.copy2(checkout / "THIRD_PARTY_NOTICES.md", stage / "THIRD_PARTY_NOTICES.md")
+        else:
+            subprocess.run(["zig", "build", "-Doptimize=ReleaseSafe", "--prefix", str(stage)],
+                           cwd=checkout, check=True, timeout=1200)
+        subprocess.run([publisher, "--publish-install", os.environ["HOME"], str(stage),
+                        "released-install" if released else "intentional-source"],
                        check=True, timeout=30)
     binary = pathlib.Path(os.environ["HOME"], ".local/bin/rui")
     print(f"Installed artifact sha256={hashlib.sha256(binary.read_bytes()).hexdigest()}", flush=True)
     return binary
+
+
+def release_version(binary):
+    reported = subprocess.check_output([binary, "--version"], text=True, timeout=5)
+    match = re.fullmatch(r"rui (0\.[0-9]+\.[0-9]+) \(.*\)\n", reported)
+    assert match, reported
+    return match[1]
+
+
+def build_candidate_release(candidate, root):
+    # Source installs normally report "unreleased", which cannot be used for
+    # verified release activation. Reuse upgrade-integration's production actor:
+    # only its release identity is synthetic, not its Host or installer behavior.
+    prefix = root / "candidate"
+    subprocess.run(["zig", "build", "upgrade-fixture", "--prefix", prefix, "-j2"],
+                   cwd=candidate, check=True, timeout=1200)
+    return prefix / "bin/rui-upgrade-release-fixture"
+
+
+def install_candidate_release(candidate, publisher, root):
+    # Exercise the rendered curl-installer path, including extraction, digest
+    # verification, publication and restart. Only archive transport is local.
+    sys.path.insert(0, str(candidate / "tests/ci"))
+    import release
+
+    version = release_version(publisher)
+    platform = os_semantics.native_release_target()
+    assert platform is not None, "unsupported release platform"
+    name = f"rui-{version}-{platform}"
+    archive = root / f"{name}.tar.gz"
+    with tarfile.open(archive, "w:gz") as packed:
+        packed.add(publisher, arcname=f"{name}/bin/rui")
+        packed.add(candidate / "THIRD_PARTY_NOTICES.md", arcname=f"{name}/THIRD_PARTY_NOTICES.md")
+    with archive.open("rb") as packed:
+        digest = hashlib.file_digest(packed, "sha256").hexdigest()
+    script = root / "install.sh"
+    script.write_text(release.installer(
+        (candidate / "release/install.sh").read_text(), version,
+        {target: digest for target in release.PLATFORMS},
+        (candidate / "release/publish.sh").read_text()))
+    tools = root / "tools"
+    tools.mkdir()
+    curl = tools / "curl"
+    curl.write_text("""#!/usr/bin/env python3
+import os
+import sys
+args = sys.argv[1:]
+url = os.environ["RUI_UPGRADE_ARCHIVE_URL"]
+assert args.count(url) == 1, args
+args[args.index(url)] = os.environ["RUI_UPGRADE_LOCAL_ARCHIVE"]
+os.execv(os.environ["RUI_UPGRADE_REAL_CURL"], ["curl", *args])
+""")
+    curl.chmod(0o700)
+    real_curl = shutil.which("curl")
+    assert real_curl is not None, "release installer requires curl"
+    print("Installing candidate through rendered release/install.sh (local native archive)", flush=True)
+    result = subprocess.run(["sh", script], capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PATH": str(tools) + os.pathsep + os.environ["PATH"],
+             "RUI_NO_MODIFY_PATH": "1", "RUI_UPGRADE_REAL_CURL": real_curl,
+             "RUI_UPGRADE_ARCHIVE_URL": f"https://github.com/DivyanshGolyan/rui/releases/download/v{version}/{name}.tar.gz",
+             "RUI_UPGRADE_LOCAL_ARCHIVE": archive.as_uri()})
+    output = result.stdout + result.stderr
+    print(output, flush=True)
+    assert result.returncode == 0, (result.returncode, output)
+    return pathlib.Path(os.environ["HOME"], ".local/bin/rui"), output
+
+
+def assert_running_upgrade(dialect, binary, store, seed, ready, previous, version, output):
+    state, shown = dialect.host_status(binary, store, 5)
+    assert state == "ready", shown
+    current = json.loads(shown)
+    assert current["store"] == previous["store"] == str(store), shown
+    assert current["instance"] != previous["instance"], "installer left the old Host running"
+    # Status's version is a wire version, not a release version. Bind its socket
+    # to the kernel's exact server image before asking that image for its version.
+    with os_semantics.unix_stream() as connection:
+        connection.settimeout(5)
+        connection.connect(ready["socket"])
+        pid = os_semantics.socket_peer_pid(connection)
+    assert pid != seed.pid, "installer kept the previous-release process"
+    executable = os_semantics.process_executable(pid)
+    assert executable == binary.resolve(), (executable, binary.resolve())
+    assert release_version(binary) == version, "installer did not select the candidate version"
+    assert release_version(executable) == version, "serving Host is not the candidate version"
+    assert f"{store}: restarted on {version}" in output, output
+    wait_for(lambda: seed.poll() is not None, "previous-release Host retirement", timeout=10)
+    print(f"Running Host upgraded to {version}, instance {previous['instance']} → {current['instance']}", flush=True)
 
 
 def supported_format(checkout):
@@ -77,9 +174,10 @@ class Dialect:
     def serve(self):
         return ("host", "serve") if self.resource_first else ("serve",)
 
-    def host_arguments(self, store, endpoint):
+    def host_arguments(self, store, endpoint, *, retry_waits=True):
         return [str(fixture.RUI), *self.serve(), "--store", str(store), "--active-capacity", "1",
-                "--provider-endpoint", endpoint, "--test-retry-waits-ms", "50,100,150"]
+                "--provider-endpoint", endpoint,
+                *(["--test-retry-waits-ms", "50,100,150"] if retry_waits else [])]
 
     def host_status(self, binary, store, timeout):
         status = subprocess.run([binary, "host", "status", "--store", store],
@@ -173,14 +271,22 @@ def stop_detached(dialect, binary, store):
 
 
 def main():
-    previous, candidate = (pathlib.Path(value).resolve() for value in sys.argv[1:])
-    previous_format = supported_format(previous)
-    candidate_minimum, candidate_format = supported_range(candidate)
-    supported = candidate_minimum <= previous_format <= candidate_format
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--running-host", action="store_true",
+                        help="previous is an unpacked release; leave its Host running during release/install.sh")
+    parser.add_argument("previous", type=pathlib.Path)
+    parser.add_argument("candidate", type=pathlib.Path)
+    args = parser.parse_args()
+    previous, candidate = args.previous.resolve(), args.candidate.resolve()
+    if not args.running_host:
+        previous_format = supported_format(previous)
+        candidate_minimum, candidate_format = supported_range(candidate)
+        supported = candidate_minimum <= previous_format <= candidate_format
     # Do not use the runner's HOME, default Store or credentials. Keep the
     # compiler cache outside HOME so both normal installs can reuse compilation.
     os.environ.setdefault("ZIG_GLOBAL_CACHE_DIR", str(pathlib.Path.home() / ".cache/zig"))
     directory = tempfile.mkdtemp(prefix="rui-upgrade-", dir=os.environ.get("RUI_UPGRADE_FAILURES"))
+    host_released = True
     try:
         root = canonical_fixture_root(directory)
         home, workspace, store = root / "home", root / "workspace", root / "store"
@@ -189,8 +295,10 @@ def main():
         os.environ["HOME"] = str(home)
         os.environ["RUI_CODEX_CREDENTIAL_FILE"] = str(root / "absent-credentials.json")
         fixture.ROOT = workspace
-        publisher = install(candidate).resolve()
-        binary = install(previous, publisher)
+        publisher = (build_candidate_release(candidate, root) if args.running_host
+                     else install(candidate).resolve())
+        candidate_cli = Dialect(publisher)
+        binary = install(previous, publisher, released=args.running_host)
         previous_artifact = binary.resolve()
         previous_hash = hashlib.sha256(previous_artifact.read_bytes()).digest()
         fixture.RUI = binary
@@ -204,9 +312,22 @@ def main():
         thread.start()
         seed = None
         attempted_restart = False
+
+        def stop_installed_host():
+            nonlocal host_released
+            # The old child is reaped first; a failed install may have left
+            # either it or a detached candidate serving this Store.
+            if args.running_host:
+                stop_detached(candidate_cli, publisher, store)
+                host_released = True
+            elif attempted_restart:
+                stop_detached(dialect, binary, store)
+
         try:
-            seed, _ = start_ready_process(
-                dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses"),
+            host_released = False
+            seed, ready = start_ready_process(
+                dialect.host_arguments(store, f"http://127.0.0.1:{endpoint.server_port}/responses",
+                                       retry_waits=not args.running_host),
                 required_fields={"execution": "enabled"},
             )
             session = dialect.configure(root, store, "upgrade-configure", "upgrade/session", "gpt-6-sol")
@@ -223,27 +344,39 @@ def main():
             before = dialect.inspect_session(store, session)["session"]
             for field, value in configuration.items():
                 assert before[field] == value, (field, value, before)
-            subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=10)
-            # Effect-aware shutdown is a nonzero serving exit, not a crash.
-            assert seed.wait(timeout=10) != 0
-            stop_detached(dialect, binary, store)  # Confirm lease release, not just acknowledgement.
-            stop_process(seed)
-            seed = None
-            # The Host has closed and checkpointed. A normal read-only WAL
-            # connection creates sidecars, contaminating the refusal snapshot.
-            with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)) as database:
-                assert database.execute("PRAGMA user_version").fetchone()[0] == previous_format
-            before_hashes = database_hashes(store)
-            assert "rui.sqlite3" in before_hashes
-            print("Previous build saved the exact answer and released the Store", flush=True)
+            if args.running_host:
+                state, shown = dialect.host_status(previous_artifact, store, 5)
+                assert state == "ready" and seed.poll() is None, shown
+                previous_status = json.loads(shown)
+                print(f"Leaving previous release {release_version(previous_artifact)} running: {shown}", flush=True)
+                binary, installer_output = install_candidate_release(candidate, publisher, root)
+            else:
+                subprocess.run([binary, *dialect.pause, "--store", store], check=True, timeout=10)
+                # Effect-aware shutdown is a nonzero serving exit, not a crash.
+                assert seed.wait(timeout=10) != 0
+                stop_detached(dialect, binary, store)  # Confirm lease release, not just acknowledgement.
+                stop_process(seed)
+                seed = None
+                # The Host has closed and checkpointed. A normal read-only WAL
+                # connection creates sidecars, contaminating the refusal snapshot.
+                with contextlib.closing(sqlite3.connect((store / "rui.sqlite3").as_uri() + "?mode=ro&immutable=1", uri=True)) as database:
+                    assert database.execute("PRAGMA user_version").fetchone()[0] == previous_format
+                before_hashes = database_hashes(store)
+                assert "rui.sqlite3" in before_hashes
+                print("Previous build saved the exact answer and released the Store", flush=True)
 
-            binary = install(candidate)
+                binary = install(candidate)
             assert binary.resolve() != previous_artifact, "installation did not publish a new build"
             assert hashlib.sha256(previous_artifact.read_bytes()).digest() == previous_hash, "old build changed"
             fixture.RUI = binary
             dialect = candidate_cli = Dialect(binary)
-            commands = ((("host", "start"),) if supported
-                        else (("host", "start"), candidate_cli.serve()))
+            if args.running_host:
+                assert_running_upgrade(dialect, binary, store, seed, ready, previous_status,
+                                       release_version(publisher), installer_output)
+                commands = ()  # No explicit start/restart may repair the installer.
+            else:
+                commands = ((("host", "start"),) if supported
+                            else (("host", "start"), candidate_cli.serve()))
             for command in commands:
                 attempted_restart = True
                 started_at = time.monotonic()
@@ -282,7 +415,7 @@ def main():
                     stop_detached(dialect, binary, store)
                     attempted_restart = False
                     print(f"Breaking format {previous_format}→{candidate_format} {' '.join(command)} refused in {elapsed:.3f}s; SQLite hashes unchanged", flush=True)
-            if not supported:
+            if not args.running_host and not supported:
                 # The previous installed artifact must still recover the exact
                 # work at its original Store path. This is not a migration.
                 fixture.RUI = previous_artifact
@@ -301,8 +434,9 @@ def main():
             assert len(endpoint.requests) == 1, "upgrade replayed completed work"
         finally:
             dispose_all(
-                lambda: stop_detached(dialect, binary, store) if attempted_restart else None,
-                lambda: stop_process(seed) if seed is not None else None,
+                lambda: stop_process(seed) if args.running_host and seed is not None else None,
+                stop_installed_host,
+                lambda: stop_process(seed) if not args.running_host and seed is not None else None,
                 endpoint.shutdown,
                 endpoint.server_close,
                 lambda: thread.join(timeout=5),
@@ -310,11 +444,17 @@ def main():
     except BaseException:
         # A failed/unknown start may still own this Store. Never delete beneath
         # it, even when cleanup also failed. Retain the original failure first.
-        print(f"Upgrade failure state retained at {directory}; confirm Host release before removal", flush=True)
+        if args.running_host and host_released and not os.environ.get("RUI_UPGRADE_FAILURES"):
+            dispose_all(lambda: shutil.rmtree(directory))
+        else:
+            print(f"Upgrade failure state retained at {directory}; confirm Host release before removal", flush=True)
         raise
     else:
         shutil.rmtree(directory)
-        print("Compatibility passed: supported startup readiness/migration backup or unsupported-format refusal; exact saved work/configuration and no replay", flush=True)
+        print(("Running-release install passed: installer exited 0 and named the restart; candidate Host version/new instance; "
+               if args.running_host else
+               "Compatibility passed: supported startup readiness/migration backup or unsupported-format refusal; ") +
+              "exact saved work/configuration and no replay", flush=True)
 
 
 if __name__ == "__main__":

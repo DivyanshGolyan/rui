@@ -151,8 +151,11 @@ def opening_and_views():
             assert not screen.rows()[0].rstrip().endswith(("Archived", "All")), screen.text
             for command, name in (("archived", "Archived"), ("all", "All")):
                 screen.keys(f"/sessions {command}\r")
-                screen.wait(lambda frame: "[Archived] charlie" in frame and "/sessions" not in frame,
-                            f"the {name} view")
+                expected = "○ charlie" + (" · archived" if command == "all" else "")
+                archived = screen.wait(lambda frame: expected in frame and "/sessions" not in frame,
+                                       f"the {name} view")
+                assert "[Archived]" not in archived, archived
+                assert ("charlie · archived" in archived) == (command == "all"), archived
                 screen.keys(b"/sessions unarchived\r")
                 back = screen.wait(lambda frame: "✓ alpha" in frame and "charlie" not in frame and "/sessions" not in frame,
                                    f"{name} returns to default by command")

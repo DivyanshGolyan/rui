@@ -309,7 +309,7 @@ def interactive_cases(state, binding=False, null_code=False):
         assert configured.returncode == 0, configured
         session = json.loads(configured.stdout)["answer"]["session"]
         codex.credentials(home / ".config/rui/codex.json")
-        for route, line in (("/v1/configure", "/configure --permission-mode ask"),
+        for route, line in (("/v1/configure", "panel Permissions"),
                 ("/v1/message", "original terminal bytes"), ("/v1/control/permission-decision", ""),
                 ("/v1/message", None), ("/v1/activity-page", "confirmed terminal bytes")):
             if binding and route == "/v1/activity-page":
@@ -362,7 +362,13 @@ def interactive_cases(state, binding=False, null_code=False):
                             proxy = ReplyProxy(host, "/v1/message", lambda response: response)
                         else:
                             proxy = ReplyProxy(host, route, rewrite)
-                    os.write(master, (line + "\r").encode())
+                    if route == "/v1/configure":
+                        human.chat_info_open(master)
+                        human.panel_frame(master, lambda frame: "run without asking" in frame and "ask first" in frame,
+                                          b"\x1b[B\r")
+                        os.write(master, b"\x1b[B\r")
+                    else:
+                        os.write(master, (line + "\r").encode())
                 output = ""
                 if route == "/v1/activity-page":
                     fixture.wait_for(lambda: proxy.exchanges, "healthy Message reply")
@@ -373,17 +379,14 @@ def interactive_cases(state, binding=False, null_code=False):
                     # Finish this answer before a diagnostic command can cancel it.
                     human.read_terminal(master, "accepted work remains accepted",
                         timeout=deadline - time.monotonic(), composer=True)
-                    while True:
-                        os.write(master, b"/status\r")
-                        status = human.read_terminal(master, f" Status · {session}",
-                            timeout=deadline - time.monotonic(), composer=True, fresh=True)
-                        # /status exposes unresolved frontend custody, independently
-                        # of the accepted backend reply and canonical database.
-                        if "Original reserved request:" not in status:
-                            assert "Publication/admission may be incomplete" not in status, status
-                            break
-                        assert accepted_key in status, status
-                        assert time.monotonic() < deadline, ("frontend did not settle Admission", status)
+                    # A joined answer has released Admission. Chat info is an
+                    # independent read of the same open chat, not a submission.
+                    def settled_info():
+                        status = human.chat_info_frame(master, timeout=deadline - time.monotonic())
+                        assert "Original reserved request:" not in status, status
+                        assert "Publication/admission may be incomplete" not in status, status
+                        return status if "alt+d details" not in status else None
+                    fixture.wait_for(settled_info, "frontend releases joined Admission", deadline=deadline)
                     message_records = {
                         path.name: path.read_bytes()
                         for path in (home / ".config/rui/requests").glob("*.json")
@@ -398,8 +401,14 @@ def interactive_cases(state, binding=False, null_code=False):
                 if binding and line is not None:
                     marker = reason if route == "/v1/configure" else "Decision not confirmed" if route == "/v1/control/permission-decision" else "Not confirmed"
                     deadline = time.monotonic() + 15
-                    output = human.read_terminal(master, marker, timeout=deadline - time.monotonic(),
-                        composer=True)
+                    if route == "/v1/configure":
+                        human.panel_frame(master, lambda frame: "couldn't save" in frame,
+                                          timeout=deadline - time.monotonic())
+                        output = human.panel_frame(master, lambda frame: marker in frame and "Copy last answer" not in frame,
+                                                   b"\x1b", timeout=deadline - time.monotonic())
+                    else:
+                        output = human.read_terminal(master, marker, timeout=deadline - time.monotonic(),
+                            composer=True)
                     assert "other/session" not in output and " Status · 000000" not in output and " Status · 111111" not in output and '"answer"' not in output, output
                     original = proxy.exchanges[0][0]
                     key = json.loads(original)["key"]
@@ -420,7 +429,7 @@ def interactive_cases(state, binding=False, null_code=False):
                                     timeout=deadline - time.monotonic(), composer=True)
                             elif "› " not in output.split("denied tool saved", 1)[1]:
                                 output += human.read_terminal(master, "› ", timeout=deadline - time.monotonic())
-                        os.write(master, b"/status\r")
+                        os.write(master, b"\x1bd")
                         diagnostic = human.read_terminal(master, f"Last submission error: {reason}", composer=True)
                         assert key in diagnostic and "Ctrl-R retries this exact original" in diagnostic, diagnostic
                         # No ordinary no-op may retry an unresolved submission.
@@ -505,6 +514,8 @@ def interactive_cases(state, binding=False, null_code=False):
                         "terminal": getattr(sys.exc_info()[1], "terminal_metadata", None),
                         "terminal_canonical": bool(termios.tcgetattr(slave)[3] & termios.ICANON),
                         "caller_returncode": caller.poll() if caller is not None else None,
+                        "caller_stderr": caller.stderr.read().decode(errors="replace")
+                            if caller is not None and caller.poll() is not None else None,
                         "ready_pending": bool(select.select([ready_read], [], [], 0)[0]),
                         "terminal_pending": bool(select.select([master], [], [], 0)[0]),
                         "exchanges": len(proxy.exchanges) if proxy is not None else 0,
@@ -654,9 +665,12 @@ def permission_read_cases(state):
             os.write(master, b"\x0f")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
-            # The notice under the input names what failed, then the Host's
-            # own words, whole within the row. A diagnostic is never a feed row.
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable. HTTP 503; type: busy; code: host_busy", output
+            # The Footer's right slot names what failed, then the Host's
+            # own words, once. A diagnostic is never an extra or feed row.
+            from human_cli_fixture import chat_footer_row
+            notice = "! Tool output unavailable. HTTP 503; type: busy; code: host_busy"
+            assert output.split("\n")[chat_footer_row(output)].endswith(notice), output
+            assert output.count(notice) == 1, output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)

@@ -1,8 +1,9 @@
 //! What every Rui TLS client shares, over the pinned OpenSSL: the client
 //! context settings, host naming and trust loading. The HTTP/2 client and
 //! the Store's Postgres and MySQL wire each build their own context and
-//! sessions from these, so `SSL_CERT_FILE`, `SSL_CERT_DIR`, the host bundles
-//! and `--provider-ca-file` mean the same everywhere.
+//! sessions from these, so `SSL_CERT_FILE`, `SSL_CERT_DIR`, the host's
+//! certificate directory and bundles and `--provider-ca-file` mean the same
+//! everywhere.
 //!
 //! A self-contained build module, like h2: it imports nothing from Rui and
 //! links OpenSSL, so each binary carries one copy. It holds no verification
@@ -45,8 +46,9 @@ pub const max_host_bytes = 253;
 pub const Trust = union(enum) {
     /// OpenSSL's `SSL_CERT_FILE` (a PEM bundle) and `SSL_CERT_DIR`
     /// (colon-separated hashed directories) when either is set and not
-    /// empty, read when trust loads; otherwise the first readable bundle
-    /// among the host's usual CA bundle paths.
+    /// empty, read when trust loads; otherwise, on Linux, the host's hashed
+    /// certificate directory when it has one; otherwise the first readable
+    /// bundle among the host's usual CA bundle paths.
     system,
     /// Only the certificates in this PEM file (`--provider-ca-file`).
     ca_file: []const u8,
@@ -56,6 +58,14 @@ pub const Trust = union(enum) {
 pub const TrustError = error{ TrustUnavailable, InvalidCaFile, InvalidSslCertFile, InvalidSslCertDir };
 
 pub const HostKind = enum { dns_name, ip_literal };
+
+/// Linux hashed certificate directories, probed in this order before the
+/// bundles. OpenSSL reads a root from one only when a peer's chain names it,
+/// where a bundle is parsed whole when trust loads.
+pub const system_directories = [_][:0]const u8{
+    "/etc/ssl/certs", // Debian, Ubuntu, Arch, openSUSE
+    "/etc/pki/tls/certs", // Fedora's update-ca-trust since 2024
+};
 
 /// Linux host CA bundles, probed in this order when trust loads, at run
 /// time so a cross-built or relocated binary still finds the host's bundle.
@@ -131,6 +141,10 @@ pub fn loadTrust(ctx: *c.SSL_CTX, trust: Trust) TrustError!void {
                 }
                 return;
             }
+            if (builtin.os.tag == .linux) for (system_directories) |path| {
+                if (!hashedDirectory(path)) continue;
+                if (c.SSL_CTX_load_verify_dir(ctx, path) == 1) return;
+            };
             for (system_bundles) |path| {
                 if (std.c.access(path, std.c.R_OK) != 0) continue;
                 if (c.SSL_CTX_load_verify_file(ctx, path) == 1) return;
@@ -144,6 +158,37 @@ pub fn loadTrust(ctx: *c.SSL_CTX, trust: Trust) TrustError!void {
 fn opensslTrustVariable(name: [*:0]const u8) ?[*:0]const u8 {
     const value = std.c.getenv(name) orelse return null;
     return if (value[0] == 0) null else value;
+}
+
+/// Whether `path` is a directory holding at least one readable certificate
+/// under its subject-hash name. A directory of bundles alone would load as
+/// a store with no roots, so it does not count; neither does one whose
+/// hash entries all dangle, so a missing store still fails when trust loads.
+/// noinline: keeps this path buffer out of loadTrust's frame.
+pub noinline fn hashedDirectory(path: [:0]const u8) bool {
+    const directory = std.c.opendir(path) orelse return false;
+    defer _ = std.c.closedir(directory);
+    while (std.c.readdir(directory)) |entry| {
+        const name = std.mem.sliceTo(&entry.name, 0);
+        if (!isSubjectHashName(name)) continue;
+        var path_z: [std.posix.PATH_MAX]u8 = undefined;
+        const entry_path = std.fmt.bufPrintSentinel(&path_z, "{s}/{s}", .{ path, name }, 0) catch continue;
+        if (std.c.access(entry_path, std.c.R_OK) == 0) return true;
+    }
+    return false;
+}
+
+/// Whether `name` is how OpenSSL's directory lookup names a certificate:
+/// eight lowercase hex digits of the subject hash, a dot, and a decimal
+/// sequence number (`9d04f354.0`). CRLs (`.r0`) and other files do not count.
+pub fn isSubjectHashName(name: []const u8) bool {
+    if (name.len < 10 or name[8] != '.') return false;
+    for (name[0..8]) |byte| switch (byte) {
+        '0'...'9', 'a'...'f' => {},
+        else => return false,
+    };
+    for (name[9..]) |byte| if (!std.ascii.isDigit(byte)) return false;
+    return true;
 }
 
 /// Whether a colon-separated list, as OpenSSL splits SSL_CERT_DIR, names at

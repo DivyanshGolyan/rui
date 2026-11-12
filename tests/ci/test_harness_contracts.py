@@ -400,7 +400,7 @@ SLEEP_ORDERED = {
     ("tests/integration/human_cli_integration.py", "main"):
         (2, "input paced past the bare-ESC ambiguity timeout and the repaint window"),
     ("tests/integration/human_cli_integration.py", "renderer_cases"):
-        (2, "settle sleeps before screen and request assertions"),
+        (1, "settle sleeps before screen and request assertions"),
     ("tests/integration/model_fixture.py", "FailureHandler.do_POST"):
         (2, "slow-body and stall peers pace bytes against the client's real deadlines"),
     ("tests/integration/model_fixture.py", "SuccessHandler.do_POST"):
@@ -825,6 +825,28 @@ class ProcessCensusTest(unittest.TestCase):
             with lsof(1, stderr="lsof: status error on /bin/sh: Permission denied\n"), \
                     self.assertRaises(AssertionError):
                 self.semantics.processes_executing("/bin/sh")
+
+
+class SessionListValuesTest(unittest.TestCase):
+    def test_only_read_freshness_is_removed_from_session_comparisons(self):
+        from session_list_fixture import session_values
+        row = {"read_version": "a"*32 + ".1", "reference": "aaaaaa", "revision": "1",
+               "work": {"state": {"kind": "finished", "since": "1"}},
+               "last_line": {"position": "2", "text": "Answer"}, "label": "Label"}
+        before = {"sessions": [row]}
+        later = {"sessions": [{**row, "read_version": "a"*32 + ".2"}]}
+        self.assertEqual(session_values(before), session_values(later))
+        for field, value in (("reference", "bbbbbb"), ("revision", "2"),
+                             ("work", {"state": {"kind": "stopped", "since": "1"}}),
+                             ("last_line", {"position": "3", "text": None}), ("label", "Changed")):
+            with self.subTest(field=field):
+                self.assertNotEqual(session_values(before), session_values({"sessions": [{**row, field: value}]}))
+        self.assertIn("read_version", row, "the comparison must not mutate the reply")
+        with self.assertRaises(KeyError):
+            session_values({"sessions": [{"reference": "aaaaaa"}]})
+        for invalid in ("nope", "a"*32 + ".01", "a"*32 + ".18446744073709551616"):
+            with self.subTest(invalid=invalid), self.assertRaises(AssertionError):
+                session_values({"sessions": [{**row, "read_version": invalid}]})
 
 
 class ImportSafetyTest(unittest.TestCase):

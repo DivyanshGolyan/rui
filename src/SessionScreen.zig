@@ -10,8 +10,10 @@ const ConsentPolicy = @import("session_consent.zig");
 const feed_window = @import("feed_window.zig");
 const Self = @This();
 
-/// The feed and three independent file-backed panel views.
-pub const ViewKind = enum { feed, inspection, action, message };
+/// The presented page, independent of any in-flight reader operation.
+pub const ViewKind = enum { feed, inspection, details, action, message };
+/// Pages loaded into the shared browsing document by its owner.
+pub const FileView = enum { inspection, details, action };
 
 vx: vaxis.Vaxis = undefined,
 memory: Memory = .{},
@@ -169,14 +171,14 @@ pub fn viewed(self: *Self) *Document {
     return switch (self.view) {
         .feed => unreachable,
         .message => &self.staging,
-        .inspection, .action => &self.browsing,
+        .inspection, .details, .action => &self.browsing,
     };
 }
 
 pub fn latest(self: *Self) !void {
     if (self.action_view) |action| {
         const seen = self.action_seen;
-        try self.showFile(action.io, action.file, true);
+        try self.showFile(action.io, action.file, .action);
         self.action_seen = seen;
     } else self.view = .feed;
 }
@@ -200,9 +202,14 @@ fn load(self: *Self, document: *Document, io: std.Io, file: std.Io.File, prefix:
     try document.prepare();
 }
 
-pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, action: bool) !void {
+pub fn showFile(self: *Self, io: std.Io, file: std.Io.File, view: FileView) !void {
     const length = (try file.stat(io)).size;
-    self.view = if (action) .action else .inspection;
+    self.view = switch (view) {
+        .inspection => .inspection,
+        .details => .details,
+        .action => .action,
+    };
+    const action = view == .action;
     try self.load(&self.browsing, io, file, true);
     self.browsing.quotes = action;
     self.browsing.top = .{};
@@ -236,7 +243,7 @@ pub fn refreshFile(self: *Self, io: std.Io, file: std.Io.File) !void {
 fn prepareAction(self: *Self, io: std.Io, file: std.Io.File) !void {
     self.invalidateLayout();
     self.action_view = .{ .io = io, .file = file };
-    if (self.view == .feed) try self.showFile(io, file, true);
+    if (self.view == .feed) try self.showFile(io, file, .action);
 }
 
 /// The decision was consumed: leave its page for the latest view.

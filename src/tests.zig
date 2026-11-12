@@ -38,7 +38,9 @@ test {
     _ = @import("Installation.zig");
     _ = @import("release_candidate.zig");
     _ = @import("upgrade_process.zig");
+    _ = @import("host_coordinator.zig");
     _ = @import("HostLifecycle.zig");
+    _ = @import("host_restart_all.zig");
     _ = @import("host_identity.zig");
     _ = @import("upgrade.zig");
     _ = @import("installation_path.zig");
@@ -68,6 +70,7 @@ test {
     _ = @import("os/system_path.zig");
     _ = @import("execution_turn.zig");
     _ = @import("launch_frame.zig");
+    _ = @import("start_report.zig");
     _ = @import("mysql_url.zig");
     _ = @import("openapi.zig");
     _ = @import("http1/Exchange.zig");

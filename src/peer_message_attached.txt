@@ -1,0 +1,2 @@
+
+Your answer is stored as this request's result and delivered to the sender, your parent Session, when your Turn ends.

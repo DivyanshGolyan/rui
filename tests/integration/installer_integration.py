@@ -97,6 +97,16 @@ if os.environ.get("TEST_INVALID_BUILD"):
 (prefix / "THIRD_PARTY_NOTICES.md").write_text("test notices")
 '''
 
+def installer_command(*args, **kwargs):
+    """The fake build records the new native handoff, not lifecycle policy."""
+    command = fake_rui.script(*args, **kwargs)
+    return command.replace('case "$*" in', r'''case "$*" in
+    "host restart --all")
+        if [ -n "${TEST_RESTART_LOG-}" ]; then printf '%s\n' "$0:$*" >>"$TEST_RESTART_LOG"; fi
+        if [ -n "${TEST_RESTART_OUTPUT-}" ]; then printf '%s\n' "$TEST_RESTART_OUTPUT"; fi
+        exit "${TEST_RESTART_FAILURE-0}" ;;''', 1)
+
+
 class NativeInstallerCase(unittest.TestCase):
     def __init__(self, methodName, *, publisher):
         super().__init__(methodName)
@@ -140,7 +150,7 @@ cp "{self.served}/${{url##*/download/}}" "$output"
         stage = self.root / "stage" / version / name
         minor = version.split(".")[1]
         (stage / "bin").mkdir(parents=True)
-        (stage / "bin/rui").write_text(fake_rui.script(f"rui {reported or version} (abc123)", minor, version, pause=int(minor) >= PAUSE_SINCE))
+        (stage / "bin/rui").write_text(installer_command(f"rui {reported or version} (abc123)", minor, version, pause=int(minor) >= PAUSE_SINCE))
         (stage / "bin/rui").chmod(0o755)
         (stage / "THIRD_PARTY_NOTICES.md").write_text("notices")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -317,7 +327,7 @@ cp "{self.served}/${{url##*/download/}}" "$output"
     def test_manual_release_install_can_replace_tagged_managed_source(self):
         earlier = self.home / ".local/lib/rui/install.source"
         (earlier / "bin").mkdir(parents=True)
-        (earlier / "bin/rui").write_text(fake_rui.script("rui 0.99.0 (dirty)", "40", "source"))
+        (earlier / "bin/rui").write_text(installer_command("rui 0.99.0 (dirty)", "40", "source"))
         (earlier / "bin/rui").chmod(0o755)
         (earlier / "revision").write_text("abcdef0 (local changes)\n")
         (self.bin / "rui").symlink_to(earlier / "bin/rui")
@@ -518,10 +528,26 @@ cp "{self.served}/${{url##*/download/}}" "$output"
                 self.assertEqual((self.bin / "rui").read_text(), "previous rui")
                 self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
 
+    def test_restart_all_uses_selected_binary_and_failure_is_nonfatal(self):
+        log = self.root / "restart.log"
+        result = self.install("0.40.1", TEST_RESTART_LOG=str(log),
+                              TEST_RESTART_OUTPUT="restart receipt", TEST_RESTART_FAILURE="6")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(log.read_text().splitlines(), [f"{self.bin / 'rui'}:host restart --all"])
+        self.assertIn("restart receipt", result.stdout)
+        self.assertIn("some Hosts could not be restarted", result.stderr)
+        log.unlink()
+        result = self.install("0.40.2", TEST_RESTART_LOG=str(log), TEST_RESTART_OUTPUT="restarted receipt")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(log.read_text().splitlines(), [f"{self.bin / 'rui'}:host restart --all"])
+        self.assertIn("restarted receipt", result.stdout)
+        self.assertNotIn("some Hosts could not be restarted", result.stderr)
+
     def test_help_is_read_only_and_bad_arguments_fail(self):
         result = self.install("0.35.0", "0" * 64, "--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Download Rui 0.35.0", result.stdout)
+        self.assertIn("Running Hosts are restarted on the new version.", result.stdout)
         self.assertFalse((self.home / ".local/lib").exists())
         self.assertNotEqual(self.install("0.35.0", "0" * 64, "--unknown").returncode, 0)
 
@@ -580,7 +606,7 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
             "ZIG_LOCAL_PKG_DIR": str(self.root / "selected packages"),
             "RUI_TEST_PUBLISH_HELPER": str(self.publisher),
             # An unreleased build: the report names it by its revision file.
-            "TEST_RUI_SCRIPT": fake_rui.script("rui unreleased (0000000)", "40", "GENERATION"),
+            "TEST_RUI_SCRIPT": installer_command("rui unreleased (0000000)", "40", "GENERATION"),
         }
 
     def install(self, *args, **environment):
@@ -629,7 +655,7 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
         (self.repo / "src/store/schema.zig").write_text(source)
         supported = int(release.SCHEMA.search(source)[1])
         fake_rui.saved_work(self.home, supported - 1)
-        script = fake_rui.script("rui unreleased (0000000)", str(supported), "GENERATION")
+        script = installer_command("rui unreleased (0000000)", str(supported), "GENERATION")
         result = self.install(TEST_RUI_SCRIPT=script, TEST_MINIMUM_SCHEMA=str(supported - 1))
         self.assertEqual(self.report(result)[1:2], [
             f"Your defaults-selected SQLite Store uses format {supported - 1}. Host startup can back it up and migrate it "
@@ -668,10 +694,26 @@ pathlib.Path(sys.argv[sys.argv.index("-o") + 1]).write_bytes(b"fixture archive")
                 self.assertEqual(list((self.home / ".local/lib/rui").glob("install.*")), [])
                 self.assertEqual((self.repo / "build.zig.zon").read_text(), self.manifest)
 
+    def test_restart_all_uses_selected_binary_and_failure_is_nonfatal(self):
+        log = self.root / "restart.log"
+        result = self.install(TEST_RESTART_LOG=str(log),
+                              TEST_RESTART_OUTPUT="restart receipt", TEST_RESTART_FAILURE="6")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(log.read_text().splitlines(), [f"{self.bin / 'rui'}:host restart --all"])
+        self.assertIn("restart receipt", result.stdout)
+        self.assertIn("some Hosts could not be restarted", result.stderr)
+        log.unlink()
+        result = self.install(TEST_RESTART_LOG=str(log), TEST_RESTART_OUTPUT="restarted receipt")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(log.read_text().splitlines(), [f"{self.bin / 'rui'}:host restart --all"])
+        self.assertIn("restarted receipt", result.stdout)
+        self.assertNotIn("some Hosts could not be restarted", result.stderr)
+
     def test_help_is_read_only_and_bad_arguments_fail(self):
         result = self.install("--help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Usage: ./install.sh", result.stdout)
+        self.assertIn("Running Hosts are restarted on the new version.", result.stdout)
         self.assertFalse(self.cache.exists())
         self.assertFalse((self.home / ".local/lib").exists())
         self.assertNotEqual(self.install("--unknown").returncode, 0)
