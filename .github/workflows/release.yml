@@ -112,7 +112,7 @@ jobs:
           retention-days: 3
           if-no-files-found: error
   npm:
-    # The npm tarballs: the compiled client and one package per platform. Nothing is published to npm.
+    # The npm tarballs: the compiled client (npm name ruicode) and one package per platform. Publishing them to npm is manual.
     needs: [plan, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10

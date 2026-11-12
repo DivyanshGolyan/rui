@@ -1,4 +1,4 @@
-// Builds the npm tarballs for one release: the `rui` package (compiled to
+// Builds the npm tarballs for one release: the `ruicode` package (compiled to
 // plain JavaScript, since Node does not strip types under node_modules) and
 // one package per platform holding that platform's `rui` executable (D125,
 // D127, D186). Nothing here publishes anything.
@@ -7,7 +7,7 @@
 //
 // <platform> is a release platform: linux-x86_64, linux-arm64 or darwin-arm64.
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,17 +16,25 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Release platform -> npm package, operating system and CPU. */
 export const PLATFORMS = {
-	"linux-x86_64": { name: "rui-linux-x64", os: "linux", cpu: "x64" },
-	"linux-arm64": { name: "rui-linux-arm64", os: "linux", cpu: "arm64" },
-	"darwin-arm64": { name: "rui-darwin-arm64", os: "darwin", cpu: "arm64" },
+	"linux-x86_64": { name: "ruicode-linux-x64", os: "linux", cpu: "x64" },
+	"linux-arm64": { name: "ruicode-linux-arm64", os: "linux", cpu: "arm64" },
+	"darwin-arm64": { name: "ruicode-darwin-arm64", os: "darwin", cpu: "arm64" },
 };
+
+const REPOSITORY = { type: "git", url: "git+https://github.com/DivyanshGolyan/rui.git" };
+const HOMEPAGE = "https://github.com/DivyanshGolyan/rui";
 
 function writeJson(path, value) {
 	writeFileSync(path, `${JSON.stringify(value, null, "\t")}\n`);
 }
 
+// Release assets keep their rui-* file names (tests/ci/release_publication.py
+// checks every release, old and new, against one list); only the npm package
+// names inside are ruicode*, because npm refused the name `rui`.
 function pack(directory, outdir) {
-	execFileSync("npm", ["pack", "--silent", "--pack-destination", outdir], { cwd: directory, stdio: ["ignore", "ignore", "inherit"] });
+	const [{ filename }] = JSON.parse(execFileSync("npm", ["pack", "--json", "--pack-destination", outdir], { cwd: directory, encoding: "utf8", stdio: ["ignore", "pipe", "inherit"] }));
+	if (!filename.startsWith("ruicode")) throw new Error(`unexpected npm pack output ${filename}`);
+	renameSync(join(outdir, filename), join(outdir, `rui${filename.slice("ruicode".length)}`));
 }
 
 /** Writes the directory of one platform package. */
@@ -43,6 +51,8 @@ export function platformPackage(directory, version, platform, executable) {
 		os: [target.os],
 		cpu: [target.cpu],
 		files: ["bin"],
+		repository: REPOSITORY,
+		homepage: HOMEPAGE,
 	});
 }
 
@@ -59,6 +69,9 @@ export function mainPackage(directory, version) {
 		engines: source.engines,
 		exports: { ".": { types: "./dist/index.d.ts", default: "./dist/index.js" } },
 		files: ["dist", "README.md"],
+		repository: REPOSITORY,
+		homepage: HOMEPAGE,
+		keywords: ["agents", "llm", "agent-runtime", "mcp"],
 		optionalDependencies: Object.fromEntries(Object.values(PLATFORMS).map(({ name }) => [name, version])),
 	});
 }
@@ -72,9 +85,9 @@ function main(args) {
 	mkdirSync(resolve(outdir), { recursive: true });
 	const work = mkdtempSync(join(tmpdir(), "rui-pack-"));
 	try {
-		mkdirSync(join(work, "rui"));
-		mainPackage(join(work, "rui"), version);
-		pack(join(work, "rui"), resolve(outdir));
+		mkdirSync(join(work, "ruicode"));
+		mainPackage(join(work, "ruicode"), version);
+		pack(join(work, "ruicode"), resolve(outdir));
 		for (const entry of executables) {
 			const [platform, executable] = entry.split("=");
 			const directory = join(work, platform);
