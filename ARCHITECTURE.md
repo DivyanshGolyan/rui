@@ -464,7 +464,8 @@ Each Session evolves independently; sharing a settings object creates no shared 
 Tool names remain exactly as supplied by MCP servers, without an inferred server namespace (D120).
 At Host startup, an unreachable server keeps its saved tool copies; a configured server with no records contributes no tools (D147).
 When a create or update spec names a tool absent from the catalog, admission refuses it as `mcp_server_unavailable` if any configured MCP server contributes no tools, otherwise `unknown_tool`.
-This is deliberately not an ownership claim: the refusal's advisory `message` says the name is unknown and lists every empty server that may provide it.
+The refusal's advisory `message` names the first unknown tool in canonical tool-name order for either code (D241).
+This is deliberately not an ownership claim: when servers are empty, it lists every empty server that may provide the tool.
 The same catalog decision applies to a creating Message and `start_agent`; the latter returns a failed tool result naming `spec.tools`, without starting a Session.
 Known tools, including saved copies of an unreachable server's tools, remain admissible subject to the existing provider and child-narrowing rules.
 Only the rejection code is durable; direct replies derive the advisory message from the current Host's catalog and launch configuration, including on replay, with no extra Store read or format change.
