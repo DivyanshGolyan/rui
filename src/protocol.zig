@@ -524,6 +524,7 @@ pub const PermissionMode = cli_value.PermissionMode;
 /// One `list-sessions` row. Every fact comes from the Store read that
 /// produced its page.
 pub const SessionRow = struct {
+    read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
     archive_state: SessionArchiveState = .active,
     reference: Bounded(max_session_bytes) = .{},
     workspace: Bounded(max_workspace_bytes) = .{},
@@ -544,12 +545,11 @@ pub const SessionRow = struct {
     peers: PeerFacts = .{},
 
     pub const json_shape = .{
-        "{\"archive_state\":\"",   Hole{ .tag = SessionArchiveState },    "\",\"reference\":",  Hole{ .string = max_session_bytes },         ",\"workspace\":", Hole{ .string = max_workspace_bytes },
-        ",\"provider\":\"",        Hole{ .tag = Provider },               "\",\"model\":",      Hole{ .string = max_model_bytes },           ",\"tools\":",     Hole{ .text = max_tool_names_json_bytes },
-        ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },         "\",\"parent\":",     Hole{ .optional_string = session_id_bytes }, ",\"label\":",     Hole{ .optional_string = max_label_bytes },
-        ",\"created_at\":\"",      Hole.decimal,                          "\",\"revision\":\"", Hole.decimal,                                "\",\"end\":\"",   Hole.decimal,
-        "\",\"first_message\":",   Hole{ .optional_json = FirstMessage }, ",\"last_line\":",    Hole{ .optional_json = LastLine.Fields },    ",\"work\":",      Hole{ .json = SessionWork },
-        ",\"peers\":",             Hole{ .json = PeerFacts },             "}",
+        "{\"read_version\":\"", Hole{ .text = change_ring.Token.max_bytes }, "\",\"archive_state\":\"", Hole{ .tag = SessionArchiveState },         "\",\"reference\":",  Hole{ .string = max_session_bytes },       ",\"workspace\":",         Hole{ .string = max_workspace_bytes },
+        ",\"provider\":\"",     Hole{ .tag = Provider },                     "\",\"model\":",           Hole{ .string = max_model_bytes },          ",\"tools\":",        Hole{ .text = max_tool_names_json_bytes }, ",\"permission_mode\":\"", Hole{ .tag = PermissionMode },
+        "\",\"parent\":",       Hole{ .optional_string = session_id_bytes }, ",\"label\":",             Hole{ .optional_string = max_label_bytes }, ",\"created_at\":\"", Hole.decimal,                              "\",\"revision\":\"",      Hole.decimal,
+        "\",\"end\":\"",        Hole.decimal,                                "\",\"first_message\":",   Hole{ .optional_json = FirstMessage },      ",\"last_line\":",    Hole{ .optional_json = LastLine.Fields },  ",\"work\":",              Hole{ .json = SessionWork },
+        ",\"peers\":",          Hole{ .json = PeerFacts },                   "}",
     };
     pub const max_json_bytes = shapeBytes(json_shape);
     /// A row may never exceed this, whatever its fields hold: a new field that
@@ -562,6 +562,7 @@ pub const SessionRow = struct {
     /// A row's fields borrowed from wherever they are held, such as a Store
     /// read's row: the one place that orders them into `json_shape`.
     pub const Fields = struct {
+        read_version: change_ring.Token = .{ .instance = @splat(0), .generation = 0 },
         archive_state: SessionArchiveState = .active,
         reference: []const u8,
         workspace: []const u8,
@@ -583,11 +584,11 @@ pub const SessionRow = struct {
         pub const max_json_bytes = SessionRow.max_json_bytes;
 
         pub fn writeJson(f: *const Fields, out: *std.Io.Writer) !void {
+            var token_buffer: [change_ring.Token.max_bytes]u8 = undefined;
             try writeShape(out, json_shape, .{
-                f.archive_state, f.reference,       f.workspace,     f.provider,  f.model,
-                f.tools,         f.permission_mode, f.parent,        f.label,     f.created_at,
-                f.revision,      f.end,             f.first_message, f.last_line, f.work,
-                f.peers,
+                f.read_version.format(&token_buffer), f.archive_state,   f.reference, f.workspace, f.provider,   f.model,
+                f.tools,                              f.permission_mode, f.parent,    f.label,     f.created_at, f.revision,
+                f.end,                                f.first_message,   f.last_line, f.work,      f.peers,
             });
         }
     };
@@ -605,6 +606,7 @@ pub const SessionRow = struct {
         }
         try tools_writer.writeByte(']');
         const fields: Fields = .{
+            .read_version = self.read_version,
             .archive_state = self.archive_state,
             .reference = self.reference.slice(),
             .workspace = self.workspace.slice(),
