@@ -24,6 +24,7 @@ const queued_line = @import("queued_line.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const status_page = @import("status_page.zig");
+const ChatInfo = @import("chat_info.zig");
 const ReadPhase = departure.ReadPhase;
 const feed_reads = @import("feed_reads.zig");
 const feed_window = @import("feed_window.zig");
@@ -43,6 +44,7 @@ pub const RenderedRow = struct {
     collapsed_count: usize = 0,
 };
 
+pub const Configure = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, ChatInfo.Edit) anyerror!bool;
 pub const Command = *const fn (std.process.Init, client.ReadContext, []const u8, []const u8, []u8) anyerror!void;
 /// Writes /requests' recovery handles, and offers each saved Message among
 /// them to the page's list.
@@ -50,12 +52,13 @@ pub const Requests = *const fn (std.process.Init, client.ReadContext, []const u8
 /// The saved Messages a /requests page offers, under the Store's key bound.
 pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
 /// Local-only adapter: consumes an already-read Current and files, never
-/// Host transport. Takes what /status reports of the Session, whose
+/// Host transport. Takes the chat info inspection of the Session, whose
 /// attention rows are in the first file, into the Session given. True when
 /// it differs from the shown one (always without one): the second file then
 /// lists its Actions awaiting approval, as the page shows them.
 pub const Status = *const fn (std.Io, *const protocol_reply.Current, std.Io.File, *status_page.Session, ?*const status_page.Session, std.Io.File) anyerror!bool;
-pub const Inspection = union(enum) { status, requests, command, copy: Copy };
+
+pub const Inspection = union(enum) { requests, command, copy: Copy };
 
 /// What a /copy sends: the last answer or its last code block to the
 /// clipboard, or the last answer to a file.
@@ -77,9 +80,9 @@ pub fn copyName(buffer: *[copy_name_bytes]u8, session: []const u8) []const u8 {
 /// Live output renders into the inspection scratch file and shows whole, with
 /// its footer, status and cursor, in one UI step after join.
 /// The frontend's private scratch files, which a read borrows whole.
-/// `status` holds the /status page shown; `actions` the Actions each of the
-/// two /status reads it alternates between lists.
-pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, status: std.Io.File, actions: [2]std.Io.File };
+/// Inspection is worker-owned; details is UI-owned repair scratch.
+/// The paired captures alternate without borrowing live widget storage.
+pub const Files = struct { scratch: std.Io.File, action: std.Io.File, inspection: std.Io.File, details: std.Io.File, actions: [2]std.Io.File };
 
 /// The moment a Session line was read at. Every input of the context
 /// estimate takes a Session position and every settings change a revision,
@@ -224,6 +227,8 @@ pub const Job = struct {
     colour: bool = false,
     width_method: Viewport.Method = .wcwidth,
     command: Command = undefined,
+    configure: ?Configure = null,
+    info_edit: ?ChatInfo.Edit = null,
     requests: Requests = undefined,
     status: Status = undefined,
     phase: ReadPhase = .activity,
@@ -239,13 +244,15 @@ pub const Job = struct {
     /// Retry request: newest person Message strictly before this ending.
     retry: ?Key = null,
     queued_line: u64 = 0,
-    inspection_kind: Inspection = .status,
+    inspection_kind: Inspection = .requests,
     // A command observes exit or a signal as an interruption.
     interrupted: *client.Cancellation = undefined,
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
-    // A scan takes /status from its own Current capture: when the user
+
+    // A scan takes chat info from its own Current capture: when the user
+
     // asks for it, or while the page shows `status_shown`, into
     // `status_taken`, listing its Actions in `status_actions`.
     open_status: bool = false,
@@ -265,7 +272,7 @@ pub const Job = struct {
         line: ?Line = null,
         // The unlabelled Session's name, when this read looked it up.
         hint: ?Hint = null,
-        // `status_taken` holds /status from one Current capture, which
+        // `status_taken` holds chat info from one Current capture, which
         // differs from the shown page.
         status: bool = false,
         rows: [16]RenderedRow = undefined,
@@ -287,6 +294,7 @@ pub const Job = struct {
         rendering: bool = false,
         // Only confirmed stderr restoration permits exit to replay this page.
         command_stderr_restored: bool = false,
+        info_saved: bool = false,
         action: ?u64 = null,
         summary: View.ActionSummary = .{},
         // Bytes of live output staged in the inspection scratch file.
@@ -300,6 +308,19 @@ pub const Job = struct {
         recall_passed: bool = false,
         retry: ?Retry = null,
     } = .{},
+
+    /// The worker borrows only its Job, including string edit storage.
+    pub fn setInfoEdit(self: *Job, edit: ChatInfo.Edit) !void {
+        self.info_edit = edit;
+        switch (edit) {
+            .label, .model => |text| {
+                if (text.len > self.command_text.len) return error.ValueTooLong;
+                @memcpy(self.command_text[0..text.len], text);
+                self.info_edit = if (edit == .label) .{ .label = self.command_text[0..text.len] } else .{ .model = self.command_text[0..text.len] };
+            },
+            else => {},
+        }
+    }
 
     /// Call only after a successful reader join. Scratch is borrowed until the
     /// next reader starts; consume/copy the exact range before reusing it.
@@ -470,11 +491,13 @@ const RecallStaging = struct {
 /// Host commands keep their one-shot output owners. Their complete stdout and
 /// stderr become an inspection page while the Session screen keeps drawing
 /// through its own descriptor. No command reads terminal input.
+pub const runInfoConfigure = runCommand;
+
 pub fn runCommand(raw: *anyopaque, task: *Task) !void {
     const job: *Job = @ptrCast(@alignCast(raw));
     var read = task.readContext();
     read.cancellation = job.interrupted;
-    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length] };
+    const run: CommandRun = .{ .command = job.command, .init = job.init, .requests = read, .store = job.store, .session = job.session, .line = job.command_text[0..job.command_text_length], .configure = job.configure, .edit = job.info_edit, .saved = &job.result.info_saved };
     const ended = run.into(job.files.inspection);
     job.result.rendering = ended.rendering;
     job.result.command_stderr_restored = ended.stderr_restored;
@@ -491,6 +514,16 @@ pub const CommandRun = struct {
     session: []const u8,
     /// Decoded in place.
     line: []u8,
+    configure: ?Configure = null,
+    edit: ?ChatInfo.Edit = null,
+    saved: ?*bool = null,
+
+    fn execute(self: CommandRun) !void {
+        if (self.edit) |edit| {
+            const configure = self.configure orelse return error.ConfigureUnavailable;
+            self.saved.?.* = try configure(self.init, self.requests, self.store, self.session, edit);
+        } else try self.command(self.init, self.requests, self.store, self.session, self.line);
+    }
 
     /// How a run ended.
     pub const Ended = struct {
@@ -516,7 +549,7 @@ pub const CommandRun = struct {
         };
         if (saved[0] < 0 or saved[1] < 0) return .{ .outcome = error.TerminalCleanupFailed };
         // Redirected descriptors are output custody: any failure now is fatal.
-        const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.command(self.init, self.requests, self.store, self.session, self.line);
+        const result = if (std.c.dup2(page.handle, 1) < 0 or std.c.dup2(page.handle, 2) < 0) error.TerminalCleanupFailed else self.execute();
         const stdout_restored = std.c.dup2(saved[0], 1) >= 0;
         const stderr_restored = std.c.dup2(saved[1], 2) >= 0;
         if (!stdout_restored or !stderr_restored) {
@@ -1087,7 +1120,7 @@ test "session_reads a Host command writes its page and inherits no saved termina
     const page = try tmp.dir.createFile(io, "inspection", .{ .read = true });
     defer page.close(io);
     var interrupted: client.Cancellation = .{};
-    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .status = undefined, .actions = undefined }, .command = Probe.command, .interrupted = &interrupted };
+    var job: Job = .{ .files = .{ .scratch = undefined, .action = undefined, .inspection = page, .details = undefined, .actions = undefined }, .command = Probe.command, .interrupted = &interrupted };
     var task: Task = .{ .io = io };
     Probe.before = Probe.inheritable();
     try runCommand(&job, &task);
@@ -1406,7 +1439,7 @@ const FakeHost = struct {
                 defer inspection.close(io);
                 action.job.store = root;
                 if (action.job.session.len == 0) action.job.session = "k7m2qx";
-                action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .status = inspection, .actions = .{ inspection, inspection } };
+                action.job.files = .{ .scratch = inspection, .action = inspection, .inspection = inspection, .details = inspection, .actions = .{ inspection, inspection } };
                 var task: Task = .{ .io = io };
                 try action.run_read(action.job, &task);
                 host.shown = host.output[0..try inspection.readPositionalAll(io, &host.output, 0)];
@@ -2120,7 +2153,7 @@ test "session_reads retry stages exact multi-window bytes before its ending and 
             defer file.close(io);
             action.job.store = root;
             action.job.session = "k7m2qx";
-            action.job.files = .{ .scratch = file, .inspection = file, .action = file, .status = file, .actions = .{ file, file } };
+            action.job.files = .{ .scratch = file, .inspection = file, .action = file, .details = file, .actions = .{ file, file } };
             var task: Task = .{};
             try task.start(io, action.job, retry);
             try task.join();
@@ -2218,7 +2251,7 @@ test "session_reads capped answer target opens the whole authenticated answer" {
             defer inspection.close(io);
             const scratch = try dir.createFile(io, "message-stage", .{ .read = true });
             defer scratch.close(io);
-            var job: Job = .{ .opening = true, .store = root, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 1 }, .files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .status = inspection, .actions = .{ inspection, inspection } } };
+            var job: Job = .{ .opening = true, .store = root, .session = "k7m2qx", .line_read = .{ .revision = 1, .end = 1 }, .files = .{ .scratch = scratch, .inspection = inspection, .action = inspection, .details = inspection, .actions = .{ inspection, inspection } } };
             var task: Task = .{ .io = io };
             try scan(&job, &task);
             const row = job.result.rows[0];
@@ -2321,4 +2354,18 @@ test "session_reads summary byte overflow retains neither partial mark nor targe
         try document.prepare();
         try std.testing.expectEqual(@as(usize, 1), document.collapsed(0, document.length).count);
     }
+}
+
+test "chat info worker owns typed model and label bytes until completion" {
+    var job: Job = .{};
+    var label = "lane four".*;
+    try job.setInfoEdit(.{ .label = &label });
+    @memset(&label, 'x');
+    try std.testing.expectEqualStrings("lane four", job.info_edit.?.label);
+    var model = "future-chat".*;
+    try job.setInfoEdit(.{ .model = &model });
+    @memset(&model, 'x');
+    try std.testing.expectEqualStrings("future-chat", job.info_edit.?.model);
+    try job.setInfoEdit(.{ .permission = .ask });
+    try std.testing.expectEqual(ChatInfo.Edit{ .permission = .ask }, job.info_edit.?);
 }

@@ -11,6 +11,7 @@ const cores = .{
     .{ "activity_facts.zig", @import("activity_facts.zig") },
     .{ "activity_read.zig", @import("activity_read.zig") },
     .{ "activity_reply.zig", @import("activity_reply.zig") },
+    .{ "app_input.zig", @import("app_input.zig") },
     .{ "attempt.zig", @import("attempt.zig") },
     .{ "attention.zig", @import("attention.zig") },
     .{ "bash_action_text.zig", @import("bash_action_text.zig") },
@@ -343,6 +344,7 @@ fn benchmarkRows(rows: []overview_view.Listed, now_s: u64, shift: u64) void {
         row.* = .{
             .reference = reference,
             .workspace = workspaces[at % workspaces.len],
+            .provider = .codex,
             .label = if (at % 3 == 0) null else "Find why the store tests fail on the second run",
             .state = state,
             .first = .{ .position = 1, .admission = at + 1, .sender = null },

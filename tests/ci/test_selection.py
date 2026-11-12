@@ -80,9 +80,9 @@ class AssertedTextSelectionTest(unittest.TestCase):
                                                                         "A shell single-quoted literal"}})
 
     def test_keys_panel_text_selects_human_cli_integration(self):
-        path = "src/keys_panel.zig"
+        path = "src/keymap.zig"
         text = (Path(__file__).resolve().parents[2] / path).read_text()
-        self.assertIn("ctrl+p   earlier message", text)
+        self.assertIn('"earlier message"', text)
         result = select([path], "review", AVAILABLE, contents={path: (text, text)})
         self.assertIn("human-cli-integration", result["targets"])
         self.assertIn("Asserted text: a fixture waits for text this file draws", result["reasons"])
@@ -1009,7 +1009,8 @@ class SelectionTest(unittest.TestCase):
     def test_codex_credential_values_keep_portable_and_native_owner_checks(self):
         for path in ("src/codex_credential_policy.zig", "src/codex_token_wire.zig"):
             result = select([path], "review", AVAILABLE)
-            native = ["codex-credential-integration", "codex-h2-integration", "codex-integration", "test", "test-logic"]
+            # The ChatGPT plan sign-in keeps its records in the same custody.
+            native = ["chatgpt-plan-integration", "codex-credential-integration", "codex-h2-integration", "codex-integration", "test", "test-logic"]
             self.assertEqual(result["native_targets"], native)
             self.assertEqual(result["targets"], sorted(native + ["stack-frames"]))
 

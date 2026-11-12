@@ -49,8 +49,7 @@ pub const ConfigureInput = struct {
     /// saved effort applies only where the caller named no effort; "default"
     /// takes the model's own. Saved permissions apply only when not named.
     pub fn completeCreation(self: *ConfigureInput, provider: Provider, model: []const u8, saved_effort: ?ReasoningEffort, saved_permission: ?PermissionMode, compaction: *[20]u8) void {
-        if (!self.reasoning_effort.present) self.reasoning_effort = startEffort(model, saved_effort);
-        if (self.reasoning_effort.present and self.reasoning_effort.value == null) self.reasoning_effort = startEffort(model, null);
+        self.reasoning_effort = creationEffort(model, self.reasoning_effort, saved_effort);
         if (!self.compaction_trigger.present or self.compaction_trigger.value == null) self.compaction_trigger = .{ .present = true, .value = compactionTrigger(provider, model, compaction) };
         if (self.tools == null) self.tools = product_defaults.tools;
         if (!self.permission_mode.present) self.permission_mode = .{ .present = true, .value = if (saved_permission) |mode| @tagName(mode) else product_defaults.permission_mode };
@@ -73,6 +72,15 @@ pub const ConfigureInput = struct {
 /// A policy setting as a caller spells it: "default" resets it.
 pub fn policy(text: []const u8) OptionalPolicy {
     return .{ .present = true, .value = if (std.mem.eql(u8, text, "default")) null else text };
+}
+
+/// A fresh Session's complete effort policy. Explicit values stay intact
+/// for admission; omission reads saved effort and default ignores it.
+/// Every fallback remains with client_defaults.startEffort.
+pub fn creationEffort(model: []const u8, held: OptionalPolicy, saved: ?ReasoningEffort) OptionalPolicy {
+    if (!held.present) return startEffort(model, saved);
+    if (held.value == null) return startEffort(model, null);
+    return held;
 }
 
 fn startEffort(model: []const u8, saved: ?ReasoningEffort) OptionalPolicy {

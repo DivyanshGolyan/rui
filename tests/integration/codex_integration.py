@@ -723,7 +723,7 @@ def openai_journey():
 
         host = start(store, url, "--test-openai-fixture-endpoint", url)
         status = fixture.command("host", "status", "--store", store)
-        assert status["capabilities"]["providers"] == {"codex": "chatgpt_device", "openai": "key_file"}, status
+        assert status["capabilities"]["providers"] == {"codex": "chatgpt_device", "openai": "key_file", "chatgpt": "unserved"}, status
         sessions = {}
         for provider in ("codex", "openai"):
             configured = fixture.command(

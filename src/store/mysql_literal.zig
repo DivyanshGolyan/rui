@@ -238,7 +238,7 @@ test "@now writes the bound second, and @served each provider's binding" {
         Args,
         .{ .provider = "x" },
         .{ .now = 1_700_000_000, .served = &routes },
-        "SELECT 1700000000,(_utf8mb4 X'78' COLLATE utf8mb4_0900_bin IN (_utf8mb4 X'636f646578' COLLATE utf8mb4_0900_bin,_utf8mb4 X'' COLLATE utf8mb4_0900_bin))",
+        "SELECT 1700000000,(_utf8mb4 X'78' COLLATE utf8mb4_0900_bin IN (_utf8mb4 X'636f646578' COLLATE utf8mb4_0900_bin,_utf8mb4 X'' COLLATE utf8mb4_0900_bin,_utf8mb4 X'' COLLATE utf8mb4_0900_bin))",
     );
 }
 

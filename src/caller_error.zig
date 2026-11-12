@@ -54,9 +54,11 @@ pub const Code = enum {
     host_not_serving,
     host_incompatible,
     host_identity_unconfirmed,
+    host_restart_failed,
     upgrade_ineligible,
     upgrade_release_invalid,
     upgrade_preparation_failed,
+    upgrade_download_failed,
     host_stopping,
     mysql_host_unavailable,
     store_path_malformed,
@@ -246,10 +248,12 @@ fn mapped(err: anyerror) ?Code {
         error.OutOfMemory => .memory_exhausted,
         error.SavedRequestWireVersionMismatch => .request_wire_incompatible,
         error.HostNotServing => .host_not_serving,
+        error.HostRestartFailed => .host_restart_failed,
         error.IncompatibleHost => .host_incompatible,
         error.InvalidHostInfo, error.HostPeerIdentityUnavailable, error.HostProcessSnapshotUnavailable, error.InvalidHostProcessSnapshot => .host_identity_unconfirmed,
         error.IneligibleInstallation, error.UpgradeIneligible, error.InvalidInstallationHome => .upgrade_ineligible,
-        error.InvalidReleaseVersion, error.InvalidReleaseChecksum, error.DuplicateReleaseChecksum, error.MissingReleaseChecksum, error.MissingOrDuplicateReleaseAsset, error.NotStableRelease, error.UnpinnedReleaseAsset, error.InvalidReleaseEndpoint, error.UnsupportedReleasePlatform => .upgrade_release_invalid,
+        error.InvalidReleaseVersion, error.InvalidReleaseChecksum, error.DuplicateReleaseChecksum, error.MissingReleaseChecksum, error.InvalidReleaseEndpoint, error.UnsupportedReleasePlatform => .upgrade_release_invalid,
+        error.ReleaseDownloadFailed => .upgrade_download_failed,
         error.InvalidManagedBuild, error.InvalidReleaseExecutable, error.ReleaseArchiveTooLarge, error.ReleaseChecksumMismatch, error.ReleaseExecutableVersionMismatch, error.UnsafeReleaseArchive, error.UpgradeChildFailed => .upgrade_preparation_failed,
         error.HostStopping => .host_stopping,
         error.MysqlHostUnavailable => .mysql_host_unavailable,
@@ -410,8 +414,10 @@ pub fn facts(code: Code) Facts {
         .environment_too_large => .{ .act = .fix, .input = .arguments, .accepted = .{ .grammar = "an inherited environment within the Message byte limit" }, .says = "The inherited environment is too large for a Message.", .next = "Unset or shorten the largest variables, then recover the saved request with rui request recover HANDLE." },
         .internal_unexpected => .{ .act = .report, .input = null, .accepted = .none, .says = "Rui could not complete this operation because of an internal fault.", .next = "Keep the saved request, if any, and report this code with the command to the Rui maintainer." },
         .host_identity_unconfirmed => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host's exact process/build identity could not be verified.", .next = "Inspect this Store with its owning client. Do not pause a guessed or replacement Host." },
+        .host_restart_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "One or more Hosts could not be restarted or confirmed.", .next = "Follow the per-Host instructions above, then retry rui host restart --all; do not stop a guessed or replacement Host." },
         .upgrade_ineligible => .{ .act = .operate, .input = null, .accepted = .none, .says = "This installation is not eligible for automatic release upgrade.", .next = "Use the standalone release installer for a managed source build, or the application/package owner for an unmanaged binary." },
-        .upgrade_release_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "Published stable release metadata or platform assets could not be validated.", .next = "Check the published release and supported platform; no installation or Host was changed." },
+        .upgrade_release_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "Published stable release tag or platform checksums could not be validated.", .next = "Check the published release and supported platform; no installation or Host was changed." },
+        .upgrade_download_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui could not download release information or the archive from GitHub.", .next = "Check network access, then retry; nothing was changed." },
         .upgrade_preparation_failed => .{ .act = .operate, .input = null, .accepted = .none, .says = "Release preparation or validation failed.", .next = "Check network access, disk space and the published archive. The selected build and Host were not changed before publication." },
         .host_not_serving => .{ .act = .operate, .input = null, .accepted = .none, .says = "No Host serves this Store.", .next = "Start its Host with the command below, then retry the same saved request unchanged." },
         .host_incompatible => .{ .act = .operate, .input = null, .accepted = .none, .says = "The Host serving this Store runs a different Rui version that does not speak this rui's protocol.", .next = "Pause it with the Rui version that started it, then start it again with rui host start --store PATH." },
@@ -425,7 +431,7 @@ pub fn facts(code: Code) Facts {
         .preferences_invalid => .{ .act = .operate, .input = null, .accepted = .none, .says = "The saved preferences are malformed or use an unsupported version.", .next = "Inspect HOME/.config/rui/preferences; repair or remove that file, then run rui defaults configure." },
         .preferences_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "Rui cannot read or save private preferences.", .next = "Check ownership and access to HOME/.config/rui (0700) and its preferences file (0600), then run rui defaults inspect." },
         .preference_store_invalid => .{ .act = .fix, .input = .identity, .accepted = .{ .grammar = "an existing private absolute Store directory" }, .says = "The default Store path is invalid.", .next = "Run rui defaults configure --store PATH with an existing private absolute directory." },
-        .preference_provider_invalid => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The default provider is unsupported.", .next = "Run rui defaults configure --provider codex or --provider openai." },
+        .preference_provider_invalid => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "The default provider is unsupported.", .next = "Run rui defaults configure --provider codex, --provider openai or --provider chatgpt." },
         .preference_model_invalid => .{ .act = .fix, .input = .model, .accepted = .{ .grammar = "a supported model ID of 1-256 printable non-space ASCII bytes" }, .says = "The default model is invalid or unsupported.", .next = "Run rui defaults configure --clear-model, or set --provider and a supported --model." },
         .preference_provider_required => .{ .act = .fix, .input = .provider, .accepted = .{ .closed = names(provider_name.Provider) }, .says = "Saving a default model requires a provider.", .next = "Run rui defaults configure --provider codex --model MODEL, or --provider openai --model MODEL." },
         .home_unavailable => .{ .act = .operate, .input = null, .accepted = .none, .says = "HOME is missing or is not an absolute directory.", .next = "Set HOME to your absolute home directory, or supply --store PATH when only a Store is needed." },
@@ -828,4 +834,10 @@ test "saved request wire mismatch has an explicit recovery diagnostic" {
     try writeLine(&out, .request_wire_incompatible, .{ .resource = "request", .operation = "recover" });
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "different Rui wire version; it was not sent") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.buffered(), "do not resubmit it with a new key") != null);
+}
+
+test "release download failures have their own caller code" {
+    try std.testing.expectEqual(Code.upgrade_download_failed, of(error.ReleaseDownloadFailed));
+    try std.testing.expectEqual(Code.upgrade_preparation_failed, of(error.UpgradeChildFailed));
+    try std.testing.expectEqual(Code.upgrade_release_invalid, of(error.InvalidReleaseEndpoint));
 }

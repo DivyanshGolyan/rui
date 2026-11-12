@@ -32,6 +32,10 @@ pub const fixture_access_token = "e30.eyJleHAiOjQxMDI0NDQ4MDB9.c2ln";
 pub const fixture_id_token = "e30.eyJjaGF0Z3B0X2FjY291bnRfaWQiOiJydWktdGVzdC1hY2NvdW50In0.c2ln";
 pub const fixture_fedramp_id_token = "e30.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoicnVpLXRlc3QtYWNjb3VudCIsImNoYXRncHRfYWNjb3VudF9pc19mZWRyYW1wIjp0cnVlfX0.c2ln";
 pub const fixture_account_id = "rui-test-account";
+// The client a plan fixture's record names. A plan sign-in's client is the
+// one the issuer registered, so no Rui login records this one, and only a
+// test-only fixture endpoint accepts it.
+pub const fixture_client_id = "rui-test-plan-client";
 
 pub fn isFixtureId(id_token: []const u8) bool {
     return std.mem.eql(u8, id_token, fixture_id_token) or
@@ -126,7 +130,8 @@ pub fn opaqueRefreshDue(refreshed_at: i64, now_seconds: i64) bool {
 }
 
 /// A compact access token refreshes `margin_seconds` before its expiry; an
-/// opaque token refreshes eight days after the last successful exchange.
+/// opaque Codex token refreshes eight days after the last successful
+/// exchange. A plan record always has an expiry (`expiryOf`).
 pub fn refreshDue(record: *const Record, now_seconds: i64, margin_seconds: i64) bool {
     if (record.expires_at != 0) return record.expires_at <= now_seconds +| margin_seconds;
     return opaqueRefreshDue(record.refreshed_at, now_seconds);
@@ -145,6 +150,12 @@ pub fn validateSelected(record: *const Record, fixture: bool, scratch: *ClaimScr
     if (!std.mem.eql(u8, account.id.slice(), record.account_id.slice()) or
         account.fedramp != record.fedramp) return error.AccountMismatch;
     if (try expiryOf(record, scratch) != record.expires_at) return error.InvalidCredentialExpiry;
+}
+
+/// A fixture whose token endpoint is a loopback accepts only a record issued
+/// to `fixture_client_id`, so no real refresh token or access token reaches it.
+pub fn requireFixtureClient(record: *const Record) !void {
+    if (!std.mem.eql(u8, record.client_id.slice(), fixture_client_id)) return error.FixtureRequiresSyntheticCredential;
 }
 
 /// The account `id_token` names for a record of `record`'s kind. A Codex
@@ -166,9 +177,13 @@ pub fn deriveClaims(record: *Record, scratch: *ClaimScratch) !void {
     record.expires_at = try expiryOf(record, scratch);
 }
 
-/// The expiry a record's access token carries; an opaque token has none (0).
+/// The expiry a record's access token carries. An opaque Codex token has
+/// none (0); a plan sign-in's token must carry one, since nothing says how
+/// long an opaque plan token lasts.
 pub fn expiryOf(record: *const Record, scratch: *ClaimScratch) !i64 {
-    return (try parseExpiry(record.access_token.slice(), scratch)) orelse 0;
+    const expiry = try parseExpiry(record.access_token.slice(), scratch);
+    if (record.client_id.len != 0) return expiry orelse error.InvalidCredentialExpiry;
+    return expiry orelse 0;
 }
 
 /// A pending record means an earlier claimant may have consumed the refresh
@@ -285,6 +300,7 @@ pub fn validateRecord(record: *const Record) !void {
     try validateText(record.access_token.slice(), false);
     try validateText(record.refresh_token.slice(), false);
     if (record.expires_at < 0 or record.refreshed_at <= 0) return error.InvalidCredentialTime;
+    if (record.client_id.len != 0 and record.expires_at == 0) return error.InvalidCredentialExpiry;
     var segments = std.mem.splitScalar(u8, record.access_token.slice(), '.');
     var count: usize = 0;
     while (segments.next()) |segment| {
@@ -674,6 +690,41 @@ test "selection refreshes inside the launch margin and rejects unusable records"
     try fixtureRecord(&record);
     record.expires_at = 1234;
     try std.testing.expectError(error.InvalidCredentialExpiry, select(&record, false, 0, &claims));
+}
+
+test "a plan record refreshes inside the launch margin of its token's expiry, never on the opaque clock" {
+    var claims: ClaimScratch = undefined;
+    var record: Record = undefined;
+    try fixtureRecord(&record);
+    try record.client_id.set(fixture_client_id);
+    try record.account_id.set("plan-subject");
+    try record.id_token.set("e30.eyJzdWIiOiJwbGFuLXN1YmplY3QifQ.c2ln");
+    try std.testing.expectEqual(Selection.use, try select(&record, false, fixture_expires_at - 301, &claims));
+    try std.testing.expectEqual(Selection.refresh, try select(&record, false, fixture_expires_at - 300, &claims));
+    // An opaque plan token has no expiry to refresh by: no file holds one,
+    // and no login or refresh derives one.
+    try record.access_token.set("opaque-access");
+    record.expires_at = 0;
+    try std.testing.expectError(error.InvalidCredentialExpiry, select(&record, false, 0, &claims));
+    try std.testing.expectError(error.InvalidCredentialExpiry, deriveClaims(&record, &claims));
+    try std.testing.expectError(error.InvalidCredentialExpiry, validateRecord(&record));
+    // A Codex record keeps its opaque clock.
+    record.client_id = .{};
+    try record.account_id.set(fixture_account_id);
+    try record.id_token.set(fixture_id_token);
+    try deriveClaims(&record, &claims);
+    try std.testing.expectEqual(@as(i64, 0), record.expires_at);
+    try validateRecord(&record);
+}
+
+test "a fixture token endpoint takes only the fixture client's record" {
+    var record: Record = undefined;
+    try fixtureRecord(&record);
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, requireFixtureClient(&record));
+    try record.client_id.set("oaiapp_real");
+    try std.testing.expectError(error.FixtureRequiresSyntheticCredential, requireFixtureClient(&record));
+    try record.client_id.set(fixture_client_id);
+    try requireFixtureClient(&record);
 }
 
 test "launch rejects a leased token that expired after selection" {

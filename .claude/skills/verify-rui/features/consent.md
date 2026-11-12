@@ -12,7 +12,7 @@ In ask mode, a proposed Bash command appears with its working directory. The use
 
 ## How to get to it (user POV)
 
-- In Session `approve` (or after `/configure --permission-mode ask`), send a request whose model reply proposes Bash.
+- In Session `approve` (or after choosing **ask first** on chat info’s **Permissions** field), send a request whose model reply proposes Bash.
 
 ## Driving it with verify-rui
 

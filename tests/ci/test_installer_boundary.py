@@ -21,9 +21,9 @@ class InstallerBoundaryTest(unittest.TestCase):
             spec.loader.exec_module(module)
             publisher = Path("/explicit/compiled/production/rui")
             cases = list(module.installer_suite(publisher))
-        self.assertEqual(len(cases), 40)
-        self.assertEqual(sum(isinstance(case, module.ReleaseInstallerTest) for case in cases), 29)
-        self.assertEqual(sum(isinstance(case, module.SourceInstallerTest) for case in cases), 11)
+        self.assertEqual(len(cases), 42)
+        self.assertEqual(sum(isinstance(case, module.ReleaseInstallerTest) for case in cases), 30)
+        self.assertEqual(sum(isinstance(case, module.SourceInstallerTest) for case in cases), 12)
         self.assertTrue(all(case.publisher == publisher for case in cases))
         self.assertTrue(all(not getattr(case, "__unittest_skip__", False) for case in cases))
 

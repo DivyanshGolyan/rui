@@ -13,7 +13,7 @@ if [ $# = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
     printf '%s\n' "Usage: install.sh" \
         "Download Rui $version for this platform and install it in ~/.local/bin." \
         'Adds ~/.local/bin to your shell profile when PATH lacks it (RUI_NO_MODIFY_PATH=1 skips this).' \
-        'Preserves Stores, credentials, running Hosts and earlier builds.'
+        'Preserves Stores, credentials and earlier builds. Running Hosts are restarted on the new version.'
     exit 0
 fi
 if [ $# != 0 ]; then
@@ -93,3 +93,9 @@ test -f "$release/THIRD_PARTY_NOTICES.md"
 published=1
 format=${version#0.}
 rui_publish "$prefix" "$release" "${format%%.*}" released-install
+
+# Restart through the selected command, never a PATH-shadowing older binary.
+# Activation failure does not undo a complete, successfully published install.
+if ! "$prefix/bin/rui" host restart --all; then
+    printf '%s\n' 'Rui was installed, but some Hosts could not be restarted; follow the instructions above and retry rui host restart --all.' >&2
+fi
