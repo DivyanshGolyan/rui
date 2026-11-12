@@ -3241,7 +3241,7 @@ fn statusRows(state: *const State) u16 {
 
 /// Provider bands, as `headerSegments` draws them.
 fn topRows(state: *const State) usize {
-    return @intFromBool(band(state) != null);
+    return @intFromBool(band(state) != null) + @as(usize, @intFromBool(showsNewSession(state)));
 }
 
 /// The list between the rule and the draft as it is now, while the person
@@ -3599,31 +3599,36 @@ pub fn writeSettings(settings: *const StartSettings, writer: *std.Io.Writer) std
     }
 }
 
-/// The New Session entry, the blank line under it, then every Session in
-/// screen order. The gap is its own line, so New Session's highlight never
-/// covers it and no press lands on it.
+/// Items use the same words and click meanings whether pinned or scrolled.
 pub const Item = union(enum) { new_session, gap, row: usize, empty };
 
-/// Lines before the first Session: New Session and its gap.
-pub const first_row_line = 2;
-
-pub fn listLength(state: *const State) usize {
-    return state.order.items.len + first_row_line;
+/// The new-conversation control belongs to the overview, never a chat sidebar.
+pub fn showsNewSession(state: *const State) bool {
+    return state.conversing == null and state.listArea() == .sessions;
 }
 
-/// Settings is pinned outside the list and therefore has no list line.
+/// A blank line separates the pinned control from Sessions at the scroll origin.
+/// It scrolls away, leaving the above marker immediately under the pinned row.
+pub fn firstRowLine(state: *const State) usize {
+    return @intFromBool(showsNewSession(state));
+}
+
+pub fn listLength(state: *const State) usize {
+    return state.order.items.len + firstRowLine(state);
+}
+
+/// Pinned controls have no scrollable list line.
 pub fn selectedLine(state: *const State) ?usize {
     return switch (state.selected) {
-        .new_session => 0,
-        .session => |ref| if (position(state, ref)) |at| at + first_row_line else null,
-        .settings => null,
+        .session => |ref| if (position(state, ref)) |at| at + firstRowLine(state) else null,
+        .new_session, .settings => null,
     };
 }
 
 pub fn listItem(state: *const State, line: usize) ?Item {
-    if (line == 0) return .new_session;
-    if (line == 1) return .gap;
-    return if (line - first_row_line < state.order.items.len) .{ .row = line - first_row_line } else null;
+    const first = firstRowLine(state);
+    if (line < first) return .gap;
+    return if (line - first < state.order.items.len) .{ .row = line - first } else null;
 }
 
 /// The panel in the Sessions' rows: its heading, with the way back at the
@@ -4176,6 +4181,10 @@ const Frame = struct {
                 count += 1;
             }
         } else {
+            if (showsNewSession(state)) {
+                lines[count] = (try listSegments(gpa, state, .new_session, width, caps, frame)).segments;
+                count += 1;
+            }
             var at: usize = 0;
             while (listItem(state, at)) |item| : (at += 1) {
                 lines[count] = (try listSegments(gpa, state, item, width, caps, frame)).segments;
@@ -4360,7 +4369,7 @@ test "overview rows draw a flat order without headings" {
     defer std.testing.allocator.free(text);
     inline for (.{ " Needs you ·", " Yours ·", " Active ·", " Idle ·", " Finished ·", " Stopped or failed ·", " more" }) |heading| try std.testing.expect(std.mem.indexOf(u8, text, heading) == null);
     try std.testing.expect(std.mem.indexOf(u8, text, "+ New Session") != null);
-    try std.testing.expectEqual(mixed.len + first_row_line, listLength(&state));
+    try std.testing.expectEqual(mixed.len + firstRowLine(&state), listLength(&state));
 }
 
 fn expectOrder(state: *const State, expected: []const []const u8) !void {
@@ -4908,6 +4917,9 @@ test "snapshot and listing rows render identical stopped failed and done endings
         // supplied it. Use the same clock, with no intervening refresh.
         var from_list = try opened(&.{initial});
         defer from_list.deinit();
+        // Compare the same sidebar presentation: the overview alone pins
+        // New Session, independently of which read supplied the row.
+        _ = try step(&from_list, .{ .conversation = ref });
         _ = try step(&from_list, .{ .tick = state.now_ms });
         var listed = session(&ref, case.state, .{ .label = "Same Session", .turn = 8 });
         listed.last_line = .{ .position = 4, .text = case.text };
@@ -5720,7 +5732,7 @@ test "the selection stays on its Session when it moves from active to finished" 
     // A selected row remains selected when its age moves it to the end.
     _ = try refresh(&state, .changed, testToken(3), &.{session("m1n2p3", .{ .finished = ago(10 * 86400) }, .{ .label = "Explain provider output parsing" })});
     try expectSelected(&state, "m1n2p3");
-    try std.testing.expectEqual(state.order.items.len + first_row_line, listLength(&state));
+    try std.testing.expectEqual(state.order.items.len + firstRowLine(&state), listLength(&state));
 }
 
 /// Takes every program status record waiting for the shell, as sent.
@@ -5811,13 +5823,13 @@ test "overview selection walks both ends and every row without folding" {
     defer state.deinit();
     _ = try press(&state, .{}, .first);
     try std.testing.expectEqual(Selection.new_session, state.selected);
-    try std.testing.expectEqual(@as(?usize, 0), selectedLine(&state));
+    try std.testing.expectEqual(null, selectedLine(&state));
     _ = try press(&state, .{}, .previous);
     try std.testing.expectEqual(Selection.new_session, state.selected);
     for (state.order.items, 0..) |index, at| {
         _ = try press(&state, .{}, .next);
         try expectSelected(&state, &state.rows.items[index].reference);
-        try std.testing.expectEqual(@as(?usize, at + 2), selectedLine(&state));
+        try std.testing.expectEqual(@as(?usize, at + 1), selectedLine(&state));
     }
     _ = try press(&state, .{}, .next);
     try std.testing.expectEqual(Selection.settings, state.selected);
@@ -5878,24 +5890,31 @@ test "overview settings and New Session clicks follow Enter and draft rules" {
     try expectEffects(&.{.{ .start = .{ .text = draft.bytes, .settings = &state.settings, .binding = state.nextBinding() } }}, try submit(&state, draft));
 }
 
-test "overview list items are New Session, its gap, then all Sessions, with no trailing item" {
+test "overview scroll rows exclude the pinned New Session and chat omits its gap too" {
     var state = try opened(&mixed);
     defer state.deinit();
-    try std.testing.expectEqual(Click.new_session, clickOf(&state, listItem(&state, 0).?).?);
-    try std.testing.expectEqual(Item.gap, listItem(&state, 1).?);
+    try std.testing.expect(showsNewSession(&state));
+    try std.testing.expectEqual(Item.gap, listItem(&state, 0).?);
     try std.testing.expectEqual(null, clickOf(&state, .gap));
-    for (state.order.items, 0..) |index, at| {
-        const item = listItem(&state, at + 2).?;
-        try std.testing.expectEqual(Item{ .row = at }, item);
-        try std.testing.expectEqualStrings(&state.rows.items[index].reference, &clickOf(&state, item).?.open);
+    for ([_]bool{ false, true }) |chat| {
+        state.conversing = if (chat) mixed[0].reference else null;
+        try std.testing.expectEqual(!chat, showsNewSession(&state));
+        for (state.order.items, 0..) |index, at| {
+            const item = listItem(&state, at + @intFromBool(!chat)).?;
+            try std.testing.expectEqual(Item{ .row = at }, item);
+            try std.testing.expectEqualStrings(&state.rows.items[index].reference, &clickOf(&state, item).?.open);
+            state.selected = .{ .session = state.rows.items[index].reference };
+            try std.testing.expectEqual(@as(?usize, at + @intFromBool(!chat)), selectedLine(&state));
+        }
+        try std.testing.expectEqual(null, listItem(&state, listLength(&state)));
+        state.selected = .new_session;
+        try std.testing.expectEqual(null, selectedLine(&state));
     }
-    try std.testing.expectEqual(null, listItem(&state, listLength(&state)));
     var empty = try opened(&.{});
     defer empty.deinit();
-    try std.testing.expectEqual(@as(usize, 2), listLength(&empty));
-    try std.testing.expectEqual(Item.new_session, listItem(&empty, 0).?);
-    try std.testing.expectEqual(Item.gap, listItem(&empty, 1).?);
-    try std.testing.expectEqual(null, listItem(&empty, 2));
+    try std.testing.expectEqual(@as(usize, 1), listLength(&empty));
+    try std.testing.expectEqual(Item.gap, listItem(&empty, 0).?);
+    try std.testing.expectEqual(null, listItem(&empty, 1));
 }
 
 test "a click that names a Session gone from the list since it was drawn changes nothing" {
