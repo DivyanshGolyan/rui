@@ -7092,7 +7092,8 @@ const EmptySessionOwner = struct {
     fn create() !*EmptySessionOwner {
         const fixture = try std.testing.allocator.create(EmptySessionOwner);
         errdefer std.testing.allocator.destroy(fixture);
-        fixture.* = .{ .tmp = std.testing.tmpDir(.{ .iterate = true }) };
+        const tmp = std.testing.tmpDir(.{ .iterate = true });
+        fixture.* = .{ .tmp = tmp };
         errdefer fixture.tmp.cleanup();
         try fixture.tmp.dir.setPermissions(std.testing.io, .fromMode(0o700));
         fixture.path_len = try fixture.tmp.dir.realPath(std.testing.io, &fixture.path);

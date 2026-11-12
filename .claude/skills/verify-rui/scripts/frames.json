@@ -842,19 +842,22 @@
           }
         },
         {
-          "wait": "✓"
+          "wait": "Model"
         },
         {
           "text": "ter"
         },
         {
-          "wait": "Model           ter"
+          "wait": "ter\n"
         },
         {
-          "mouse": {
-            "at": "gpt-6.1-terra",
-            "do": "click"
-          }
+          "wait": "gpt-6.1-terra"
+        },
+        {
+          "keys": [
+            "Down",
+            "Enter"
+          ]
         },
         {
           "gone": "Model"

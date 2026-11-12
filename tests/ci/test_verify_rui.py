@@ -743,7 +743,15 @@ while True:
             self.assertIn("Existing conversation", state["expect"])
             self.assertEqual(state["steps"][-1], {"wait": "enter open"})
         model = states["empty-chat-model-left"]["steps"]
-        self.assertIn({"mouse": {"at": "gpt-6.1-terra", "do": "click"}}, model)
+        opened = model.index({"mouse": {"at": "gpt-6.1-sol", "do": "click"}})
+        typed = model.index({"text": "ter"})
+        picked = model.index({"keys": ["Down", "Enter"]})
+        # A sidebar's completed row already has ✓ before the choice opens.
+        # Standalone Model puts its filter on the next row, not Settings' inline value.
+        self.assertEqual(model[opened + 1:typed], [{"wait": "Model"}])
+        self.assertEqual(model[typed + 1:picked], [{"wait": "ter\n"}, {"wait": "gpt-6.1-terra"}])
+        self.assertNotIn({"wait": "Model           ter"}, model)
+        self.assertNotIn({"mouse": {"at": "gpt-6.1-terra", "do": "click"}}, model)
         self.assertIn({"wait": "gpt-6.1-terra ·"}, model)
         self.assertIn({"gone": "Model"}, model)
         self.assertEqual(sum(step == {"keys": ["Home", "Enter"]} for step in states["empty-chat-two-left"]["steps"]), 2)

@@ -1451,6 +1451,42 @@
                         ],
                         "items": false,
                         "minItems": 3
+                      },
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200,
+                            "x-rui-max-bytes": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tool": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 64,
+                            "x-rui-max-bytes": 64
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "server": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 64,
+                            "x-rui-max-bytes": 64
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     },
                     "required": [
@@ -1459,7 +1495,10 @@
                       "call_ordinal",
                       "action",
                       "rejection",
-                      "fields"
+                      "fields",
+                      "description",
+                      "tool",
+                      "server"
                     ],
                     "additionalProperties": false
                   }
@@ -1948,13 +1987,52 @@
                       },
                       "call_ordinal": {
                         "$ref": "#/components/schemas/Decimal"
+                      },
+                      "description": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 200,
+                            "x-rui-max-bytes": 200
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "tool": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 64,
+                            "x-rui-max-bytes": 64
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "server": {
+                        "anyOf": [
+                          {
+                            "type": "string",
+                            "maxLength": 64,
+                            "x-rui-max-bytes": 64
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
                       }
                     },
                     "required": [
                       "session",
                       "action",
                       "operation",
-                      "call_ordinal"
+                      "call_ordinal",
+                      "description",
+                      "tool",
+                      "server"
                     ],
                     "additionalProperties": false
                   }
