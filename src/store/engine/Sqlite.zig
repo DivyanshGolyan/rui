@@ -96,8 +96,21 @@ pub noinline fn open(io: std.Io, database_path: []const u8, selector: []const u8
 
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_LENGTH, @intCast(content_string.max_bytes + 4096));
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_SQL_LENGTH, 16 * 1024);
-    // Format 66 has 36 Operation columns; format 67 adds two final-attempt timings.
-    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, 38);
+    // The schema owns row width; a new frozen field must not require a
+    // second format-sized constant here before the Store can bootstrap.
+    const column_limit = comptime blk: {
+        var widest: usize = 0;
+        for (store_schema.tables) |table| {
+            if (!table.engines.on(.sqlite)) continue;
+            var columns: usize = 0;
+            for (table.columns) |column| {
+                if (column.engines.on(.sqlite)) columns += 1;
+            }
+            widest = @max(widest, columns);
+        }
+        break :blk @as(c_int, @intCast(widest));
+    };
+    try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COLUMN, column_limit);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_EXPR_DEPTH, @import("../../json_limits.zig").max_depth);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_COMPOUND_SELECT, 4);
     try sqlite.setLimit(database.?, c.SQLITE_LIMIT_FUNCTION_ARG, 16);

@@ -21,7 +21,6 @@ const Viewport = @import("ConversationViewport.zig");
 const session_line = @import("session_line.zig");
 const slash_commands = @import("slash_commands.zig");
 const queued_line = @import("queued_line.zig");
-const session_chrome = @import("session_chrome.zig");
 const Bounded = @import("bounded.zig").Bounded;
 const AnswerRenderer = @import("AnswerRenderer.zig");
 const status_page = @import("status_page.zig");
@@ -58,7 +57,8 @@ pub const SavedRequests = slash_commands.Requests(protocol.max_key_bytes);
 /// it differs from the shown one (always without one): the second file then
 /// lists its Actions awaiting approval, as the page shows them.
 pub const Status = *const fn (std.Io, *const protocol_reply.Current, std.Io.File, *status_page.Session, ?*const status_page.Session, std.Io.File) anyerror!bool;
-pub const Inspection = union(enum) { requests, help, command, copy: Copy };
+
+pub const Inspection = union(enum) { requests, command, copy: Copy };
 
 /// What a /copy sends: the last answer or its last code block to the
 /// clipboard, or the last answer to a file.
@@ -244,14 +244,15 @@ pub const Job = struct {
     /// Retry request: newest person Message strictly before this ending.
     retry: ?Key = null,
     queued_line: u64 = 0,
-    inspection_kind: Inspection = .help,
+    inspection_kind: Inspection = .requests,
     // A command observes exit or a signal as an interruption.
     interrupted: *client.Cancellation = undefined,
     command_text: [@typeInfo(@FieldType(Input, "command_buffer")).array.len]u8 = undefined,
     command_text_length: usize = 0,
     inspection_submission: ?Submission.View = null,
-    inspection_action: ?u64 = null,
+
     // A scan takes chat info from its own Current capture: when the user
+
     // asks for it, or while the page shows `status_shown`, into
     // `status_taken`, listing its Actions in `status_actions`.
     open_status: bool = false,
@@ -262,8 +263,6 @@ pub const Job = struct {
     // The moment the UI's Session line was read at, and whether it still
     // needs the unlabelled Session's name.
     line_read: ?Moment = null,
-    /// The Session's provider, as the UI's Session line last read it.
-    provider: ?protocol.Provider = null,
     hint_wanted: bool = false,
     result: struct {
         // The work the page's own Store read saw: its history, footer and
@@ -1088,24 +1087,9 @@ pub fn inspectPage(raw: *anyopaque, task: *Task) !void {
     try task.io.vtable.fileSeekTo(task.io.userdata, job.files.inspection, 0);
     var buffer: [4096]u8 = undefined;
     var output = job.files.inspection.writerStreaming(task.io, &buffer);
-    if (job.inspection_kind == .help) {
-        if (job.inspection_action) |action| {
-            try output.interface.writeAll("This Action exceeds the in-app preview. Approval here is disabled.\nDetach with Ctrl-C, inspect the complete exact Action, then decide in your shell:\n");
-            for ([_][]const u8{ "inspect", "allow", "deny" }) |command| {
-                try output.interface.print("rui action {s} --store ", .{command});
-                try TerminalText.writeShellWord(&output.interface, job.store);
-                try TerminalText.writeShellSession(&output.interface, job.session, false);
-                try output.interface.print(" --action {d}\n", .{action});
-            }
-            try output.interface.writeAll("\n");
-        }
-        try output.interface.writeAll(session_chrome.help ++ slash_commands.conversation.help ++ "\nLogin: ");
-        try output.interface.print("{s} in your shell.\n", .{(job.provider orelse comptime protocol.Provider.onlyWith(.sign_in)).login()});
-    } else {
-        std.debug.assert(job.inspection_kind == .requests);
-        try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);
-        try writeSubmission(job.inspection_submission, null, &output.interface);
-    }
+    std.debug.assert(job.inspection_kind == .requests);
+    try job.requests(job.init, task.readContext(), job.store, job.session, &output.interface, &job.result.requests);
+    try writeSubmission(job.inspection_submission, null, &output.interface);
     try output.flush();
 }
 

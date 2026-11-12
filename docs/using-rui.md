@@ -3,13 +3,20 @@
 This page covers the interactive `rui` client: its commands, input, screen, Sessions, models and context compaction.
 For a first conversation, see [Start a conversation](../README.md#start-a-conversation).
 
+## Keys
+
+Open **Settings › Keys** for the full key list. In the overview, End then Enter opens the pinned Settings row; select the last **Keys** row and press Enter.
+In a wide conversation, click the pinned Settings row without leaving the chat.
+Esc returns to Settings; another Esc returns to the conversation or overview.
+The footer shows the keys available in the current state. A typed `?` is ordinary draft text, not a shortcut.
+There is no `/help` command.
+
 ## Commands
 
 Enter these at the `›` prompt. Typing `/` lists names only; fixed choices appear quietly beside the name, separated by ` · `. Choice and option rows also show names only.
 
 | Command | What it does |
 | --- | --- |
-| `/help` | Lists available commands. |
 | `/requests` | Lists saved requests for recovery. |
 | `/setup` | Changes defaults for future Sessions, not the current one. |
 

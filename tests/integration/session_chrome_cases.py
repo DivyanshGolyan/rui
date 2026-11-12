@@ -26,6 +26,7 @@ from human_cli_fixture import (
     chat_info_geometry,
     footer_click,
     assert_model_choice,
+    composer_line,
     keyed_frame,
     model_choice_frame,
     model_choice_shown,
@@ -110,8 +111,8 @@ class Chrome:
             message = admit(self.home, "session", "send", "--to", session, input=text)
             fixture.wait_for(lambda key=message["request"]: fixture.completed_observation(self.store, key), "saved answer")
 
-    def open(self, session, ready):
-        master, slave = open_pty(80, ROWS)
+    def open(self, session, ready, *, columns=80):
+        master, slave = open_pty(columns, ROWS)
         self.descriptors += [master, slave]
         caller = spawn([str(fixture.RUI), "session", "resume", "--", session],
             env={**os.environ, "HOME": str(self.home)}, cwd=str(self.workspace),
@@ -143,7 +144,7 @@ class Chrome:
 
 def composing(screen, draft):
     """The composer shows `draft` on its row between the rules."""
-    shown = rows(screen)
+    shown = [composer_line(screen, index) for index in range(len(rows(screen)))]
     return len(shown) == ROWS and (set(shown[ROWS - 5]) == {"─"} and set(shown[ROWS - 3]) == {"─"}
             and shown[ROWS - 4].rstrip() == (" › " + draft).rstrip())
 
@@ -335,7 +336,7 @@ def scroll_marker_case():
 
 
 def pages_case():
-    """Chat info opens above the input; /help remains a Transcript page;
+    """Chat info opens above the input and returns to the saved feed;
     the `↓` marker says more is below; Esc returns to the latest. A page
     opened while work runs substitutes its own footer; Esc restores the live
     stop hint without changing work."""
@@ -381,10 +382,7 @@ def pages_case():
             assert "Copy last answer" not in returned and not model_choice_shown(returned), returned
             assert len(chrome.endpoint.requests) == 1, chrome.endpoint.requests
             chrome.frame(master, b"\x15", lambda screen: composing(screen, ""))
-            help_page = chrome.frame(master, b"/help\r", lambda screen: transcript_rows(screen)[0] == "Marks")
-            assert "ctrl+x                 stop" in help_page and "shift+↑↓               scroll" in help_page, help_page
-            assert "ctrl+o                 open" in help_page and marker(help_page) == "↓", help_page
-            chrome.frame(master, b"\x1b", lambda screen: latest(screen, "SEED-ANSWER"))
+            chrome.frame(master, b"", lambda screen: latest(screen, "SEED-ANSWER"))
             os.write(master, b"HOLD-QUESTION\r")
             release.set()
             chrome.frame(master, b"", lambda screen: "⠹ Held call · " in screen)
@@ -398,7 +396,7 @@ def pages_case():
         finally:
             release.set()
             (chrome.workspace / "release").write_text("")
-    print("session chrome: chat info has one substituted footer; Esc returns its draft and the live work stop hint; help remains a page", flush=True)
+    print("session chrome: chat info has one substituted footer; Esc returns its draft and the live work stop hint; Settings > Keys owns the shortcuts", flush=True)
 
 
 
@@ -436,8 +434,9 @@ def info_natural_height_case():
                 # A click on the substituted footer is safe and idempotent.
                 chrome.frame(master, footer_click(opened, marker=" · info", info=True) + b"\x1b[B\r",
                              lambda screen: "ask first" in screen and "run without asking" in screen)
-                clicked = chrome.frame(master, b"\x1b\x1b[A",
+                clicked = chrome.frame(master, b"\x1b",
                                        lambda screen: "ask first" not in screen and "Copy last answer" in screen)
+                chrome.frame(master, b"\x1b[A", lambda screen: "Copy last answer" in screen)
                 assert chat_info_geometry(clicked) == base, clicked
                 live = chrome.frame(master, b"\x1b", lambda screen:
                                     "Copy last answer" not in screen and "FEED-24" in screen and "kept draft" in screen)
@@ -564,9 +563,47 @@ def opening_case():
     print("session chrome: a reopened Session shows ◌ 2 · the newest waiting Message under the running call; Ctrl-O selects the lowest tool or Message, and reopening keeps tools folded", flush=True)
 
 
+def keys_case():
+    """Settings > Keys is inert and Esc closes only the topmost layer."""
+    with Chrome("rui-chrome-keys.", []) as chrome:
+        session = chrome.session()
+        chrome.endpoint.responses.append(fixture.sse_answer("keys", "r", "m", "KEYS-ANSWER")[0])
+        chrome.answered(session, "keys")
+        for width in (140, 46):
+            master, caller, shown = chrome.open(session, lambda screen: "KEYS-ANSWER" in screen, columns=width)
+            if width == 140:
+                # The pinned list remains beside the chat: open Settings
+                # without leaving the conversation or touching its draft.
+                row, line = next((index, line) for index, line in enumerate(rows(shown)) if "Settings" in line)
+                col = line.index("Settings") + 1
+                gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
+            else:
+                chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
+                gesture = b"\x1b[F\r"
+            chrome.frame(master, gesture, lambda screen: "Notifications" in screen and "Version" in screen)
+            keys = chrome.frame(master, b"\x1b[B" * 6 + b"\r", lambda screen: "earlier message" in screen)
+            for index, expected in enumerate(('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave')):
+                assert expected in keys, (width, expected, keys)
+                if width == 46:
+                    assert rows(keys)[index].rstrip() == " " + expected, (index, keys)
+            if width == 140:
+                assert " enter    send              esc      back" in rows(keys)[0], keys
+            for absent in ("/help", "Ctrl-X twice", "shift+enter or ctrl+j", "Commands", "Marks", "Esc returns", "↑↓ · enter change · esc close", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select'):
+                assert absent not in keys, (width, absent, keys)
+            # Enter and typing do not edit a setting or the hidden draft.
+            settings = chrome.frame(master, b"\rx\x1b", lambda screen: "Notifications" in screen and "Version" in screen)
+            assert "earlier message" not in settings, settings
+            if width == 140:
+                chrome.frame(master, b"\x1b", lambda screen: latest(screen, "KEYS-ANSWER") and composing(screen, ""))
+            else:
+                chrome.frame(master, b"\x1b", lambda screen: "Settings" in screen and "Rui · settings" not in screen and not any(line.startswith(" ‹ ") for line in rows(screen)))
+            chrome.leave(master, caller)
+    print("session chrome: Settings > Keys has eleven aligned entries, paired at 140 columns and one column at 46; Enter/text are inert and Esc returns one layer, preserving a wide conversation", flush=True)
+
+
 def notice_case():
-    """A notice shows in the bottom state slot until the next key; `?` on an empty
-    draft shows the shortcuts and the next key closes them."""
+    """A notice shows in the bottom state slot until the next key; question
+    marks are ordinary draft text, even on an empty draft."""
     with Chrome("rui-chrome-notice.", []) as chrome:
         session = chrome.session()
         master, caller, _ = chrome.open(session, lambda screen: True)
@@ -576,12 +613,12 @@ def notice_case():
         assert rows(gone)[NOTICE].strip() == "" and rows(gone)[FOOTER].strip().startswith("‹ "), gone
         os.write(master, b"\x15")
         chrome.frame(master, b"", lambda screen: composing(screen, ""))
-        shortcuts = chrome.frame(master, b"?", lambda screen: "shift+enter or ctrl+j new line" in screen)
-        assert composing(shortcuts, ""), shortcuts
-        closed = chrome.frame(master, b"x", lambda screen: composing(screen, "x"))
-        assert "shift+enter or ctrl+j" not in closed, closed
+        question = chrome.frame(master, b"?", lambda screen: composing(screen, "?"))
+        assert "shift+enter or ctrl+j" not in question, question
+        questions = chrome.frame(master, b"?", lambda screen: composing(screen, "??"))
+        assert "shift+enter or ctrl+j" not in questions, questions
         chrome.leave(master, caller)
-    print("session chrome: a notice goes at the next key; ? shows the shortcuts and the next key closes them", flush=True)
+    print("session chrome: a notice goes at the next key; ? is ordinary text on empty and nonempty drafts", flush=True)
 
 
 def main():
@@ -593,3 +630,4 @@ def main():
     approval_overflow_case()
     opening_case()
     notice_case()
+    keys_case()

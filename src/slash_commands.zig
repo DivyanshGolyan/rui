@@ -1,6 +1,6 @@
 //! Each screen's slash commands: one table per screen of each command's
 //! name and argument shape. The screen's parser, the
-//! list typing "/" shows, Tab and /help all read it.
+//! list typing "/" shows, and Tab all read it.
 const std = @import("std");
 const model_catalog = @import("model_catalog.zig");
 const session_settings = @import("session_settings.zig");
@@ -78,7 +78,7 @@ pub const Command = struct {
     /// offers each admitted word.
     choice_name: ?[]const u8 = null,
     argument: Argument = .none,
-    /// Whether typing `/` lists the command; /help also names unlisted commands.
+    /// Whether typing `/` lists the command.
     listed: bool = true,
 };
 
@@ -122,14 +122,12 @@ fn completionRank(comptime field: []const u8) usize {
 /// Future defaults, as /setup saves them; /setup alone shows them.
 const setup_options: Options = .of(cli_args.live_setup, &.{ "model", "provider", "reasoning-effort", "notifications", "clear-model", "store" }, true, false);
 
-/// The conversation's commands, declared in the order its list and /help
-/// show them.
+/// The conversation's commands, declared in list order.
 const ConversationName = enum {
     archive,
     copy,
     discard,
     effort,
-    help,
     recover,
     @"reload-skills",
     rename,
@@ -145,7 +143,6 @@ pub const conversation = Commands(ConversationName, .{
     .copy = .{ .argument = .{ .choice = copy_words } },
     .discard = .{ .listed = false },
     .effort = .{ .argument = .effort },
-    .help = .{},
     .recover = .{ .argument = .{ .required = "KEY" }, .listed = false },
     .@"reload-skills" = .{},
     .rename = .{ .argument = .{ .required = "NAME" } },
@@ -167,10 +164,9 @@ const session_views = &[_]Choice{
     .{ .word = "all" },
 };
 
-pub const overview = Commands(enum { archive, configure, help, rename, sessions, setup, unarchive }, .{
+pub const overview = Commands(enum { archive, configure, rename, sessions, setup, unarchive }, .{
     .archive = .{},
     .configure = .{ .argument = .{ .options = start_options } },
-    .help = conversation.table.get(.help),
     .rename = .{ .argument = conversation.table.get(.rename).argument },
     .sessions = .{ .choice_name = "VIEW", .argument = .{ .choice = session_views } },
     .setup = conversation.table.get(.setup),
@@ -183,11 +179,11 @@ pub fn unknown(buffer: *[unknown_bytes]u8, text: []const u8) []const u8 {
     const name = text[0 .. std.mem.indexOfScalar(u8, text, ' ') orelse text.len];
     var shown = name.len <= max_unknown_name;
     for (name) |byte| shown = shown and byte > ' ' and byte < 0x7f;
-    return std.fmt.bufPrint(buffer, "! Unknown command{s}{s} · /help", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
+    return std.fmt.bufPrint(buffer, "! Unknown command{s}{s}", .{ if (shown) " " else "", if (shown) name else "" }) catch unreachable;
 }
 
 const max_unknown_name = 32;
-pub const unknown_bytes = "! Unknown command  · /help".len + max_unknown_name;
+pub const unknown_bytes = "! Unknown command ".len + max_unknown_name;
 
 /// The most a command's output may hold and still show as a notice, on
 /// either screen; more opens a page.
@@ -270,13 +266,6 @@ pub fn Commands(comptime N: type, comptime commands: std.enums.EnumFieldStruct(N
                 widest = @max(widest, 1 + @tagName(name).len);
             };
             break :blk widest + 2;
-        };
-
-        /// The command names and argument shapes, one per line, for /help.
-        pub const help = blk: {
-            var text: []const u8 = "";
-            for (std.enums.values(Name)) |name| text = text ++ usage.get(name) ++ "\n";
-            break :blk text;
         };
 
         const choices_text = blk: {
@@ -759,14 +748,14 @@ test "a command admits exactly the arguments its shape names" {
 test "the list names the listed commands a command word starts, and Tab puts the highlighted one in" {
     const Case = struct { draft: []const u8, shown: ?[]const []const u8, first: ?[]const u8 = null };
     const cases = [_]Case{
-        .{ .draft = "/", .shown = &.{ "archive", "copy ", "effort ", "help", "reload-skills", "rename ", "setup ", "unarchive" } },
+        .{ .draft = "/", .shown = &.{ "archive", "copy ", "effort ", "reload-skills", "rename ", "setup ", "unarchive" } },
         .{ .draft = "/c", .shown = &.{"copy "}, .first = "opy " },
         .{ .draft = "/cop", .shown = &.{"copy "}, .first = "y " },
         .{ .draft = "/st", .shown = &.{} },
         .{ .draft = "/re", .shown = &.{ "reload-skills", "rename " } },
         .{ .draft = "/rel", .shown = &.{"reload-skills"}, .first = "oad-skills" },
         .{ .draft = "/s", .shown = &.{"setup "}, .first = "etup " },
-        // Recovery commands work, and /help names them, but the list leaves them out.
+        // Recovery commands work, but the list leaves them out.
         .{ .draft = "/req", .shown = &.{} },
         .{ .draft = "/w", .shown = &.{} },
         .{ .draft = "/login", .shown = &.{} },
@@ -911,7 +900,7 @@ test "a key's list is the draft's own, and counts as drawn when the latest frame
     try std.testing.expectEqual(@as(u64, 4), stored.?.revision);
 }
 
-test "the list order is the names' order and help retains argument shapes" {
+test "the list order is the names' order and usage retains argument shapes" {
     inline for (.{ conversation, overview }) |screen| {
         const names = std.enums.values(screen.Name);
         for (names[1..], 0..) |name, index| try std.testing.expectEqual(.lt, std.mem.order(u8, @tagName(names[index]), @tagName(name)));
@@ -931,8 +920,8 @@ test "/copy takes each Copy's name but the answer's, which it copies alone" {
 }
 
 test "both screens' shared commands take the same arguments and say the same things" {
-    inline for (.{ "help", "rename", "setup" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
-    for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5", "/help", "/help me" }) |text| {
+    inline for (.{ "rename", "setup" }) |name| try std.testing.expectEqualStrings(conversation.usage.get(@field(conversation.Name, name)), overview.usage.get(@field(overview.Name, name)));
+    for ([_][]const u8{ "/rename", "/rename lane four", "/setup", "/setup --model gpt-5.5" }) |text| {
         errdefer std.debug.print("line={s}\n", .{text});
         try std.testing.expectEqualStrings(@tagName(conversation.parse(text)), @tagName(overview.parse(text)));
     }
@@ -944,11 +933,11 @@ test "both screens' shared commands take the same arguments and say the same thi
 
 test "an unknown command names itself when it is short printable ASCII" {
     var buffer: [unknown_bytes]u8 = undefined;
-    try std.testing.expectEqualStrings("! Unknown command /foo · /help", unknown(&buffer, "/foo bar"));
-    try std.testing.expectEqualStrings("! Unknown command · /help", unknown(&buffer, "/\x1b[2J"));
+    try std.testing.expectEqualStrings("! Unknown command /foo", unknown(&buffer, "/foo bar"));
+    try std.testing.expectEqualStrings("! Unknown command", unknown(&buffer, "/\x1b[2J"));
     const long = "/" ++ @as([max_unknown_name]u8, @splat('x'));
-    try std.testing.expectEqualStrings("! Unknown command · /help", unknown(&buffer, long));
-    try std.testing.expectEqualStrings("! Unknown command " ++ long[0..max_unknown_name] ++ " · /help", unknown(&buffer, long[0..max_unknown_name]));
+    try std.testing.expectEqualStrings("! Unknown command", unknown(&buffer, long));
+    try std.testing.expectEqualStrings("! Unknown command " ++ long[0..max_unknown_name] ++ "", unknown(&buffer, long[0..max_unknown_name]));
 }
 
 test "a command's short output is the same notice on both screens, and longer output takes a page" {
@@ -963,13 +952,12 @@ test "a command's short output is the same notice on both screens, and longer ou
     try std.testing.expectEqual(@as(usize, short_result_bytes), resultNotice(&buffer, long[0..short_result_bytes]).?.len);
 }
 
-test "deleted app commands are unknown on both screens and absent from completion and help" {
+test "deleted app commands are unknown on both screens and absent from completion" {
     inline for (.{ conversation, overview }) |screen| {
-        inline for (.{ "upgrade", "login", "wait", "inspect-action", "exit" }) |name| {
+        inline for (.{ "help", "upgrade", "login", "wait", "inspect-action", "exit" }) |name| {
             try std.testing.expect(screen.parse("/" ++ name) == .unknown);
             try std.testing.expect(screen.parse("/" ++ name ++ " now") == .unknown);
             try std.testing.expectEqual(@as(usize, 0), screen.suggest("/" ++ name, .{}).?.count);
-            try std.testing.expect(std.mem.indexOf(u8, screen.help, "/" ++ name) == null);
         }
     }
 }
@@ -1025,8 +1013,7 @@ test "older conversation is feed navigation, not a slash command" {
     try std.testing.expect(conversation.parse("/history") == .unknown);
     try std.testing.expectEqual(@as(usize, 0), conversation.suggest("/history", .{}).?.count);
     const list = conversation.suggest("/h", .{}).?;
-    try std.testing.expectEqual(@as(usize, 1), list.count);
-    try std.testing.expectEqualStrings("help", list.shown()[0].word);
+    try std.testing.expectEqual(@as(usize, 0), list.count);
     try std.testing.expect(conversation.parse("/details") == .unknown);
 }
 

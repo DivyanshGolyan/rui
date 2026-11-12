@@ -1715,35 +1715,46 @@ def renderer_cases():
         print("renderer: a card decides only the request it drew", flush=True)
 
         # Chat info is its own Layer, independent of an Activity read in flight.
-        # Closing it and opening help must not let the delayed read reopen it.
+        # Closing it and opening Settings > Keys must not let a delayed read reopen it.
         session = configure()
         marker = answer("info yields")
         holding = threading.Event()
-        held = threading.Event()
-        released = threading.Event()
+        held = [threading.Event(), threading.Event()]
+        released = [threading.Event(), threading.Event()]
         def hold_info_read(_):
-            if holding.is_set() and not held.is_set():
-                held.set()
-                released.wait(10)
+            if holding.is_set():
+                for ready, resume in zip(held, released):
+                    if not ready.is_set():
+                        ready.set()
+                        resume.wait(10)
+                        break
             return True
         proxy = canonical.ReplyProxy(host, "/v1/activity-page", lambda response: response, before_forward=hold_info_read)
-        with terminal(session) as tty:
+        with terminal(session, columns=140) as tty:
             tty.send("info yields\r", marker)
             holding.set()
-            fixture.wait_for(tty.draining(held.is_set), "held Activity page", timeout=10)
+            fixture.wait_for(tty.draining(held[0].is_set), "first held Activity page", timeout=10)
             tty.send("\x1bi", "Copy last answer")
+            released[0].set()
+            # The next Activity read carries the info inspection request.
+            fixture.wait_for(tty.draining(held[1].is_set), "info Activity page", timeout=10)
             tty.send("\x1b", predicate=lambda: "Copy last answer" not in tty.capture.completed)
-            os.write(tty.master, b"/help\r")
-            released.set()
-            tty.wait("shift+↑↓               scroll", timeout=20)
+            row, line = next((index, line) for index, line in enumerate(tty.capture.completed.split("\n")) if "Settings" in line)
+            col = line.index("Settings") + 1
+            tty.send(f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m", "Notifications")
+            keys = tty.send("\x1b[B" * 6 + "\r", "earlier message")
+            assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
+            frames = tty.every_frame()
+            released[1].set()
             time.sleep(1.5)
-            assert "shift+↑↓               scroll" in tty.capture.completed, tty.capture.completed
-            assert "Copy last answer" not in tty.capture.completed, tty.capture.completed
+            assert "earlier message" in tty.capture.completed, tty.capture.completed
+            for frame in frames:
+                assert " · info" not in frame and "Copy last answer" not in frame, frame
             tty.caller.send_signal(signal.SIGINT)
             tty.finish()
         proxy.close()
         proxy = None
-        print("renderer: delayed Activity cannot reopen chat info after Esc and help", flush=True)
+        print("renderer: delayed info inspection cannot cover Settings > Keys after the panel closes", flush=True)
 
         # A short fresh feed clamps at its first saved row; scrolling does
         # not add a start label or duplicate the admitted Message and reply.
@@ -2585,21 +2596,31 @@ def main(selected="all"):
             assert folder.endswith(workspace.resolve().name), binding
             assert folder.startswith(("…/", "~/", "/")), binding
             assert "gpt-6-sol" in binding and "asks before Bash/MCP" not in binding and permission_row(binding, "ask"), binding
-            # The whole page fits this terminal's 50 rows, so one frame shows it from Marks to Login.
-            help_text = terminal_step(master, "/help", "in your shell.", composer=True)
-            assert help_text.lstrip().startswith("Marks\n"), help_text
-            for command in ("alt+i", "/requests", "/result KEY", "/setup", "ctrl+r"):
-                assert command in help_text, help_text
-            assert all(command not in help_text for command in ("/history", "/upgrade", "/exit", "/inspect-action", "/wait", "/login")) and "rui auth login codex" in help_text, help_text
-            # This Session asks: help must not describe the bypass default as its mode (the status panel shows the mode).
-            assert "without approval" not in help_text, help_text
+            # The wide layout exposes the pinned Settings row without
+            # leaving this conversation or changing its draft.
+            terminal_capture(master).resize(140, 50)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 140, 0, 0))
+            wide = keyed_frame(master, b"", lambda screen, x, y: "Settings" in screen and "first answer" in screen)
+            row, line = next((index, line) for index, line in enumerate(wide.split("\n")) if "Settings" in line)
+            col = line.index("Settings") + 1
+            gesture = f"\x1b[<0;{col};{row + 1}M\x1b[<0;{col};{row + 1}m".encode()
+            keyed_frame(master, gesture, lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            keys = keyed_frame(master, b"\x1b[B" * 6 + b"\r", lambda screen, x, y: "earlier message" in screen)
+            for expected in ('enter    send', 'esc      back', '⇧enter   new line', 'ctrl+x   stop', '↑↓       scroll', 'ctrl+o   tool output', 'ctrl+p   earlier message', 'ctrl+r   retry', '/        skills', 'alt+a    archive', 'ctrl+c   leave'):
+                assert expected in keys, (expected, keys)
+            assert all(stale not in keys for stale in ("/help", "Commands", "Marks", "Esc returns", "Ctrl-X twice", "shift+enter or ctrl+j", "‹ Rui · settings", 'ctrl+g', 'ctrl+d', 'ctrl+n', 'ctrl+end', 'ctrl+c/d', 'pgup/pgdn', 'first session', 'latest / last', 'scroll / select')), keys
+            settings = keyed_frame(master, b"\x1b", lambda screen, x, y: "Notifications" in screen and "Version" in screen)
+            assert "earlier message" not in settings, settings
+            keyed_frame(master, b"\x1b", lambda screen, x, y: "first answer" in screen and "Rui · settings" not in screen)
+            terminal_capture(master).resize(80, 50)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 80, 0, 0))
             result = terminal_step(master, f"/result {queued}", "result: completed", composer=True)
             assert "result: completed\nfirst answer" in conversation_text(result), result
             terminal_step(master, "/requests", "Local recovery handles", composer=True)
             assert not (fresh_home / ".config/rui/requests").exists(), "re-entry should not require saved records"
             before_unsupported = set(json.loads(run(preferences_home, "request", "list")))
-            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit"):
-                notice = f"! Unknown command {command} · /help"
+            for command in ("/upgrade", "/login", "/wait", "/inspect-action", "/exit", "/help"):
+                notice = f"! Unknown command {command}"
                 terminal_step(master, command, notice, composer=True)
                 assert set(json.loads(run(preferences_home, "request", "list"))) == before_unsupported
             terminal_step(master, "/setup", "gpt-6-luna", composer=True)
@@ -3211,6 +3232,9 @@ def main(selected="all"):
         proxy = None
         try:
             read_terminal(master, "› ")
+            # Cache actual Session facts before the Host is deliberately lost;
+            # the stopped-Host modal probes edit those already-known facts.
+            chat_info_frame(master)
             before = set(json.loads(run(home, "request", "list")))
             def hold_observation(response):
                 observation_held.set()

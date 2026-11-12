@@ -92,7 +92,7 @@ pub const Facts = struct {
 /// requests never change shape, so a pinned Session's prompt cache holds.
 /// New Sessions pin the provider's current codec; a Session pinned to an
 /// older one keeps it.
-pub const Codec = enum { @"openai-responses/1", @"openai-responses/2" };
+pub const Codec = enum { @"openai-responses/1", @"openai-responses/2", @"openai-responses/3" };
 
 test "both OpenAI providers run web_search, and neither runs bash" {
     for (std.enums.values(Provider)) |provider| {

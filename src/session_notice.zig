@@ -60,7 +60,7 @@ pub const Action = struct {
 
 /// Why a draft waits for the Action.
 pub fn decision(action: Action) []const u8 {
-    if (action.preview) return "! Approval disabled · /help for exact shell commands. Draft retained.";
+    if (action.preview) return "! Action exceeds in-app preview. Approval disabled. Draft retained.";
     return if (action.visible) "! Action needs a decision; Esc returns to the choice. Draft retained." else "! Action needs a decision; Esc returns to it. Draft retained.";
 }
 
@@ -174,7 +174,7 @@ test "Enter in the draft says the most pressing reason it sent nothing" {
 
 test "a waiting Action that is a preview says it is decided in the shell, whether or not it is on screen" {
     for ([_]bool{ false, true }) |visible| {
-        try std.testing.expectEqualStrings("! Approval disabled · /help for exact shell commands. Draft retained.", decision(.{ .preview = true, .visible = visible, .reason = false }));
+        try std.testing.expectEqualStrings("! Action exceeds in-app preview. Approval disabled. Draft retained.", decision(.{ .preview = true, .visible = visible, .reason = false }));
     }
     try std.testing.expectEqualStrings("! Action needs a decision; Esc returns to the choice. Draft retained.", decision(.{ .preview = false, .visible = true, .reason = false }));
 }

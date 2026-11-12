@@ -11579,17 +11579,17 @@ test "complete historical tool-result traversal scales with groups and calls, in
 /// A bound fixture statement that adds `?1` failed Operations after
 /// Operation `?2`, in its Turn.
 const failed_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position," ++
-    "attempt_ordinal,output_reservation,resolution_code,resolved_at,tool_set_id) " ++
+    "attempt_ordinal,output_reservation,resolution_code,resolved_at,tool_set_id,context_window) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value," ++
-    "1,0,'failed',1,current.tool_set_id FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+    "1,0,'failed',1,current.tool_set_id,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 /// `failed_operations_sql`, the Operations alternating in purpose.
 const failed_purpose_operations_sql = "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose," ++
-    "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+    "output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
     "WITH RECURSIVE sequence(value) AS (SELECT 1 UNION ALL SELECT value+1 FROM sequence WHERE value<?1) " ++
     "SELECT 100+value,current.turn_id,current.session_ref,current.settings_revision,current.input_cutoff,100+value,value%2," ++
-    "0,1,'failed',1,current.tool_set_id FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
+    "0,1,'failed',1,current.tool_set_id,current.context_window FROM sequence CROSS JOIN model_operation current WHERE current.operation_id=?2";
 
 test "historical accepted output selection work excludes failed Operation population, in rounds" {
     try store_testing.forEachEngine(struct {
@@ -11774,9 +11774,9 @@ test "an Activity page costs the same steps after 10 or 10,000 earlier rows, in 
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO message_admission(admission_id,session_ref,command_key,content_id,admission_position,turn_id,admitted_at) " ++
                 sequence_to_first_argument ++
                 "SELECT value,?2,value+1000000,?4,?3+4*(value-1),value,1 FROM sequence", .{ history, session.slice(), start, content });
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 sequence_to_first_argument ++
-                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start });
+                "SELECT value,value,?2,1,value,?3+4*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../product_defaults.zig").unlisted_context_window });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT value,0,?2,?3+4*(value-1)+1,3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
@@ -11874,9 +11874,9 @@ test "a forward one-row page of a person's Messages costs the same steps past 10
             const content = try store_testing.queryU64(&storage, "SELECT instructions_content_id FROM session WHERE session_ref=?1", .{session.slice()});
             // Each tool group names its Turn before the Turn row exists. A
             // cancelled Turn needs no answer content.
-            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id) " ++
+            try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) " ++
                 sequence_to_first_argument ++
-                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2) FROM sequence", .{ history, session.slice(), start });
+                "SELECT 1000+value,1000+value,?2,1,1000+value,?3+3*(value-1),0,1,'tool_proposals',1,(SELECT coalesce(loaded_tool_set_id,tool_set_id) FROM session WHERE session_ref=?2),?4 FROM sequence", .{ history, session.slice(), start, @import("../product_defaults.zig").unlisted_context_window });
             try store_testing.withoutForeignKeys(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,extras_content_id,part_count) " ++
                 sequence_to_first_argument ++
                 "SELECT 1000+value,0,?2,?3+3*(value-1),3,1,zeroblob(32),0,?4,0 FROM sequence", .{ history, session.slice(), start, content });
@@ -15914,6 +15914,251 @@ test "configure parent refuses every widening field, missing or ended parents an
     }.run);
 }
 
+/// One model's selected facts; the caller controls chronology, not a live provider.
+fn saveFrozenContextWindow(storage: *Store, model: []const u8, window: ?u32) !void {
+    try storage.saveModelFacts(&.{.{ .id = model, .context_window = window, .efforts = .{}, .openai_listed = true }}, null);
+}
+
+fn expectFrozenContextWindow(storage: *Store, binding: AttemptBinding, expected: u64) !void {
+    try std.testing.expectEqual(expected, try store_testing.queryU64(storage, "SELECT context_window FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+}
+
+test "frozen context window selects the whole saved-or-shipped domain and survives retry reopen" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            const Variant = enum { shipped, unknown, saved, only, missing, empty, null_window, zero, maximum };
+            inline for (std.enums.values(Variant)) |variant| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const model = if (variant == .unknown or variant == .only) "d238-only" else "gpt-6.1-sol";
+                var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                const create = try completeConfiguration("window-config", "", try canonicalCwd(std.testing.io, &workspace_buffer), model);
+                const session = (try storage.configure(&create, .{})).accepted.session;
+                const expected: u64 = switch (variant) {
+                    .shipped, .unknown => model_capability.contextWindow(@import("../model_catalog.zig").shipped, model),
+                    .saved, .only => 321,
+                    .missing, .empty, .null_window => product_defaults.unlisted_context_window,
+                    .zero => 0,
+                    .maximum => std.math.maxInt(u32),
+                };
+                switch (variant) {
+                    .shipped, .unknown => {},
+                    .missing => try saveFrozenContextWindow(&storage, "unrelated", 321),
+                    .empty => try storage.saveModelFacts(&.{}, null),
+                    .null_window => try saveFrozenContextWindow(&storage, model, null),
+                    else => try saveFrozenContextWindow(&storage, model, @intCast(expected)),
+                }
+                try submitTestMessage(&storage, &tmp, "window-one", "window-one", session.slice(), "first");
+                const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                try expectFrozenContextWindow(&storage, first, expected);
+                try saveFrozenContextWindow(&storage, model, 500);
+                try storage.close();
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                const retry = (try admitRetryForTesting(&storage)).?.permit.binding;
+                try std.testing.expectEqual(first.operation_id, retry.operation_id);
+                try expectFrozenContextWindow(&storage, retry, expected);
+                try settleMessagesForTesting(&storage, &tmp, retry, 1, false, null);
+                try submitTestMessage(&storage, &tmp, "window-next", "window-next", session.slice(), "next");
+                const next = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+                try expectFrozenContextWindow(&storage, next, 500);
+            }
+        }
+    }.run);
+}
+
+test "frozen context window rides every model admission kind without another round" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            var tmp = std.testing.tmpDir(.{});
+            defer tmp.cleanup();
+            var storage: Store = undefined;
+            try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+            defer storage.close() catch unreachable;
+            const session = try configureTestSession(&storage, "window-kinds");
+            try saveFrozenContextWindow(&storage, "model-a", 1000);
+            try submitTestMessage(&storage, &tmp, "window-first", "window-first", session.slice(), "first");
+            const first = (try storage.admitModelAttempt(.message, .{})).?.permit.binding;
+            try expectFrozenContextWindow(&storage, first, 1000);
+            try submitTestMessage(&storage, &tmp, "window-second", "window-second", session.slice(), "second");
+            try settleMessagesForTesting(&storage, &tmp, first, 1, false, null);
+            try saveFrozenContextWindow(&storage, "model-a", 2000);
+            const joined = (try storage.admitModelAttempt(.open_turn_message, .{})).?.permit.binding;
+            try expectFrozenContextWindow(&storage, joined, 2000);
+            try settleCallsForTesting(&storage, &tmp, joined, "window-call", &.{.{
+                .item_id = "unknown-item",
+                .name = "unknown_tool",
+                .encoded_call_id = "unknown-call",
+                .decoded_call_id = "unknown-call",
+                .encoded_arguments = "{}",
+                .decoded_arguments = "{}",
+            }});
+            try saveFrozenContextWindow(&storage, "model-b", 3000);
+            var patch: wire_request.ConfigureCommand = .{};
+            try patch.key.set("window-model-switch");
+            patch.session = session;
+            patch.configuration.model.state = .value;
+            try patch.configuration.model.value.set("model-b");
+            patch.configuration.compaction_trigger.state = .value;
+            try patch.configuration.compaction_trigger.value.set("1000");
+            try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+            const continuation = (try storage.admitModelAttempt(.tool_continuation, .{})).?.permit.binding;
+            try expectFrozenContextWindow(&storage, continuation, 3000);
+            try expectFrozenContextWindow(&storage, first, 1000);
+            try expectFrozenContextWindow(&storage, joined, 2000);
+        }
+    }.run);
+}
+
+/// A compact history with independently chosen byte sizes: at window=100 the
+/// three targets (400,100,25) retain first+[120,30,10], first+[30,10], first+[10].
+fn frozenWindowHistory(storage: *Store, tmp: *std.testing.TmpDir, session: []const u8) !void {
+    try submitTestMessage(storage, tmp, "window-first", "window-first", session, "first");
+    inline for (.{ .{ "window-big", 600, 'b' }, .{ "window-middle", 120, 'm' }, .{ "window-small", 30, 's' }, .{ "window-last", 10, 'n' } }) |item| {
+        const text: [item[1]]u8 = @splat(item[2]);
+        try submitTestMessage(storage, tmp, item[0], item[0], session, &text);
+    }
+}
+
+fn expectFrozenFloor(storage: *Store, binding: AttemptBinding, level: u64, oldest: []const u8, dropped: u64) !void {
+    const position = try store_testing.queryU64(storage, "SELECT entry.session_position FROM conversation_entry entry JOIN message_admission msg ON msg.admission_id=entry.source_admission_id WHERE msg.command_key=?1 AND entry.entry_kind=1", .{oldest});
+    try std.testing.expectEqual(position - 1, try store_testing.queryU64(storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+    try std.testing.expectEqual(level, try store_testing.queryU64(storage, "SELECT history_level FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+    try std.testing.expectEqual(dropped, try store_testing.queryU64(storage, "SELECT history_dropped FROM model_operation WHERE operation_id=?1", .{binding.operation_id}));
+    var view: HistoricalView = undefined;
+    try openCheckedView(storage, binding, &view);
+    defer view.close();
+    var cursor: TestingHistoryCursor = .{};
+    const first = (try cursor.next(&view)).?;
+    var bytes: [1024]u8 = undefined;
+    try std.testing.expectEqualStrings("first", try renderTestingEntry(&view, first, &bytes));
+    const sizes = [_]usize{ 120, 30, 10 };
+    const letters = [_]u8{ 'm', 's', 'n' };
+    const start: usize = if (std.mem.eql(u8, oldest, "window-middle")) 0 else if (std.mem.eql(u8, oldest, "window-small")) 1 else 2;
+    for (sizes[start..], letters[start..]) |size, letter| {
+        const entry = (try cursor.next(&view)).?;
+        const text = try renderTestingEntry(&view, entry, &bytes);
+        try std.testing.expectEqual(size, text.len);
+        for (text) |byte| try std.testing.expectEqual(letter, byte);
+    }
+    try std.testing.expect((try cursor.next(&view)) == null);
+}
+
+test "frozen context window refresh before settlement and successor admission cannot change escalation" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            // Both directions, plus a frozen exhausted walk that a live read
+            // would incorrectly turn into another compaction.
+            for ([_]u32{ 100, 1000, 100000 }) |original| {
+                var tmp = std.testing.tmpDir(.{});
+                defer tmp.cleanup();
+                var storage: Store = undefined;
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                defer storage.close() catch unreachable;
+                const session = try configureTestSession(&storage, "window-refresh");
+                try frozenWindowHistory(&storage, &tmp, session.slice());
+                const assistant = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try storage.settleModelAttemptFailure(assistant, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                try saveFrozenContextWindow(&storage, "model-a", original);
+                const full = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                try expectFrozenContextWindow(&storage, full, original);
+                try saveFrozenContextWindow(&storage, "model-a", if (original == 100) 100000 else 100);
+                try storage.settleModelAttemptFailure(full, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                try saveFrozenContextWindow(&storage, "model-a", if (original == 100) 200000 else 200);
+                // Restart with a settled overflow and a different catalog.
+                try storage.close();
+                try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                const next = try storage.admitNextModelAttempt(.{});
+                try std.testing.expectEqual(original != 100000, next != null);
+                if (original == 100000) {
+                    try expectActivityOutcome(&storage, session.slice(), full, .context_full, "ResourceExceeded");
+                } else {
+                    const deeper = next.?.permit.binding;
+                    try expectFrozenFloor(&storage, deeper, if (original == 100) 1 else 3, "window-middle", 1);
+                    try expectFrozenContextWindow(&storage, deeper, if (original == 100) 200000 else 200);
+                    try expectFrozenContextWindow(&storage, full, original);
+                }
+            }
+        }
+    }.run);
+}
+
+test "frozen context window covers all levels reservation exhaustion and inherited floors" {
+    try store_testing.forEachEngine(struct {
+        fn run(case: *store_testing.Case) !void {
+            for ([_]u64{ 0, 100, 200 }) |reservation| {
+                for ([_]bool{ false, true }) |accept_base| {
+                    var tmp = std.testing.tmpDir(.{});
+                    defer tmp.cleanup();
+                    var storage: Store = undefined;
+                    try store_testing.testingStore(case, &storage, &tmp, std.testing.io);
+                    defer storage.close() catch unreachable;
+                    var workspace_buffer: [protocol.max_workspace_bytes]u8 = undefined;
+                    var create = try completeConfiguration("window-levels", "", try canonicalCwd(std.testing.io, &workspace_buffer), "model-a");
+                    create.configuration.output_reservation.state = .value;
+                    var count: [20]u8 = undefined;
+                    try create.configuration.output_reservation.value.set(try std.fmt.bufPrint(&count, "{d}", .{reservation}));
+                    const session = (try storage.configure(&create, .{})).accepted.session;
+                    try frozenWindowHistory(&storage, &tmp, session.slice());
+                    var previous = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try storage.settleModelAttemptFailure(previous, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                    try saveFrozenContextWindow(&storage, "model-a", 100);
+                    previous = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    const count_levels: usize = if (reservation == 0) 3 else 1;
+                    for (0..count_levels) |index| {
+                        try storage.settleModelAttemptFailure(previous, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                        const deeper = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                        const oldest = if (reservation != 0 or index == 2) "window-last" else if (index == 1) "window-small" else "window-middle";
+                        try expectFrozenFloor(&storage, deeper, index + 1, oldest, if (reservation != 0) 3 else 1);
+                        previous = deeper;
+                    }
+                    if (!accept_base) {
+                        try storage.settleModelAttemptFailure(previous, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                        try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                        try expectActivityOutcome(&storage, session.slice(), previous, .context_full, "ResourceExceeded");
+                        continue;
+                    }
+                    // A successful base transfers its floor to the assistant's recipe.
+                    try settleCompactionForTesting(&storage, &tmp, previous, &.{.compaction});
+                    const successor = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try expectFrozenContextWindow(&storage, successor, 100);
+                    {
+                        var view: HistoricalView = undefined;
+                        try openCheckedView(&storage, successor, &view);
+                        defer view.close();
+                        const coverage = try view.coverage();
+                        try std.testing.expectEqual(try store_testing.queryU64(&storage, "SELECT history_floor FROM model_operation WHERE operation_id=?1", .{previous.operation_id}), coverage.floor.position);
+                        try std.testing.expect(!coverage.floor.own);
+                    }
+                    try storage.settleModelAttemptFailure(successor, .{ .uncorrelated = "context_overflow" }, .context_overflow, .{});
+                    try std.testing.expect((try storage.admitNextModelAttempt(.{})) == null);
+                    // A new model must not inherit the old model's base or floor.
+                    try saveFrozenContextWindow(&storage, "model-b", 700);
+                    var patch: wire_request.ConfigureCommand = .{};
+                    try patch.key.set("window-base-switch");
+                    patch.session = session;
+                    patch.configuration.model.state = .value;
+                    try patch.configuration.model.value.set("model-b");
+                    patch.configuration.compaction_trigger.state = .value;
+                    try patch.configuration.compaction_trigger.value.set("700");
+                    try std.testing.expect(try storage.configure(&patch, .{}) == .accepted);
+                    try submitTestMessage(&storage, &tmp, "window-new-model", "window-new-model", session.slice(), "new");
+                    const switched = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
+                    try expectFrozenContextWindow(&storage, switched, 700);
+                    var view: HistoricalView = undefined;
+                    try openCheckedView(&storage, switched, &view);
+                    defer view.close();
+                    const coverage = try view.coverage();
+                    try std.testing.expectEqual(@as(u64, 0), coverage.floor.position);
+                    try std.testing.expect(coverage.anchor == null);
+                }
+            }
+        }
+    }.run);
+}
+
 /// Calls the admission owner's SQL, rather than duplicating it in a fixture.
 const EffortCarryRead = struct {
     const query = rsql.Read(.{
@@ -15982,10 +16227,10 @@ test "admitted effort carry agrees with replay recipe across the owner domain" {
                 // Closed fixture includes NULL boundaries. The codec declines
                 // a concrete-to-NULL transition; compare only encodable folds.
                 try store_testing.exec(&storage, "UPDATE model_operation SET admission_position=2 WHERE session_ref=?1", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor) SELECT 90,turn_id,session_ref,1,input_cutoff,10,1,0,'high',1,'failed',1,tool_set_id,10 FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor) SELECT 91,turn_id,session_ref,2,input_cutoff,20,1,0,'xhigh',1,'failed',1,tool_set_id,20 FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id) SELECT 92,turn_id,session_ref,1,input_cutoff,22,0,'none',1,'failed',1,tool_set_id FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
-                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id) SELECT 93,turn_id,session_ref,1,input_cutoff,25,0,NULL,1,'failed',1,tool_set_id FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor,context_window) SELECT 90,turn_id,session_ref,1,input_cutoff,10,1,0,'high',1,'failed',1,tool_set_id,10,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,purpose,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,history_floor,context_window) SELECT 91,turn_id,session_ref,2,input_cutoff,20,1,0,'xhigh',1,'failed',1,tool_set_id,20,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) SELECT 92,turn_id,session_ref,1,input_cutoff,22,0,'none',1,'failed',1,tool_set_id,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
+                try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,context_window) SELECT 93,turn_id,session_ref,1,input_cutoff,25,0,NULL,1,'failed',1,tool_set_id,context_window FROM model_operation WHERE session_ref=?1 AND admission_position=2", .{session.slice()});
                 try store_testing.exec(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) SELECT 90,0,session_ref,11,4,1,item_id_digest,0,0,extras_content_id,0 FROM model_output_item WHERE session_ref=?1 AND item_ordinal=0 LIMIT 1", .{session.slice()});
                 try store_testing.exec(&storage, "INSERT INTO model_output_item(operation_id,item_ordinal,session_ref,session_position,item_kind,attempt_ordinal,item_id_digest,replay_omits_reasoning_text,phase,extras_content_id,part_count) SELECT 91,0,session_ref,21,4,1,item_id_digest,0,0,extras_content_id,0 FROM model_output_item WHERE operation_id=90 AND session_ref=?1", .{session.slice()});
                 const entries = [_]Entry{ .{ .position = 2, .model = "unlisted-A", .effort = top }, .{ .position = 10, .model = "unlisted-A", .effort = .high }, .{ .position = 20, .model = "unlisted-B", .effort = .xhigh }, .{ .position = 22, .model = "unlisted-A", .effort = .none }, .{ .position = 25, .model = "unlisted-A", .effort = null } };
@@ -16046,7 +16291,7 @@ test "effort refusal eligibility excludes a source refused by any Operation" {
             const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
             // A second snapshot sharing the source isolates the source's
             // immutable refusal fact from the exact refusing Operation.
-            try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,999,0,reasoning_effort,1,'failed',1,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override FROM model_operation WHERE operation_id=?1", .{binding.operation_id});
+            try store_testing.exec(&storage, "INSERT INTO model_operation(operation_id,turn_id,session_ref,settings_revision,input_cutoff,admission_position,output_reservation,reasoning_effort,attempt_ordinal,resolution_code,resolved_at,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window) SELECT 999,turn_id,session_ref,settings_revision,input_cutoff,999,0,reasoning_effort,1,'failed',1,tool_set_id,effort_source_revision,previous_reasoning_effort,effort_update,previous_effort_override,context_window FROM model_operation WHERE operation_id=?1", .{binding.operation_id});
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, binding.operation_id));
             try std.testing.expect(try EffortCarryRead.refusalEligible(&storage, 999));
             try storage.settleModelAttemptFailure(binding, .{ .correlated = .{ .code = "provider_http_400", .request_id = .{}, .report = "unsupported_value: reasoning.effort" } }, .effort_change_refused, .{});

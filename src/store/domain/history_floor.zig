@@ -104,7 +104,7 @@ const floor_facts = rsql.Read(.{
     .sql = "SELECT current.admission_position,current.history_floor,current.history_level,base.history_floor AS base_floor,coalesce(base.admission_position,0) AS frontier," ++
         "coalesce((SELECT min(first.session_position) FROM conversation_entry first @index(conversation_entry_history) " ++
         "WHERE first.session_ref=current.session_ref AND first.entry_kind=1),0) AS first_message," ++
-        "current.output_reservation,r.model,base_revision.model AS base_model FROM model_operation current " ++
+        "current.output_reservation,current.context_window,r.model,base_revision.model AS base_model FROM model_operation current " ++
         "JOIN session_revision r ON r.session_ref=current.session_ref AND r.revision=current.settings_revision " ++
         "LEFT JOIN model_operation base ON base.operation_id=(SELECT selected.operation_id " ++
         "FROM model_operation selected @index(model_operation_compaction_bases) WHERE selected.session_ref=current.session_ref AND selected.purpose=1 " ++
@@ -121,6 +121,7 @@ const floor_facts = rsql.Read(.{
         frontier: u64,
         first_message: u64,
         output_reservation: u64,
+        context_window: u64,
         model: Bounded(model_capability.max_model_bytes),
         base_model: ?Bounded(model_capability.max_model_bytes),
     },
@@ -211,9 +212,9 @@ pub fn deeperFloor(a: anytype, operation: u64) !?Room {
     const compatible = if (facts.base_model) |*model| output_item.Kind.compaction.replayableTo(model.slice(), facts.model.slice(), .selected_base) else true;
     const base_floor: u64 = if (compatible) (if (facts.base_floor) |floor| floor.get() else 0) else 0;
     const previous: u64 = if (facts.history_floor) |floor| floor.get() else base_floor;
-    // Settlement and admission must agree about an already frozen Operation's
-    // escalation. A refresh between them must not change its historical walk.
-    var walk: Walk = .init(model_capability.contextWindow(@import("../../model_catalog.zig").shipped, facts.model.slice()), facts.output_reservation, facts.admission_position.get());
+    // Both callers walk the failed Operation's admission-time window, never
+    // today's catalog or its successor's window. A refresh cannot move this floor.
+    var walk: Walk = .init(facts.context_window, facts.output_reservation, facts.admission_position.get());
     while (!walk.done()) {
         walk.page_rows = 0;
         a.readEach(units, .{

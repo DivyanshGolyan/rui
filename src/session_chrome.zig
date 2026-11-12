@@ -1,7 +1,6 @@
 //! The Session screen's chrome, decided over values its shell read: the
 //! status bar under the facts row, the marker over a scrolled-back
-//! transcript, how far Shift-Up/Down scroll, the terminal title, and the one
-//! Keys table that /help and the `?` shortcuts both show. Nothing here
+//! transcript, how far Shift-Up/Down scroll, and the terminal title. Nothing here
 //! reads a clock or the terminal; the shell passes the time and widths.
 const std = @import("std");
 const session_line = @import("session_line.zig");
@@ -15,7 +14,7 @@ pub const Method = session_line.Method;
 pub const notice_ms = 5_000;
 
 /// The notice about the person's own last action: `Copied 12 lines`,
-/// `! Unknown command /x · /help`. One at a time: a newer one replaces it,
+/// `! Unknown command /x`. One at a time: a newer one replaces it,
 /// and the next key dismisses it before the key acts, so a key's own
 /// notice survives it. Anything the person must act on is never a notice:
 /// it is the status bar's `needs` text, which lasts until resolved.
@@ -347,116 +346,6 @@ fn cutUtf8(bytes: []const u8, limit: usize) usize {
     return end;
 }
 
-// --- Keys -------------------------------------------------------------------
-
-pub const Binding = struct { key: []const u8, does: []const u8 };
-
-/// The Session's keys, in the order /help lists them and the `?` shortcuts
-/// pack them. The full key behaviour lives in `session_keys`; this is how
-/// it is said.
-pub const keys = [_]Binding{
-    .{ .key = "enter", .does = "send" },
-    .{ .key = "shift+enter or ctrl+j", .does = "new line" },
-    .{ .key = "ctrl+p/n", .does = "recall" },
-    .{ .key = "/", .does = "commands" },
-    .{ .key = "esc", .does = "overview" },
-    .{ .key = "ctrl+x", .does = "stop" },
-    .{ .key = "ctrl+o", .does = "open" },
-    .{ .key = "ctrl+r", .does = "retry" },
-    .{ .key = "shift+↑↓", .does = "scroll" },
-    .{ .key = "?", .does = "shortcuts" },
-};
-
-/// The column a key's words start at on the /help page.
-const key_column = blk: {
-    var widest = 0;
-    for (keys) |binding| widest = @max(widest, scalars(binding.key));
-    break :blk widest + 2;
-};
-
-/// Scalars in `text`: a key's cells, since every key is drawn one cell a
-/// scalar (checked by a test against the terminal's width).
-fn scalars(text: []const u8) usize {
-    var count: usize = 0;
-    for (text) |byte| count += @intFromBool(byte & 0xc0 != 0x80);
-    return count;
-}
-
-/// The marks a Session shows, as /help lists them.
-pub const marks = blk: {
-    const table = @import("marks.zig").marks;
-    break :blk table.get(.finished).unicode ++ "  done                 " ++ table.get(.active).unicode ++ "  running\n" ++
-        table.get(.failed).unicode ++ "  failed               " ++ table.get(.stopped).unicode ++ "  stopped\n" ++
-        table.get(.needs_you).unicode ++ "  an Action waits for Allow or Deny\n" ++
-        table.get(.queued).unicode ++ "  waiting its turn\n";
-};
-
-/// The /help page's Marks and Keys sections, one key per line. The
-/// screen's commands follow them.
-pub const help = blk: {
-    var text: []const u8 = "Marks\n" ++ marks ++ "\nKeys\n";
-    const padding: [key_column]u8 = @splat(' ');
-    for (keys) |binding| text = text ++ binding.key ++ padding[scalars(binding.key)..] ++ binding.does ++ "\n";
-    break :blk text ++ "\nCommands\n";
-};
-
-/// Bytes `shortcuts` writes at most.
-pub const shortcuts_bytes = blk: {
-    var bytes = 0;
-    for (keys) |binding| bytes += binding.key.len + 1 + binding.does.len + " · ".len + 1;
-    break :blk bytes;
-};
-
-/// The `?` shortcuts: the same keys packed into lines of at most `width`
-/// cells, `key does` joined by ` · `. A binding wider than the line takes a
-/// line of its own and the shell clips it.
-pub fn shortcuts(buffer: *[shortcuts_bytes]u8, width: usize, method: Method) []const u8 {
-    var out = std.Io.Writer.fixed(buffer);
-    var line: usize = 0;
-    for (keys) |binding| {
-        const cells = session_line.cells(binding.key, method) + 1 + session_line.cells(binding.does, method);
-        if (line != 0 and line + 3 + cells > width) {
-            out.writeByte('\n') catch unreachable;
-            line = 0;
-        }
-        if (line != 0) {
-            out.writeAll(" · ") catch unreachable;
-            line += 3;
-        }
-        out.print("{s} {s}", .{ binding.key, binding.does }) catch unreachable;
-        line += cells;
-    }
-    return out.buffered();
-}
-
-/// What a key does to the `?` shortcuts.
-pub const Shortcut = enum {
-    /// Show them; the key types nothing.
-    open,
-    /// Close them, and the key types `?` (`??` starts a Message with one).
-    close_and_type,
-    /// Close them, then the key acts as usual.
-    close_and_act,
-    /// Not open: the key acts as usual.
-    act,
-};
-
-/// `?` on an empty draft shows the shortcuts; the next key closes them and
-/// then acts, except a second `?`, which types one. `?` on a draft with
-/// text is just a character.
-pub fn shortcut(open: bool, draft_empty: bool, question: bool) Shortcut {
-    if (open) return if (question) .close_and_type else .close_and_act;
-    return if (question and draft_empty) .open else .act;
-}
-
-test "? on an empty draft shows the shortcuts; the next key closes them; ?? types one" {
-    try std.testing.expectEqual(Shortcut.open, shortcut(false, true, true));
-    try std.testing.expectEqual(Shortcut.act, shortcut(false, false, true));
-    try std.testing.expectEqual(Shortcut.act, shortcut(false, true, false));
-    try std.testing.expectEqual(Shortcut.close_and_type, shortcut(true, true, true));
-    try std.testing.expectEqual(Shortcut.close_and_act, shortcut(true, true, false));
-}
-
 test "a notice goes after about five seconds or at the next key; the newest replaces it; what needs the person stays" {
     var notice: Notice(256) = .{};
     try std.testing.expectEqual(@as(?[]const u8, null), notice.current(0));
@@ -470,8 +359,8 @@ test "a notice goes after about five seconds or at the next key; the newest repl
     notice.show("Copied 12 lines", 10_000);
     // A clock that reads earlier than the notice still shows it.
     try std.testing.expect(notice.current(9_000) != null);
-    notice.show("! Unknown command /x · /help", 12_000);
-    try std.testing.expectEqualStrings("! Unknown command /x · /help", notice.current(16_000).?);
+    notice.show("! Unknown command /x", 12_000);
+    try std.testing.expectEqualStrings("! Unknown command /x", notice.current(16_000).?);
     notice.dismiss();
     try std.testing.expectEqual(@as(?[]const u8, null), notice.current(12_001));
     // A long notice is cut on a character.
@@ -480,7 +369,7 @@ test "a notice goes after about five seconds or at the next key; the newest repl
     try std.testing.expectEqual(@as(usize, 256), notice.current(0).?.len);
 
     try std.testing.expectEqual(Tone.quiet, bar(.{ .notice = "Copied 12 lines", .width = 80 }).tone);
-    try std.testing.expectEqual(Tone.attention, bar(.{ .notice = "! Unknown command /x · /help", .width = 80 }).tone);
+    try std.testing.expectEqual(Tone.attention, bar(.{ .notice = "! Unknown command /x", .width = 80 }).tone);
     const unconfirmed = bar(.{ .needs = "! Not confirmed · ctrl+r retries", .notice = "Copied 12 lines", .width = 80 });
     try std.testing.expectEqualStrings("! Not confirmed · ctrl+r retries", unconfirmed.left);
     try std.testing.expectEqual(Tone.attention, unconfirmed.tone);
@@ -555,28 +444,4 @@ fn repeat(comptime text: []const u8, comptime count: usize) []const u8 {
     var joined: []const u8 = "";
     for (0..count) |_| joined = joined ++ text;
     return joined;
-}
-
-test "/help and the ? shortcuts say the same keys" {
-    try std.testing.expect(std.mem.startsWith(u8, help, "Marks\n✓  done"));
-    try std.testing.expect(std.mem.indexOf(u8, help, "\nKeys\nenter                  send\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, help, "\nshift+↑↓               scroll\n") != null);
-    try std.testing.expect(std.mem.endsWith(u8, help, "\nCommands\n"));
-    var buffer: [shortcuts_bytes]u8 = undefined;
-    const wide = shortcuts(&buffer, 1_000, .unicode);
-    try std.testing.expect(std.mem.indexOfScalar(u8, wide, '\n') == null);
-    for (keys) |binding| {
-        try std.testing.expectEqual(scalars(binding.key), session_line.cells(binding.key, .unicode));
-        var entry: [64]u8 = undefined;
-        const said = std.fmt.bufPrint(&entry, "{s} {s}", .{ binding.key, binding.does }) catch unreachable;
-        try std.testing.expect(std.mem.indexOf(u8, wide, said) != null);
-        try std.testing.expect(std.mem.indexOf(u8, help, binding.does) != null);
-    }
-    try std.testing.expectEqualStrings(
-        \\enter send · shift+enter or ctrl+j new line · ctrl+p/n recall · / commands
-        \\esc overview · ctrl+x stop · ctrl+o open · ctrl+r retry · shift+↑↓ scroll
-        \\? shortcuts
-    , shortcuts(&buffer, 80, .unicode));
-    var lines = std.mem.splitScalar(u8, shortcuts(&buffer, 30, .unicode), '\n');
-    while (lines.next()) |line| try std.testing.expect(session_line.cells(line, .unicode) <= 30 or std.mem.indexOf(u8, line, " · ") == null);
 }
