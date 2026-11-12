@@ -89,29 +89,30 @@ def inventory():
                        ("malformed-utf8", b"bad\xc3(\r")):
         rows.append({"name": name, "scenario": "rejection", "chunks": [chunk(data)]})
     rows.append({"name": "recovery-raw", "scenario": "recovery", "chunks": [chunk(b"\x12")]})
-    # The continuous feed has 18 rows (scenarios.navigation), starting at
-    # line 83 at end. Half-page movement is 9 rows; the reserved chip row
-    # never changes that geometry. End, Esc and Ctrl-G return to end.
-    for name, enter, leave, first in (
-        ("key-pgup", b"\x1b[5~", b"\x07", 74),
-        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 65),
-        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 74),
-        ("key-shift-up", b"\x1b[1;2A", b"\x07", 74),
-        ("key-up-csi", b"\x1b[A", b"\x07", 82),
-        ("key-up-ss3", b"\x1bOA", b"\x07", 82),
-        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 74),
-        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 74),
-        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 74),
-        ("key-esc", b"\x1b[5~", b"\x1b", 74),
-        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 80),
-        ("chat-info", b"\x1bi", b"\x1b", None),
+    # Expected movement is relative to the rendered feed capacity, not a
+    # particular footer height. The reserved chip row never changes that
+    # capacity. End, Esc and Ctrl-G return to the live anchor.
+    for name, enter, leave, pages, lines in (
+        ("key-pgup", b"\x1b[5~", b"\x07", 1, 0),
+        ("key-pgdn", b"\x1b[5~" * 2, b"\x1b[6~", 2, 0),
+        ("key-shift-pgup", b"\x1b[5;2~", b"\x07", 1, 0),
+        ("key-shift-up", b"\x1b[1;2A", b"\x07", 1, 0),
+        ("key-up-csi", b"\x1b[A", b"\x07", 0, 1),
+        ("key-up-ss3", b"\x1bOA", b"\x07", 0, 1),
+        ("key-end-csi-f", b"\x1b[5~", b"\x1b[F", 1, 0),
+        ("key-end-ss3-f", b"\x1b[5~", b"\x1bOF", 1, 0),
+        ("key-end-csi-4", b"\x1b[5~", b"\x1b[4~", 1, 0),
+        ("key-esc", b"\x1b[5~", b"\x1b", 1, 0),
+        ("wheel-alt-scroll", b"\x1b[A" * 3, b"\x1b[B", 0, 3),
+        ("chat-info", b"\x1bi", b"\x1b", 0, 0),
     ):
         vector = {"name": name, "scenario": "navigation", "chunks": [chunk(enter)],
-                  "return_chunks": [chunk(leave)], "chat_info": name == "chat-info", "first_history": first}
+                  "return_chunks": [chunk(leave)], "chat_info": name == "chat-info",
+                  "back": {"pages": pages, "lines": lines}}
         if name == "key-pgdn":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "first_history": 74}]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[6~")], "back": {"pages": 1, "lines": 0}}]
         elif name == "wheel-alt-scroll":
-            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "first_history": first} for first in (81, 82)]
+            vector["middle"] = [{"chunks": [chunk(b"\x1b[B")], "back": {"pages": 0, "lines": lines}} for lines in (2, 1)]
         rows.append(vector)
     return rows
 

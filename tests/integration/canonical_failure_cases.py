@@ -665,9 +665,12 @@ def permission_read_cases(state):
             os.write(master, b"\x0f")
             human.read_terminal(master, "host_busy", timeout=10)
             output = human.current_screen(master)
-            # The notice under the input names what failed, then the Host's
-            # own words, whole within the row. A diagnostic is never a feed row.
-            assert output.rstrip("\n").rsplit("\n", 1)[1] == "! Tool output unavailable. HTTP 503; type: busy; code: host_busy", output
+            # The Footer's right slot names what failed, then the Host's
+            # own words, once. A diagnostic is never an extra or feed row.
+            from human_cli_fixture import chat_footer_row
+            notice = "! Tool output unavailable. HTTP 503; type: busy; code: host_busy"
+            assert output.split("\n")[chat_footer_row(output)].endswith(notice), output
+            assert output.count(notice) == 1, output
             assert caller.poll() is None, output
             os.write(master, b"\x03")
             _, errors = human.terminal_exit(caller, master, timeout=10)

@@ -2545,10 +2545,12 @@ export interface components {
             since?: string | null;
         };
         PageWork: {
+            read_version: string;
             state: components["schemas"]["WorkStateJson"];
             turn: components["schemas"]["Decimal"] | null;
             operation: components["schemas"]["Decimal"] | null;
             first_action: components["schemas"]["Decimal"] | null;
+            last_line: components["schemas"]["LastLineFields"] | null;
             revision: components["schemas"]["Decimal"];
             workspace: string;
         };
@@ -2715,6 +2717,7 @@ export interface components {
             archived?: boolean;
         };
         SessionRow: {
+            read_version: string;
             /** @enum {string} */
             archive_state: "active" | "archiving" | "archived";
             reference: string;

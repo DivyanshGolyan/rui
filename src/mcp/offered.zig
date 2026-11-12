@@ -16,11 +16,13 @@ const deadline = @import("../deadline.zig");
 const stderr = @import("../stderr.zig");
 const Listing = @import("Listing.zig");
 const post = @import("post.zig");
+const pages = @import("../os/pages.zig");
 
 /// How long one server has to list its tools.
 pub const list_timeout_ms = 10_000;
 
-/// Room for one server's listing, taken from the scratch allocator.
+/// Room for one server's listing: entries from the scratch allocator, the
+/// rest in fresh pages so only what the listing writes becomes resident.
 const entries_per_server = tools.max_host_tool_records;
 const arena_bytes = 4 * 1024 * 1024;
 const answer_bytes = 512 * 1024;
@@ -115,8 +117,8 @@ pub noinline fn fetch(io: std.Io, arena: std.mem.Allocator, scratch: std.mem.All
     const target = http1.parseTarget(server.url.slice()) catch return .unreachable_;
     const entries = try scratch.alloc(Listing.Entry, entries_per_server);
     defer scratch.free(entries);
-    const room = try scratch.alloc(u8, arena_bytes + answer_bytes + request_bytes);
-    defer scratch.free(room);
+    const room = pages.mapZeroed(u8, arena_bytes + answer_bytes + request_bytes) catch return error.OutOfMemory;
+    defer pages.unmapZeroed(room);
     const listing = try scratch.create(Listing);
     defer scratch.destroy(listing);
     listing.init(
