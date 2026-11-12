@@ -213,8 +213,8 @@ def chat_footer_row(screen):
 
 
 def composer_empty(screen, y):
-    """The composer holds no draft: the cursor's row is its bare mark."""
-    return composer_line(screen, y) in (" ›", " >")
+    """No draft: the cursor row is a bare mark or the empty-chat placeholder."""
+    return composer_line(screen, y) in (" ›", " >", " › Type a task", " > Type a task")
 
 
 def composer_ready(screen, x, y):

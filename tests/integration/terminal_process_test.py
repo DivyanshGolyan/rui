@@ -56,6 +56,42 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
+    def test_empty_composer_accepts_placeholder_in_the_focused_pane(self):
+        from human_cli_fixture import composer_empty
+
+        for prefix in (" ", "list text│ ", "中       │ "):
+            for mark in ("›", ">"):
+                for text in ("", " Type a task", " /copy", " draft", " Type a task extra", " x │ y"):
+                    with self.subTest(prefix=prefix, mark=mark, text=text):
+                        screen = " › earlier message\n" + prefix + mark + text
+                        self.assertEqual(composer_empty(screen, 1), text in ("", " Type a task"))
+        self.assertFalse(composer_empty("  + New Session\n  Settings", 0))
+
+    def test_command_frame_waits_past_placeholder_for_typed_command_and_reply(self):
+        from human_cli_fixture import command_frame
+        from types import SimpleNamespace
+
+        initial = " › Type a task\n ‹ gpt-6-sol · low"
+        typed = " › /copy\n ‹ gpt-6-sol · low"
+        reply = " › Type a task\n ‹ gpt-6-sol · low    No answer to copy"
+        frames = iter((initial, typed, reply))
+        events = []
+        capture = SimpleNamespace(completed=initial, listener=None)
+
+        def feed(_chunk):
+            capture.completed = next(frames)
+            events.append(capture.completed)
+            capture.listener(capture.completed, 3, 0)
+
+        capture.feed = feed
+        with patch("human_cli_fixture.terminal_capture", return_value=capture), \
+                patch("human_cli_fixture.os.write", side_effect=lambda fd, data: events.append(data)), \
+                patch("human_cli_fixture.os.read", return_value=b"committed frame"), \
+                patch("human_cli_fixture.select.select", return_value=([17], [], [])):
+            self.assertEqual(command_frame(17, "/copy", lambda screen: "No answer to copy" in screen), reply)
+        self.assertEqual(events, [b"/copy", initial, typed, b"\r", reply])
+        self.assertIsNone(capture.listener)
+
     def test_overview_oracle_requires_list_footer_without_editor(self):
         from human_cli_fixture import overview_frame
 
