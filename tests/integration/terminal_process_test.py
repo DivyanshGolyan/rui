@@ -56,6 +56,52 @@ class TerminalProcessTest(unittest.TestCase):
         self.assertEqual(conversation_text("list│ › line1    01:23\nlist│   line2\n    │ edited 2"),
                          "› line1    01:23\n  line2\nedited 2")
 
+    def test_draft_oracle_matches_empty_placeholder_without_losing_text_or_caret(self):
+        from types import SimpleNamespace
+        import unicodedata
+        from terminal_screen import Cell
+
+        def capture(prefix, text, caret, *, quiet=False, colour=8, faint=False):
+            # Mock committed cells only: this owner test never loads a terminal.
+            current = ScreenCapture.__new__(ScreenCapture)
+            current.synchronized, current.generation = False, 1
+            current.completed = " › earlier message\n" + "".join(prefix) + text
+            cells = [Cell(value, 7, False) for value in [*prefix, *text]]
+            if quiet:
+                for index in range(len(prefix) + 2, len(cells)):
+                    cells[index] = cells[index]._replace(fg=colour, faint=faint)
+            current.completed_cells = [[], cells]
+            current.view = SimpleNamespace(cursor=SimpleNamespace(x=len(prefix) + caret, y=1))
+            return current
+
+        for prefix in ([" "], ["l", "│", " "], ["中", "", "│", " "]):
+            for prompt in ("› ", "> "):
+                for text in ("", "kept", "café", "é", "Type a task"):
+                    normalized = unicodedata.normalize("NFC", text)
+                    caret = 2 + len(normalized)
+                    for drawn in ((prompt.rstrip(), prompt + "Type a task") if not text else (prompt + normalized,)):
+                        with self.subTest(prefix=prefix, prompt=prompt, text=text, drawn=drawn):
+                            current = capture(prefix, drawn, caret, quiet=not text and drawn.endswith("Type a task"))
+                            self.assertTrue(current.draft(text, caret, prompt=prompt))
+                            self.assertFalse(current.draft(text, caret - 1, prompt=prompt))
+                            self.assertFalse(current.draft("wrong", caret, prompt=prompt))
+                            if text:
+                                self.assertFalse(current.draft("", 2, prompt=prompt))
+        literal = capture([" "], "› Type a task", 2)
+        self.assertTrue(literal.draft("Type a task", 2))
+        self.assertFalse(literal.draft("", 2), "literal text at Home is not an empty editor")
+        self.assertFalse(capture([" "], "› Type a task", 2, quiet=True, colour=7).draft("", 2))
+        self.assertTrue(capture([" "], "› Type a task", 2, quiet=True, colour=7, faint=True).draft("", 2))
+        self.assertFalse(capture([" "], "› Type a task", 3, quiet=True).draft("", 3))
+        current = capture([" "], "› Type a task", 2, quiet=True)
+        current.synchronized = True
+        self.assertFalse(current.draft("", 2))
+        current.synchronized, current.generation = False, 0
+        self.assertFalse(current.draft("", 2))
+        current.generation, current.completed = 1, current.completed + "\nOpening…"
+        self.assertFalse(current.draft("", 2))
+        self.assertFalse(capture([" "], "Password: Type a task", 10).draft("", 10, prompt="Password: "))
+
     def test_empty_composer_accepts_placeholder_in_the_focused_pane(self):
         from human_cli_fixture import composer_empty
 

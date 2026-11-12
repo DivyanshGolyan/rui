@@ -154,7 +154,7 @@ def editor(fixture, row):
         # If Esc merged with a later byte, this overview observation must fail.
         escaped_overview(tty, fixture.session)
         tty.send(b"\r")
-        tty.marker(f"‹ {fixture.session} · ")
+        # Its unsent chat shows model facts, not the Session reference.
         tty.draft(row["reopen_draft"], 2 + len(row["reopen_draft"]))
         chunks(tty, row["submit_chunks"])
     # Each vector supplies its own submit byte(s). This makes wrong Enter,

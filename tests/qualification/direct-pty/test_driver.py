@@ -163,6 +163,29 @@ class OverviewTests(unittest.TestCase):
                 escaped_overview(Terminal(frame + "\n" + editor), "a1b2c3")
 
 
+    def test_editor_reopen_waits_for_restored_draft_not_empty_chat_reference(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
+            import scenarios
+
+        tty = Mock()
+        fixture = SimpleNamespace(answer=Mock(), terminal=lambda: tty, session="a1b2c3",
+                                  endpoint=SimpleNamespace(requests=[]))
+        row = next(row for row in inventory() if row["name"] == "bare-esc-expiry")
+        self.assertEqual((row["reopen_draft"], row["expected"]), ("ab", "abZ"))
+        with patch.object(scenarios, "chunks"), patch.object(scenarios, "escaped_overview") as overview, \
+                patch.object(scenarios, "assert_submitted") as submitted, patch.object(scenarios, "leave"):
+            scenarios.editor(fixture, row)
+        overview.assert_called_once_with(tty, fixture.session)
+        tty.send.assert_called_once_with(b"\r")
+        tty.draft.assert_any_call("ab", 4)
+        tty.draft.assert_any_call("", 2)
+        tty.marker.assert_called_once_with("TD4 exact answer")
+        self.assertEqual(submitted.call_count, 2)
+        submitted.assert_called_with(fixture.endpoint.requests, ["abZ"])
+
+
 class ExitTests(unittest.TestCase):
     def test_leave_sends_ctrl_c_then_checks_restoration(self):
         with patch.object(sys, "argv", [sys.argv[0], sys.executable]):
