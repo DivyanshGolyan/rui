@@ -865,6 +865,8 @@ Required: minimum ten-client intake; budget covers wake pair, 100 ordinary excha
 ## Release demonstrations
 
 `upgrade-integration` builds `rui-upgrade-release-fixture` from the current production sources with a synthetic release version and the actual source revision.
+The historical Host-info profiles include wire 14 (v0.70.0), with all provider routes required. Parser, framing, discovery and exact-instance lifecycle tests exercise it alongside wires 13 and 9; ordinary readiness remains current-wire only. Format 71 migration tests cover the conditional saved-wire 14-to-15 update, populated SQLite reopen and live MySQL when configured.
+
 Its `restart_all_cases` suite also runs alone with `python3 tests/integration/upgrade_integration.py REAL_RUI restart-all` as an isolated non-root user.
 Two real retained managed builds serve separate Stores; `host restart --all` must replace both instances with the selected pinned executable and retire both old PIDs, preserve capacity/environment, then leave both current instances unchanged on retry.
 The suite checks no-Host/no-start behavior, mandatory `--all`, refusal of per-Store selection, a live unreadable socket as an operational failure, a legacy stale refused socket without a Store hint as unconfirmed rather than an inferred absence, and application-owned and unknown-managed Hosts as explained successful skips even without an installed target.
