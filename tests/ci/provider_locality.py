@@ -2,8 +2,8 @@
 
 Provider-specific knowledge (the ChatGPT sign-in, OpenAI's error codes and
 header names) lives in the files that own a provider: the codecs, the
-`codex_*` sign-in files, `providers.zig`, the provider table and the CLI
-commands that sign a provider in. Every other file in src/ is core, and its
+`codex_*` and `chatgpt_*` sign-in files, `providers.zig`, the provider table
+and the CLI commands that sign a provider in. Every other file in src/ is core, and its
 production code (tests and comments aside) names none of it. Core asks the
 provider table or the sign-in source a question instead.
 
@@ -24,6 +24,7 @@ SRC = ROOT / "src"
 PROVIDER_OWNED = (
     "codecs/*",
     "codex_*.zig",
+    "chatgpt_*.zig",
     "providers.zig",
     "provider_name.zig",
     "api_key.zig",
