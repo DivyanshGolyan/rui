@@ -1336,7 +1336,9 @@
           "workspace": "code/rui",
           "messages": [
             "Check this sidebar."
-          ]
+          ],
+          "mode": "bypass",
+          "effort": "high"
         }
       ]
     },
