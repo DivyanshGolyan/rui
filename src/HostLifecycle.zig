@@ -93,6 +93,14 @@ pub fn observe(allocator: std.mem.Allocator, io: std.Io, home: []const u8, store
     defer build.deinit(allocator);
     const version = switch (build) {
         .released => |released| released.version,
+        .source => source: {
+            const reported = try process.output(allocator, io, &.{ snapshot.executable, "--version" }, cancellation, 512);
+            defer allocator.free(reported);
+            break :source releaseVersion(reported) orelse {
+                snapshot.deinit(allocator);
+                return .{ .unsupported = .configuration_unavailable };
+            };
+        },
         else => {
             snapshot.deinit(allocator);
             return .{ .unsupported = .application_owned };
