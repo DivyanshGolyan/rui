@@ -38,8 +38,17 @@ pub const Attempt = struct {
         return if (sent < 0) null else @intCast(@max(0, now.toMilliseconds() - sent));
     }
 
-    pub fn snapshot(self: *const Attempt, now: std.Io.Timestamp) Values {
-        return .{ .latency_ms = self.elapsedMs(now), .first_event_ms = self.firstEventMs() };
+    /// Read the published boundaries before sampling their cutoff. The event's
+    /// acquire pairs with publication after `begin`, so a known event also has
+    /// a known send. A callback during the clock read cannot amend this value.
+    pub fn snapshot(self: *const Attempt, io: std.Io) Values {
+        const first_event_ms = self.firstEventMs();
+        const sent = self.sent_at_ms.load(.acquire);
+        const cutoff = std.Io.Clock.awake.now(io).toMilliseconds();
+        return .{
+            .latency_ms = if (sent < 0) null else @intCast(@max(0, cutoff - sent)),
+            .first_event_ms = first_event_ms,
+        };
     }
 };
 
@@ -47,9 +56,9 @@ pub const Attempt = struct {
 /// source/Operation (prelaunch or recovery) has no observed boundaries.
 pub const Source = struct {
     context: ?*anyopaque = null,
-    read: ?*const fn (*anyopaque, u64, std.Io.Timestamp) Values = null,
+    read: ?*const fn (*anyopaque, u64, std.Io) Values = null,
 
-    pub fn snapshot(self: Source, operation: u64, now: std.Io.Timestamp) Values {
-        return if (self.read) |read| read(self.context.?, operation, now) else .{};
+    pub fn snapshot(self: Source, operation: u64, io: std.Io) Values {
+        return if (self.read) |read| read(self.context.?, operation, io) else .{};
     }
 };

@@ -4365,22 +4365,60 @@ test "a skill tool reload under heap exhaustion runs again later without fencing
 test "model resolution owner captures timings for success failure interruption stop and archive" {
     const fixture = store_module.testing;
     const Clock = struct {
+        const Observation = enum { prelaunch, launched, response, during_capture, after_capture };
         var milliseconds: i64 = 100;
+        var on_cutoff: ?*provider.Transfer = null;
+        var callbacks: usize = 0;
+
+        // Inject the transport callback at the read boundary, without a
+        // scheduler or sleeps. Return the cutoff sampled before preemption.
         fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
-            if (clock == .awake) return .fromNanoseconds(@as(i96, milliseconds) * std.time.ns_per_ms);
-            return std.testing.io.vtable.now(userdata, clock);
+            if (clock != .awake) return std.testing.io.vtable.now(userdata, clock);
+            const cutoff = std.Io.Timestamp.fromNanoseconds(@as(i96, milliseconds) * std.time.ns_per_ms);
+            if (on_cutoff) |transfer| {
+                on_cutoff = null;
+                respond(transfer);
+            }
+            return cutoff;
         }
+
+        fn respond(transfer: *provider.Transfer) void {
+            milliseconds = 128;
+            callbacks += 1;
+            _ = transfer.reactor.observe(&transfer.stream, .{ .head = .{ .kind = .interim, .status = 100, .fields = &.{} } });
+        }
+
+        const Capture = struct {
+            source: @import("model_timing.zig").Source,
+            transfer: *provider.Transfer,
+            observation: Observation,
+            reads: usize = 0,
+
+            fn read(raw: *anyopaque, operation: u64, io: std.Io) @import("model_timing.zig").Values {
+                const self: *@This() = @ptrCast(@alignCast(raw));
+                self.reads += 1;
+                if (self.reads == 1 and self.observation == .during_capture) on_cutoff = self.transfer;
+                const captured = self.source.snapshot(operation, io);
+                if (self.reads == 1 and self.observation == .after_capture) respond(self.transfer);
+                return captured;
+            }
+        };
     };
     try fixture.forEachEngine(struct {
         fn run(case: *fixture.Case) !void {
             const Outcome = enum { success, failure, interruption, stop, archive };
-            const Observation = enum { prelaunch, launched, response };
+            const Observation = Clock.Observation;
             var vtable = std.testing.io.vtable.*;
             vtable.now = Clock.now;
             var io = std.testing.io;
             io.vtable = &vtable;
             for (std.enums.values(Outcome)) |outcome| for (std.enums.values(Observation)) |observation| {
+                // Completed transfers are retired before settlement; controls
+                // alone retain a live callback source while resolving.
+                if ((observation == .during_capture or observation == .after_capture) and (outcome == .success or outcome == .failure)) continue;
                 Clock.milliseconds = 100;
+                Clock.on_cutoff = null;
+                Clock.callbacks = 0;
                 var tmp = std.testing.tmpDir(.{});
                 defer tmp.cleanup();
                 var storage: store_module.Store = undefined;
@@ -4432,6 +4470,8 @@ test "model resolution owner captures timings for success failure interruption s
                         _ = reactor.observe(&transfer.stream, .{ .head = .{ .kind = .interim, .status = 100, .fields = &.{} } });
                     }
                 }
+                var capture: Clock.Capture = .{ .source = custody.timingSource(), .transfer = &transfer, .observation = observation };
+                storage.modelTimingSource().* = .{ .context = &capture, .read = Clock.Capture.read };
                 Clock.milliseconds = 123;
                 // Completion retires the Transfer before interpretation; controls
                 // retire it after their immutable transaction commits.
@@ -4469,8 +4509,16 @@ test "model resolution owner captures timings for success failure interruption s
                 try storage.activityPage(&request, page);
                 try std.testing.expectEqual(@as(usize, 1), page.count);
                 const call = page.items[0].value.model_call;
-                try std.testing.expectEqual(if (observation == .prelaunch) @as(?u64, null) else 23, call.latency_ms);
-                try std.testing.expectEqual(if (observation == .response) @as(?u64, 5) else null, call.first_event_ms);
+                const raced = observation == .during_capture or observation == .after_capture;
+                // A forced MySQL transaction rerun captures again after the
+                // single callback; its later coherent pair must keep the event.
+                const recaptured = raced and case.rerun;
+                try std.testing.expectEqual(if (observation == .prelaunch) @as(?u64, null) else if (recaptured) @as(u64, 28) else 23, call.latency_ms);
+                try std.testing.expectEqual(if (observation == .response) @as(?u64, 5) else if (recaptured) @as(?u64, 28) else null, call.first_event_ms);
+                if (call.first_event_ms) |first| try std.testing.expect(first <= (call.latency_ms orelse return error.MissingSend));
+                try std.testing.expectEqual(@as(usize, if (raced) 1 else 0), Clock.callbacks);
+                try std.testing.expectEqual(if (case.rerun) @as(usize, 2) else 1, capture.reads);
+                if (raced) try std.testing.expectEqual(@as(?u64, 28), transfer.timing.?.firstEventMs());
                 const expected_status = switch (outcome) {
                     .success => "answer",
                     .failure => "provider_final",
@@ -4485,7 +4533,7 @@ test "model resolution owner captures timings for success failure interruption s
                 }
                 try custody.detach(token);
                 try custody.cleanupComplete(token);
-                try std.testing.expectEqualDeep(@import("model_timing.zig").Values{}, custody.timingSource().snapshot(binding.operation_id, std.Io.Clock.awake.now(io)));
+                try std.testing.expectEqualDeep(@import("model_timing.zig").Values{}, custody.timingSource().snapshot(binding.operation_id, io));
                 const reused = custody.reserve().?;
                 try custody.releaseUnused(reused);
                 Clock.milliseconds = 999;

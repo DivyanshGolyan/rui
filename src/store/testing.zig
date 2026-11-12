@@ -818,7 +818,7 @@ pub const EffortMigrationChoice = enum {
 /// installs the custody registry; owner-boundary timing tests use live Attempts.
 pub fn timingSource(values: *@import("../model_timing.zig").Values) @import("../model_timing.zig").Source {
     return .{ .context = values, .read = struct {
-        fn read(raw: *anyopaque, _: u64, _: std.Io.Timestamp) @import("../model_timing.zig").Values {
+        fn read(raw: *anyopaque, _: u64, _: std.Io) @import("../model_timing.zig").Values {
             return @as(*@import("../model_timing.zig").Values, @ptrCast(@alignCast(raw))).*;
         }
     }.read };

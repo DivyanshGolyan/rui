@@ -352,12 +352,12 @@ pub const CustodyPool = struct {
         return .{ .context = self, .read = readTiming };
     }
 
-    fn readTiming(raw: *anyopaque, operation: u64, now: std.Io.Timestamp) model_timing.Values {
+    fn readTiming(raw: *anyopaque, operation: u64, io: std.Io) model_timing.Values {
         const self: *CustodyPool = @ptrCast(@alignCast(raw));
         for (self.records) |*record| {
             const generation = record.generation.load(.acquire);
             if (record.state.load(.acquire) != .attached or record.timing_operation.load(.acquire) != operation) continue;
-            const value = record.timing.snapshot(now);
+            const value = record.timing.snapshot(io);
             if (record.generation.load(.acquire) == generation and record.timing_operation.load(.acquire) == operation and record.state.load(.acquire) == .attached)
                 return value;
         }
