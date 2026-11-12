@@ -29,6 +29,7 @@ const historical_domain = @import("historical.zig");
 const history_floor_domain = @import("history_floor.zig");
 const model_admission_domain = @import("model_admission.zig");
 const store_access = @import("../access.zig");
+const transition = @import("../transition.zig");
 const forward_domain = @import("forward.zig");
 const turn_domain = @import("turn.zig");
 const failure_class = @import("../../failure_class.zig");
@@ -304,27 +305,45 @@ fn runOperationRead(a: anytype) !void {
     try store_access.runAs(a, error.OperationReadFailed);
 }
 
-/// Round 1 reads the Attempt; the claim is written only when the round
-/// found it running, unclaimed and within the allowance. Otherwise, or
-/// when the claim's UPDATE changes no row, the Access is abandoned and
-/// the answer is false, as on main.
-pub fn claimModelAuthRefresh(a: anytype, binding: AttemptBinding) !bool {
-    var facts: attempt_facts.Result = undefined;
-    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &facts);
-    try runOperationRead(a);
-    const row = try currentAttempt(&facts, binding);
-    if (row.retry_waiting or row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) {
-        try a.abandon(.{});
+/// Claims the Attempt's one forced auth refresh. Round 1 reads the
+/// Attempt; the claim is written only when the round found it running,
+/// unclaimed and within the allowance. Otherwise, or when the claim's
+/// UPDATE changes no row, nothing is written and the answer is false, as
+/// on main.
+pub const ClaimAuthRefresh = struct {
+    pub const rounds = transition.rounds(.{ .facts = .{ .always, error.OperationReadFailed } });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .facts;
+    pub const Input = struct { binding: AttemptBinding };
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.attempt_binding;
+    pub const Guards = store_core.Ordinary.attempt_binding || Declined;
+    pub const Declined = error{AuthRefreshUnclaimed};
+
+    input: Input,
+    facts: attempt_facts.Result = undefined,
+
+    pub fn step(t: *ClaimAuthRefresh, r: *transition.Round(ClaimAuthRefresh), ran: ?rounds.At) !transition.Next(ClaimAuthRefresh) {
+        const binding = t.input.binding;
+        if (ran == null) {
+            r.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &t.facts);
+            return .{ .round = .facts };
+        }
+        const row = try currentAttempt(&t.facts, binding);
+        if (row.retry_waiting or row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) return .{ .done = false };
+        r.write(claim_auth_refresh, .{ .operation_id = binding.operation_id, .attempt_ordinal = binding.attempt_ordinal, .session = row.session });
+        return .commit;
+    }
+
+    pub fn committed(_: *const ClaimAuthRefresh) Result {
+        return true;
+    }
+
+    pub fn declined(_: *const ClaimAuthRefresh, _: Declined) Result {
         return false;
     }
-    a.write(claim_auth_refresh, .{ .operation_id = binding.operation_id, .attempt_ordinal = binding.attempt_ordinal, .session = row.session });
-    a.commit() catch |err| {
-        if (err != error.AuthRefreshUnclaimed) return err;
-        try a.abandon(.{});
-        return false;
-    };
-    return true;
-}
+};
 
 /// Resolves an unresolved Attempt with a failure: `ordinary`, a context
 /// overflow and an exhausted retry. `last_failure_code` null keeps the
@@ -376,30 +395,6 @@ fn queueEffortRefusal(a: anytype, session: rsql.SessionHead, revision: u64, oper
 
 const EffortRefusal = union(enum) { unmatched, retried, exhausted: u64 };
 
-/// The refusal and retry share a commit. Even an exhausted allowance must
-/// retain the refusal: later Operations must not reuse the rejected effort.
-fn settleEffortRefusal(a: anytype, io: std.Io, binding: AttemptBinding, failure: ModelFailure, faults: Faults) !EffortRefusal {
-    var facts: attempt_facts.Result = undefined;
-    var source: refused_effort_source.Result = undefined;
-    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &facts);
-    a.read(refused_effort_source, .{ .operation = binding.operation_id }, &source);
-    try runOperationRead(a);
-    const row = try currentAttempt(&facts, binding);
-    const revision = (source orelse return .unmatched).revision.get();
-    if (binding.attempt_ordinal >= retry_policy.maximum_attempts) return .{ .exhausted = revision };
-    try queueEffortRefusal(a, row.session, revision, binding.operation_id, failure.report());
-    schedule_retry.queue(a, .{
-        .operation_id = binding.operation_id,
-        .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
-        .code = failure.code(),
-        .attempt_ordinal = binding.attempt_ordinal,
-        .session = row.session,
-    });
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-    return .retried;
-}
-
 /// The content a failure settles with: its diagnostic and its report.
 const FailureContent = struct {
     diagnostic: ?content_domain.Import,
@@ -441,131 +436,214 @@ const FailureContent = struct {
     }
 };
 
-/// Round 1 reads the Attempt and, for a failure that resolves it, looks
-/// up the failure's diagnostic and report. A context overflow reads in
-/// round 2 whether compaction can recover it, which needs the Attempt's
-/// position. The write round resolves the Attempt or schedules its retry,
-/// and closes its Turn or records its continuation, then commits.
-pub fn settleModelAttemptFailure(
-    a: anytype,
-    io: std.Io,
-    binding: AttemptBinding,
-    failure: ModelFailure,
-    requested_disposition: ModelFailureClass,
-    faults: Faults,
-) !void {
-    var exhausted_refusal: ?u64 = null;
-    const disposition: ModelFailureClass = if (requested_disposition == .effort_change_refused) refusal: {
-        switch (try settleEffortRefusal(a, io, binding, failure, faults)) {
-            .retried => return,
-            .unmatched => break :refusal .ordinary,
-            .exhausted => |revision| {
-                exhausted_refusal = revision;
-                break :refusal .{ .retryable = .{ .waits_ms = retry_policy.default_waits_ms } };
-            },
-        }
-    } else requested_disposition;
-    const code = failure.code();
-    var retry_random: u64 = 0;
-    if (disposition == .retryable) io.random(std.mem.asBytes(&retry_random));
-    // Only a resolving failure saves content: an ordinary one, an overflow,
-    // or a retry that exhausts the allowance.
-    const resolves = switch (disposition) {
-        .ordinary, .context_overflow => true,
-        .refreshed => false,
-        .effort_change_refused => unreachable,
-        .retryable => binding.attempt_ordinal == retry_policy.maximum_attempts,
-    };
-    var facts: attempt_facts.Result = undefined;
-    var content: FailureContent = if (resolves) .of(&failure) else .{ .diagnostic = null, .report = null };
-    const context_full = disposition == .context_overflow or failure_class.of(code) == .overflow;
-    a.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = resolves, .context_full = resolves and context_full }, &facts);
-    content.lookup(a);
-    try runOperationRead(a);
-    content.found();
-    const row = try currentAttempt(&facts, binding);
-    const session = row.session;
-    switch (disposition) {
-        .effort_change_refused => unreachable,
-        .ordinary, .context_overflow => {
-            // An overflowing call compacts; an overflowing compaction makes
-            // room with a deeper floor while one drops more (D217).
-            const compact = disposition == .context_overflow and compact: {
-                if (row.compaction) break :compact try history_floor_domain.deeperFloor(a, binding.operation_id) != null;
-                var changed: context_changed.Result = undefined;
-                a.read(context_changed, .{ .session = &session.ref, .boundary = row.admission_position.get() }, &changed);
-                try a.run();
-                break :compact turn_policy.recoversOverflow(.assistant_response, try model_admission_domain.contextChanged(&changed));
-            };
-            if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
-            const diagnostic_id = try content.importDiagnostic(a, &failure);
-            resolve_failure.queue(a, .{
-                .operation_id = binding.operation_id,
-                .resolution = if (disposition == .context_overflow) @tagName(turn_policy.Resolution.context_overflow) else code,
-                .content_id = diagnostic_id,
-                .request_id = optionalText(failure.requestId()),
-                .last_failure_code = if (disposition == .context_overflow) code else null,
+/// Settles a failed Attempt. Round 1 reads the Attempt and, for a
+/// failure that resolves it, looks up the failure's diagnostic and report.
+/// A context overflow reads in a round of its own whether compaction can
+/// recover it, which needs the Attempt's position: a compaction's walk
+/// for a deeper floor, a page a round, or a call's changed context. The
+/// commit round resolves the Attempt or schedules its retry, and closes
+/// its Turn or records its continuation.
+///
+/// An effort refusal first reads, in a round of its own, whether this
+/// request emitted the refused effort. The refusal and retry share a
+/// commit; an exhausted allowance still keeps the refusal, so later
+/// Operations do not reuse the rejected effort, and settles as an
+/// exhausted retry; one that was not emitted settles as ordinary.
+pub const SettleFailure = struct {
+    pub const rounds = transition.rounds(.{
+        .refusal = .{ .branch, error.OperationReadFailed },
+        .facts = .{ .always, error.OperationReadFailed },
+        .floor = .{ .branch, error.CorruptStore },
+        .floor_page = .{ .paged, error.CorruptStore },
+        .context = .{.branch},
+    });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = .refusal;
+    /// `failure` and `disposition` are the Held body's own: the failure's
+    /// texts are read in place.
+    pub const Input = struct { io: std.Io, binding: AttemptBinding, failure: *const ModelFailure, disposition: *const ModelFailureClass };
+    pub const Result = void;
+    pub const Ordinary = store_core.Ordinary.attempt_binding;
+    pub const Guards = store_core.Ordinary.attempt_binding;
+    pub const Declined = error{};
 
-                .attempt_ordinal = binding.attempt_ordinal,
-                .session = session,
-            });
-            if (compact) {
-                turn_domain.queueContinuation(a, binding.turn_id, session);
-            } else {
-                if (!row.turn_open) return error.StaleAttemptBinding;
-                if (content.report != null and faults.content_import) return error.InjectedContentImportFailure;
-                const report = try content.importReport(a, &failure);
-                const outcome: TurnOutcome = if (disposition == .context_overflow) .{ .resource_exceeded = optionalId(report) } else .{ .failed = .{
-                    .code = code,
-                    .report = optionalId(report),
-                } };
-                const positions = try a.positions(session);
-                try turn_domain.queueCloseOr(a, positions, binding.turn_id, outcome, error.StaleAttemptBinding);
-                if (outcome.ending(false) == .context_full) turn_domain.queueOwedStops(a, &session.ref, positions.head.next_position.get() + positions.taken - 1, row.unowed_children);
-            }
-        },
-        .refreshed => {
-            if (!row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) return error.StaleAttemptBinding;
-            schedule_retry.queue(a, .{
-                .operation_id = binding.operation_id,
-                .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(io))),
-                .code = code,
-                .attempt_ordinal = binding.attempt_ordinal,
-                .session = session,
-            });
-        },
-        .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try store_core.readUnixMilliseconds(io), retry_random)) {
-            .schedule_at_ms => |due_at_ms| schedule_retry.queue(a, .{
-                .operation_id = binding.operation_id,
-                .due_at_ms = std.math.cast(u64, due_at_ms) orelse return error.IntegerOutOfRange,
-                .code = code,
-                .attempt_ordinal = binding.attempt_ordinal,
-                .session = session,
-            }),
-            .exhausted => {
-                if (content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
-                const diagnostic_id = try content.importDiagnostic(a, &failure);
-                resolve_failure.queue(a, .{
+    input: Input,
+    /// The refused revision an exhausted allowance still records.
+    exhausted_refusal: ?u64 = null,
+    retry_random: u64 = 0,
+    facts: attempt_facts.Result = undefined,
+    content: FailureContent = .{ .diagnostic = null, .report = null },
+    /// The refusal round's source, then an overflow's recovery read.
+    reads: union { source: refused_effort_source.Result, floor: history_floor_domain.FloorSearch, context: context_changed.Result } = undefined,
+
+    /// What the settlement resolves as: an effort refusal the refusal
+    /// round did not retry is an exhausted retry when it kept the refusal,
+    /// else an ordinary failure.
+    fn disposition(t: *const SettleFailure) ModelFailureClass {
+        if (t.input.disposition.* != .effort_change_refused) return t.input.disposition.*;
+        if (t.exhausted_refusal != null) return .{ .retryable = .{ .waits_ms = retry_policy.default_waits_ms } };
+        return .ordinary;
+    }
+
+    pub fn step(t: *SettleFailure, r: *transition.Round(SettleFailure), ran: ?rounds.At) !transition.Next(SettleFailure) {
+        const binding = t.input.binding;
+        const failure = t.input.failure;
+        const at = ran orelse {
+            if (t.input.disposition.* != .effort_change_refused) return t.queueFacts(r);
+            t.reads = .{ .source = undefined };
+            r.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = false }, &t.facts);
+            r.read(refused_effort_source, .{ .operation = binding.operation_id }, &t.reads.source);
+            return .{ .round = .refusal };
+        };
+        switch (at) {
+            .refusal => {
+                const row = try currentAttempt(&t.facts, binding);
+                const revision = (t.reads.source orelse return t.queueFacts(r)).revision.get();
+                if (binding.attempt_ordinal >= retry_policy.maximum_attempts) {
+                    t.exhausted_refusal = revision;
+                    return t.queueFacts(r);
+                }
+                try queueEffortRefusal(r, row.session, revision, binding.operation_id, failure.report());
+                schedule_retry.queue(r, .{
                     .operation_id = binding.operation_id,
-                    .resolution = "retry_exhausted",
+                    .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(t.input.io))),
+                    .code = failure.code(),
+                    .attempt_ordinal = binding.attempt_ordinal,
+                    .session = row.session,
+                });
+                if (r.faults().before_commit) return error.InjectedCommitFailure;
+                return .commit;
+            },
+            .facts => {
+                t.content.found();
+                const row = try currentAttempt(&t.facts, binding);
+                if (t.disposition() != .context_overflow) return t.settle(r, false);
+                // An overflowing call compacts; an overflowing compaction makes
+                // room with a deeper floor while one drops more (D217).
+                if (row.compaction) {
+                    t.reads = .{ .floor = .{ .operation = binding.operation_id } };
+                    t.reads.floor.start(r);
+                    return .{ .round = .floor };
+                }
+                t.reads = .{ .context = undefined };
+                r.read(context_changed, .{ .session = &row.session.ref, .boundary = row.admission_position.get() }, &t.reads.context);
+                return .{ .round = .context };
+            },
+            .floor, .floor_page => {
+                if (t.reads.floor.next(r)) return .{ .round = .floor_page };
+                return t.settle(r, t.reads.floor.room() != null);
+            },
+            .context => return t.settle(r, turn_policy.recoversOverflow(.assistant_response, try model_admission_domain.contextChanged(&t.reads.context))),
+        }
+    }
+
+    /// Queues the round that reads the Attempt, and the failure's content
+    /// when the settlement resolves it.
+    fn queueFacts(t: *SettleFailure, r: *transition.Round(SettleFailure)) transition.Next(SettleFailure) {
+        const binding = t.input.binding;
+        const settles_as = t.disposition();
+        if (settles_as == .retryable) t.input.io.random(std.mem.asBytes(&t.retry_random));
+        // Only a resolving failure saves content: an ordinary one, an overflow,
+        // or a retry that exhausts the allowance.
+        const resolves = switch (settles_as) {
+            .ordinary, .context_overflow => true,
+            .refreshed => false,
+            .effort_change_refused => unreachable,
+            .retryable => binding.attempt_ordinal == retry_policy.maximum_attempts,
+        };
+        if (resolves) t.content = .of(t.input.failure);
+        const context_full = settles_as == .context_overflow or failure_class.of(t.input.failure.code()) == .overflow;
+        r.read(attempt_facts, .{ .operation_id = binding.operation_id, .closes = resolves, .context_full = resolves and context_full }, &t.facts);
+        t.content.lookup(r);
+        return .{ .round = .facts };
+    }
+
+    /// Queues the commit round's writes; `compact` is whether an overflow
+    /// compacts instead of ending the Turn.
+    fn settle(t: *SettleFailure, r: *transition.Round(SettleFailure), compact: bool) !transition.Next(SettleFailure) {
+        const binding = t.input.binding;
+        const failure = t.input.failure;
+        const faults = r.faults();
+        const code = failure.code();
+        const row = try currentAttempt(&t.facts, binding);
+        const session = row.session;
+        switch (t.disposition()) {
+            .effort_change_refused => unreachable,
+            .ordinary, .context_overflow => {
+                const overflow = t.disposition() == .context_overflow;
+                if (t.content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
+                const diagnostic_id = try t.content.importDiagnostic(r, failure);
+                resolve_failure.queue(r, .{
+                    .operation_id = binding.operation_id,
+                    .resolution = if (overflow) @tagName(turn_policy.Resolution.context_overflow) else code,
                     .content_id = diagnostic_id,
-                    // The settling Attempt's correlation, like a terminal failure.
                     .request_id = optionalText(failure.requestId()),
-                    .last_failure_code = code,
+                    .last_failure_code = if (overflow) code else null,
+
                     .attempt_ordinal = binding.attempt_ordinal,
                     .session = session,
                 });
-                if (!row.turn_open) return error.StaleAttemptBinding;
-                if (content.report != null and faults.content_import) return error.InjectedContentImportFailure;
-                const report = try content.importReport(a, &failure);
-                try turn_domain.queueCloseOr(a, try a.positions(session), binding.turn_id, .{ .retry_exhausted = optionalId(report) }, error.StaleAttemptBinding);
+                if (compact) {
+                    turn_domain.queueContinuation(r, binding.turn_id, session);
+                } else {
+                    if (!row.turn_open) return error.StaleAttemptBinding;
+                    if (t.content.report != null and faults.content_import) return error.InjectedContentImportFailure;
+                    const report = try t.content.importReport(r, failure);
+                    const outcome: TurnOutcome = if (overflow) .{ .resource_exceeded = optionalId(report) } else .{ .failed = .{
+                        .code = code,
+                        .report = optionalId(report),
+                    } };
+                    const positions = try r.positions(session);
+                    try turn_domain.queueCloseOr(r, positions, binding.turn_id, outcome, error.StaleAttemptBinding);
+                    if (outcome.ending(false) == .context_full) turn_domain.queueOwedStops(r, &row.session.ref, positions.head.next_position.get() + positions.taken - 1, row.unowed_children);
+                }
             },
-        },
+            .refreshed => {
+                if (!row.refresh_claimed or binding.attempt_ordinal >= retry_policy.maximum_attempts) return error.StaleAttemptBinding;
+                schedule_retry.queue(r, .{
+                    .operation_id = binding.operation_id,
+                    .due_at_ms = @intCast(@max(1, try store_core.readUnixMilliseconds(t.input.io))),
+                    .code = code,
+                    .attempt_ordinal = binding.attempt_ordinal,
+                    .session = session,
+                });
+            },
+            .retryable => |policy| switch (try retry_policy.decide(binding.attempt_ordinal, policy, try store_core.readUnixMilliseconds(t.input.io), t.retry_random)) {
+                .schedule_at_ms => |due_at_ms| schedule_retry.queue(r, .{
+                    .operation_id = binding.operation_id,
+                    .due_at_ms = std.math.cast(u64, due_at_ms) orelse return error.IntegerOutOfRange,
+                    .code = code,
+                    .attempt_ordinal = binding.attempt_ordinal,
+                    .session = session,
+                }),
+                .exhausted => {
+                    if (t.content.diagnostic != null and faults.content_import) return error.InjectedContentImportFailure;
+                    const diagnostic_id = try t.content.importDiagnostic(r, failure);
+                    resolve_failure.queue(r, .{
+                        .operation_id = binding.operation_id,
+                        .resolution = "retry_exhausted",
+                        .content_id = diagnostic_id,
+                        // The settling Attempt's correlation, like a terminal failure.
+                        .request_id = optionalText(failure.requestId()),
+                        .last_failure_code = code,
+                        .attempt_ordinal = binding.attempt_ordinal,
+                        .session = session,
+                    });
+                    if (!row.turn_open) return error.StaleAttemptBinding;
+                    if (t.content.report != null and faults.content_import) return error.InjectedContentImportFailure;
+                    const report = try t.content.importReport(r, failure);
+                    try turn_domain.queueCloseOr(r, try r.positions(session), binding.turn_id, .{ .retry_exhausted = optionalId(report) }, error.StaleAttemptBinding);
+                },
+            },
+        }
+        if (t.exhausted_refusal) |revision| try queueEffortRefusal(r, session, revision, binding.operation_id, failure.report());
+        if (faults.before_commit) return error.InjectedCommitFailure;
+        return .commit;
     }
-    if (exhausted_refusal) |revision| try queueEffortRefusal(a, session, revision, binding.operation_id, failure.report());
-    if (faults.before_commit) return error.InjectedCommitFailure;
-    try a.commit();
-}
+
+    pub fn committed(_: *const SettleFailure) Result {}
+};
 
 /// Text that binds NULL when empty, as `sqlite.bindOptionalText` did.
 fn optionalText(text: []const u8) ?[]const u8 {
@@ -609,23 +687,42 @@ const ExhaustedChoice = struct {
     }
 };
 
-/// Resolves one exhausted Attempt no slot holds and closes its Turn. The
-/// read Access `candidate` scans outside any transaction, so a pass that
-/// finds none runs only the scan; the scan stops at the first Attempt
-/// `active` does not hold, after at most one more than it can exclude.
-/// The Store runs no other entry point meanwhile, so the write Access
-/// `a` writes from what the scan read, in one round.
-pub fn recoverOneExhaustedModelAttempt(candidate: anytype, a: anytype, active: ActiveOperationFilter) !bool {
-    var choice: ExhaustedChoice = .{ .active = active };
-    candidate.readEach(exhausted_attempts, .{}, try std.math.add(u64, active.maximum_exclusions, 1), &choice);
-    try store_access.runAs(candidate, error.RetryRecoveryFailed);
-    const chosen = choice.chosen orelse return false;
-    if (!chosen.turn_open) return error.SelectionChanged;
-    resolve_exhausted.queue(a, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
-    try turn_domain.queueCloseOr(a, try a.positions(chosen.session), chosen.turn_id.get(), .{ .retry_exhausted = null }, error.SelectionChanged);
-    try a.commit();
-    return true;
-}
+/// Resolves one exhausted Attempt no slot holds and closes its Turn. Its
+/// scan runs outside any transaction, so a pass that finds none runs only
+/// the scan; the scan stops at the first Attempt `active` does not hold,
+/// after at most one more than it can exclude. The Store runs no other
+/// entry point meanwhile, so the commit writes from what the scan read.
+pub const RecoverExhausted = struct {
+    pub const rounds = transition.rounds(.{ .scan = .{ .always, error.RetryRecoveryFailed } });
+    pub const round_budget = 2;
+    pub const commit: transition.Commit = .transaction;
+    pub const begin: ?rounds.At = null;
+    pub const Input = struct { active: ActiveOperationFilter };
+    pub const Result = bool;
+    pub const Ordinary = store_core.Ordinary.none;
+    pub const Guards = error{SelectionChanged};
+    pub const Declined = error{};
+
+    input: Input,
+    choice: ExhaustedChoice = undefined,
+
+    pub fn step(t: *RecoverExhausted, r: *transition.Round(RecoverExhausted), ran: ?rounds.At) !transition.Next(RecoverExhausted) {
+        if (ran == null) {
+            t.choice = .{ .active = t.input.active };
+            r.readEach(exhausted_attempts, .{}, try std.math.add(u64, t.input.active.maximum_exclusions, 1), &t.choice);
+            return .{ .round = .scan };
+        }
+        const chosen = t.choice.chosen orelse return .{ .done = false };
+        if (!chosen.turn_open) return error.SelectionChanged;
+        resolve_exhausted.queue(r, .{ .operation_id = chosen.operation_id.get(), .session = chosen.session });
+        try turn_domain.queueCloseOr(r, try r.positions(chosen.session), chosen.turn_id.get(), .{ .retry_exhausted = null }, error.SelectionChanged);
+        return .commit;
+    }
+
+    pub fn committed(_: *const RecoverExhausted) Result {
+        return true;
+    }
+};
 
 const builtin_names_sql = blk: {
     var names: []const u8 = "";

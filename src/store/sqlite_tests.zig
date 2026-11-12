@@ -5515,33 +5515,37 @@ test "a refresh claim whose UPDATE changes no row answers false and does not fen
     const binding = (try storage.admitNextModelAttempt(.{})).?.permit.binding;
     // Claims between the read round and the write, so the guarded UPDATE finds no row.
     const Interposed = struct {
-        const Inner = store_access.Access(.write, store_core.Ordinary.attempt_binding || error{AuthRefreshUnclaimed});
-        inner: *Inner,
+        const Inner = model_settlement_domain.ClaimAuthRefresh;
+        pub const rounds = Inner.rounds;
+        pub const round_budget = Inner.round_budget;
+        pub const commit = Inner.commit;
+        pub const begin = Inner.begin;
+        pub const Result = Inner.Result;
+        pub const Guards = Inner.Guards;
+        pub const Declined = Inner.Declined;
 
-        pub fn read(self: *@This(), comptime S: type, args: S.Args, destination: *S.Result) void {
-            self.inner.read(S, args, destination);
+        inner: Inner,
+        storage: *Store,
+
+        pub fn step(t: *@This(), r: *transition.Round(@This()), ran: ?rounds.At) !transition.Next(@This()) {
+            const next = try Inner.step(&t.inner, r, ran);
+            if (next == .commit) sqlite.exec(t.storage.sqliteDatabase(), "UPDATE model_operation SET auth_refresh_claimed=1") catch unreachable;
+            return next;
         }
-        pub fn run(self: *@This()) Inner.Error!void {
-            return self.inner.run();
+
+        pub fn committed(t: *const @This()) Result {
+            return Inner.committed(&t.inner);
         }
-        pub fn write(self: *@This(), comptime S: type, args: S.Args) void {
-            self.inner.write(S, args);
-        }
-        pub fn abandon(self: *@This(), faults: store_core.Faults) Inner.Error!void {
-            return self.inner.abandon(faults);
-        }
-        pub fn commit(self: *@This()) Inner.Error!void {
-            sqlite.exec(self.inner.store.sqliteDatabase(), "UPDATE model_operation SET auth_refresh_claimed=1") catch unreachable;
-            return self.inner.commit();
+
+        pub fn declined(t: *const @This(), err: Declined) Result {
+            return Inner.declined(&t.inner, err);
         }
     };
     {
         const entry = try store_core.enter(&storage, .none);
         defer entry.release();
-        var access: Interposed.Inner = .open(&entry);
-        defer access.deinit();
-        var interposed: Interposed = .{ .inner = &access };
-        try std.testing.expect(!try entry.finishTransaction(store_core.Ordinary.attempt_binding, .{}, access.end(.{}, model_settlement_domain.claimModelAuthRefresh(&interposed, binding))));
+        var interposed: Interposed = .{ .inner = .{ .input = .{ .binding = binding } }, .storage = &storage };
+        try std.testing.expect(!try entry.finishTransaction(store_core.Ordinary.attempt_binding, .{}, transition.run(&entry, Interposed, &interposed, .{})));
     }
     try std.testing.expect(!storage.isFenced());
     try std.testing.expectEqual(@as(u64, 0), try store_testing.sqlite_only.queryU64(&storage, "SELECT count(*) FROM model_operation WHERE auth_refresh_claimed=1", .{}));
