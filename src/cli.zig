@@ -4511,6 +4511,7 @@ test "CLI boundary classifies local failures with repair lines and exits" {
     const cases = [_]Case{
         .{ .err = error.HostNotServing, .code = .host_not_serving, .exit = 6, .phrase = "No Host serves this Store." },
         .{ .err = error.HostStopping, .code = .host_stopping, .exit = 5, .phrase = "The Host for this Store is shutting down and no longer accepts requests." },
+        .{ .err = error.IncompatibleHost, .code = .host_incompatible, .exit = 6, .phrase = "Pause it with the Rui version that started it" },
         .{ .err = error.InvalidStorePath, .code = .store_path_malformed, .exit = 2, .phrase = "Supply --store PATH" },
         .{ .err = error.InvalidStore, .code = .store_path_malformed, .exit = 2, .phrase = "canonical form is at most 492 bytes" },
         .{ .err = error.StoreUnavailable, .code = .store_unavailable, .exit = 6, .phrase = "permissions to 0700" },

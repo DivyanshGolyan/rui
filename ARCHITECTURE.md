@@ -2192,6 +2192,7 @@ CLI failures cross one catalog boundary and render a stable code with accepted i
 Unmapped legacy failures remain on an explicit shrink-only pending inventory, render `internal_unexpected` without a raw Zig name and exit 1.
 The detection owner distinguishes malformed Store paths (exit 2), unusable Store directories (exit 6) and a Store with no serving Host (`host_not_serving`, exit 6); the latter prints the exact `rui host start --store PATH` command.
 An unreachable Host is absent only when the Store lock is free; a missing or refused control socket while that lock is held is `host_stopping` (exit 5), with advice to wait for shutdown before restarting and retrying.
+A Host from another Rui version that does not speak this rui's protocol is `host_incompatible` (exit 6); pause it with the Rui version that started it, then start it again with this rui.
 Other transport failures while the lock is held, or a failed lock probe, do not establish either condition and retain their original classification.
 Missing input or endpoint paths never imply that no Host serves the selected Store.
 Failure after upload begins leaves admission unconfirmed; inspection or recovery must retain the original identity.
