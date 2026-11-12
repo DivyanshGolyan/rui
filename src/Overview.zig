@@ -749,7 +749,7 @@ fn overviewKey(input: vxfw.Event) view.Key {
 /// A click the screen's widgets name steps the core as a key does.
 fn appClick(raw: *anyopaque, ctx: *vxfw.EventContext, click: view.Click) anyerror!void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft(), .pasting = self.root.input.pasting } }));
+    try self.appNext(ctx, try self.event(.{ .clicked = .{ .target = click, .draft = self.composerDraft() } }));
     if (click == .new_session and self.state.inputMode() != .frozen and self.root.session == null) try ctx.requestFocus(self.widget());
     ctx.redraw = true;
 }
@@ -814,13 +814,13 @@ fn openSession(self: *Self, ctx: *vxfw.EventContext) !void {
     const frontend = try self.init.gpa.create(SessionFrontend);
     const lender: SessionFrontend.Lender = .{ .context = self, .step = conversed, .service = service, .line = conversationLine, .observed = observed, .upgrade = upgradeValue, .archive_state = archiveState, .models = modelsSnapshot };
     frontend.begin(self.init, self.options.store, &self.opened, self.options.directory, files, self.hooks.command, self.hooks.requests, self.hooks.status, screen, self.interrupted, lender);
-    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .start = requestHostStart, .notice = hostNotice } }, self.caps);
+    const child = frontend.attach(.{ .configure = self.hooks.configure, .drafts = &self.session_drafts, .root = &self.root, .context = self, .leave = appSessionLeft, .copy = appCopy, .on_open = appSessionFollow, .host = .{ .context = self, .held = hostHeld, .lost = hostLost, .startable = hostStartable, .start = requestHostStart, .notice = hostNotice } }, self.caps);
     // Custody transfers before focus delivery: on failure the exit
     // path cancels and joins the same frontend before freeing it.
     self.app_session = .{ .session = reference, .frontend = frontend, .files = files, .ended = .detached };
     count = 0;
     _ = try self.event(.{ .conversation = reference });
-    try self.root.openSession(ctx, child);
+    try self.root.openSession(ctx, child, frontend.keyOwner());
 }
 
 fn appSessionLeft(raw: *anyopaque, ctx: *vxfw.EventContext, outcome: SessionFrontend.Outcome) !void {
@@ -1269,13 +1269,12 @@ fn closeStandaloneChoice(self: *Self, ctx: *vxfw.EventContext) !void {
 
 fn appChoiceClose(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (self.root.input.pasting) return;
     try self.closeStandaloneChoice(ctx);
 }
 
 fn appChoicePick(raw: *anyopaque, ctx: *vxfw.EventContext) !void {
     const self: *Self = @ptrCast(@alignCast(raw));
-    if (!self.root.settings_page.standaloneOpen() or self.root.input.pasting) return;
+    if (!self.root.settings_page.standaloneOpen()) return;
     try self.root.settings_page.standaloneWidget().handleEvent(ctx, .{ .key_press = .{ .codepoint = vaxis.Key.enter } });
 }
 
@@ -2267,6 +2266,12 @@ fn launchNext(self: *const Self) ?HostLaunch.Next {
 fn queueHostStart(self: *Self) void {
     self.host_launch = null;
     self.queue(.start_host);
+}
+
+/// The Host is stopped and a start can mend it now.
+fn hostStartable(raw: *anyopaque) bool {
+    const self: *Self = @ptrCast(@alignCast(raw));
+    return self.hostNext() != null;
 }
 
 fn requestHostStart(raw: *anyopaque, ctx: *vxfw.EventContext) !bool {
@@ -6133,7 +6138,7 @@ test "App overview schedules spinning rows only while Root shows the list" {
             // Closing at phone width makes the same list eligible again.
             .{ .width = 46, .open = false, .visible = true },
         }) |layout| {
-            if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget());
+            if (layout.open and overview.root.session == null) try overview.root.openSession(&ctx, session.widget(), null);
             if (!layout.open and overview.root.session != null) try overview.root.closeSession(&ctx);
             _ = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = layout.width, .height = 24 }, .cell_size = .{} });
             try std.testing.expectEqual(spinning, overview.listSpins());
@@ -6300,7 +6305,7 @@ test "App overview list press follows only after the open child settles and open
             try std.testing.expectEqualStrings("b4n8wd", &overview.opened);
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, overview.app_sessions.widget());
+            try overview.root.openSession(ctx, overview.app_sessions.widget(), null);
         }
     };
     var tmp = std.testing.tmpDir(.{});
@@ -6368,7 +6373,7 @@ test "App shell divider follows overview locale across layouts and screen select
         for (0..2) |paint| {
             if (paint != 0) try overview.paintCursor();
             for ([_]bool{ false, true }) |open| {
-                if (open) try overview.root.openSession(&events, session.widget()) else try overview.root.closeSession(&events);
+                if (open) try overview.root.openSession(&events, session.widget(), null) else try overview.root.closeSession(&events);
                 for ([_]u16{ 46, 99, 100, 140 }) |width| {
                     const surface = try overview.root.widget().draw(.{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = width, .height = 24 }, .cell_size = .{} });
                     const layout = surface.children[0].surface;
@@ -6416,7 +6421,7 @@ test "App list clicks validate present and removed targets with open and closed 
             try std.testing.expect(overview.root.session == null);
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, overview.app_sessions.widget());
+            try overview.root.openSession(ctx, overview.app_sessions.widget(), null);
         }
     };
     var tmp = std.testing.tmpDir(.{});
@@ -6498,7 +6503,7 @@ test "App root navigation shows and focuses the main pane before every Session s
             try std.testing.expect((try focus(ctx)).eql(overview.widget()));
             Seen.now.conversations += 1;
             Seen.now.conversed = overview.opened;
-            try overview.root.openSession(ctx, @This().widget(overview));
+            try overview.root.openSession(ctx, @This().widget(overview), null);
         }
         fn widget(overview: *Self) vxfw.Widget {
             return .{ .userdata = overview, .eventHandler = @This().event, .drawFn = @This().draw };
@@ -8345,8 +8350,13 @@ test "Overview standalone footer close clicks match Escape preserve paste and pr
             } else return error.TestExpectedCloseTarget;
             try std.testing.expectEqual(@as(u16, 9), close.surface.size.width);
             try std.testing.expect(close.origin.col + close.surface.size.width <= width);
+            // Inside a paste Root takes the click before the footer sees it.
             self.root.input.pasting = true;
-            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
+            for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| {
+                ctx.consume_event = false;
+                try self.root.widget().captureEvent(&ctx, .{ .mouse = .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind } });
+                try std.testing.expect(ctx.consume_event);
+            }
             try std.testing.expect(page.standaloneOpen());
             self.root.input.pasting = false;
             for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind });
@@ -8426,7 +8436,7 @@ test "Overview standalone lifetime shared domain closes every phase through real
             .close_click => for ([_]vaxis.Mouse.Type{ .press, .release }) |kind| try app_events.mouse(&ctx, footer, .{ .row = 0, .col = @intCast(close.origin.col), .button = .left, .mods = .{}, .type = kind }),
             .navigate => {
                 const session: vxfw.Text = .{ .text = "Session" };
-                try self.root.openSession(&ctx, session.widget());
+                try self.root.openSession(&ctx, session.widget(), null);
                 try std.testing.expect(!page.standaloneOpen() and page.standaloneField() == null);
                 try self.root.closeSession(&ctx);
             },

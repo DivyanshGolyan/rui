@@ -4,11 +4,11 @@
 //! returns without deciding anything itself. Navigation between layers is an
 //! input to the same `step`, so keys and navigation share one owner, and
 //! every navigation focuses the top visible layer.
-//! Root hands the overview its keys, pastes and malformed keys with the
-//! paste state and the layer they arrived under, so the overview's core
-//! decides what each means. The settings page's own keys and the open
-//! Session's keys `pass`: vxfw's focus path delivers them; PR3 moves the
-//! Session's keys into its core.
+//! Root hands the main pane's core its keys, pastes and malformed keys with
+//! the paste state they arrive in: the overview's with the layer they
+//! arrived under, the open Session's while it is the main pane. Each core
+//! decides what a key means there. The settings page's own keys `pass`:
+//! vxfw's focus path delivers them. No click acts inside a paste.
 const std = @import("std");
 const keymap = @import("keymap.zig");
 
@@ -122,6 +122,9 @@ pub const Effects = struct {
         /// settings page only leaving and an Upgrade's Esc are the
         /// overview's, and Root redraws.
         overview: Delivery,
+        /// Root hands it to the open Session's core and stops it. It
+        /// arrives only under main, while the Session is the main pane.
+        session: Delivery,
         /// Root hands it to the overview, which owns the palette, and stops it.
         colors,
         /// Root stops it; nothing takes it.
@@ -201,6 +204,8 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
         .paste_end => state.pasting = false,
         else => {},
     }
+    // A click inside a paste is pasted bytes, never a press: nothing takes it.
+    if (input == .mouse and input.mouse == .click and state.pasting) return .{ .route = .swallow };
     // The sign-in page owns keys and pastes even over settings or a list
     // that had focus before it opened, and no click navigates behind it.
     if (state.layer == .sign_in) return switch (input) {
@@ -208,11 +213,11 @@ pub fn step(state: *State, facts: Facts, input: Input) Effects {
         else => .{ .route = .sign_in },
     };
     if (input == .key and state.layer == .settings) return settingsKey(state, facts.settings, input.key);
-    // The overview's core takes every key, paste mark and malformed key
-    // while it is the main pane; the Session's and a click pass.
-    if (state.layer == .main and !facts.session_open and input != .mouse)
-        return .{ .route = .{ .overview = .{ .under = .main, .pasted = state.pasting } } };
-    return .{};
+    // The main pane's core takes every key, paste mark and malformed key:
+    // the open Session's, else the overview's. A click passes.
+    if (state.layer != .main or input == .mouse) return .{};
+    const delivery: Effects.Delivery = .{ .under = .main, .pasted = state.pasting };
+    return .{ .route = if (facts.session_open) .{ .session = delivery } else .{ .overview = delivery } };
 }
 
 /// The overview's keys under the settings page, never pasted.
@@ -243,13 +248,14 @@ test "Root input routing over every layer, main pane, settings state and input" 
     // the sign-in open/close made before this owner existed (main 5df5531),
     // except three decisions made with it: a paste spans every layer,
     // navigation focuses the top visible layer, and signing in is one
-    // request. The overview's keys come to its core straight from Root
-    // (main 309d639 let them pass to the focused overview, which read the
-    // same paste flag). Each combination matches exactly one row, and every
-    // row matches some.
+    // request. The overview's and the open Session's keys come to their
+    // cores straight from Root (main 309d639 let them pass to the focused
+    // pane, which read the same paste flag), and no click acts inside a
+    // paste (main 309d639 let one pass to whatever was under it). Each
+    // combination matches exactly one row, and every row matches some.
     const LayerCase = enum { main, settings, sign_in_over_main, sign_in_over_settings };
     const Page = enum { plain, keys_open, choice_open, model_filter, upgrade_cancellable };
-    const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, wheel, key_release, colors, invalid_key, focus_out, open_settings, show_main, open_sign_in, close_sign_in, signed_in };
+    const Event = enum { printable, pasted_printable, enter, pasted_enter, escape, ctrl_g, ctrl_c, paste_start, paste_end, click, pasted_click, wheel, key_release, colors, invalid_key, focus_out, open_settings, show_main, open_sign_in, close_sign_in, signed_in };
     const all_layers = std.enums.values(LayerCase);
     const all_pages = std.enums.values(Page);
     const shown = [_]LayerCase{ .main, .settings };
@@ -269,17 +275,23 @@ test "Root input routing over every layer, main pane, settings state and input" 
         pasting: ?bool = null,
     };
     const main_shown: Effects = .{ .page = .reset, .focus = .main, .redraw = true };
-    const overview = struct {
-        fn underMain(pasted: bool) Effects {
+    const Main = struct {
+        fn overview(pasted: bool) Effects {
             return .{ .route = .{ .overview = .{ .under = .main, .pasted = pasted } } };
         }
-    }.underMain;
+        fn session(pasted: bool) Effects {
+            return .{ .route = .{ .session = .{ .under = .main, .pasted = pasted } } };
+        }
+    };
+    const overview = Main.overview;
     const closed: Effects = .{ .page = .reset, .focus = .main, .route = .swallow, .redraw = true };
     const rows = [_]Row{
         // Every layer.
         .{ .events = &.{.key_release}, .effects = .{ .route = .swallow } },
         .{ .events = &.{.colors}, .effects = .{ .route = .colors } },
         .{ .events = &.{.focus_out}, .effects = .{} },
+        // A click inside a paste is pasted bytes: nothing takes it.
+        .{ .events = &.{.pasted_click}, .effects = .{ .route = .swallow } },
         // Sign-in takes keys, pastes and invalid keys; the paste is still one.
         .{ .layers = &signing, .events = &(keys ++ [_]Event{.invalid_key}), .effects = .{ .route = .sign_in } },
         .{ .layers = &signing, .events = &.{.paste_start}, .effects = .{ .route = .sign_in }, .pasting = true },
@@ -290,11 +302,12 @@ test "Root input routing over every layer, main pane, settings state and input" 
         .{ .layers = &.{.settings}, .events = &.{.paste_end}, .effects = .{}, .pasting = false },
         .{ .layers = &shown, .events = &.{ .click, .wheel }, .effects = .{} },
         .{ .layers = &.{.settings}, .events = &.{.invalid_key}, .effects = .{} },
-        // The open Session takes its own keys; otherwise the overview's
-        // core does, with the paste they arrive in.
-        .{ .layers = &.{.main}, .sessions = &.{true}, .events = &.{.paste_start}, .effects = .{}, .pasting = true },
-        .{ .layers = &.{.main}, .sessions = &.{true}, .events = &.{.paste_end}, .effects = .{}, .pasting = false },
-        .{ .layers = &.{.main}, .sessions = &.{true}, .events = &(keys ++ [_]Event{.invalid_key}), .effects = .{} },
+        // The open Session's core takes its keys; otherwise the overview's
+        // does, with the paste they arrive in.
+        .{ .layers = &.{.main}, .sessions = &.{true}, .events = &.{.paste_start}, .effects = Main.session(true), .pasting = true },
+        .{ .layers = &.{.main}, .sessions = &.{true}, .events = &.{.paste_end}, .effects = Main.session(false), .pasting = false },
+        .{ .layers = &.{.main}, .sessions = &.{true}, .events = &.{ .pasted_printable, .pasted_enter }, .effects = Main.session(true) },
+        .{ .layers = &.{.main}, .sessions = &.{true}, .events = &.{ .printable, .enter, .escape, .ctrl_g, .ctrl_c, .invalid_key }, .effects = Main.session(false) },
         .{ .layers = &.{.main}, .sessions = &.{false}, .events = &.{.paste_start}, .effects = overview(true), .pasting = true },
         .{ .layers = &.{.main}, .sessions = &.{false}, .events = &.{.paste_end}, .effects = overview(false), .pasting = false },
         .{ .layers = &.{.main}, .sessions = &.{false}, .events = &.{ .pasted_printable, .pasted_enter }, .effects = overview(true) },
@@ -359,7 +372,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
                 .ctrl_c => .{ .key = .{ .named = .ctrl_c } },
                 .paste_start => .paste_start,
                 .paste_end => .paste_end,
-                .click => .{ .mouse = .click },
+                .click, .pasted_click => .{ .mouse = .click },
                 .wheel => .{ .mouse = .wheel },
                 .key_release => .key_release,
                 .colors => .colors,
@@ -385,7 +398,7 @@ test "Root input routing over every layer, main pane, settings state and input" 
         const row = rows[matched.?];
         used[matched.?] = true;
         // A pasted key arrives inside a paste; paste_end closes one.
-        const pasting = event == .pasted_printable or event == .pasted_enter or event == .paste_end;
+        const pasting = event == .pasted_printable or event == .pasted_enter or event == .pasted_click or event == .paste_end;
         var state: State = .{ .layer = Case.layer(layer), .pasting = pasting };
         const effects = step(&state, Case.facts(session, page, event), Case.input(event));
         // The main pane shows the Session when one is open, under any layer.
